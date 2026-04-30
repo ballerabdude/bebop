@@ -84,10 +84,7 @@ pub async fn serve(state: AppState) -> Result<()> {
         .await
         .context("disable classic discoverability")?;
 
-    let adapter_address = adapter
-        .address()
-        .await
-        .context("read adapter address")?;
+    let adapter_address = adapter.address().await.context("read adapter address")?;
     info!(
         adapter = %adapter.name(),
         address = %adapter_address,
@@ -130,10 +127,7 @@ pub async fn serve(state: AppState) -> Result<()> {
         local_name: Some(local_name.clone()),
         ..Default::default()
     };
-    let adv_handle = adapter
-        .advertise(adv)
-        .await
-        .context("start advertising")?;
+    let adv_handle = adapter.advertise(adv).await.context("start advertising")?;
     info!(name = %local_name, "BLE advertising started");
 
     // Pump the request/response IO loop forever.
@@ -435,7 +429,9 @@ async fn status_snapshot(state: &AppState) -> Result<Vec<u8>> {
         payload: Some(agent_response::Payload::AppStatus(payload)),
     };
     let mut buf = Vec::with_capacity(envelope.encoded_len());
-    envelope.encode(&mut buf).context("encode status snapshot")?;
+    envelope
+        .encode(&mut buf)
+        .context("encode status snapshot")?;
     Ok(buf)
 }
 
