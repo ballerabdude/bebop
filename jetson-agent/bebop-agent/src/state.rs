@@ -38,6 +38,10 @@ pub enum AppLifecycle {
     Starting,
     Running,
     Crashed,
+    // Scaffolding: set by the OTA updater while a container swap is in
+    // flight. Wiring lands when `ota::apply` is taught to flip app
+    // lifecycle (currently it only mutates `OtaLifecycle`).
+    #[allow(dead_code)]
     Updating,
 }
 

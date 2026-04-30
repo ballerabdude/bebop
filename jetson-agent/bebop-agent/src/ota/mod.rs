@@ -27,9 +27,15 @@ struct Manifest {
     /// Fully-qualified image reference the robot should run.
     image: String,
     /// Optional digest to pin the exact image content.
+    // Scaffolding: parsed for forward-compat with signed manifests; not yet
+    // verified against the pulled image's content digest.
+    #[allow(dead_code)]
     #[serde(default)]
     digest: Option<String>,
     /// Optional notes — shown in the mobile app.
+    // Scaffolding: parsed so the manifest schema stays stable; surfaced to
+    // the phone once the BLE status payload carries OTA release notes.
+    #[allow(dead_code)]
     #[serde(default)]
     notes: Option<String>,
 }
