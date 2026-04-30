@@ -1,0 +1,67 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Generic build artifacts
+build/
+dist/
+install/
+log/
+*.deb
+*.o
+*.elf
+*.hex
+*.bin
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ROS 2 (workspace lives at ros2/)
+ros2/build/
+ros2/install/
+ros2/log/
+
+# micro-ROS (downloaded/generated - can be rebuilt)
+ros2/src/micro_ros_setup/
+ros2/src/uros/
+
+# PlatformIO
+firmware/**/.pio/
+firmware/**/.pioenvs/
+firmware/**/.piolibdeps/
+firmware/**/.cache/
+firmware/**/lib/
+
+# Sim training output
+sim/logs/
+
+# Jetson L4T flashing artifacts (multi-GB downloads + extracted toolchain;
+# regenerate by re-running jetson-flash/setup_env.sh)
+jetson-flash/Linux_for_Tegra/
+jetson-flash/*.tbz2
+jetson-flash/*.tar.gz
+jetson-flash/*.tar.bz2

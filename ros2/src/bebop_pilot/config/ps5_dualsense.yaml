@@ -1,0 +1,46 @@
+pilot_node:
+  ros__parameters:
+    # ---------------------------------------------------------------------
+    # Device discovery
+    # ---------------------------------------------------------------------
+    # If left empty, the node will auto-detect the first input device whose
+    # name matches `device_name_substring` (case-insensitive).
+    device_path: ""
+    device_name_substring: "DualSense"
+
+    # ---------------------------------------------------------------------
+    # Publish rate (Hz). The policy_runner samples /cmd_vel on its own
+    # control loop, so 50 Hz here is plenty.
+    # ---------------------------------------------------------------------
+    publish_rate: 50.0
+
+    # ---------------------------------------------------------------------
+    # Velocity limits sent to the policy.
+    # Keep these <= the training command ranges in
+    # bebop_training/envs/bebop_v2_base_cfg.py to stay in-distribution.
+    # ---------------------------------------------------------------------
+    max_lin_vel_x: 0.6   # m/s  forward / backward
+    max_lin_vel_y: 0.4   # m/s  strafe
+    max_ang_vel_z: 1.0   # rad/s yaw rate
+
+    # ---------------------------------------------------------------------
+    # Stick handling
+    # ---------------------------------------------------------------------
+    # Raw DualSense stick range is 0..255 (centered at ~128). The node
+    # normalizes to [-1, 1], then applies deadzone + expo curve.
+    deadzone: 0.08          # ignore stick magnitudes below this
+    expo: 0.4               # 0 = linear, 1 = full cubic. Softer near center.
+    invert_left_stick_y: true   # push up = forward
+    invert_right_stick_x: false # push right = clockwise yaw
+
+    # ---------------------------------------------------------------------
+    # Safety
+    # ---------------------------------------------------------------------
+    # Deadman: while held, /cmd_vel is published and /policy_enable=true.
+    # Released => zero command + /policy_enable=false.
+    # Default: L1 (BTN_TL).
+    require_deadman: true
+
+    # On disconnect or stale events, fall back to zero command after this
+    # many seconds and disable the policy.
+    watchdog_timeout: 0.25

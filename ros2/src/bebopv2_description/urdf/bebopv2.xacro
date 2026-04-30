@@ -1,0 +1,260 @@
+<?xml version="1.0" ?>
+<robot name="bebopv2" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<xacro:include filename="$(find bebopv2_description)/urdf/materials.xacro" />
+<xacro:include filename="$(find bebopv2_description)/urdf/bebopv2.ros2control" />
+<xacro:include filename="$(find bebopv2_description)/urdf/bebopv2.gazebo" />
+<link name="base_link">
+  <inertial>
+    <origin xyz="0.007385904694151062 -0.0004782319133016371 0.03368322966647506" rpy="0 0 0"/>
+    <mass value="2.683107573914711"/>
+    <inertia ixx="0.035466" iyy="0.017273" izz="0.025862" ixy="4.2e-05" iyz="-1.7e-05" ixz="-0.001118"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="hip_abduction_left_1_1">
+  <inertial>
+    <origin xyz="-0.0003217598941065208 0.06711052569446321 1.0147989649067783e-05" rpy="0 0 0"/>
+    <mass value="0.38495857785704823"/>
+    <inertia ixx="0.000878" iyy="0.000645" izz="0.000696" ixy="0.0" iyz="0.0" ixz="1e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.000262 -0.15 -0.000132" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/hip_abduction_left_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.000262 -0.15 -0.000132" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/hip_abduction_left_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="hip_abduction_right_1_1">
+  <inertial>
+    <origin xyz="-0.0003217940431635766 -0.06711052938146245 -1.023141995292347e-05" rpy="0 0 0"/>
+    <mass value="0.3849585610474383"/>
+    <inertia ixx="0.000878" iyy="0.000645" izz="0.000696" ixy="-0.0" iyz="0.0" ixz="-1e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.0 0.151 -0.0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/hip_abduction_right_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.0 0.151 -0.0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/hip_abduction_right_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="femur_left_1_1">
+  <inertial>
+    <origin xyz="0.03177134523380352 0.00031797747528269915 -0.18130160282671445" rpy="0 0 0"/>
+    <mass value="6.100588872036469"/>
+    <inertia ixx="0.082959" iyy="0.08488" izz="0.005962" ixy="-8e-06" iyz="0.000373" ixz="0.005077"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.029288 -0.22 -0.000132" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/femur_left_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.029288 -0.22 -0.000132" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/femur_left_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="femur_right_1_1">
+  <inertial>
+    <origin xyz="0.0321027922345207 -0.00031797682024858887 -0.18130148887841674" rpy="0 0 0"/>
+    <mass value="6.100585251669615"/>
+    <inertia ixx="0.082959" iyy="0.084903" izz="0.005985" ixy="1.4e-05" iyz="-0.000373" ixz="0.005232"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.02955 0.221 0.0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/femur_right_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.02955 0.221 0.0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/femur_right_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="shin_left_1_1">
+  <inertial>
+    <origin xyz="3.887590066825597e-05 0.016598133015893995 -0.12318420193029112" rpy="0 0 0"/>
+    <mass value="0.23016891060875985"/>
+    <inertia ixx="0.001921" iyy="0.001941" izz="4.3e-05" ixy="-0.0" iyz="-1.2e-05" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.066788 -0.2477 0.293902" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/shin_left_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.066788 -0.2477 0.293902" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/shin_left_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="shin_right_1_1">
+  <inertial>
+    <origin xyz="-0.0021886908544472145 -0.016598132485373535 -0.12316472976088472" rpy="0 0 0"/>
+    <mass value="0.23016883140801822"/>
+    <inertia ixx="0.001921" iyy="0.001941" izz="4.4e-05" ixy="0.0" iyz="1.2e-05" ixz="-3.2e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.06705 0.2487 0.294034" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/shin_right_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.06705 0.2487 0.294034" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/shin_right_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="foot_left_1_1">
+  <inertial>
+    <origin xyz="0.02219188787582449 -0.016069983036660074 -0.040821402975144694" rpy="0 0 0"/>
+    <mass value="0.938066903777968"/>
+    <inertia ixx="0.001351" iyy="0.003336" izz="0.003073" ixy="-9.6e-05" iyz="0.00018" ixz="0.000268"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.066793 -0.2477 0.547402" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/foot_left_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.066793 -0.2477 0.547402" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/foot_left_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="foot_right_1_1">
+  <inertial>
+    <origin xyz="0.02218978231016064 0.016069982543298805 -0.040816882308905234" rpy="0 0 0"/>
+    <mass value="0.9380669235063296"/>
+    <inertia ixx="0.001352" iyy="0.003336" izz="0.003073" ixy="9.6e-05" iyz="-0.000181" ixz="0.000268"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.062621 0.2487 0.547495" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/foot_right_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.062621 0.2487 0.547495" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find bebopv2_description)/meshes/foot_right_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<joint name="hip_abduction_left_joint" type="revolute">
+  <origin xyz="-0.000262 0.15 0.000132" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="hip_abduction_left_1_1"/>
+  <axis xyz="0.0 1.0 -0.0"/>
+  <limit upper="0.785398" lower="-0.785398" effort="100" velocity="100"/>
+</joint>
+
+<joint name="hip_abduction_right_joint" type="revolute">
+  <origin xyz="0.0 -0.151 0.0" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="hip_abduction_right_1_1"/>
+  <axis xyz="-0.0 -1.0 0.0"/>
+  <limit upper="0.785398" lower="-0.785398" effort="100" velocity="100"/>
+</joint>
+
+<joint name="femur_left_joint" type="revolute">
+  <origin xyz="0.02955 0.07 0.0" rpy="0 0 0"/>
+  <parent link="hip_abduction_left_1_1"/>
+  <child link="femur_left_1_1"/>
+  <axis xyz="1.0 -0.0 0.0"/>
+  <limit upper="0.785398" lower="-0.349066" effort="100" velocity="100"/>
+</joint>
+
+<joint name="femur_right_joint" type="revolute">
+  <origin xyz="0.02955 -0.07 -0.0" rpy="0 0 0"/>
+  <parent link="hip_abduction_right_1_1"/>
+  <child link="femur_right_1_1"/>
+  <axis xyz="1.0 -0.0 -0.0"/>
+  <limit upper="0.349066" lower="-0.785398" effort="100" velocity="100"/>
+</joint>
+
+<joint name="shin_left_joint" type="revolute">
+  <origin xyz="0.0375 0.0277 -0.294034" rpy="0 0 0"/>
+  <parent link="femur_left_1_1"/>
+  <child link="shin_left_1_1"/>
+  <axis xyz="0.0 1.0 0.0"/>
+  <limit upper="1.570796" lower="-0.785398" effort="100" velocity="100"/>
+</joint>
+
+<joint name="shin_right_joint" type="revolute">
+  <origin xyz="0.0375 -0.0277 -0.294034" rpy="0 0 0"/>
+  <parent link="femur_right_1_1"/>
+  <child link="shin_right_1_1"/>
+  <axis xyz="-0.0 -1.0 -0.0"/>
+  <limit upper="0.785398" lower="-1.570796" effort="100" velocity="100"/>
+</joint>
+
+<joint name="foot_left_joint" type="revolute">
+  <origin xyz="5e-06 0.0 -0.2535" rpy="0 0 0"/>
+  <parent link="shin_left_1_1"/>
+  <child link="foot_left_1_1"/>
+  <axis xyz="-0.0 1.0 0.0"/>
+  <limit upper="0.523599" lower="-0.523599" effort="100" velocity="100"/>
+</joint>
+
+<joint name="foot_right_joint" type="revolute">
+  <origin xyz="-0.004429 0.0 -0.253461" rpy="0 0 0"/>
+  <parent link="shin_right_1_1"/>
+  <child link="foot_right_1_1"/>
+  <axis xyz="-0.0 -1.0 -0.0"/>
+  <limit upper="0.523599" lower="-0.523599" effort="100" velocity="100"/>
+</joint>
+
+</robot>

@@ -1,0 +1,49 @@
+[package]
+name = "bebop-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "On-device daemon for Bebop robots: BLE provisioning + container app manager + OTA."
+
+[[bin]]
+name = "bebop-agent"
+path = "src/main.rs"
+
+[dependencies]
+bebop-proto = { workspace = true }
+
+tokio        = { workspace = true }
+tokio-stream = { workspace = true }
+futures      = { workspace = true }
+async-trait  = { workspace = true }
+
+anyhow              = { workspace = true }
+thiserror           = { workspace = true }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+
+serde      = { workspace = true }
+serde_json = { workspace = true }
+toml       = { workspace = true }
+
+bollard = { workspace = true }
+reqwest = { workspace = true }
+
+uuid  = { workspace = true }
+time  = { workspace = true }
+bytes = { workspace = true }
+prost = "0.13"
+
+# BLE peripheral / GATT server.
+# BlueZ (what `bluer` talks to over D-Bus) is Linux-only, so this dep is
+# target-gated. Every `use bluer::...` site must also be cfg-gated behind
+# `#[cfg(target_os = "linux")]` so `cargo check` works on macOS dev boxes.
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { version = "0.17", features = ["bluetoothd", "l2cap", "rfcomm"] }
+
+[features]
+default = []
+# Compile without touching real system daemons (BlueZ, Docker, NetworkManager).
+# Useful for host-side development & CI.
+mock = []

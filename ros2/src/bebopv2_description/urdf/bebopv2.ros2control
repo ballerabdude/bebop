@@ -1,0 +1,4 @@
+<?xml version="1.0" ?>
+<robot name="bebopv2" xmlns:xacro="http://www.ros.org/wiki/xacro" >
+
+</robot>

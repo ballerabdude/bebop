@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>13s2p 21700 Battery Pack — Option 2 (Mirrored)</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    color: #eee;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 30px 20px;
+    min-height: 100vh;
+  }
+  h1 { font-size: 1.5rem; margin-bottom: 5px; color: #00d4ff; }
+  h2 { font-size: 1rem; margin-bottom: 20px; color: #888; font-weight: 400; }
+
+  .diagram-container {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+  }
+
+  .view-label {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #ffaa00;
+    margin: 25px 0 10px 0;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+  }
+  .view-label:first-of-type { margin-top: 10px; }
+
+  .pack-view {
+    position: relative;
+    padding: 20px;
+    background: #0f0f23;
+    border-radius: 12px;
+    border: 2px solid #333;
+  }
+
+  .cell {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 1.3rem;
+    position: relative;
+    border: 3px solid #555;
+    background: #2a2a3e;
+    z-index: 2;
+  }
+  .cell.pos-up {
+    background: radial-gradient(circle at 50% 35%, #ff4444, #991111);
+    border-color: #ff6666;
+  }
+  .cell.neg-up {
+    background: radial-gradient(circle at 50% 35%, #4488ff, #113399);
+    border-color: #6699ff;
+  }
+  .cell.empty {
+    background: #1a1a2e;
+    border: 3px dashed #444;
+    color: #555;
+  }
+  .cell .polarity {
+    font-size: 1.5rem;
+    line-height: 1;
+  }
+  .cell .label {
+    font-size: 0.55rem;
+    color: rgba(255,255,255,0.7);
+    margin-top: 2px;
+  }
+
+  .nickel-h-top {
+    position: absolute;
+    height: 12px;
+    background: linear-gradient(180deg, #d4d4aa, #b0b080, #d4d4aa);
+    border-radius: 3px;
+    z-index: 1;
+    border: 1px solid #999;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+  }
+  .nickel-v-top {
+    position: absolute;
+    width: 12px;
+    background: linear-gradient(90deg, #d4d4aa, #b0b080, #d4d4aa);
+    border-radius: 3px;
+    z-index: 1;
+    border: 1px solid #999;
+    box-shadow: 1px 0 3px rgba(0,0,0,0.5);
+  }
+  .nickel-h-bot {
+    position: absolute;
+    height: 12px;
+    background: linear-gradient(180deg, #e8a060, #cc7733, #e8a060);
+    border-radius: 3px;
+    z-index: 1;
+    border: 1px solid #bb6622;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+  }
+  .nickel-v-bot {
+    position: absolute;
+    width: 12px;
+    background: linear-gradient(90deg, #e8a060, #cc7733, #e8a060);
+    border-radius: 3px;
+    z-index: 1;
+    border: 1px solid #bb6622;
+    box-shadow: 1px 0 3px rgba(0,0,0,0.5);
+  }
+
+  .bms-point {
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    background: #00ff88;
+    border: 2px solid #00cc66;
+    border-radius: 50%;
+    z-index: 5;
+    box-shadow: 0 0 8px rgba(0,255,136,0.6);
+  }
+  .bms-label {
+    position: absolute;
+    font-size: 0.55rem;
+    color: #00ff88;
+    white-space: nowrap;
+    z-index: 5;
+    font-weight: 600;
+  }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    margin-top: 25px;
+    padding: 15px 25px;
+    background: #0f0f23;
+    border-radius: 10px;
+    border: 1px solid #333;
+    justify-content: center;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8rem;
+  }
+  .legend-swatch {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 2px solid #555;
+    flex-shrink: 0;
+  }
+  .legend-swatch.pos { background: radial-gradient(circle, #ff4444, #991111); border-color: #ff6666; }
+  .legend-swatch.neg { background: radial-gradient(circle, #4488ff, #113399); border-color: #6699ff; }
+  .legend-swatch.empty-s { background: #1a1a2e; border: 2px dashed #555; }
+  .legend-rect {
+    width: 30px;
+    height: 12px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .legend-rect.nickel-top { background: linear-gradient(180deg, #d4d4aa, #b0b080, #d4d4aa); border: 1px solid #999; }
+  .legend-rect.nickel-bot { background: linear-gradient(180deg, #e8a060, #cc7733, #e8a060); border: 1px solid #bb6622; }
+  .legend-circle {
+    width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0;
+    background: #00ff88; border: 2px solid #00cc66;
+    box-shadow: 0 0 6px rgba(0,255,136,0.5);
+  }
+
+  .series-label {
+    position: absolute;
+    font-size: 0.6rem;
+    color: #ffaa00;
+    font-weight: 700;
+    z-index: 6;
+    background: rgba(0,0,0,0.7);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
+  .terminal {
+    position: absolute;
+    z-index: 6;
+    padding: 4px 10px;
+    border-radius: 5px;
+    font-weight: 800;
+    font-size: 0.85rem;
+  }
+  .terminal.main-pos {
+    background: #ff4444;
+    color: #fff;
+    border: 2px solid #ff6666;
+    box-shadow: 0 0 10px rgba(255,68,68,0.5);
+  }
+  .terminal.main-neg {
+    background: #4488ff;
+    color: #fff;
+    border: 2px solid #6699ff;
+    box-shadow: 0 0 10px rgba(68,136,255,0.5);
+  }
+
+  .info-box {
+    margin-top: 20px;
+    padding: 15px 20px;
+    background: #0f0f23;
+    border-radius: 10px;
+    border: 1px solid #333;
+    max-width: 800px;
+    font-size: 0.8rem;
+    line-height: 1.6;
+    color: #aaa;
+  }
+  .info-box strong { color: #ffaa00; }
+
+  .wiring-section {
+    margin-top: 30px;
+    width: 720px;
+  }
+  .wiring-section h3 {
+    font-size: 1.2rem;
+    color: #00d4ff;
+    margin-bottom: 15px;
+    text-align: center;
+  }
+  .wiring-diagram {
+    background: #0f0f23;
+    border-radius: 12px;
+    border: 2px solid #333;
+    padding: 30px 20px;
+    position: relative;
+  }
+  .wiring-diagram svg {
+    display: block;
+    margin: 0 auto;
+  }
+
+  /* Flow arrows */
+  .flow-arrow {
+    position: absolute;
+    z-index: 7;
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: #ffaa00;
+    white-space: nowrap;
+  }
+
+  /* Thermistor probes */
+  .therm-probe {
+    position: absolute;
+    width: 22px;
+    height: 22px;
+    background: radial-gradient(circle, #ffe44d, #ff9900);
+    border: 2px solid #ffcc00;
+    border-radius: 4px;
+    transform: rotate(45deg);
+    z-index: 8;
+    box-shadow: 0 0 10px rgba(255,200,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .therm-probe::after {
+    content: '🌡';
+    font-size: 12px;
+    transform: rotate(-45deg);
+  }
+  .therm-label {
+    position: absolute;
+    font-size: 0.55rem;
+    color: #ffcc00;
+    white-space: nowrap;
+    z-index: 8;
+    font-weight: 700;
+    text-shadow: 0 0 4px rgba(0,0,0,0.8);
+  }
+</style>
+</head>
+<body>
+
+<h1>⚡ 13S2P 21700 Battery Pack — Option 2 (Mirrored)</h1>
+<h2>4 Rows × 7 Columns — Vertical Pairs — Bottom Half Mirrored for Short S6→S7 Hop</h2>
+
+<div class="diagram-container">
+
+  <div class="view-label">🔼 Top View (Looking Down)</div>
+  <div class="pack-view" id="topView" style="width: 800px; height: 560px;">
+  </div>
+
+</div>
+
+<!-- Legend -->
+<div class="legend">
+  <div class="legend-item"><div class="legend-swatch pos"></div> Positive (+) terminal up</div>
+  <div class="legend-item"><div class="legend-swatch neg"></div> Negative (−) terminal up</div>
+  <div class="legend-item"><div class="legend-swatch empty-s"></div> Empty slot</div>
+  <div class="legend-item"><div class="legend-rect nickel-top"></div> Nickel strip (top face)</div>
+  <div class="legend-item"><div class="legend-rect nickel-bot"></div> Nickel strip (bottom face)</div>
+  <div class="legend-item"><div class="legend-circle"></div> BMS balance wire tap</div>
+  <div class="legend-item"><div style="width:18px;height:18px;background:radial-gradient(circle,#ffe44d,#ff9900);border:2px solid #ffcc00;border-radius:3px;transform:rotate(45deg);flex-shrink:0;margin:0 4px;"></div> Thermistor probe</div>
+</div>
+
+<!-- BMS & Charger Wiring Schematic -->
+<div class="wiring-section">
+  <h3>🔌 BMS &amp; Charger Wiring Schematic</h3>
+  <div class="wiring-diagram">
+    <svg width="680" height="360" viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+
+      <rect x="30" y="60" width="140" height="240" rx="10" fill="#1a1a2e" stroke="#ffaa00" stroke-width="2"/>
+      <text x="100" y="88" text-anchor="middle" fill="#ffaa00" font-size="13" font-weight="700">Battery Pack</text>
+      <text x="100" y="105" text-anchor="middle" fill="#666" font-size="10">13S2P · 46.8V</text>
+
+      <line x1="170" y1="140" x2="500" y2="140" stroke="#ff4444" stroke-width="4"/>
+      <circle cx="500" cy="140" r="4" fill="#ff4444"/>
+      <text x="180" y="133" fill="#ff4444" font-size="10" font-weight="700">PACK + (S131)</text>
+
+      <line x1="170" y1="230" x2="240" y2="230" stroke="#ff8800" stroke-width="4"/>
+      <text x="180" y="223" fill="#ff8800" font-size="10" font-weight="700">B− (S11)</text>
+
+      <line x1="170" y1="185" x2="240" y2="185" stroke="#00ff88" stroke-width="1.5" stroke-dasharray="4,2"/>
+      <text x="100" y="170" text-anchor="middle" fill="#00ff88" font-size="9">Balance</text>
+      <text x="100" y="182" text-anchor="middle" fill="#00ff88" font-size="9">B0–B13</text>
+
+      <rect x="240" y="155" width="150" height="150" rx="10" fill="#1a1a2e" stroke="#00ff88" stroke-width="2"/>
+      <text x="315" y="178" text-anchor="middle" fill="#00ff88" font-size="13" font-weight="700">Smart BMS</text>
+      <text x="315" y="194" text-anchor="middle" fill="#666" font-size="10">13S · B− / P−</text>
+
+      <text x="248" y="188" fill="#00ff88" font-size="8">B0–B13</text>
+      <text x="248" y="233" fill="#ff8800" font-size="10" font-weight="700">B−</text>
+
+      <rect x="275" y="248" width="80" height="24" rx="4" fill="#2a2a3e" stroke="#ff8800" stroke-width="1.5"/>
+      <text x="315" y="265" text-anchor="middle" fill="#ff8800" font-size="9" font-weight="600">MOSFETs</text>
+      <line x1="315" y1="235" x2="315" y2="248" stroke="#ff8800" stroke-width="2.5"/>
+
+      <line x1="315" y1="272" x2="315" y2="290" stroke="#ff8800" stroke-width="3"/>
+      <line x1="315" y1="290" x2="500" y2="290" stroke="#ff8800" stroke-width="4"/>
+      <circle cx="500" cy="290" r="4" fill="#ff8800"/>
+
+      <rect x="390" y="277" width="75" height="18" rx="3" fill="#ff8800"/>
+      <text x="427" y="291" text-anchor="middle" fill="#fff" font-size="10" font-weight="700">P− = PACK −</text>
+
+      <line x1="500" y1="140" x2="570" y2="140" stroke="#ff4444" stroke-width="3"/>
+      <line x1="500" y1="140" x2="500" y2="55" stroke="#ff4444" stroke-width="3"/>
+
+      <line x1="500" y1="290" x2="570" y2="290" stroke="#ff8800" stroke-width="3"/>
+      <line x1="500" y1="290" x2="500" y2="340" stroke="#ff8800" stroke-width="3"/>
+
+      <rect x="570" y="120" width="90" height="50" rx="8" fill="#1a1a2e" stroke="#aaa" stroke-width="2"/>
+      <text x="615" y="143" text-anchor="middle" fill="#eee" font-size="12" font-weight="700">Load</text>
+      <text x="615" y="158" text-anchor="middle" fill="#666" font-size="9">Motor / ESC</text>
+      <text x="566" y="138" text-anchor="end" fill="#ff4444" font-size="9" font-weight="700">+</text>
+      <line x1="570" y1="290" x2="615" y2="290" stroke="#ff8800" stroke-width="2.5"/>
+      <line x1="615" y1="170" x2="615" y2="290" stroke="#ff8800" stroke-width="2.5"/>
+      <text x="566" y="172" text-anchor="end" fill="#ff8800" font-size="9" font-weight="700">−</text>
+
+      <rect x="445" y="25" width="110" height="45" rx="8" fill="#1a1a2e" stroke="#00d4ff" stroke-width="2"/>
+      <text x="500" y="46" text-anchor="middle" fill="#00d4ff" font-size="12" font-weight="700">Charger</text>
+      <text x="500" y="62" text-anchor="middle" fill="#666" font-size="9">54.6V CC/CV</text>
+      <text x="500" y="22" text-anchor="middle" fill="#ff4444" font-size="9" font-weight="600">+</text>
+
+      <rect x="445" y="320" width="110" height="30" rx="6" fill="#1a1a2e" stroke="#00d4ff" stroke-width="1.5"/>
+      <text x="500" y="340" text-anchor="middle" fill="#00d4ff" font-size="10" font-weight="600">CHG −</text>
+
+      <rect x="30" y="315" width="195" height="38" rx="6" fill="rgba(255,136,0,0.08)" stroke="#ff8800" stroke-width="1" stroke-dasharray="3,2"/>
+      <text x="38" y="330" fill="#ff8800" font-size="9" font-weight="700">Smart BMS — no B+ on BMS</text>
+      <text x="38" y="343" fill="#888" font-size="8">PACK + goes direct from battery to load/charger</text>
+    </svg>
+  </div>
+</div>
+
+<div class="info-box">
+  <strong>Layout — Option 2 (Mirrored Bottom Half)</strong><br>
+  <strong>Configuration:</strong> 13S2P = 26 cells, 2 empty slots (col 6, rows 0–1).<br>
+  <strong>Top Half (Rows 0–1):</strong> S1→S2→…→S6, flowing left to right. Empty slots at column 6.<br>
+  <strong>Bottom Half (Rows 2–3):</strong> S7→S8→…→S13, flowing <em>right to left</em> (mirrored). S7 at col 6, S13 at col 0.<br>
+  <strong>Why Mirrored?</strong> S6 (col 5, top half) → S7 (col 6, bottom half) is now a <strong style="color:#ffaa00;">1-column hop</strong> across the gap — same distance as every other series connection. No long bus bar needed!<br>
+  <strong>Polarity:</strong> Same pattern for both halves: even cols (+) up, odd cols (−) up. Series connections alternate between top face and bottom face strips.<br>
+  <strong>Series Flow:</strong> S1(col0)→…→S6(col5) ↓ S7(col6)→S8(col5)→…→S13(col0). Forms a "U" shape.<br>
+  <strong>Terminals:</strong> B−/PACK− (from S1, col 0 left) and PACK+ (from S13, col 0 left) — both on the <em>left edge</em> for clean wiring to BMS and load.<br>
+  <strong>BMS Taps:</strong> 14 balance wires (B0–B13) at series junctions, extending to nearest edge.<br>
+  <strong>⚠️ Wire Gauge for S6→S7:</strong> This carries <strong>full pack current</strong> (up to 40A). Use <strong style="color:#ff4444;">8–10 AWG</strong> silicone wire or thick copper bus bar/strap. <strong style="color:#ff4444;">22 AWG is dangerously undersized</strong> (~7A max). All series connections should be rated for full pack current.<br>
+  <strong>Nickel Strips:</strong> Use <strong>0.2mm × 30mm pure nickel</strong> or <strong>0.15mm copper-nickel</strong> for parallel connections. For series connections (full current path), double-stack strips or use thicker stock.<br>
+  <strong style="color:#ffcc00;">Thermistor Placement (2 probes):</strong> <strong>T1</strong> = center of top half (gap between S3/S4, rows 0–1). <strong>T2</strong> = center of bottom half (gap between S10/S9, rows 2–3). These are the <em>most thermally insulated</em> spots — surrounded by cells on all 4 sides with the worst airflow. Press the NTC bead flat against the cell sidewall and secure with <strong>kapton tape</strong>. Route the thin sensor wires to the BMS NTC input.<br>
+  <strong>Nominal:</strong> 46.8V | <strong>Charge:</strong> 54.6V | <strong>Cells:</strong> 21700
+</div>
+
+<script>
+// === CONFIG ===
+const ROWS = 4, COLS = 7, CELL_SIZE = 80, GAP = 6;
+const STEP = CELL_SIZE + GAP;
+const PAD_X = 80, PAD_Y = 70, HALF_GAP = 80;
+const TAB = 18;
+
+// === LAYOUT: Option 2 — Mirrored Bottom Half ===
+//
+// Top half flows LEFT→RIGHT:
+// Col:   0    1    2    3    4    5    6
+// R0:  S1+  S2−  S3+  S4−  S5+  S6−   ∅
+// R1:  S1+  S2−  S3+  S4−  S5+  S6−   ∅
+//      ──────────── gap ────────────────
+// Bottom half flows RIGHT→LEFT (mirrored):
+// R2: S13+  S12− S11+ S10−  S9+  S8−  S7+
+// R3: S13+  S12− S11+ S10−  S9+  S8−  S7+
+//
+// S6(col5) → S7(col6) = 1-column hop across gap!
+// PACK− (S1−) and PACK+ (S13+) both on left edge.
+
+function getTopPolarity(r, c) {
+  // Empty slots: col 6 top half only
+  if (r < 2 && c === 6) return 'empty';
+  // Same polarity pattern for both halves:
+  // even col = + up, odd col = − up
+  return (c % 2 === 0) ? '+' : '-';
+}
+
+function getSeriesGroup(r, c) {
+  if (r < 2 && c === 6) return null;
+  if (r < 2) return c + 1;        // S1(col0) – S6(col5), left to right
+  return 13 - c;                   // S13(col0) – S7(col6), mirrored
+}
+
+function cellX(c)  { return PAD_X + c * STEP; }
+function cellY(r)  { return PAD_Y + r * STEP + (r >= 2 ? HALF_GAP : 0); }
+function cellCX(c) { return cellX(c) + CELL_SIZE / 2; }
+function cellCY(r) { return cellY(r) + CELL_SIZE / 2; }
+
+function buildView(containerId) {
+  const container = document.getElementById(containerId);
+
+  function addStrip(x, y, w, h, isTop) {
+    const s = document.createElement('div');
+    const horiz = w >= h;
+    s.className = isTop
+      ? (horiz ? 'nickel-h-top' : 'nickel-v-top')
+      : (horiz ? 'nickel-h-bot' : 'nickel-v-bot');
+    s.style.cssText = 'left:'+x+'px;top:'+y+'px;width:'+w+'px;height:'+h+'px;';
+    container.appendChild(s);
+  }
+  function addTabH(x, y, w, isTop) { addStrip(x, y, w, 8, isTop); }
+  function addTabV(x, y, h, isTop) { addStrip(x, y, 8, h, isTop); }
+
+  function addDot(x, y) {
+    const pt = document.createElement('div');
+    pt.className = 'bms-point';
+    pt.style.left = (x - 8) + 'px';
+    pt.style.top  = (y - 8) + 'px';
+    container.appendChild(pt);
+  }
+  function addLbl(text, x, y) {
+    const lbl = document.createElement('div');
+    lbl.className = 'bms-label';
+    lbl.textContent = text;
+    lbl.style.left = x + 'px';
+    lbl.style.top  = y + 'px';
+    container.appendChild(lbl);
+  }
+  function midX(c1, c2) { return (cellCX(c1) + cellCX(c2)) / 2; }
+
+  // ─── CELLS ──────────────────────────────────────────────────
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const pol = getTopPolarity(r, c);
+      const cell = document.createElement('div');
+
+      if (pol === 'empty') {
+        cell.className = 'cell empty';
+        cell.innerHTML = '<span class="polarity">∅</span><span class="label">EMPTY</span>';
+      } else {
+        cell.className = 'cell ' + (pol === '+' ? 'pos-up' : 'neg-up');
+        const sg = getSeriesGroup(r, c);
+        const pn = (r === 0 || r === 2) ? 1 : 2;
+        cell.innerHTML = '<span class="polarity">' + (pol === '+' ? '+' : '−') +
+          '</span><span class="label">S' + sg + pn + '</span>';
+      }
+
+      cell.style.position = 'absolute';
+      cell.style.left = cellX(c) + 'px';
+      cell.style.top  = cellY(r) + 'px';
+      container.appendChild(cell);
+    }
+  }
+
+  // ─── GAP METRICS ────────────────────────────────────────────
+
+  const gapTop = cellY(1) + CELL_SIZE;
+  const gapBot = cellY(2);
+  const gapMid = (gapTop + gapBot) / 2;
+
+  // Separator
+  const sep = document.createElement('div');
+  sep.style.cssText = 'position:absolute;left:'+PAD_X+'px;top:'+gapMid+'px;width:'+(6*STEP+CELL_SIZE)+'px;height:0;border-top:2px dashed #333;z-index:0;';
+  container.appendChild(sep);
+
+  // Section labels
+  const secA = document.createElement('div');
+  secA.style.cssText = 'position:absolute;z-index:6;font-size:0.65rem;color:#666;font-weight:600;';
+  secA.textContent = '▲ S1→S6 (left to right)';
+  secA.style.left = PAD_X + 'px';
+  secA.style.top  = (gapTop + 4) + 'px';
+  container.appendChild(secA);
+
+  const secB = document.createElement('div');
+  secB.style.cssText = 'position:absolute;z-index:6;font-size:0.65rem;color:#666;font-weight:600;';
+  secB.textContent = '▼ S13←S7 (right to left)';
+  secB.style.left = PAD_X + 'px';
+  secB.style.top  = (gapBot - 16) + 'px';
+  container.appendChild(secB);
+
+  // Flow direction arrows
+  function addFlowArrow(text, x, y) {
+    const el = document.createElement('div');
+    el.className = 'flow-arrow';
+    el.textContent = text;
+    el.style.left = x + 'px';
+    el.style.top  = y + 'px';
+    container.appendChild(el);
+  }
+
+  // Top half: → arrows
+  addFlowArrow('S1 ➜➜➜ S6', cellCX(2) - 20, cellY(0) - 30);
+  // Bottom half: ← arrows
+  addFlowArrow('S13 ←←← S7', cellCX(2) - 20, cellY(3) + CELL_SIZE + 10);
+  // S6→S7 down arrow
+  addFlowArrow('S6↓S7', cellCX(5) + CELL_SIZE/2 + 8, gapMid - 10);
+
+  // ─── PARALLEL STRIPS (vertical, both faces) ─────────────────
+
+  for (let c = 0; c < COLS; c++) {
+    const x = cellCX(c);
+
+    // Top half (rows 0-1)
+    if (getTopPolarity(0, c) !== 'empty') {
+      const y1 = cellCY(0), y2 = cellCY(1);
+      addStrip(x - 13, y1 - 2, 12, y2 - y1 + 4, true);
+      addStrip(x + 1,  y1 - 2, 12, y2 - y1 + 4, false);
+    }
+
+    // Bottom half (rows 2-3)
+    {
+      const y3 = cellCY(2), y4 = cellCY(3);
+      addStrip(x - 13, y3 - 2, 12, y4 - y3 + 4, true);
+      addStrip(x + 1,  y3 - 2, 12, y4 - y3 + 4, false);
+    }
+  }
+
+  // ─── SERIES STRIPS — TOP HALF (S1→S2→…→S6, left to right) ───
+  // S1(col0,+up) → S2(col1,−up): S1+ top, S2− top → top face strip at row 0
+  // S2(col1,−up) → S3(col2,+up): S2+ bottom, S3− bottom → bottom face strip at row 1
+  // Pattern: even c → top face at row 0, odd c → bottom face at row 1
+
+  for (let c = 0; c < 5; c++) {
+    const row   = (c % 2 === 0) ? 0 : 1;
+    const isTop = (c % 2 === 0);
+    const x1 = cellCX(c), x2 = cellCX(c + 1);
+    addStrip(x1 - 2, cellCY(row) - 6, x2 - x1 + 4, 12, isTop);
+  }
+
+  // ─── SERIES STRIPS — BOTTOM HALF (S7→S8→…→S13, right to left) ───
+  // Bottom half has same polarity pattern but flow is reversed.
+  // S7(col6,+up) → S8(col5,−up): S7+ top, S8− top → top face strip at row 2
+  // S8(col5,−up) → S9(col4,+up): S8+ bottom, S9− bottom → bottom face strip at row 3
+  //
+  // Going right to left: c goes from 6 down to 1
+  // At each pair (c, c-1): if c is even → bottom face at row3, if c is odd → top face at row2
+  // Actually simpler: strip between col c and col c-1 for c = 6..1
+  //   c=6(S7+) → c=5(S8−): even c → top face at row2? Let's check:
+  //     S7(col6) + up, S8(col5) − up. Series: S7+ (top) → S8− (top). → top face strip at row 2 ✓
+  //   c=5(S8−) → c=4(S9+): S8+ (bottom) → S9− (bottom) → bottom face strip at row 3 ✓
+
+  for (let c = 6; c > 0; c--) {
+    // Strip between col c and col c-1
+    const row   = (c % 2 === 0) ? 2 : 3;
+    const isTop = (c % 2 === 0);
+    const x1 = cellCX(c - 1), x2 = cellCX(c);
+    addStrip(x1 - 2, cellCY(row) - 6, x2 - x1 + 4, 12, isTop);
+  }
+
+  // ─── S6 → S7 SERIES CONNECTION (across gap) ────────────────
+  // S6(col5, − up) positive is on BOTTOM face
+  // S7(col6, + up) negative is on BOTTOM face
+  // Connection: vertical strip from S6 bottom (col5 row1) down through gap
+  //             to S7 bottom (col6 row2)
+  // These are adjacent columns (5→6), just across the gap.
+  // We draw it as a short vertical + horizontal strip.
+
+  const s6x = cellCX(5), s7x = cellCX(6);
+  const s6bot = cellY(1) + CELL_SIZE;
+  const s7top = cellY(2);
+
+  // Vertical from S6 down
+  addStrip(s6x - 2, s6bot - 4, 4, (gapMid - s6bot + 6), false);
+  // Horizontal across (1 column)
+  addStrip(s6x - 2, gapMid - 2, s7x - s6x + 4, 4, false);
+  // Vertical up to S7
+  addStrip(s7x - 2, gapMid - 2, 4, (s7top - gapMid + 6), false);
+
+  const busLbl = document.createElement('div');
+  busLbl.className = 'series-label';
+  busLbl.textContent = 'S6→S7';
+  busLbl.style.left = (s6x + 10) + 'px';
+  busLbl.style.top  = (gapMid - 20) + 'px';
+  container.appendChild(busLbl);
+
+  // ─── BMS BALANCE WIRE TAPS ─────────────────────────────────
+  // 14 taps (B0–B13). B0 = Pack−, B13 = Pack+.
+  //
+  // Top half series junctions (between columns):
+  //   B1: S1→S2 (col 0↔1), B2: S2→S3 (col 1↔2), …, B5: S5→S6 (col 4↔5)
+  // S6→S7 junction:
+  //   B6: at the S6→S7 transition
+  // Bottom half series junctions (between columns, right to left):
+  //   B7: S7→S8 (col 6↔5), B8: S8→S9 (col 5↔4), …, B12: S12→S13 (col 1↔0)
+
+  const botEdge = cellY(3) + CELL_SIZE;
+
+  // B0 (Pack−): S1 negative terminal, left edge, bottom face
+  addTabH(cellX(0) - TAB, cellCY(1) - 4, TAB, false);
+  addDot(cellX(0) - TAB, cellCY(1));
+  addLbl('B0 (P−)', cellX(0) - TAB - 22, cellCY(1) + 10);
+
+  // B1: S1→S2 junction, top face, extends up from row 0
+  addTabV(midX(0,1) - 4, cellY(0) - TAB, TAB, true);
+  addDot(midX(0,1), cellY(0) - TAB);
+  addLbl('B1', midX(0,1) - 5, cellY(0) - TAB - 16);
+
+  // B2: S2→S3 junction, bottom face, extends into gap
+  addTabV(midX(1,2) - 4, gapTop, TAB, false);
+  addDot(midX(1,2), gapTop + TAB);
+  addLbl('B2', midX(1,2) - 5, gapTop + TAB + 4);
+
+  // B3: S3→S4 junction, top face, extends up
+  addTabV(midX(2,3) - 4, cellY(0) - TAB, TAB, true);
+  addDot(midX(2,3), cellY(0) - TAB);
+  addLbl('B3', midX(2,3) - 5, cellY(0) - TAB - 16);
+
+  // B4: S4→S5 junction, bottom face, extends into gap
+  addTabV(midX(3,4) - 4, gapTop, TAB, false);
+  addDot(midX(3,4), gapTop + TAB);
+  addLbl('B4', midX(3,4) - 5, gapTop + TAB + 4);
+
+  // B5: S5→S6 junction, top face, extends up
+  addTabV(midX(4,5) - 4, cellY(0) - TAB, TAB, true);
+  addDot(midX(4,5), cellY(0) - TAB);
+  addLbl('B5', midX(4,5) - 5, cellY(0) - TAB - 16);
+
+  // B6: S6→S7 transition, right edge
+  addTabH(cellX(6) + CELL_SIZE, gapMid - 4, TAB, false);
+  addDot(cellX(6) + CELL_SIZE + TAB, gapMid);
+  addLbl('B6', cellX(6) + CELL_SIZE + TAB - 5, gapMid + 10);
+
+  // B7: S7→S8 junction (col 6↔5), top face, extends into gap from bottom half
+  addTabV(midX(5,6) - 4, gapBot - TAB, TAB, true);
+  addDot(midX(5,6), gapBot - TAB);
+  addLbl('B7', midX(5,6) - 5, gapBot - TAB - 16);
+
+  // B8: S8→S9 junction (col 5↔4), bottom face, extends down from row 3
+  addTabV(midX(4,5) - 4, botEdge, TAB, false);
+  addDot(midX(4,5), botEdge + TAB);
+  addLbl('B8', midX(4,5) - 5, botEdge + TAB + 4);
+
+  // B9: S9→S10 junction (col 4↔3), top face, extends into gap
+  addTabV(midX(3,4) - 4, gapBot - TAB, TAB, true);
+  addDot(midX(3,4), gapBot - TAB);
+  addLbl('B9', midX(3,4) - 5, gapBot - TAB - 16);
+
+  // B10: S10→S11 junction (col 3↔2), bottom face, extends down
+  addTabV(midX(2,3) - 4, botEdge, TAB, false);
+  addDot(midX(2,3), botEdge + TAB);
+  addLbl('B10', midX(2,3) - 8, botEdge + TAB + 4);
+
+  // B11: S11→S12 junction (col 2↔1), top face, extends into gap
+  addTabV(midX(1,2) - 4, gapBot - TAB, TAB, true);
+  addDot(midX(1,2), gapBot - TAB);
+  addLbl('B11', midX(1,2) - 8, gapBot - TAB - 16);
+
+  // B12: S12→S13 junction (col 1↔0), bottom face, extends down
+  addTabV(midX(0,1) - 4, botEdge, TAB, false);
+  addDot(midX(0,1), botEdge + TAB);
+  addLbl('B12', midX(0,1) - 8, botEdge + TAB + 4);
+
+  // B13 (Pack+): S13 positive terminal, left edge, top face
+  addTabH(cellX(0) - TAB, cellCY(2) - 4, TAB, true);
+  addDot(cellX(0) - TAB, cellCY(2));
+  addLbl('B13 (P+)', cellX(0) - TAB - 22, cellCY(2) + 10);
+
+  // ─── MAIN TERMINALS ────────────────────────────────────────
+
+  // B− (from S1 negative, left side)
+  const bmsNeg = document.createElement('div');
+  bmsNeg.style.cssText = 'position:absolute;z-index:6;padding:4px 10px;border-radius:5px;font-weight:800;font-size:0.85rem;background:#ff8800;color:#fff;border:2px solid #ffaa00;box-shadow:0 0 10px rgba(255,136,0,0.4);';
+  bmsNeg.textContent = 'B−';
+  bmsNeg.style.left = (cellX(0) - TAB - 38) + 'px';
+  bmsNeg.style.top  = (cellCY(1) - 35) + 'px';
+  container.appendChild(bmsNeg);
+
+  const bmsNote = document.createElement('div');
+  bmsNote.style.cssText = 'position:absolute;z-index:6;font-size:0.48rem;color:#ff8800;white-space:nowrap;';
+  bmsNote.textContent = '8-10 AWG → BMS';
+  bmsNote.style.left = (cellX(0) - TAB - 45) + 'px';
+  bmsNote.style.top  = (cellCY(1) - 12) + 'px';
+  container.appendChild(bmsNote);
+
+  // PACK + (from S13+, left side bottom half)
+  const packPos = document.createElement('div');
+  packPos.className = 'terminal main-pos';
+  packPos.textContent = 'PACK +';
+  packPos.style.left = (cellX(0) - TAB - 55) + 'px';
+  packPos.style.top  = (cellCY(2) - 12) + 'px';
+  container.appendChild(packPos);
+
+  const packPosNote = document.createElement('div');
+  packPosNote.style.cssText = 'position:absolute;z-index:6;font-size:0.48rem;color:#ff4444;white-space:nowrap;';
+  packPosNote.textContent = 'direct to load & charger';
+  packPosNote.style.left = (cellX(0) - TAB - 62) + 'px';
+  packPosNote.style.top  = (cellCY(2) + 14) + 'px';
+  container.appendChild(packPosNote);
+
+  // ─── THERMISTOR PROBES ──────────────────────────────────────
+  // Two probes placed at the CENTER of each half — in the
+  // diamond gap between 4 cells. These spots are:
+  //   • Surrounded by cells on all sides (worst heat dissipation)
+  //   • Representative of peak internal temperature
+  //   • Probe sits against cell sidewalls with kapton/thermal tape
+  //
+  // T1: Center of top half — gap between col2(S3) / col3(S4), rows 0/1
+  // T2: Center of bottom half — gap between col3(S10) / col4(S9), rows 2/3
+
+  function addThermistor(cx, cy, label, labelX, labelY) {
+    const probe = document.createElement('div');
+    probe.className = 'therm-probe';
+    probe.style.left = (cx - 11) + 'px';
+    probe.style.top  = (cy - 11) + 'px';
+    container.appendChild(probe);
+
+    const lbl = document.createElement('div');
+    lbl.className = 'therm-label';
+    lbl.textContent = label;
+    lbl.style.left = labelX + 'px';
+    lbl.style.top  = labelY + 'px';
+    container.appendChild(lbl);
+  }
+
+  // T1: between S3(col2) and S4(col3), between row 0 and row 1
+  const t1x = midX(2, 3);
+  const t1y = (cellCY(0) + cellCY(1)) / 2;
+  addThermistor(t1x, t1y, 'T1', t1x + 16, t1y - 18);
+
+  // T2: between S10(col3) and S9(col4), between row 2 and row 3
+  const t2x = midX(3, 4);
+  const t2y = (cellCY(2) + cellCY(3)) / 2;
+  addThermistor(t2x, t2y, 'T2', t2x + 16, t2y - 18);
+}
+
+buildView('topView');
+</script>
+
+</body>
+</html>

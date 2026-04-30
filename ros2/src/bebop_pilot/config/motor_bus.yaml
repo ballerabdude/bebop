@@ -1,0 +1,106 @@
+motor_bus:
+  ros__parameters:
+    # ---------------------------------------------------------------------
+    # Linux SocketCAN interface name (the netdev, *not* a per-motor ID).
+    #  - Jetson Orin Nano native CAN (40-pin header) -> "can0"
+    #  - CANable / candleLight USB dongle            -> "can0" or "can1"
+    # Bring it up first:
+    #   sudo ip link set can0 up type can bitrate 1000000
+    # ---------------------------------------------------------------------
+    can_interface: "can0"
+
+    # Order MUST match bebop_v2_base_cfg.py:JOINT_NAMES_ALL so /joint_states
+    # indices line up with policy_runner's expectations.
+    joint_names:
+      - hip_abduction_left_joint
+      - hip_abduction_right_joint
+      - femur_left_joint
+      - femur_right_joint
+      - shin_left_joint
+      - shin_right_joint
+      - foot_left_joint
+      - foot_right_joint
+
+    # ---------------------------------------------------------------------
+    # Per-joint configuration. Looked up by name from joint_names above.
+    #
+    #   motor_id : 8-bit Robstride node ID set in the Robstride debugger.
+    #   model    : RS01 | RS02 | RS03 | RS04 (matches BEBOP_V2_CFG.actuators)
+    #   kp / kd  : MIT-mode PD gains. Defaults MIRROR the training actuator
+    #              config in bebop_training/envs/bebop_v2_base_cfg.py — keep
+    #              them in sync to avoid sim-to-real gait drift.
+    #
+    # Bebop V2 numbering convention: tens digit = side (3 = left, 4 = right),
+    # ones digit = joint level.
+    # ---------------------------------------------------------------------
+    joints:
+      # ----- Hip abduction (RS04) -----------------------------------------
+      hip_abduction_left_joint:
+        motor_id: 31
+        model: RS04
+        kp: 200.0
+        kd: 8.0
+      hip_abduction_right_joint:
+        motor_id: 41
+        model: RS04
+        kp: 200.0
+        kd: 8.0
+
+      # ----- Femur / hip pitch (RS03) -------------------------------------
+      femur_left_joint:
+        motor_id: 32
+        model: RS03
+        kp: 100.0
+        kd: 5.0
+      femur_right_joint:
+        motor_id: 42
+        model: RS03
+        kp: 100.0
+        kd: 5.0
+
+      # ----- Shin / knee (RS04) -------------------------------------------
+      shin_left_joint:
+        motor_id: 34
+        model: RS04
+        kp: 150.0
+        kd: 8.0
+      shin_right_joint:
+        motor_id: 44
+        model: RS04
+        kp: 150.0
+        kd: 8.0
+
+      # ----- Foot / ankle (RS02) ------------------------------------------
+      foot_left_joint:
+        motor_id: 35
+        model: RS02
+        kp: 40.0
+        kd: 2.0
+      foot_right_joint:
+        motor_id: 45
+        model: RS02
+        kp: 40.0
+        kd: 2.0
+
+    # ---------------------------------------------------------------------
+    # Timing
+    # ---------------------------------------------------------------------
+    command_rate: 100.0          # Hz, MIT-mode TX to motors
+    publish_rate: 100.0          # Hz, /joint_states from cached feedback
+    feedback_interval_ms: 5      # ms, asks each motor to stream at 200 Hz
+    watchdog_timeout: 0.25       # s, /joint_commands staleness threshold
+
+    # ---------------------------------------------------------------------
+    # Safety
+    # ---------------------------------------------------------------------
+    # If false, motors stay disabled until True is published on /motor_enable.
+    # Recommended: leave false for first bring-up so /joint_commands traffic
+    # is observable before motors energize.
+    enable_on_start: false
+
+    # DANGEROUS: writes the current motor positions to flash as the new
+    # mechanical zeros. Only set true when you have manually placed the
+    # robot in its training-zero pose and want to calibrate. Otherwise
+    # leave false — calibration belongs in the joint_default_pos field of
+    # policy_runner.yaml.
+    set_zero_on_start: false

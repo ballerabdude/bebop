@@ -1,0 +1,21 @@
+# Clangd configuration for the firmware subprojects (PlatformIO/Teensy).
+# Works across different machines - uses query-driver to find toolchain paths.
+# This file is scoped to firmware/; paths below are relative to it.
+
+CompileFlags:
+  # Use compile_commands.json from the locomotion firmware
+  CompilationDatabase: bebop-locomotion
+  
+  # Remove flags that confuse clangd's parser
+  Remove:
+    - "-nostdlib"
+    - "-mthumb"
+    - "-mcpu=*"
+    - "-mfloat-abi=*"
+    - "-mfpu=*"
+
+Diagnostics:
+  # Suppress noise from embedded/Arduino code that compiles fine with GCC
+  Suppress:
+    - "pp_file_not_found"
+    - "ovl_diff_return_type"

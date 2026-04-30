@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "bebop-agent",
+    "bebop-proto",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+authors = ["Bebop Robotics"]
+repository = "https://github.com/your-org/bebop"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+
+# Errors / logging
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Protobuf
+prost = "0.13"
+prost-build = "0.13"
+
+# Docker API client
+bollard = "0.17"
+
+# HTTP (for OTA manifest checks)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# UUIDs, time, misc
+uuid = { version = "1.10", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde", "formatting"] }
+bytes = "1.7"
+
+# Local crates
+bebop-proto = { path = "bebop-proto" }

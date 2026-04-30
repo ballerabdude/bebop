@@ -1,0 +1,57 @@
+policy_runner:
+  ros__parameters:
+    # ---------------------------------------------------------------------
+    # Model paths. model_path is required; pass via --ros-args -p or here.
+    # normalizer_path defaults to model_path with .pt -> .norm.npz.
+    # ---------------------------------------------------------------------
+    model_path: ""
+    normalizer_path: ""
+
+    # Hz. Match decimation * sim.dt from training:
+    #   bebop_v2_base_cfg.py: decimation=2, sim.dt=0.005 -> control dt = 0.01s -> 100 Hz
+    # 50 Hz is a safe starting point; increase to 100 Hz once jitter is verified.
+    control_rate: 50.0
+
+    # Start disabled; bebop_pilot publishes /policy_enable when L1 is held.
+    enabled_default: false
+
+    # Must match bebop_v2_base_cfg.py:ActionsCfg.joints_pos.scale.
+    action_scale: 0.8
+
+    # Velocity command clamps. Keep <= the training command ranges in
+    # whichever experiment cfg you trained on (e.g. exp_flat_locomotion_v2.py).
+    max_lin_vel: 0.6
+    max_ang_vel: 1.0
+
+    # ---------------------------------------------------------------------
+    # CALIBRATION — joint_default_pos is the encoder reading at the training
+    # "home" pose (which in bebop_v2_base_cfg.py is all zeros). If the real
+    # robot's encoder zero matches the training mechanical zero, leave these
+    # at 0.0. Otherwise, fill in the encoder reading at home for each joint.
+    #
+    # Order MUST match bebop_v2_base_cfg.py:JOINT_NAMES_ALL:
+    #   [hip_abduction_left, hip_abduction_right,
+    #    femur_left,         femur_right,
+    #    shin_left,          shin_right,
+    #    foot_left,          foot_right]
+    # ---------------------------------------------------------------------
+    joint_default_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # Hard safety limits applied to the commanded position (after action scaling).
+    # Defaults are wide-open; replace with your motor / mechanical limits.
+    # Recommended: read from the URDF and tighten by ~10% for margin.
+    joint_min_pos: [-3.14, -3.14, -3.14, -3.14, -3.14, -3.14, -3.14, -3.14]
+    joint_max_pos: [ 3.14,  3.14,  3.14,  3.14,  3.14,  3.14,  3.14,  3.14]
+
+    # ---------------------------------------------------------------------
+    # base_lin_vel handling. Options: "zeros" | "odom" | "twist".
+    #   zeros: stub (recommended for first bring-up; mildly OOD).
+    #   odom:  subscribe to nav_msgs/Odometry on odom_topic (e.g. EKF output).
+    #   twist: subscribe to geometry_msgs/TwistStamped on twist_topic.
+    # ---------------------------------------------------------------------
+    lin_vel_source: "zeros"
+    odom_topic: "/odom"
+    twist_topic: "/base_twist"
+
+    # Stale-data timeout (s) for joint_states / IMU / external linear velocity.
+    data_timeout: 0.1

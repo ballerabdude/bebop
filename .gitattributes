@@ -1,0 +1,24 @@
+# Force Unix line endings for scripts
+*.py text eol=lf
+*.sh text eol=lf
+*.bash text eol=lf
+*.launch.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# Firmware source files
+*.cpp text eol=lf
+*.h text eol=lf
+*.hpp text eol=lf
+*.c text eol=lf
+*.ino text eol=lf
+
+# Docker files
+Dockerfile* text eol=lf
+docker-compose*.yml text eol=lf
+
+# Keep binary files as-is
+*.hex binary
+*.elf binary
+*.bin binary
+

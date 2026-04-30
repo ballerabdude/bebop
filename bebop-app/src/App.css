@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@theme {
+    --color-bg: #0e1013;
+    --color-bg-elev: #181c22;
+    --color-bg-elev-2: #20252d;
+    --color-border: #2a2f38;
+    --color-text: #f2f4f7;
+    --color-text-dim: #9aa3b2;
+    --color-accent: #4f8cff;
+    --color-accent-press: #3d74d6;
+    --color-danger: #ff5a5f;
+    --color-success: #35c28f;
+    --radius-card: 12px;
+}
+
+/* Keep spinner keyframes — Tailwind doesn't ship these */
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes fade-in {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.animate-fade-in {
+    animation: fade-in 200ms ease both;
+}

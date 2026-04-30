@@ -1,0 +1,92 @@
+# Bebop
+
+The Bebop companion app. One customer-facing app for every interaction
+with a Bebop robot — first-time setup, ongoing configuration, app status,
+and OTA updates.
+
+Built with [Tauri 2](https://tauri.app) + React + TypeScript + Vite.
+Runs on desktop today and targets iOS and Android.
+
+## Features
+
+Today:
+
+* **Setup wizard** — scan for nearby robots over BLE, connect, configure
+  Wi-Fi, name the robot, choose owner + timezone.
+* **Dashboard** — live app status (container state, image) and OTA status
+  with a "check for updates" action.
+
+Planned:
+
+* Re-pair / switch between multiple robots owned by the same user.
+* Manage robot settings after initial provisioning.
+* Surface logs and diagnostics for support escalations.
+* Trigger robot application controls (start / stop / restart).
+
+## Architecture
+
+The UI talks to the robot through a `BebopTransport` abstraction
+(`src/ble/transport.ts`). Two implementations ship today:
+
+| Transport              | When it&rsquo;s picked              | Where it lives                                        |
+| ---------------------- | ----------------------------------- | ----------------------------------------------------- |
+| `TauriTransport`       | Inside the Tauri shell (desktop / mobile) | `src/ble/tauriTransport.ts`, `src-tauri/src/ble.rs`   |
+| `WebBluetoothTransport`| Plain browser with Web Bluetooth (Chrome, Edge) | `src/ble/webBluetoothTransport.ts`                    |
+
+There is no user-facing toggle — `createTransport()` picks the right
+one at runtime: Tauri if its internals are present on `window`,
+otherwise Web Bluetooth. If neither is available the app shows a
+&ldquo;Bluetooth unavailable&rdquo; screen.
+
+`TauriTransport` calls Rust commands defined in `src-tauri/src/ble/`,
+which are backed by [`btleplug`](https://github.com/deviceplug/btleplug)
+(macOS / Linux / Windows today; iOS/Android via the same crate or a
+platform plugin in the future). The Rust side owns scanning, GATT
+connection management, and length-prefixed framing; it speaks the same
+JSON envelope as the Web Bluetooth path so both transports stay in sync.
+
+> macOS only: the first time the app accesses Bluetooth, the system will
+> prompt for permission. For release builds you&rsquo;ll also need to set
+> `NSBluetoothAlwaysUsageDescription` in the bundle&rsquo;s `Info.plist`.
+
+## BLE protocol
+
+The UUIDs and framing scheme are mirrored from the Rust agent:
+
+* UUIDs — `src/ble/protocol.ts` ←→ `../jetson-agent/bebop-agent/src/ble/uuids.rs`
+* Length-prefixed framing — `src/ble/protocol.ts` ←→ `../jetson-agent/bebop-agent/src/ble/framing.rs`
+* Wire messages — `../jetson-agent/bebop-proto/proto/bebop.proto`
+
+Treat those three files as the public ABI between the app and the robot.
+
+## Developing
+
+```sh
+# from bebop/bebop-app
+nvm use        # use the node version from .nvmrc
+npm install
+npm run tauri dev      # desktop dev build
+npm run tauri android init && npm run tauri android dev
+npm run tauri ios init && npm run tauri ios dev
+```
+
+Prerequisites:
+
+* Node 20+ (managed via `nvm`)
+* Rust toolchain (`rustup` stable)
+* For mobile: Android Studio / Xcode toolchains (see Tauri docs)
+
+## Repo layout
+
+```
+bebop-app/
+├── src/                  # React + TypeScript UI
+│   ├── App.tsx           # App shell + flow orchestration
+│   ├── ble/              # Transport interface + Tauri / Web Bluetooth impls
+│   ├── components/       # Shared UI primitives
+│   └── screens/          # Welcome, Scan, Wifi, Config, Done (setup wizard)
+├── src-tauri/            # Rust / Tauri shell
+│   ├── src/ble/          # Tauri commands + btleplug-based BLE central
+│   └── src/lib.rs        # invoke_handler + managed state registration
+└── README.md
+```

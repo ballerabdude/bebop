@@ -1,0 +1,26 @@
+streamlit
+openai
+langchain-openai
+jpl-rosa
+transforms3d
+
+# ROS 2 build dependencies (needed for colcon/ament)
+catkin_pkg
+empy
+lark
+typeguard
+
+# ROS Bridge dependencies
+psutil
+pymongo
+argcomplete
+cbor2
+
+# GUI dependencies for data visualizer
+PyQt6
+pyqtgraph
+numpy
+
+PyOpenGL
+PyOpenGL_accelerate
+scipy

@@ -1,0 +1,160 @@
+services:
+  ros2_docker:
+    build:
+      context: ./ros2/docker
+      dockerfile: Dockerfile
+      args:
+        docker_user_name: "${USER}"         # or "robot" if you want to hardcode
+        ros_ws: "master_ros2_ws"            # matches your example
+        UID: "${UID:-1000}"                 # fallback to 1000 if UID not set
+        GID: "${GID:-1000}"  
+    # Mount /dev to access serial devices dynamically (works when USB not connected)
+    # device_cgroup_rules grants permission to ACM devices (major 166)
+    device_cgroup_rules:
+      - 'c 166:* rmw'  # ttyACM* devices (Teensy, Arduino, etc.)
+      - 'c 189:* rmw'  # USB devices
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    image: bebop_ros2:v0.1
+    container_name: bebop_ros2
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      # ROS2 DDS settings - must match Isaac Sim container
+      - ROS_DOMAIN_ID=0
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp      
+    volumes:
+      - /dev:/dev  # Mount /dev for dynamic serial port access
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ./ros2/src:/home/${USER}/master_ros2_ws/src:rw
+      - /var/run/spnav.sock:/var/run/spnav.sock:rw
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    ipc: host
+    network_mode: host
+    command: bash
+    stdin_open: true
+    tty: true
+    profiles:
+      - sim
+      - lab
+
+  isaac_sim:
+    build:
+      context: ./sim/docker
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: nvcr.io/nvidia/isaac-sim:5.1.0
+        USER_NAME: "${USER}"
+        UID: "${UID:-1000}"
+        GID: "${GID:-1000}"
+        WORK_DIR: /isaac-sim
+    container_name: bebop_isaac_sim
+    # entrypoint is set in Dockerfile.isaac to install bebop_training package
+    environment:
+      - ACCEPT_EULA=Y
+      - PRIVACY_CONSENT=Y
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      # ROS2 Jazzy Bridge config (Ubuntu 24.04)
+      - ROS_DISTRO=jazzy
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+      - ROS_DOMAIN_ID=0
+      - LD_LIBRARY_PATH=/isaac-sim/exts/isaacsim.ros2.bridge/jazzy/lib:${LD_LIBRARY_PATH:-}
+      # Project path for training scripts (mounted at /workspace/bebop_bot)
+      - BEBOP_PROJECT_ROOT=/workspace/bebop_bot
+    command: ./runheadless.sh --enable-ext "isaacsim.ros2.bridge"
+    volumes:
+      # X11 for GUI (optional - can run headless)
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
+      # Isaac Sim cache directories (improves startup time)
+      - ~/.isaac_sim/cache/kit:/isaac-sim/kit/cache:rw
+      - ~/.isaac_sim/cache/ov:/home/${USER}/.cache/ov:rw
+      - ~/.isaac_sim/cache/pip:/home/${USER}/.cache/pip:rw
+      - ~/.isaac_sim/cache/glcache:/home/${USER}/.cache/nvidia/GLCache:rw
+      - ~/.isaac_sim/cache/computecache:/home/${USER}/.nv/ComputeCache:rw
+      # Logs and data persistence
+      - ~/.isaac_sim/logs:/home/${USER}/.nvidia-omniverse/logs:rw
+      - ~/.isaac_sim/data:/home/${USER}/.local/share/ov/data:rw
+      # Omniverse Kit shared content (silences content browser warning)
+      - ~/Documents/Kit/shared:/home/${USER}/Documents/Kit/shared:rw
+      # Mount project for URDF access
+      - .:/workspace/bebop_bot:rw
+      # Writable output directory for USD exports (create with: mkdir -p ~/.isaac_sim/output)
+      - ~/.isaac_sim/output:/output:rw
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    ipc: host
+    network_mode: host
+    stdin_open: true
+    tty: true
+    profiles:
+      - sim
+
+  isaac_lab:
+    build:
+      context: ./sim/docker
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: nvcr.io/nvidia/isaac-lab:3.0.0-beta1
+        USER_NAME: "${USER}"
+        UID: "${UID:-1000}"
+        GID: "${GID:-1000}"
+        WORK_DIR: /workspace
+    container_name: bebop_isaac_lab
+    # entrypoint is set in Dockerfile.isaac to install bebop_training package
+    environment:
+      - ACCEPT_EULA=Y
+      - PRIVACY_CONSENT=Y
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      # ROS2 Jazzy Bridge config (Ubuntu 24.04)
+      - ROS_DISTRO=jazzy
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+      - ROS_DOMAIN_ID=0
+      - LD_LIBRARY_PATH=/isaac-sim/exts/isaacsim.ros2.bridge/jazzy/lib:${LD_LIBRARY_PATH:-}
+      # Project path for training scripts (mounted at /workspace/bebop_bot)
+      - BEBOP_PROJECT_ROOT=/workspace/bebop_bot
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
+      - ~/.isaac_sim/cache/kit:/isaac-sim/kit/cache:rw
+      - ~/.isaac_sim/cache/ov:/home/${USER}/.cache/ov:rw
+      - ~/.isaac_sim/cache/pip:/home/${USER}/.cache/pip:rw
+      - ~/.isaac_sim/cache/glcache:/home/${USER}/.cache/nvidia/GLCache:rw
+      - ~/.isaac_sim/cache/computecache:/home/${USER}/.nv/ComputeCache:rw
+      - ~/.isaac_sim/logs:/home/${USER}/.nvidia-omniverse/logs:rw
+      - ~/.isaac_sim/data:/home/${USER}/.local/share/ov/data:rw
+      - .:/workspace/bebop_bot:rw
+      - /mnt/synology-home-files:/home-files:rw
+      - ./sim/logs:/workspace/bebop_bot/sim/logs:rw
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    ipc: host
+    network_mode: host
+    stdin_open: true
+    tty: true
+    profiles:
+      - lab

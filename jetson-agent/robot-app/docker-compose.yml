@@ -1,0 +1,17 @@
+# Dev convenience compose file — lets you run the robot-app image locally
+# on a Jetson with the nvidia runtime. In production, `bebop-agent` manages
+# the container lifecycle directly and this file is not used.
+
+services:
+  bebop-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bebop-app:dev
+    runtime: nvidia
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - /var/lib/bebop/app-data:/data

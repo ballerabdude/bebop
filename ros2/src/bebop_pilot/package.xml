@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>bebop_pilot</name>
+  <version>0.2.0</version>
+  <description>
+    Full deployment stack for the Bebop V2 humanoid on Jetson:
+      - pilot_node:    PS5 DualSense teleop -> /cmd_vel + /policy_enable
+      - policy_runner: trained 8-DoF ONNX policy -> /joint_commands
+      - motor_bus:     SocketCAN bridge to 8x Robstride motors
+                       (subscribes /joint_commands, publishes /joint_states)
+      - bno085_imu:    BNO085 I2C driver -> /imu/data
+      - rate_monitor:  timing/jitter diagnostic for the comm stack
+    Replaces the deprecated bebop_control package for V2 work.
+  </description>
+  <maintainer email="your@email.com">Your Name</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+
+  <exec_depend>ros2launch</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-can</exec_depend>
+
+  <!-- The following Python packages must be installed manually:
+         sudo apt install python3-evdev python3-can     (gamepad + SocketCAN)
+         pip install onnxruntime-gpu                    (policy inference; or onnxruntime CPU)
+         pip install adafruit-circuitpython-bno08x      (IMU driver) -->
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

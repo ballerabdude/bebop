@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # Host-side checks: format, lint, tests. Runs on Linux so BlueZ and the
+  # real BLE server module are in the compile graph.
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: jetson-agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (BlueZ, D-Bus, protoc)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.90.0"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: jetson-agent
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+  # Produce a Jetson (arm64) build artifact so we always have something
+  # shippable on `main`.
+  cross-jetson:
+    runs-on: ubuntu-latest
+    needs: rust
+    defaults:
+      run:
+        working-directory: jetson-agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.90.0"
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: jetson-agent
+
+      - name: Install cross
+        run: cargo install --locked cross
+
+      - name: Cross-compile bebop-agent
+        run: cross build --release --target aarch64-unknown-linux-gnu -p bebop-agent
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bebop-agent-aarch64
+          path: jetson-agent/target/aarch64-unknown-linux-gnu/release/bebop-agent
+          if-no-files-found: error

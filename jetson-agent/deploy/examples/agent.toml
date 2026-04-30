@@ -1,0 +1,27 @@
+# Example /etc/bebop/agent.toml
+#
+# Anything not set falls back to compiled-in defaults (see
+# bebop-agent/src/config/mod.rs).
+
+robot_name = "bebop"
+state_dir  = "/var/lib/bebop"
+
+[ble]
+# adapter    = "hci0"        # uncomment to force a specific BLE adapter
+local_name   = "Bebop-0001"
+require_pairing = true
+
+[app]
+name              = "bebop-app"
+image             = "nvcr.io/your-org/bebop-app:latest"
+use_nvidia_runtime = true
+env    = ["RUST_LOG=info"]
+volumes = [
+    "/var/lib/bebop/app-data:/data",
+    "/dev:/dev",
+]
+
+[ota]
+poll_interval_secs = 300
+manifest_url       = "https://updates.bebop.example.com/channels/stable.json"
+channel            = "stable"
