@@ -1,27 +1,79 @@
-# Example /etc/bebop/agent.toml
+# /etc/bebop/agent.toml
 #
-# Anything not set falls back to compiled-in defaults (see
-# bebop-agent/src/config/mod.rs).
+# Reference config for bebop-agent. This file ships as a template:
+# every key is commented out, and the agent uses the compiled-in
+# defaults from bebop-agent/src/config/mod.rs for anything you do not
+# override here.
+#
+# Uncomment and edit a line only when you actually want to deviate
+# from the default. Restart the service after editing:
+#
+#     sudo systemctl restart bebop-agent
 
-robot_name = "bebop"
-state_dir  = "/var/lib/bebop"
+# --- top-level ------------------------------------------------------------
 
-[ble]
-# adapter    = "hci0"        # uncomment to force a specific BLE adapter
-local_name   = "Bebop-0001"
-require_pairing = true
+# Human-readable robot identifier.
+# Default: contents of /etc/hostname.
+# robot_name = "bebop-lab-01"
 
-[app]
-name              = "bebop-app"
-image             = "nvcr.io/your-org/bebop-app:latest"
-use_nvidia_runtime = true
-env    = ["RUST_LOG=info"]
-volumes = [
-    "/var/lib/bebop/app-data:/data",
-    "/dev:/dev",
-]
+# Persistent state / config directory (must be writable by the service).
+# Default: "/var/lib/bebop"
+# state_dir = "/var/lib/bebop"
 
-[ota]
-poll_interval_secs = 300
-manifest_url       = "https://updates.bebop.example.com/channels/stable.json"
-channel            = "stable"
+# --- BLE ------------------------------------------------------------------
+# [ble]
+#
+# Force a specific HCI adapter. Leave unset to use the system default.
+# adapter = "hci0"
+#
+# Name advertised over BLE (what the mobile app sees while scanning).
+# Default: "Bebop-<first 6 chars of /etc/machine-id>" so every device
+# is unique out of the box. Override only if you want a custom name.
+# local_name = "Bebop-Lab-01"
+#
+# Require the mobile app to complete a pairing challenge before any
+# write takes effect. You almost never want this off in production.
+# Default: true
+# require_pairing = true
+
+# --- Robot application container ------------------------------------------
+# [app]
+#
+# Container name the agent manages.
+# Default: "bebop-app"
+# name = "bebop-app"
+#
+# Image to pull and run. THIS HAS NO REAL DEFAULT — the compiled-in
+# value is a placeholder ("nvcr.io/your-org/bebop-app:latest") and
+# will fail to pull. Set this to your registry path before enabling.
+# image = "nvcr.io/your-org/bebop-app:1.2.3"
+#
+# Pass --runtime=nvidia to docker (required for GPU access on Jetson).
+# Default: true
+# use_nvidia_runtime = true
+#
+# Extra env vars injected into the app container.
+# Default: []
+# env = ["RUST_LOG=info"]
+#
+# Bind mounts: "host_path:container_path[:ro]".
+# Default: []
+# volumes = [
+#     "/var/lib/bebop/app-data:/data",
+#     "/dev:/dev",
+# ]
+
+# --- OTA updater ----------------------------------------------------------
+# [ota]
+#
+# Manifest URL describing the desired image for this channel.
+# Leave unset (compiled default) to fully disable OTA polling.
+# manifest_url = "https://updates.bebop.example.com/channels/stable.json"
+#
+# Update channel name (informational; the URL is authoritative).
+# Default: "stable"
+# channel = "stable"
+#
+# How often to poll the manifest, in seconds.
+# Default: 300
+# poll_interval_secs = 300

@@ -33,12 +33,31 @@ SSH.
 
 ## Prereqs on the Jetson
 
-The installer does not install these (your base image should):
+`install.sh` will (idempotently) install and enable what it can from the
+distro repos:
 
 - `bluez` (BlueZ 5.x)
 - `network-manager`
-- Docker + `nvidia-container-toolkit`
-- `docker` set to start on boot
+- `dbus`
+- Docker (`docker.io` from the Ubuntu/Debian repo, with the unit enabled)
+
+It will additionally **probe** for `nvidia-container-toolkit` and print
+remediation if missing. It does **not** auto-install it, because that
+requires NVIDIA's apt repo and the right keyring for your JetPack
+release. On JetPack:
+
+```sh
+sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+If your base image already has everything baked in, pass
+`--skip-prereqs` to leave system packages alone:
+
+```sh
+sudo ./deploy/scripts/install.sh --skip-prereqs ./bebop-agent
+```
 
 ## Debian packaging (TODO)
 
