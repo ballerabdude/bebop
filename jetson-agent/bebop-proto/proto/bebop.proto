@@ -21,6 +21,7 @@ message ClientRequest {
     ControlAppRequest         control_app          = 17;
     TriggerOtaRequest         trigger_ota          = 18;
     GetOtaStatusRequest       get_ota_status       = 19;
+    SetAppImageRequest        set_app_image        = 20;
   }
 }
 
@@ -144,6 +145,15 @@ enum AppCommand {
 message ControlAppRequest {
   string app_name = 1;
   AppCommand command = 2;
+}
+
+// Update the configured robot-app container image and persist it to
+// the agent's on-disk config. Empty string clears the configured image
+// (the supervisor then idles). The new image takes effect on the next
+// container restart (control_app with APP_COMMAND_RESTART, or
+// stop+start). Response: AppStatus reflecting the current container.
+message SetAppImageRequest {
+  string image = 1;
 }
 
 // ---------------------------------------------------------------------------

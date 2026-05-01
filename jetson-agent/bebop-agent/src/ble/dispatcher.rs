@@ -6,6 +6,8 @@ use bebop_proto::v1::{
     DeviceInfo, OtaStatus, ResponseStatus, RobotConfig, WifiScanResult, WifiStatus,
 };
 
+use crate::config::{self, AgentConfig};
+use crate::error::AgentError;
 use crate::{containers, ota, state::AppState, wifi, AGENT_VERSION};
 
 /// Top-level dispatch.
@@ -35,6 +37,9 @@ pub async fn handle(state: &AppState, req: ClientRequest) -> AgentResponse {
             trigger_ota(state, request_id, req.target_image).await
         }
         client_request::Payload::GetOtaStatus(_) => ota_status(state, request_id).await,
+        client_request::Payload::SetAppImage(req) => {
+            set_app_image(state, request_id, req.image).await
+        }
     }
 }
 
@@ -99,14 +104,16 @@ async fn set_robot_config(
     let Some(cfg) = cfg else {
         return err_response(request_id, ResponseStatus::Error, "missing config");
     };
-    // TODO: persist the robot config + apply it (robot_name, timezone, etc.)
-    state
-        .update_config(|c| {
-            if !cfg.robot_name.is_empty() {
-                c.robot_name = cfg.robot_name.clone();
-            }
-        })
-        .await;
+    let robot_name = cfg.robot_name.clone();
+    if let Err(e) = mutate_and_persist(state, |c| {
+        if !robot_name.is_empty() {
+            c.robot_name = robot_name;
+        }
+    })
+    .await
+    {
+        return err_response(request_id, ResponseStatus::Error, &e.to_string());
+    }
     ok_response(request_id, agent_response::Payload::RobotConfig(cfg))
 }
 
@@ -134,6 +141,22 @@ async fn app_status(state: &AppState, request_id: u32) -> AgentResponse {
         restart_count: s.restart_count,
     };
     ok_response(request_id, agent_response::Payload::AppStatus(msg))
+}
+
+async fn set_app_image(state: &AppState, request_id: u32, image: String) -> AgentResponse {
+    let next = if image.is_empty() { None } else { Some(image) };
+    if let Err(e) = mutate_and_persist(state, |c| {
+        c.app.image = next;
+    })
+    .await
+    {
+        return err_response(request_id, ResponseStatus::Error, &e.to_string());
+    }
+    // Return the live AppStatus so the caller can render the change
+    // immediately. The configured image now reflects the new value, but
+    // the running container is untouched until ControlApp{RESTART} is
+    // invoked.
+    app_status(state, request_id).await
 }
 
 async fn control_app(
@@ -250,4 +273,19 @@ fn jetpack_version() -> Option<String> {
     std::fs::read_to_string("/etc/nv_tegra_release")
         .ok()
         .map(|s| s.lines().next().unwrap_or_default().to_owned())
+}
+
+/// Clone the current config, apply `f`, persist to disk, then swap the
+/// in-memory copy on success. Keeps the live config and the on-disk file
+/// in lockstep so a crash mid-write can't leave them disagreeing.
+async fn mutate_and_persist<F>(state: &AppState, f: F) -> Result<(), AgentError>
+where
+    F: FnOnce(&mut AgentConfig),
+{
+    let mut next = state.config().await;
+    f(&mut next);
+    let path = config::config_path();
+    config::save(&next, &path).map_err(|e| AgentError::Config(e.to_string()))?;
+    state.update_config(|c| *c = next).await;
+    Ok(())
 }

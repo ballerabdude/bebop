@@ -29,6 +29,9 @@ pub enum AgentError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 
+    #[error("config error: {0}")]
+    Config(String),
+
     #[error("wifi error: {0}")]
     Wifi(String),
 
