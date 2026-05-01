@@ -175,13 +175,12 @@ pub fn save(cfg: &AgentConfig, path: &Path) -> Result<()> {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
     }
-    let serialized =
-        toml::to_string_pretty(cfg).context("serialising AgentConfig to TOML")?;
+    let serialized = toml::to_string_pretty(cfg).context("serialising AgentConfig to TOML")?;
 
     let tmp = path.with_extension("toml.tmp");
     {
-        let mut f = std::fs::File::create(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
+        let mut f =
+            std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
         f.write_all(serialized.as_bytes())
             .with_context(|| format!("writing {}", tmp.display()))?;
         f.sync_all()
