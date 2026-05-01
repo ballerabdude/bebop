@@ -61,9 +61,13 @@ pub struct AppConfig {
     #[serde(default = "default_app_name")]
     pub name: String,
 
-    /// Default image to run if no override is set.
-    #[serde(default = "default_app_image")]
-    pub image: String,
+    /// Image to pull and run for the robot application container.
+    ///
+    /// `None` means "no app configured": the container supervisor stays
+    /// idle and makes no pull attempts. This is the right default for a
+    /// freshly-flashed device that hasn't been pointed at a registry yet.
+    #[serde(default)]
+    pub image: Option<String>,
 
     /// Use nvidia container runtime (passes `--runtime=nvidia`).
     #[serde(default = "default_true")]
@@ -82,7 +86,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             name: default_app_name(),
-            image: default_app_image(),
+            image: None,
             use_nvidia_runtime: true,
             env: vec![],
             volumes: vec![],
@@ -163,10 +167,6 @@ fn default_ble_local_name() -> String {
 
 fn default_app_name() -> String {
     "bebop-app".into()
-}
-
-fn default_app_image() -> String {
-    "nvcr.io/your-org/bebop-app:latest".into()
 }
 
 fn default_ota_poll_secs() -> u64 {

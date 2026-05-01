@@ -31,18 +31,44 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
     let docker = connect().context("connect to docker")?;
     info!("container supervisor online");
 
-    // Ensure the configured image is present and the container is running
-    // once on startup. Afterwards, poll health.
-    if let Err(e) = ensure_running(&docker, &state).await {
-        error!(error = ?e, "initial container start failed");
-    }
-
+    // Loop drives three states:
+    //   * no image configured  -> idle silently after one info log.
+    //   * image set, not yet bootstrapped -> ensure_running once.
+    //   * bootstrapped, image unchanged -> poll health via reconcile.
+    // OTA can flip image None<->Some at runtime; flags below let us
+    // re-bootstrap without spamming the log.
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+    let mut bootstrapped = false;
+    let mut idle_logged = false;
+
     loop {
-        ticker.tick().await;
-        if let Err(e) = reconcile(&docker, &state).await {
-            warn!(error = ?e, "container reconcile error");
+        let cfg = state.config().await;
+        match cfg.app.image.as_ref() {
+            None => {
+                if !idle_logged {
+                    info!(
+                        "[app] image not configured; container supervisor idling. \
+                         Set [app] image in /etc/bebop/agent.toml (then \
+                         `systemctl restart bebop-agent`) to enable the robot app."
+                    );
+                    idle_logged = true;
+                }
+                bootstrapped = false;
+            }
+            Some(_) => {
+                idle_logged = false;
+                if !bootstrapped {
+                    match ensure_running(&docker, &state).await {
+                        Ok(()) => bootstrapped = true,
+                        Err(e) => error!(error = ?e, "initial container start failed"),
+                    }
+                } else if let Err(e) = reconcile(&docker, &state).await {
+                    warn!(error = ?e, "container reconcile error");
+                }
+            }
         }
+
+        ticker.tick().await;
     }
 }
 
@@ -80,7 +106,11 @@ pub async fn restart(state: &AppState) -> Result<(), AgentError> {
 async fn ensure_running(docker: &Docker, state: &AppState) -> anyhow::Result<()> {
     let cfg = state.config().await;
     let name = cfg.app.name.clone();
-    let image = cfg.app.image.clone();
+    let image = cfg
+        .app
+        .image
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("no [app] image configured in agent.toml"))?;
 
     // Pull image (no-op if already present + tag unchanged).
     info!(%image, "pulling image");

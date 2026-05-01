@@ -43,9 +43,9 @@
 # Default: "bebop-app"
 # name = "bebop-app"
 #
-# Image to pull and run. THIS HAS NO REAL DEFAULT — the compiled-in
-# value is a placeholder ("nvcr.io/your-org/bebop-app:latest") and
-# will fail to pull. Set this to your registry path before enabling.
+# Image to pull and run. Default: unset, which keeps the container
+# supervisor idle (no pull attempts, no error spam). Set this to your
+# registry path to enable the robot application container.
 # image = "nvcr.io/your-org/bebop-app:1.2.3"
 #
 # Pass --runtime=nvidia to docker (required for GPU access on Jetson).

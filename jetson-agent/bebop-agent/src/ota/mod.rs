@@ -104,7 +104,7 @@ async fn apply(state: &AppState, target_image: Option<String>) -> Result<()> {
     if let Some(img) = target_image {
         state
             .update_config(|c| {
-                c.app.image = img.clone();
+                c.app.image = Some(img.clone());
             })
             .await;
         s.target_image = img;
