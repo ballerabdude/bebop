@@ -14,7 +14,12 @@ import type {
 /// management, and protobuf framing. The UI layer should only deal with
 /// these high-level RPC calls.
 export interface BebopTransport {
+  /// List robots the user has already permitted/paired. MUST NOT trigger
+  /// any OS-level picker — safe to call on mount.
   scan(timeoutMs: number): Promise<DiscoveredRobot[]>;
+  /// Prompt the user to pick a robot (Web Bluetooth picker on web,
+  /// platform picker on Tauri). MUST be called from a user gesture.
+  pickDevice(): Promise<DiscoveredRobot | null>;
   connect(robotId: string): Promise<void>;
   disconnect(): Promise<void>;
   isConnected(): boolean;

@@ -215,8 +215,13 @@ pub async fn ble_get_device_info(state: State<'_, BleManager>) -> Result<DeviceI
 
 #[tauri::command]
 pub async fn ble_scan_wifi(state: State<'_, BleManager>) -> Result<Vec<WifiNetwork>, String> {
+    // nmcli runs a fresh radio scan (`--rescan yes`) which routinely takes
+    // 10-25s in busy environments. Give it more headroom than the default.
     let resp = state
-        .request(client_request::Payload::ScanWifi(ScanWifiRequest {}))
+        .request_with_timeout(
+            client_request::Payload::ScanWifi(ScanWifiRequest {}),
+            std::time::Duration::from_secs(30),
+        )
         .await?;
     let result = expect_payload(resp, "wifiScanResult", |p| match p {
         agent_response::Payload::WifiScanResult(v) => Some(v),

@@ -56,6 +56,17 @@ export class WebBluetoothTransport implements BebopTransport {
   private statusChar: BluetoothRemoteGATTCharacteristic | null = null;
   private reassembler = new Reassembler();
   private nextRequestId = 1;
+  // Cache BluetoothDevice handles by id so connect() can reuse the object
+  // returned from a prior scan() (or getDevices()) instead of triggering
+  // the OS pairing picker a second time.
+  private knownDevices = new Map<string, BluetoothDevice>();
+  // Web Bluetooth allows only one GATT operation in flight per device. If
+  // two requests fire concurrently (e.g. dashboard's `Promise.all`), the
+  // second write rejects with `NetworkError: GATT operation already in
+  // progress`. Funnel all writes through this serial chain so each
+  // request's frames are sent atomically. Responses are demultiplexed by
+  // `request_id` via `pending`, so concurrent awaiters still work.
+  private writeChain: Promise<void> = Promise.resolve();
   private pending = new Map<
     number,
     {
@@ -64,45 +75,76 @@ export class WebBluetoothTransport implements BebopTransport {
     }
   >();
 
+  /// List previously-permitted devices via Web Bluetooth's
+  /// `navigator.bluetooth.getDevices()`. This NEVER opens the OS picker,
+  /// so it's safe to call on mount (and safe under React.StrictMode's
+  /// double-invocation of effects).
   async scan(_timeoutMs: number): Promise<DiscoveredRobot[]> {
+    if (typeof navigator.bluetooth.getDevices !== "function") {
+      // Older browsers or contexts without permission backend support;
+      // we can't enumerate without a picker, so return empty and let the
+      // UI prompt the user to call pickDevice() instead.
+      return [];
+    }
+    try {
+      const known = await navigator.bluetooth.getDevices();
+      return known.map((d) => {
+        this.knownDevices.set(d.id, d);
+        return {
+          id: d.id,
+          name: d.name ?? "Unknown Bebop",
+          rssi: 0,
+        };
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /// Open the OS pairing picker. Must be called from a user gesture
+  /// (Web Bluetooth requires it, and otherwise StrictMode-style
+  /// remounts would re-trigger the picker without the user asking).
+  async pickDevice(): Promise<DiscoveredRobot | null> {
     try {
       const device = await navigator.bluetooth.requestDevice({
         filters: [{ services: [SERVICE_UUID] }],
         optionalServices: [SERVICE_UUID],
       });
-      // Web Bluetooth scan is a picker — we only get one device at a time.
-      // Return it as a single-element list so the UI works the same way.
-      return [
-        {
-          id: device.id,
-          name: device.name ?? "Unknown Bebop",
-          rssi: 0, // Web Bluetooth doesn't expose RSSI in requestDevice
-        },
-      ];
+      this.knownDevices.set(device.id, device);
+      return {
+        id: device.id,
+        name: device.name ?? "Unknown Bebop",
+        rssi: 0, // Web Bluetooth doesn't expose RSSI in requestDevice
+      };
     } catch (e) {
       if (
         e instanceof DOMException &&
         (e.name === "NotFoundError" || e.name === "AbortError")
       ) {
-        return []; // user cancelled
+        return null; // user cancelled
       }
       throw e;
     }
   }
 
   async connect(robotId: string): Promise<void> {
-    // Re-request the device — Web Bluetooth requires a user gesture for
-    // requestDevice, so scan() already did that. Here we just connect.
-    if (this.device && this.device.id === robotId) {
-      this.server = await this.device.gatt!.connect();
-    } else {
-      const device = await navigator.bluetooth.requestDevice({
+    let device =
+      this.knownDevices.get(robotId) ??
+      (this.device?.id === robotId ? this.device : null);
+
+    if (!device) {
+      // No cached handle for this id — last resort, prompt for it. This
+      // path is only hit if scan() was bypassed (e.g. caller passed a
+      // stale id from a previous session).
+      device = await navigator.bluetooth.requestDevice({
         filters: [{ services: [SERVICE_UUID] }],
         optionalServices: [SERVICE_UUID],
       });
-      this.device = device;
-      this.server = await device.gatt!.connect();
+      this.knownDevices.set(device.id, device);
     }
+
+    this.device = device;
+    this.server = await device.gatt!.connect();
 
     const service = await this.server.getPrimaryService(SERVICE_UUID);
     this.requestChar = await service.getCharacteristic(CHAR_REQUEST_UUID);
@@ -157,10 +199,15 @@ export class WebBluetoothTransport implements BebopTransport {
   }
 
   async scanWifi(): Promise<WifiNetwork[]> {
-    const resp = await this.sendRequest({
-      case: "scanWifi",
-      value: create(ScanWifiRequestSchema),
-    });
+    // nmcli runs a fresh radio scan (`--rescan yes`) which routinely takes
+    // 10-25s in busy environments. Give it more headroom than the default.
+    const resp = await this.sendRequest(
+      {
+        case: "scanWifi",
+        value: create(ScanWifiRequestSchema),
+      },
+      { timeoutMs: 30_000 },
+    );
     const result = expectPayload(resp, "wifiScanResult");
     return result.networks.map((n) => ({
       ssid: n.ssid,
@@ -286,6 +333,7 @@ export class WebBluetoothTransport implements BebopTransport {
 
   private async sendRequest(
     payload: ClientRequest["payload"],
+    options: { timeoutMs?: number } = {},
   ): Promise<AgentResponse> {
     if (!this.requestChar) throw new Error("not connected");
 
@@ -295,18 +343,28 @@ export class WebBluetoothTransport implements BebopTransport {
     const frames = encodeFrames(encoded, MAX_PAYLOAD);
 
     // Web Bluetooth wants a plain ArrayBuffer/BufferSource, so copy into
-    // a fresh one rather than passing the view directly.
-    for (const frame of frames) {
-      const buf = new ArrayBuffer(frame.byteLength);
-      new Uint8Array(buf).set(frame);
-      await this.requestChar.writeValueWithoutResponse(buf);
-    }
+    // a fresh one rather than passing the view directly. Run the whole
+    // frame burst inside `writeChain` so concurrent sendRequest() callers
+    // don't trip the "GATT operation already in progress" error.
+    const requestChar = this.requestChar;
+    const send = this.writeChain.then(async () => {
+      for (const frame of frames) {
+        const buf = new ArrayBuffer(frame.byteLength);
+        new Uint8Array(buf).set(frame);
+        await requestChar.writeValueWithoutResponse(buf);
+      }
+    });
+    // The chain itself must never reject, otherwise every subsequent
+    // request would inherit the failure.
+    this.writeChain = send.catch(() => {});
+    await send;
 
+    const timeoutMs = options.timeoutMs ?? 15_000;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new Error("request timed out"));
-      }, 15_000);
+      }, timeoutMs);
 
       this.pending.set(requestId, {
         resolve: (resp) => {

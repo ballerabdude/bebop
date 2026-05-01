@@ -22,6 +22,19 @@ export class TauriTransport implements BebopTransport {
     return await invoke<DiscoveredRobot[]>("ble_scan", { timeoutMs });
   }
 
+  /// On Tauri the native scan already returns the discovered list without
+  /// any OS picker, so "pick" is just a refresh and pick-best convenience
+  /// for callers that match the Web Bluetooth ergonomics. Returns the
+  /// strongest-RSSI robot from a 5s scan, or null if none were seen.
+  async pickDevice(): Promise<DiscoveredRobot | null> {
+    const found = await invoke<DiscoveredRobot[]>("ble_scan", {
+      timeoutMs: 5_000,
+    });
+    if (found.length === 0) return null;
+    found.sort((a, b) => b.rssi - a.rssi);
+    return found[0];
+  }
+
   async connect(robotId: string): Promise<void> {
     await invoke("ble_connect", { robotId });
     this.connected = true;

@@ -15,6 +15,8 @@ export function ScanScreen({
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Lists already-permitted robots without prompting. Safe to run on
+  // mount and under StrictMode's double-invoke.
   async function scan() {
     setError(null);
     setScanning(true);
@@ -25,6 +27,22 @@ export function ScanScreen({
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setScanning(false);
+    }
+  }
+
+  // Opens the OS pairing picker. Must only be called from a user gesture
+  // — calling it from useEffect would re-pop the picker on every remount.
+  async function pickRobot() {
+    setError(null);
+    try {
+      const picked = await transport.pickDevice();
+      if (!picked) return; // user cancelled
+      setRobots((prev) =>
+        prev.some((r) => r.id === picked.id) ? prev : [...prev, picked],
+      );
+      await connect(picked);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -89,14 +107,17 @@ export function ScanScreen({
         })}
         {!scanning && robots.length === 0 ? (
           <li className="text-text-dim py-4 text-center text-sm">
-            No robots found nearby.
+            No paired robots yet. Tap “Pair a robot” to find yours.
           </li>
         ) : null}
       </ul>
 
       <div className="mt-auto pt-4 flex flex-col gap-3">
+        <Button onClick={pickRobot} disabled={scanning || connectingId !== null}>
+          Pair a robot
+        </Button>
         <Button variant="secondary" onClick={scan} loading={scanning}>
-          {scanning ? "Scanning…" : "Scan again"}
+          {scanning ? "Scanning…" : "Refresh"}
         </Button>
       </div>
     </div>

@@ -34,7 +34,7 @@ const CHAR_STATUS_UUID: Uuid = uuid!("b3b0b003-0b3b-4f9b-9b3b-b3b0b3b0b3b0");
 
 /// Conservative default well below the typical negotiated ATT MTU.
 const MAX_PAYLOAD: usize = 128;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Serialize, Clone)]
@@ -156,8 +156,20 @@ impl BleManager {
             let _ = peripheral.subscribe(c).await;
         }
 
+        // Open the notification stream BEFORE returning so the very first
+        // request after connect() is guaranteed to have a listener. In
+        // btleplug, `notifications()` returns a fresh receiver on a
+        // per-peripheral broadcast channel — notifications that arrive
+        // before the receiver exists are not buffered, which would let
+        // the response to the first request go to /dev/null and hang the
+        // caller until its timeout.
+        let stream = peripheral
+            .notifications()
+            .await
+            .map_err(|e| e.to_string())?;
+
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let notify_task = spawn_notification_loop(peripheral.clone(), pending.clone());
+        let notify_task = spawn_notification_loop(stream, pending.clone());
 
         let mut guard = self.connection.lock().await;
         if let Some(prev) = guard.take() {
@@ -199,6 +211,19 @@ impl BleManager {
     /// payload oneof. If the agent answered with a non-OK status, this
     /// returns `Err(message)` (mirrors the TS transport's behaviour).
     pub async fn request(&self, payload: client_request::Payload) -> Result<AgentResponse, String> {
+        self.request_with_timeout(payload, DEFAULT_REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// Like [`request`], but with a caller-supplied timeout. Useful for
+    /// agent calls that legitimately take longer than the default (e.g.
+    /// `nmcli wifi list --rescan yes` can take 20+ seconds in busy RF
+    /// environments).
+    pub async fn request_with_timeout(
+        &self,
+        payload: client_request::Payload,
+        timeout: Duration,
+    ) -> Result<AgentResponse, String> {
         let (request_id, peripheral, request_char, pending) = {
             let mut guard = self.connection.lock().await;
             let conn = guard.as_mut().ok_or_else(|| "not connected".to_string())?;
@@ -231,7 +256,7 @@ impl BleManager {
             }
         }
 
-        let resp = match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+        let resp = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(resp)) => resp,
             Ok(Err(_)) => return Err("response channel closed".into()),
             Err(_) => {
@@ -256,16 +281,13 @@ impl BleManager {
     }
 }
 
-fn spawn_notification_loop(
-    peripheral: Peripheral,
-    pending: PendingMap,
-) -> tokio::task::JoinHandle<()> {
+fn spawn_notification_loop<S>(stream: S, pending: PendingMap) -> tokio::task::JoinHandle<()>
+where
+    S: futures::Stream<Item = btleplug::api::ValueNotification> + Send + Unpin + 'static,
+{
     tokio::spawn(async move {
         let mut reassembler = Reassembler::new();
-        let mut stream = match peripheral.notifications().await {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        let mut stream = stream;
         while let Some(notification) = stream.next().await {
             if notification.uuid != CHAR_RESPONSE_UUID {
                 // Status push; not routed through the request/response map.
