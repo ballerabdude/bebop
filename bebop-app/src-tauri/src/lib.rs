@@ -17,6 +17,7 @@ pub fn run() {
             ble::ble_set_robot_config,
             ble::ble_get_app_status,
             ble::ble_control_app,
+            ble::ble_set_app_image,
             ble::ble_trigger_ota,
             ble::ble_get_ota_status,
         ])

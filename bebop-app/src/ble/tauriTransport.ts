@@ -88,6 +88,10 @@ export class TauriTransport implements BebopTransport {
     await invoke("ble_control_app", { appName, command });
   }
 
+  async setAppImage(image: string): Promise<AppStatus> {
+    return await invoke<AppStatus>("ble_set_app_image", { image });
+  }
+
   async triggerOta(targetImage?: string): Promise<void> {
     await invoke("ble_trigger_ota", { targetImage: targetImage ?? "" });
   }

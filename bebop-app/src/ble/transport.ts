@@ -42,6 +42,10 @@ export interface BebopTransport {
     appName: string,
     command: "START" | "STOP" | "RESTART",
   ): Promise<void>;
+  /// Persist a new container image to the agent's on-disk config. The
+  /// running container is NOT restarted automatically; call `controlApp`
+  /// with `"RESTART"` to apply. Empty string clears the configured image.
+  setAppImage(image: string): Promise<AppStatus>;
 
   triggerOta(targetImage?: string): Promise<void>;
   getOtaStatus(): Promise<OtaStatus>;

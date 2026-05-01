@@ -20,7 +20,7 @@ use bebop_proto::v1::{
     agent_response, client_request, AppCommand as ProtoAppCommand, AppState as ProtoAppState,
     ControlAppRequest, GetAppStatusRequest, GetDeviceInfoRequest, GetOtaStatusRequest,
     GetRobotConfigRequest, GetWifiStatusRequest, OtaState as ProtoOtaState,
-    RobotConfig as ProtoRobotConfig, ScanWifiRequest, SetRobotConfigRequest,
+    RobotConfig as ProtoRobotConfig, ScanWifiRequest, SetAppImageRequest, SetRobotConfigRequest,
     SetWifiCredentialsRequest, TriggerOtaRequest,
 };
 use serde::{Deserialize, Serialize};
@@ -351,6 +351,31 @@ pub async fn ble_control_app(
         }))
         .await?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn ble_set_app_image(
+    state: State<'_, BleManager>,
+    image: String,
+) -> Result<AppStatus, String> {
+    let resp = state
+        .request(client_request::Payload::SetAppImage(SetAppImageRequest {
+            image,
+        }))
+        .await?;
+    let s = expect_payload(resp, "appStatus", |p| match p {
+        agent_response::Payload::AppStatus(v) => Some(v),
+        _ => None,
+    })?;
+    Ok(AppStatus {
+        app_name: s.app_name,
+        image: s.image,
+        image_digest: s.image_digest,
+        state: app_state_label(s.state),
+        container_id: s.container_id,
+        started_at_unix: s.started_at_unix,
+        restart_count: s.restart_count,
+    })
 }
 
 #[tauri::command]

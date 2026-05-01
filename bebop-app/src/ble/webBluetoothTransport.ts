@@ -35,6 +35,7 @@ import {
   RobotConfigSchema,
   ResponseStatus,
   ScanWifiRequestSchema,
+  SetAppImageRequestSchema,
   SetRobotConfigRequestSchema,
   SetWifiCredentialsRequestSchema,
   TriggerOtaRequestSchema,
@@ -303,6 +304,23 @@ export class WebBluetoothTransport implements BebopTransport {
         command: appCommandFromLabel(command),
       }),
     });
+  }
+
+  async setAppImage(image: string): Promise<AppStatus> {
+    const resp = await this.sendRequest({
+      case: "setAppImage",
+      value: create(SetAppImageRequestSchema, { image }),
+    });
+    const s = expectPayload(resp, "appStatus");
+    return {
+      appName: s.appName,
+      image: s.image,
+      imageDigest: s.imageDigest,
+      state: appStateLabel(s.state),
+      containerId: s.containerId,
+      startedAtUnix: Number(s.startedAtUnix),
+      restartCount: s.restartCount,
+    };
   }
 
   async triggerOta(targetImage?: string): Promise<void> {
