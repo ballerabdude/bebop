@@ -1,0 +1,14 @@
+# Codegen for the Bebop wire protocol.
+#
+# Source: ../jetson-agent/bebop-proto/proto/bebop.proto
+# Output: src/proto/   (generated, committed to the repo so CI doesn't
+#                       need a separate codegen step before tsc/vite)
+#
+# Run with:  npm run gen-proto
+version: v2
+plugins:
+  - local: protoc-gen-es
+    out: src/proto
+    opt:
+      - target=ts
+      - import_extension=js

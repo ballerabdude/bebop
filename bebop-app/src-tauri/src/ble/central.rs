@@ -1,26 +1,27 @@
 //! Native BLE central built on `btleplug`.
 //!
-//! Mirrors `mobile/bebop-app/src/ble/webBluetoothTransport.ts`:
+//! Wire format mirrors `mobile/bebop-app/src/ble/webBluetoothTransport.ts`
+//! and the agent in `jetson-agent/bebop-agent/src/ble/server.rs`:
 //!   * scan for peripherals advertising the Bebop service UUID
 //!   * connect, discover services + characteristics
 //!   * subscribe to the response characteristic for notifications
-//!   * exchange JSON envelopes (`{ requestId, ... }`) framed by
-//!     `super::framing`
+//!   * exchange `bebop.v1.ClientRequest` / `bebop.v1.AgentResponse`
+//!     protobuf messages, framed by `super::framing`
 //!
 //! All Bebop knowledge stops here; the rest of the Rust side just calls
-//! `BleManager::request(...)` with a JSON payload.
+//! `BleManager::request(...)` with a `ClientRequest::payload` arm and
+//! gets back a fully-decoded `AgentResponse`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use btleplug::api::{
-    Central, Manager as _, Peripheral as _, ScanFilter, WriteType,
-};
+use bebop_proto::v1::{client_request, AgentResponse, ClientRequest, ResponseStatus};
+use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
 use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use futures::StreamExt;
+use prost::Message;
 use serde::Serialize;
-use serde_json::Value;
 use tokio::sync::{oneshot, Mutex};
 use uuid::{uuid, Uuid};
 
@@ -44,7 +45,7 @@ pub struct DiscoveredRobot {
     pub rssi: i32,
 }
 
-type PendingMap = Arc<Mutex<HashMap<u32, oneshot::Sender<Value>>>>;
+type PendingMap = Arc<Mutex<HashMap<u32, oneshot::Sender<AgentResponse>>>>;
 
 struct Connection {
     peripheral: Peripheral,
@@ -123,10 +124,7 @@ impl BleManager {
         }
         .ok_or_else(|| "unknown robot id; scan first".to_string())?;
 
-        let peripheral = adapter
-            .peripheral(&pid)
-            .await
-            .map_err(|e| e.to_string())?;
+        let peripheral = adapter.peripheral(&pid).await.map_err(|e| e.to_string())?;
         peripheral
             .connect_with_timeout(CONNECT_TIMEOUT)
             .await
@@ -194,19 +192,16 @@ impl BleManager {
         }
     }
 
-    /// Send a JSON request envelope and wait for the matching response.
+    /// Send a `ClientRequest` payload and wait for the matching response.
     ///
-    /// The `requestId` field is injected automatically — callers only pass
-    /// the payload variant (e.g. `{ "getDeviceInfo": {} }`).
-    pub async fn request(
-        &self,
-        mut payload: serde_json::Map<String, Value>,
-    ) -> Result<Value, String> {
+    /// `request_id` is injected automatically. Returns the full
+    /// `AgentResponse` so callers can inspect both the status and the
+    /// payload oneof. If the agent answered with a non-OK status, this
+    /// returns `Err(message)` (mirrors the TS transport's behaviour).
+    pub async fn request(&self, payload: client_request::Payload) -> Result<AgentResponse, String> {
         let (request_id, peripheral, request_char, pending) = {
             let mut guard = self.connection.lock().await;
-            let conn = guard
-                .as_mut()
-                .ok_or_else(|| "not connected".to_string())?;
+            let conn = guard.as_mut().ok_or_else(|| "not connected".to_string())?;
             let id = conn.next_request_id;
             conn.next_request_id = conn.next_request_id.wrapping_add(1).max(1);
             (
@@ -217,8 +212,11 @@ impl BleManager {
             )
         };
 
-        payload.insert("requestId".into(), Value::from(request_id));
-        let bytes = serde_json::to_vec(&Value::Object(payload)).map_err(|e| e.to_string())?;
+        let req = ClientRequest {
+            request_id,
+            payload: Some(payload),
+        };
+        let bytes = req.encode_to_vec();
 
         let (tx, rx) = oneshot::channel();
         pending.lock().await.insert(request_id, tx);
@@ -233,13 +231,27 @@ impl BleManager {
             }
         }
 
-        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(_)) => Err("response channel closed".into()),
+        let resp = match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(_)) => return Err("response channel closed".into()),
             Err(_) => {
                 pending.lock().await.remove(&request_id);
-                Err("request timed out".into())
+                return Err("request timed out".into());
             }
+        };
+
+        if resp.status == ResponseStatus::Ok as i32 {
+            Ok(resp)
+        } else {
+            let label = ResponseStatus::try_from(resp.status)
+                .map(|s| format!("{s:?}"))
+                .unwrap_or_else(|_| resp.status.to_string());
+            let msg = if resp.message.is_empty() {
+                format!("agent returned status {label}")
+            } else {
+                resp.message.clone()
+            };
+            Err(msg)
         }
     }
 }
@@ -256,6 +268,7 @@ fn spawn_notification_loop(
         };
         while let Some(notification) = stream.next().await {
             if notification.uuid != CHAR_RESPONSE_UUID {
+                // Status push; not routed through the request/response map.
                 continue;
             }
             let complete = match reassembler.push(&notification.value) {
@@ -266,16 +279,17 @@ fn spawn_notification_loop(
                     continue;
                 }
             };
-            let json: Value = match serde_json::from_slice(&complete) {
-                Ok(v) => v,
+            let resp = match AgentResponse::decode(complete.as_slice()) {
+                Ok(r) => r,
                 Err(_) => continue,
             };
-            let id = json
-                .get("requestId")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            if let Some(tx) = pending.lock().await.remove(&id) {
-                let _ = tx.send(json);
+            if resp.request_id == 0 {
+                // Unsolicited push (e.g. status snapshot). Drop here; the
+                // status characteristic delivers these to UI consumers.
+                continue;
+            }
+            if let Some(tx) = pending.lock().await.remove(&resp.request_id) {
+                let _ = tx.send(resp);
             }
         }
     })

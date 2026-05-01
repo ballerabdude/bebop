@@ -2,20 +2,28 @@
 //!
 //! `central::BleManager` owns the actual `btleplug` connection and is held
 //! by Tauri as managed state. Each command here is a thin wrapper that:
-//!   * builds the JSON request envelope expected by the agent (mirrors the
-//!     shape used by the TypeScript `WebBluetoothTransport`),
+//!   * builds a `bebop_proto::v1::ClientRequest` payload variant,
 //!   * sends it via `BleManager::request`,
-//!   * extracts the typed payload from the response.
+//!   * extracts the matching `AgentResponse` `oneof` arm, and
+//!   * converts the prost types into camelCase serde DTOs the frontend
+//!     can consume directly.
 //!
-//! All DTOs use camelCase so the frontend can consume them directly.
+//! The wire is protobuf end-to-end (TS app ↔ this layer ↔ Jetson agent);
+//! these structs only exist to give the JS side a stable, typed shape.
 
 mod central;
 mod framing;
 
 pub use central::BleManager;
 
+use bebop_proto::v1::{
+    agent_response, client_request, AppCommand as ProtoAppCommand, AppState as ProtoAppState,
+    ControlAppRequest, GetAppStatusRequest, GetDeviceInfoRequest, GetOtaStatusRequest,
+    GetRobotConfigRequest, GetWifiStatusRequest, OtaState as ProtoOtaState,
+    RobotConfig as ProtoRobotConfig, ScanWifiRequest, SetRobotConfigRequest,
+    SetWifiCredentialsRequest, TriggerOtaRequest,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use tauri::State;
 
 use central::DiscoveredRobot as CentralDiscoveredRobot;
@@ -101,19 +109,63 @@ pub struct OtaStatus {
 
 // ---- helpers --------------------------------------------------------------
 
-fn obj(value: Value) -> serde_json::Map<String, Value> {
-    match value {
-        Value::Object(m) => m,
-        _ => serde_json::Map::new(),
-    }
+fn expect_payload<T, F>(
+    resp: bebop_proto::v1::AgentResponse,
+    expected: &'static str,
+    extract: F,
+) -> Result<T, String>
+where
+    F: FnOnce(agent_response::Payload) -> Option<T>,
+{
+    let case_name = match resp.payload.as_ref() {
+        Some(agent_response::Payload::DeviceInfo(_)) => "deviceInfo",
+        Some(agent_response::Payload::WifiScanResult(_)) => "wifiScanResult",
+        Some(agent_response::Payload::WifiStatus(_)) => "wifiStatus",
+        Some(agent_response::Payload::RobotConfig(_)) => "robotConfig",
+        Some(agent_response::Payload::AppStatus(_)) => "appStatus",
+        Some(agent_response::Payload::OtaStatus(_)) => "otaStatus",
+        None => "<none>",
+    };
+    let payload = resp
+        .payload
+        .ok_or_else(|| format!("agent returned no payload (expected {expected})"))?;
+    extract(payload).ok_or_else(|| {
+        format!("agent returned unexpected payload: {case_name} (expected {expected})")
+    })
 }
 
-fn extract<T: for<'de> Deserialize<'de>>(resp: &Value, field: &str) -> Result<T, String> {
-    let v = resp
-        .get(field)
-        .cloned()
-        .ok_or_else(|| format!("response missing `{field}`: {resp}"))?;
-    serde_json::from_value(v).map_err(|e| format!("decoding `{field}`: {e}"))
+fn app_state_label(s: i32) -> String {
+    match ProtoAppState::try_from(s).unwrap_or(ProtoAppState::Unspecified) {
+        ProtoAppState::Stopped => "STOPPED",
+        ProtoAppState::Starting => "STARTING",
+        ProtoAppState::Running => "RUNNING",
+        ProtoAppState::Crashed => "CRASHED",
+        ProtoAppState::Updating => "UPDATING",
+        ProtoAppState::Unspecified => "UNSPECIFIED",
+    }
+    .to_string()
+}
+
+fn ota_state_label(s: i32) -> String {
+    match ProtoOtaState::try_from(s).unwrap_or(ProtoOtaState::Unspecified) {
+        ProtoOtaState::Idle => "IDLE",
+        ProtoOtaState::Checking => "CHECKING",
+        ProtoOtaState::Downloading => "DOWNLOADING",
+        ProtoOtaState::Applying => "APPLYING",
+        ProtoOtaState::Success => "SUCCESS",
+        ProtoOtaState::Failed => "FAILED",
+        ProtoOtaState::Unspecified => "UNSPECIFIED",
+    }
+    .to_string()
+}
+
+fn app_command_from_label(c: &str) -> ProtoAppCommand {
+    match c {
+        "START" => ProtoAppCommand::Start,
+        "STOP" => ProtoAppCommand::Stop,
+        "RESTART" => ProtoAppCommand::Restart,
+        _ => ProtoAppCommand::Unspecified,
+    }
 }
 
 // ---- commands -------------------------------------------------------------
@@ -132,10 +184,7 @@ pub async fn ble_scan(
 }
 
 #[tauri::command]
-pub async fn ble_connect(
-    state: State<'_, BleManager>,
-    robot_id: String,
-) -> Result<(), String> {
+pub async fn ble_connect(state: State<'_, BleManager>, robot_id: String) -> Result<(), String> {
     state.connect(robot_id).await
 }
 
@@ -145,24 +194,44 @@ pub async fn ble_disconnect(state: State<'_, BleManager>) -> Result<(), String> 
 }
 
 #[tauri::command]
-pub async fn ble_get_device_info(
-    state: State<'_, BleManager>,
-) -> Result<DeviceInfo, String> {
-    let resp = state.request(obj(json!({ "getDeviceInfo": {} }))).await?;
-    extract(&resp, "deviceInfo")
+pub async fn ble_get_device_info(state: State<'_, BleManager>) -> Result<DeviceInfo, String> {
+    let resp = state
+        .request(client_request::Payload::GetDeviceInfo(
+            GetDeviceInfoRequest {},
+        ))
+        .await?;
+    let info = expect_payload(resp, "deviceInfo", |p| match p {
+        agent_response::Payload::DeviceInfo(v) => Some(v),
+        _ => None,
+    })?;
+    Ok(DeviceInfo {
+        serial_number: info.serial_number,
+        model: info.model,
+        agent_version: info.agent_version,
+        jetpack_version: info.jetpack_version,
+        hostname: info.hostname,
+    })
 }
 
 #[tauri::command]
-pub async fn ble_scan_wifi(
-    state: State<'_, BleManager>,
-) -> Result<Vec<WifiNetwork>, String> {
-    let resp = state.request(obj(json!({ "scanWifi": {} }))).await?;
-    let networks = resp
-        .get("wifiScanResult")
-        .and_then(|v| v.get("networks"))
-        .cloned()
-        .unwrap_or_else(|| Value::Array(Vec::new()));
-    serde_json::from_value(networks).map_err(|e| e.to_string())
+pub async fn ble_scan_wifi(state: State<'_, BleManager>) -> Result<Vec<WifiNetwork>, String> {
+    let resp = state
+        .request(client_request::Payload::ScanWifi(ScanWifiRequest {}))
+        .await?;
+    let result = expect_payload(resp, "wifiScanResult", |p| match p {
+        agent_response::Payload::WifiScanResult(v) => Some(v),
+        _ => None,
+    })?;
+    Ok(result
+        .networks
+        .into_iter()
+        .map(|n| WifiNetwork {
+            ssid: n.ssid,
+            signal_dbm: n.signal_dbm,
+            security: n.security,
+            saved: n.saved,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -173,27 +242,53 @@ pub async fn ble_set_wifi_credentials(
     hidden: bool,
 ) -> Result<(), String> {
     state
-        .request(obj(json!({
-            "setWifiCredentials": { "ssid": ssid, "password": password, "hidden": hidden },
-        })))
+        .request(client_request::Payload::SetWifiCredentials(
+            SetWifiCredentialsRequest {
+                ssid,
+                password,
+                hidden,
+            },
+        ))
         .await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn ble_get_wifi_status(
-    state: State<'_, BleManager>,
-) -> Result<WifiStatus, String> {
-    let resp = state.request(obj(json!({ "getWifiStatus": {} }))).await?;
-    extract(&resp, "wifiStatus")
+pub async fn ble_get_wifi_status(state: State<'_, BleManager>) -> Result<WifiStatus, String> {
+    let resp = state
+        .request(client_request::Payload::GetWifiStatus(
+            GetWifiStatusRequest {},
+        ))
+        .await?;
+    let s = expect_payload(resp, "wifiStatus", |p| match p {
+        agent_response::Payload::WifiStatus(v) => Some(v),
+        _ => None,
+    })?;
+    Ok(WifiStatus {
+        connected: s.connected,
+        ssid: s.ssid,
+        ip_address: s.ip_address,
+        signal_dbm: s.signal_dbm,
+    })
 }
 
 #[tauri::command]
-pub async fn ble_get_robot_config(
-    state: State<'_, BleManager>,
-) -> Result<RobotConfig, String> {
-    let resp = state.request(obj(json!({ "getRobotConfig": {} }))).await?;
-    extract(&resp, "robotConfig")
+pub async fn ble_get_robot_config(state: State<'_, BleManager>) -> Result<RobotConfig, String> {
+    let resp = state
+        .request(client_request::Payload::GetRobotConfig(
+            GetRobotConfigRequest {},
+        ))
+        .await?;
+    let c = expect_payload(resp, "robotConfig", |p| match p {
+        agent_response::Payload::RobotConfig(v) => Some(v),
+        _ => None,
+    })?;
+    Ok(RobotConfig {
+        robot_name: c.robot_name,
+        owner_id: c.owner_id,
+        timezone: c.timezone,
+        extra: c.extra,
+    })
 }
 
 #[tauri::command]
@@ -202,17 +297,40 @@ pub async fn ble_set_robot_config(
     config: RobotConfig,
 ) -> Result<(), String> {
     state
-        .request(obj(json!({ "setRobotConfig": { "config": config } })))
+        .request(client_request::Payload::SetRobotConfig(
+            SetRobotConfigRequest {
+                config: Some(ProtoRobotConfig {
+                    robot_name: config.robot_name,
+                    owner_id: config.owner_id,
+                    timezone: config.timezone,
+                    extra: config.extra,
+                }),
+            },
+        ))
         .await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn ble_get_app_status(
-    state: State<'_, BleManager>,
-) -> Result<AppStatus, String> {
-    let resp = state.request(obj(json!({ "getAppStatus": {} }))).await?;
-    extract(&resp, "appStatus")
+pub async fn ble_get_app_status(state: State<'_, BleManager>) -> Result<AppStatus, String> {
+    let resp = state
+        .request(client_request::Payload::GetAppStatus(
+            GetAppStatusRequest {},
+        ))
+        .await?;
+    let s = expect_payload(resp, "appStatus", |p| match p {
+        agent_response::Payload::AppStatus(v) => Some(v),
+        _ => None,
+    })?;
+    Ok(AppStatus {
+        app_name: s.app_name,
+        image: s.image,
+        image_digest: s.image_digest,
+        state: app_state_label(s.state),
+        container_id: s.container_id,
+        started_at_unix: s.started_at_unix,
+        restart_count: s.restart_count,
+    })
 }
 
 #[tauri::command]
@@ -222,9 +340,10 @@ pub async fn ble_control_app(
     command: String,
 ) -> Result<(), String> {
     state
-        .request(obj(json!({
-            "controlApp": { "appName": app_name, "command": command },
-        })))
+        .request(client_request::Payload::ControlApp(ControlAppRequest {
+            app_name,
+            command: app_command_from_label(&command) as i32,
+        }))
         .await?;
     Ok(())
 }
@@ -235,15 +354,29 @@ pub async fn ble_trigger_ota(
     target_image: String,
 ) -> Result<(), String> {
     state
-        .request(obj(json!({ "triggerOta": { "targetImage": target_image } })))
+        .request(client_request::Payload::TriggerOta(TriggerOtaRequest {
+            target_image,
+        }))
         .await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn ble_get_ota_status(
-    state: State<'_, BleManager>,
-) -> Result<OtaStatus, String> {
-    let resp = state.request(obj(json!({ "getOtaStatus": {} }))).await?;
-    extract(&resp, "otaStatus")
+pub async fn ble_get_ota_status(state: State<'_, BleManager>) -> Result<OtaStatus, String> {
+    let resp = state
+        .request(client_request::Payload::GetOtaStatus(
+            GetOtaStatusRequest {},
+        ))
+        .await?;
+    let s = expect_payload(resp, "otaStatus", |p| match p {
+        agent_response::Payload::OtaStatus(v) => Some(v),
+        _ => None,
+    })?;
+    Ok(OtaStatus {
+        state: ota_state_label(s.state),
+        current_image: s.current_image,
+        target_image: s.target_image,
+        progress_percent: s.progress_percent,
+        error: s.error,
+    })
 }

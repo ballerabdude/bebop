@@ -1,8 +1,12 @@
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+
 import type { BebopTransport } from "./transport";
 import type {
+  AppState as AppStateLabel,
   AppStatus,
   DeviceInfo,
   DiscoveredRobot,
+  OtaState as OtaStateLabel,
   OtaStatus,
   RobotConfig,
   WifiNetwork,
@@ -16,11 +20,34 @@ import {
   encodeFrames,
   Reassembler,
 } from "./protocol";
+import {
+  AgentResponseSchema,
+  AppCommand,
+  AppState,
+  ClientRequestSchema,
+  ControlAppRequestSchema,
+  GetAppStatusRequestSchema,
+  GetDeviceInfoRequestSchema,
+  GetOtaStatusRequestSchema,
+  GetRobotConfigRequestSchema,
+  GetWifiStatusRequestSchema,
+  OtaState,
+  RobotConfigSchema,
+  ResponseStatus,
+  ScanWifiRequestSchema,
+  SetRobotConfigRequestSchema,
+  SetWifiCredentialsRequestSchema,
+  TriggerOtaRequestSchema,
+  type AgentResponse,
+  type ClientRequest,
+} from "../proto/bebop_pb";
 
 const MAX_PAYLOAD = 128; // safe default below typical ATT MTU
 
 /// Transport using the Web Bluetooth API (Chrome, Edge, Opera on desktop).
-/// This lets us iterate on the wizard flow in a browser without Tauri.
+/// Wire format: protobuf-encoded `ClientRequest` / `AgentResponse` from
+/// `jetson-agent/bebop-proto/proto/bebop.proto`, framed by `./protocol.ts`.
+/// The agent on the Jetson speaks the same encoding via `prost`.
 export class WebBluetoothTransport implements BebopTransport {
   private device: BluetoothDevice | null = null;
   private server: BluetoothRemoteGATTServer | null = null;
@@ -31,7 +58,10 @@ export class WebBluetoothTransport implements BebopTransport {
   private nextRequestId = 1;
   private pending = new Map<
     number,
-    { resolve: (value: Uint8Array) => void; reject: (err: Error) => void }
+    {
+      resolve: (resp: AgentResponse) => void;
+      reject: (err: Error) => void;
+    }
   >();
 
   async scan(_timeoutMs: number): Promise<DiscoveredRobot[]> {
@@ -63,11 +93,9 @@ export class WebBluetoothTransport implements BebopTransport {
   async connect(robotId: string): Promise<void> {
     // Re-request the device — Web Bluetooth requires a user gesture for
     // requestDevice, so scan() already did that. Here we just connect.
-    // If we already have a cached device from scan, use it.
     if (this.device && this.device.id === robotId) {
       this.server = await this.device.gatt!.connect();
     } else {
-      // Fallback: try to get the device from the chooser again
       const device = await navigator.bluetooth.requestDevice({
         filters: [{ services: [SERVICE_UUID] }],
         optionalServices: [SERVICE_UUID],
@@ -81,7 +109,6 @@ export class WebBluetoothTransport implements BebopTransport {
     this.responseChar = await service.getCharacteristic(CHAR_RESPONSE_UUID);
     this.statusChar = await service.getCharacteristic(CHAR_STATUS_UUID);
 
-    // Listen for notifications on the response characteristic
     await this.responseChar.startNotifications();
     this.responseChar.addEventListener(
       "characteristicvaluechanged",
@@ -93,7 +120,6 @@ export class WebBluetoothTransport implements BebopTransport {
       },
     );
 
-    // Also listen on status
     await this.statusChar.startNotifications();
   }
 
@@ -116,16 +142,32 @@ export class WebBluetoothTransport implements BebopTransport {
   }
 
   async getDeviceInfo(): Promise<DeviceInfo> {
-    const resp = await this.sendRequest({ getDeviceInfo: {} });
-    return resp.deviceInfo as DeviceInfo;
+    const resp = await this.sendRequest({
+      case: "getDeviceInfo",
+      value: create(GetDeviceInfoRequestSchema),
+    });
+    const info = expectPayload(resp, "deviceInfo");
+    return {
+      serialNumber: info.serialNumber,
+      model: info.model,
+      agentVersion: info.agentVersion,
+      jetpackVersion: info.jetpackVersion,
+      hostname: info.hostname,
+    };
   }
 
   async scanWifi(): Promise<WifiNetwork[]> {
-    const resp = await this.sendRequest({ scanWifi: {} });
-    const result = resp.wifiScanResult as
-      | { networks?: WifiNetwork[] }
-      | undefined;
-    return result?.networks ?? [];
+    const resp = await this.sendRequest({
+      case: "scanWifi",
+      value: create(ScanWifiRequestSchema),
+    });
+    const result = expectPayload(resp, "wifiScanResult");
+    return result.networks.map((n) => ({
+      ssid: n.ssid,
+      signalDbm: n.signalDbm,
+      security: n.security,
+      saved: n.saved,
+    }));
   }
 
   async setWifiCredentials(
@@ -133,65 +175,133 @@ export class WebBluetoothTransport implements BebopTransport {
     password: string,
     hidden: boolean,
   ): Promise<void> {
-    await this.sendRequest({ setWifiCredentials: { ssid, password, hidden } });
+    await this.sendRequest({
+      case: "setWifiCredentials",
+      value: create(SetWifiCredentialsRequestSchema, {
+        ssid,
+        password,
+        hidden,
+      }),
+    });
   }
 
   async getWifiStatus(): Promise<WifiStatus> {
-    const resp = await this.sendRequest({ getWifiStatus: {} });
-    return resp.wifiStatus as WifiStatus;
+    const resp = await this.sendRequest({
+      case: "getWifiStatus",
+      value: create(GetWifiStatusRequestSchema),
+    });
+    const s = expectPayload(resp, "wifiStatus");
+    return {
+      connected: s.connected,
+      ssid: s.ssid,
+      ipAddress: s.ipAddress,
+      signalDbm: s.signalDbm,
+    };
   }
 
   async getRobotConfig(): Promise<RobotConfig> {
-    const resp = await this.sendRequest({ getRobotConfig: {} });
-    return resp.robotConfig as RobotConfig;
+    const resp = await this.sendRequest({
+      case: "getRobotConfig",
+      value: create(GetRobotConfigRequestSchema),
+    });
+    const c = expectPayload(resp, "robotConfig");
+    return {
+      robotName: c.robotName,
+      ownerId: c.ownerId,
+      timezone: c.timezone,
+      extra: { ...c.extra },
+    };
   }
 
   async setRobotConfig(config: RobotConfig): Promise<void> {
-    await this.sendRequest({ setRobotConfig: { config } });
+    await this.sendRequest({
+      case: "setRobotConfig",
+      value: create(SetRobotConfigRequestSchema, {
+        config: create(RobotConfigSchema, {
+          robotName: config.robotName,
+          ownerId: config.ownerId,
+          timezone: config.timezone,
+          extra: { ...config.extra },
+        }),
+      }),
+    });
   }
 
   async getAppStatus(): Promise<AppStatus> {
-    const resp = await this.sendRequest({ getAppStatus: {} });
-    return resp.appStatus as AppStatus;
+    const resp = await this.sendRequest({
+      case: "getAppStatus",
+      value: create(GetAppStatusRequestSchema),
+    });
+    const s = expectPayload(resp, "appStatus");
+    return {
+      appName: s.appName,
+      image: s.image,
+      imageDigest: s.imageDigest,
+      state: appStateLabel(s.state),
+      containerId: s.containerId,
+      // protobuf int64 → bigint; UI consumes as number (seconds since epoch fits)
+      startedAtUnix: Number(s.startedAtUnix),
+      restartCount: s.restartCount,
+    };
   }
 
   async controlApp(
     appName: string,
     command: "START" | "STOP" | "RESTART",
   ): Promise<void> {
-    await this.sendRequest({ controlApp: { appName, command } });
+    await this.sendRequest({
+      case: "controlApp",
+      value: create(ControlAppRequestSchema, {
+        appName,
+        command: appCommandFromLabel(command),
+      }),
+    });
   }
 
   async triggerOta(targetImage?: string): Promise<void> {
-    await this.sendRequest({ triggerOta: { targetImage: targetImage ?? "" } });
+    await this.sendRequest({
+      case: "triggerOta",
+      value: create(TriggerOtaRequestSchema, {
+        targetImage: targetImage ?? "",
+      }),
+    });
   }
 
   async getOtaStatus(): Promise<OtaStatus> {
-    const resp = await this.sendRequest({ getOtaStatus: {} });
-    return resp.otaStatus as OtaStatus;
+    const resp = await this.sendRequest({
+      case: "getOtaStatus",
+      value: create(GetOtaStatusRequestSchema),
+    });
+    const s = expectPayload(resp, "otaStatus");
+    return {
+      state: otaStateLabel(s.state),
+      currentImage: s.currentImage,
+      targetImage: s.targetImage,
+      progressPercent: s.progressPercent,
+      error: s.error,
+    };
   }
 
   // ---- internal helpers ------------------------------------------------
 
   private async sendRequest(
-    payload: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
+    payload: ClientRequest["payload"],
+  ): Promise<AgentResponse> {
     if (!this.requestChar) throw new Error("not connected");
 
     const requestId = this.nextRequestId++;
-    const json = JSON.stringify({ requestId, ...payload });
-    const encoded = new TextEncoder().encode(json);
+    const req = create(ClientRequestSchema, { requestId, payload });
+    const encoded = toBinary(ClientRequestSchema, req);
     const frames = encodeFrames(encoded, MAX_PAYLOAD);
 
-    // Write each frame. Web Bluetooth wants a plain ArrayBuffer/BufferSource,
-    // so copy into a fresh one rather than passing the view directly.
+    // Web Bluetooth wants a plain ArrayBuffer/BufferSource, so copy into
+    // a fresh one rather than passing the view directly.
     for (const frame of frames) {
       const buf = new ArrayBuffer(frame.byteLength);
       new Uint8Array(buf).set(frame);
       await this.requestChar.writeValueWithoutResponse(buf);
     }
 
-    // Wait for the matching response notification
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId);
@@ -199,12 +309,20 @@ export class WebBluetoothTransport implements BebopTransport {
       }, 15_000);
 
       this.pending.set(requestId, {
-        resolve: (data: Uint8Array) => {
+        resolve: (resp) => {
           clearTimeout(timeout);
-          const json = new TextDecoder().decode(data);
-          resolve(JSON.parse(json));
+          if (resp.status === ResponseStatus.OK) {
+            resolve(resp);
+          } else {
+            reject(
+              new Error(
+                resp.message ||
+                  `agent returned status ${ResponseStatus[resp.status] ?? resp.status}`,
+              ),
+            );
+          }
         },
-        reject: (err: Error) => {
+        reject: (err) => {
           clearTimeout(timeout);
           reject(err);
         },
@@ -213,20 +331,98 @@ export class WebBluetoothTransport implements BebopTransport {
   }
 
   private handleNotification(frame: Uint8Array): void {
+    let complete: Uint8Array | null;
     try {
-      const complete = this.reassembler.push(frame);
-      if (!complete) return;
-
-      const json = new TextDecoder().decode(complete);
-      const msg = JSON.parse(json);
-      const requestId = msg.requestId as number;
-      const pending = this.pending.get(requestId);
-      if (pending) {
-        this.pending.delete(requestId);
-        pending.resolve(complete);
-      }
+      complete = this.reassembler.push(frame);
     } catch {
-      // ignore malformed frames
+      this.reassembler = new Reassembler();
+      return;
     }
+    if (!complete) return;
+
+    let resp: AgentResponse;
+    try {
+      resp = fromBinary(AgentResponseSchema, complete);
+    } catch {
+      // malformed frame — drop silently; the timeout will surface to the caller.
+      return;
+    }
+    const pending = this.pending.get(resp.requestId);
+    if (!pending) return; // request_id == 0 = unsolicited status push, ignore here
+    this.pending.delete(resp.requestId);
+    pending.resolve(resp);
+  }
+}
+
+// ---- payload helpers ---------------------------------------------------
+
+type PayloadOf<C extends NonNullable<AgentResponse["payload"]>["case"]> = Extract<
+  NonNullable<AgentResponse["payload"]>,
+  { case: C }
+>["value"];
+
+/// Pull the expected `oneof` arm out of an `AgentResponse`, throwing a
+/// readable error if the agent answered with a different payload (or none
+/// at all). `sendRequest` already filters out non-OK responses, so reaching
+/// this helper means status was OK; this just defends against a schema
+/// mismatch between agent and app.
+function expectPayload<C extends NonNullable<AgentResponse["payload"]>["case"]>(
+  resp: AgentResponse,
+  expected: C,
+): PayloadOf<C> {
+  if (resp.payload?.case !== expected) {
+    throw new Error(
+      `agent returned unexpected payload: ${resp.payload?.case ?? "<none>"} (expected ${expected})`,
+    );
+  }
+  return resp.payload.value as PayloadOf<C>;
+}
+
+function appStateLabel(s: AppState): AppStateLabel {
+  switch (s) {
+    case AppState.STOPPED:
+      return "STOPPED";
+    case AppState.STARTING:
+      return "STARTING";
+    case AppState.RUNNING:
+      return "RUNNING";
+    case AppState.CRASHED:
+      return "CRASHED";
+    case AppState.UPDATING:
+      return "UPDATING";
+    case AppState.UNSPECIFIED:
+    default:
+      return "UNSPECIFIED";
+  }
+}
+
+function otaStateLabel(s: OtaState): OtaStateLabel {
+  switch (s) {
+    case OtaState.IDLE:
+      return "IDLE";
+    case OtaState.CHECKING:
+      return "CHECKING";
+    case OtaState.DOWNLOADING:
+      return "DOWNLOADING";
+    case OtaState.APPLYING:
+      return "APPLYING";
+    case OtaState.SUCCESS:
+      return "SUCCESS";
+    case OtaState.FAILED:
+      return "FAILED";
+    case OtaState.UNSPECIFIED:
+    default:
+      return "UNSPECIFIED";
+  }
+}
+
+function appCommandFromLabel(c: "START" | "STOP" | "RESTART"): AppCommand {
+  switch (c) {
+    case "START":
+      return AppCommand.START;
+    case "STOP":
+      return AppCommand.STOP;
+    case "RESTART":
+      return AppCommand.RESTART;
   }
 }

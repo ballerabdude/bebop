@@ -21,9 +21,16 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 btleplug = "0.12"
 tokio = { version = "1.40", features = ["sync", "time", "rt", "rt-multi-thread", "macros"] }
 futures = "0.3"
 uuid = "1.10"
 bytes = "1.7"
+
+# Wire protocol shared with the Jetson agent. Path-dep into the
+# jetson-agent workspace so there is exactly one source of truth for the
+# .proto schema and one set of generated Rust types on this side.
+# Building this requires `protoc` to be on PATH (same prereq as the
+# agent's own build).
+bebop-proto = { path = "../../jetson-agent/bebop-proto" }
+prost = "0.13"
