@@ -44,9 +44,11 @@ jobs:
         run: cargo test --workspace
 
   # Produce a Jetson (arm64) build artifact so we always have something
-  # shippable on `main`.
-  cross-jetson:
-    runs-on: ubuntu-latest
+  # shippable on `main`. Built natively on a GitHub-hosted arm64 runner —
+  # no `cross`/QEMU/Docker layer required. Pinned to `ubuntu-22.04-arm`
+  # (glibc 2.35) so the binary is compatible with JetPack 6 (Ubuntu 22.04).
+  jetson:
+    runs-on: ubuntu-22.04-arm
     needs: rust
     defaults:
       run:
@@ -54,23 +56,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system deps (BlueZ, D-Bus, protoc)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config protobuf-compiler
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.90.0"
-          targets: aarch64-unknown-linux-gnu
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: jetson-agent
 
-      - name: Install cross
-        run: cargo install --locked cross
-
-      - name: Cross-compile bebop-agent
-        run: cross build --release --target aarch64-unknown-linux-gnu -p bebop-agent
+      - name: Build bebop-agent (release)
+        run: cargo build --release -p bebop-agent
 
       - uses: actions/upload-artifact@v4
         with:
           name: bebop-agent-aarch64
-          path: jetson-agent/target/aarch64-unknown-linux-gnu/release/bebop-agent
+          path: jetson-agent/target/release/bebop-agent
           if-no-files-found: error

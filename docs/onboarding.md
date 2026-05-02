@@ -8,8 +8,8 @@
   `jetson-agent/rust-toolchain.toml`)
 - `protoc` (the protobuf compiler) — `brew install protobuf` or
   `apt install protobuf-compiler`
-- Docker Desktop / Docker Engine (used by both `cross` and `buildx`)
-- `cross` for Rust cross-compilation: `cargo install cross`
+- Docker Desktop / Docker Engine (used by `buildx` for the robot-app image
+  and by the Isaac Sim / ROS 2 dev containers)
 - (Optional) [`just`](https://github.com/casey/just) for the canned
   recipes in the top-level `justfile` (`just check`, `just build-jetson`,
   `just deploy user@robot.local`, ...)
@@ -65,19 +65,23 @@ just lint      # cd jetson-agent && cargo clippy --workspace --all-targets -- -D
 > the Orin Nano first — see [`../jetson-flash/README.md`](../jetson-flash/README.md).
 > Once L4T is installed and the Jetson boots, come back here.
 
-1. Build for arm64 (uses the cross-build container configured in
-   `jetson-agent/Cross.toml`, which also installs `libdbus-1-dev:arm64`
-   for `bluer`):
-   ```sh
-   just build-jetson
-   # equivalent to:
-   # cd jetson-agent && cross build --release --target aarch64-unknown-linux-gnu -p bebop-agent
-   ```
+1. Build for arm64. The agent is built natively now — no `cross` / QEMU /
+   Docker. Pick a build host:
+   - **On the robot (or any arm64 Ubuntu box):**
+     ```sh
+     sudo apt install -y libdbus-1-dev pkg-config protobuf-compiler
+     just build-jetson
+     # equivalent to:
+     # cd jetson-agent && cargo build --release -p bebop-agent
+     ```
+   - **From an x86 dev machine:** grab the `bebop-agent-aarch64` artifact
+     from the latest green CI run on `main` (built on `ubuntu-22.04-arm`,
+     glibc 2.35 → JetPack 6 compatible).
 2. Push it to the robot and install:
    ```sh
    just deploy bebop@robot.local
    # equivalent to:
-   # scp jetson-agent/target/aarch64-unknown-linux-gnu/release/bebop-agent bebop@robot.local:/tmp/
+   # scp jetson-agent/target/release/bebop-agent bebop@robot.local:/tmp/
    # rsync -a jetson-agent/deploy/ bebop@robot.local:/tmp/deploy/
    # ssh bebop@robot.local 'sudo /tmp/deploy/scripts/install.sh /tmp/bebop-agent'
    ```

@@ -12,19 +12,24 @@ Artifacts for shipping `bebop-agent` onto a Jetson.
 
 ## Typical flow
 
-On a build box (from the repo root):
+The agent is built natively on arm64 now (no `cross`/QEMU). Pick whichever
+arm64 Linux build host is convenient — the robot itself, an arm64 dev box,
+or grab the `bebop-agent-aarch64` artifact from CI (built on
+`ubuntu-22.04-arm`, see `.github/workflows/ci.yml`).
+
+On an arm64 build box (from the repo root):
 
 ```sh
 just build-jetson
 # equivalent to:
-# cd jetson-agent && cross build --release --target aarch64-unknown-linux-gnu -p bebop-agent
+# cd jetson-agent && cargo build --release -p bebop-agent
 ```
 
 Copy the binary and this `deploy/` tree to the Jetson (e.g. via `scp`,
 Ansible, or bake into your golden image), then on the Jetson:
 
 ```sh
-sudo ./deploy/scripts/install.sh ./target/aarch64-unknown-linux-gnu/release/bebop-agent
+sudo ./deploy/scripts/install.sh ./target/release/bebop-agent
 ```
 
 The `just deploy user@robot.local` recipe at the repo root does this

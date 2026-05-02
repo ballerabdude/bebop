@@ -98,6 +98,8 @@ over D-Bus). Two things keep development workable elsewhere:
   `cargo build` all work on macOS dev boxes (BLE just logs a warning and
   sleeps).
 
-Producing a real Jetson binary is done with `cross` (configured via
-`jetson-agent/Cross.toml`) — see `onboarding.md` and the `build-jetson`
-recipe in the top-level `justfile`.
+Producing a real Jetson binary is a native arm64 `cargo build` — done
+either on the robot itself, on an arm64 dev box, or in CI on a
+`ubuntu-22.04-arm` runner (whose artifact is uploaded as
+`bebop-agent-aarch64`). See `onboarding.md` and the `build-jetson` recipe
+in the top-level `justfile`.

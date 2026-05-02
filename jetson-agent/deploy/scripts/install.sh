@@ -6,8 +6,9 @@
 #   sudo ./install.sh [--skip-prereqs] [path-to-bebop-agent-binary]
 #
 # If no binary path is provided, the script assumes
-# `target/aarch64-unknown-linux-gnu/release/bebop-agent` exists in the
-# jetson-agent/ workspace root (i.e. one level up from `deploy/`).
+# `target/release/bebop-agent` exists in the jetson-agent/ workspace root
+# (i.e. one level up from `deploy/`). The agent is built natively on arm64
+# now, so there's no per-target subdir.
 #
 # Unless `--skip-prereqs` is passed, the script will also (idempotently)
 # install and enable: bluez, network-manager, dbus, and docker. It will
@@ -39,7 +40,7 @@ for arg in "$@"; do
 done
 
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BIN_SRC="${POSITIONAL[0]:-${WORKSPACE_ROOT}/target/aarch64-unknown-linux-gnu/release/bebop-agent}"
+BIN_SRC="${POSITIONAL[0]:-${WORKSPACE_ROOT}/target/release/bebop-agent}"
 
 if [[ "${EUID}" -ne 0 ]]; then
     echo "install.sh must be run as root (sudo)" >&2

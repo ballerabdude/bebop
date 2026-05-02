@@ -14,20 +14,17 @@ On-device daemon that runs on every Bebop robot. Responsibilities:
 
 ## Building
 
-On a Jetson (or an `arm64` Ubuntu dev box):
+On a Jetson (or any `arm64` Ubuntu dev box):
 
 ```sh
 sudo apt install -y libdbus-1-dev pkg-config protobuf-compiler
 cargo build --release -p bebop-agent
 ```
 
-For cross-compiling from an x86 host you probably want
-[`cross`](https://github.com/cross-rs/cross):
-
-```sh
-cargo install cross
-cross build --release --target aarch64-unknown-linux-gnu -p bebop-agent
-```
+The agent is built natively on arm64. On an x86 host, either build on the
+robot directly over SSH, or grab the `bebop-agent-aarch64` artifact from CI
+— see [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml), which
+builds on `ubuntu-22.04-arm` (glibc 2.35, JetPack 6 compatible).
 
 ## Running (dev)
 

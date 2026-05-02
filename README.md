@@ -50,7 +50,7 @@ shows how the on-robot pieces connect.
 ```sh
 just                # list available recipes
 just check          # workspace-wide cargo check (jetson-agent)
-just build-jetson   # cross-compile the agent for arm64
+just build-jetson   # native arm64 build of the agent (run on arm64 Linux)
 just app-dev        # run the mobile app in Tauri dev mode
 just sim-up         # bring up Isaac Sim + ROS 2 dev container
 just lab-up         # bring up Isaac Lab + ROS 2 dev container

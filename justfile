@@ -22,9 +22,11 @@ fmt:
 lint:
     cd jetson-agent && cargo clippy --workspace --all-targets -- -D warnings
 
-# Cross-compile the agent for the Jetson (arm64 Linux). Requires `cross` and Docker.
+# Build the agent for the Jetson. Native build — must run on an arm64 Linux
+# host (the robot itself, an arm64 dev box, or a CI `ubuntu-22.04-arm` runner).
+# From an x86 host, grab the `bebop-agent-aarch64` artifact from CI instead.
 build-jetson:
-    cd jetson-agent && cross build --release --target aarch64-unknown-linux-gnu -p bebop-agent
+    cd jetson-agent && cargo build --release -p bebop-agent
 
 # --- Robot app container ---------------------------------------------------
 
@@ -43,9 +45,10 @@ push-app:
 
 # --- Install on a robot ----------------------------------------------------
 
-# Copy a freshly cross-compiled agent + deploy tree to a robot over SSH (e.g. `just deploy user@robot.local`).
+# Copy a freshly built agent + deploy tree to a robot over SSH (e.g. `just deploy user@robot.local`).
+# Assumes you've already run `just build-jetson` on an arm64 host.
 deploy HOST:
-    scp jetson-agent/target/aarch64-unknown-linux-gnu/release/bebop-agent {{HOST}}:/tmp/bebop-agent
+    scp jetson-agent/target/release/bebop-agent {{HOST}}:/tmp/bebop-agent
     rsync -a jetson-agent/deploy/ {{HOST}}:/tmp/deploy/
     ssh {{HOST}} 'sudo /tmp/deploy/scripts/install.sh /tmp/bebop-agent'
 
