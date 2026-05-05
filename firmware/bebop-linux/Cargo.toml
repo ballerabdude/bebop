@@ -3,23 +3,38 @@ name = "bebop-linux"
 version = "0.1.0"
 edition = "2021"
 authors = ["Bebop Bot Team"]
-description = "Linux-based firmware for Bebop robot using SocketCAN and ONNX"
+description = "Linux runtime for Bebop V2 robot — multi-mode (Idle / DialIn / RunPolicy) server with SocketCAN + ONNX policy."
+
+[lib]
+name = "bebop_linux"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bebop-linux"
+path = "src/main.rs"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.35", features = ["full", "rt-multi-thread", "time", "sync", "signal", "net"] }
+tokio = { version = "1.35", features = ["full", "rt-multi-thread", "time", "sync", "signal", "net", "macros"] }
+tokio-stream = "0.1"
 futures = "0.3"
 
 # CAN bus
 socketcan = "3.3"
 
-# ONNX Runtime for neural network inference  
+# HTTP + WebSocket
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# ONNX Runtime for neural network inference
 ort = "2.0.0-rc.11"
 ndarray = "0.16"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 
 # Math
 nalgebra = "0.32"
@@ -37,6 +52,11 @@ toml = "0.8"
 
 # Time handling
 chrono = "0.4"
+
+# Wire protocol shared with the Tauri app and the Jetson agent.
+bebop-proto = { path = "../../jetson-agent/bebop-proto" }
+prost = "0.13"
+bytes = "1.7"
 
 [profile.release]
 opt-level = 3

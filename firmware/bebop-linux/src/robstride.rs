@@ -58,6 +58,7 @@ const KD_MAX: f32 = 100.0;
 const HOST_ID: u8 = 0xFD;
 
 /// Robstride motor driver
+#[derive(Debug)]
 pub struct RobstrideMotor {
     pub can_id: u8,
     pub model: RobstrideModel,

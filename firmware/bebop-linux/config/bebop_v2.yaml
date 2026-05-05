@@ -1,0 +1,135 @@
+# ============================================================================
+# Bebop V2 (humanoid) joint configuration.
+#
+# Loaded by `bebop-linux` at startup via `RobotConfig::from_yaml(path)`.
+# Schema deliberately matches `ros2/src/bebop_pilot/config/safety_limits.yaml`
+# so the same file can later become the single source of truth for both
+# the Rust runtime and any ROS2 bridge nodes.
+#
+# All limits below are *our* safety envelope, not the manufacturer's max.
+# Procedure for raising any one of them:
+#   1.  Verify the joint can mechanically reach it (manual back-drive).
+#   2.  In the dial-in tool, run the relevant test (e.g. vel_probe) at the
+#       *current* limit and confirm the motor tracks without faulting.
+#   3.  Edit a single field here, raising it by no more than ~25%, re-run.
+#   4.  Repeat until you hit a real mechanical / thermal / current ceiling.
+# Do not raise multiple limits at once — you lose the ability to attribute
+# a fault to the change.
+# ============================================================================
+
+defaults:
+  hard_limits:
+    pos_min: -0.5             # rad — well inside the ±4π motor encoder range
+    pos_max:  0.5
+    vel_max:  2.0             # rad/s (~115 °/s)
+    tau_max:  8.0             # Nm
+    temp_max: 65.0            # °C — keep well below firmware overtemp (~85 °C)
+    feedback_timeout_ms: 100  # E-STOP if no RX feedback within this window
+
+  # Always-active gains while a motor is "armed" but no test is driving it.
+  # Stiffness low; damping > 0 so the motor never goes limp under power.
+  hold_gains: { kp: 5.0, kd: 1.0 }
+
+  # Default gains for active tests (currently unused; phase 2).
+  test_gains: { kp: 30.0, kd: 2.0 }
+
+  # Setpoint slew limits. Independent of motor-side PD gains, these cap
+  # the achievable jerk in the host-side TX path.
+  slew:
+    max_pos_step_per_tick: 0.005   # rad — at 100 Hz tick = 0.5 rad/s slew cap
+    arm_ramp_s:            0.5     # gain ramp 0 → hold over arm
+    abort_ramp_s:          0.3     # gain ramp hold → 0 over abort
+
+# ============================================================================
+# Joints. Index order matters for the ONNX policy: it MUST match
+#   bebop_training/envs/bebop_v2_base_cfg.py:JOINT_NAMES_ALL
+# Bebop V2 numbering convention: tens digit = side (3 = left, 4 = right),
+# ones digit = joint level. Left leg lives on can0, right leg on can1.
+# ============================================================================
+joints:
+  # ----- Hip abduction (RS04) -----------------------------------------------
+  hip_abduction_left_joint:
+    can_interface: can0
+    motor_id: 31
+    model: RS04
+    hard_limits: { pos_min: -0.6, pos_max: 0.6, vel_max: 3.5, tau_max: 25.0, temp_max: 70.0 }
+
+  hip_abduction_right_joint:
+    can_interface: can1
+    motor_id: 41
+    model: RS04
+    hard_limits: { pos_min: -0.6, pos_max: 0.6, vel_max: 3.5, tau_max: 25.0, temp_max: 70.0 }
+
+  # ----- Femur / hip pitch (RS03) -------------------------------------------
+  femur_left_joint:
+    can_interface: can0
+    motor_id: 32
+    model: RS03
+    hard_limits: { pos_min: -1.0, pos_max: 1.0, vel_max: 3.5, tau_max: 18.0, temp_max: 70.0 }
+
+  femur_right_joint:
+    can_interface: can1
+    motor_id: 42
+    model: RS03
+    hard_limits: { pos_min: -1.0, pos_max: 1.0, vel_max: 3.5, tau_max: 18.0, temp_max: 70.0 }
+
+  # ----- Shin / knee (RS04) -------------------------------------------------
+  shin_left_joint:
+    can_interface: can0
+    motor_id: 34
+    model: RS04
+    # Knee mostly flexes one way; tighter than hip on the +ve side.
+    hard_limits: { pos_min: -1.6, pos_max: 0.1, vel_max: 4.0, tau_max: 30.0, temp_max: 70.0 }
+
+  shin_right_joint:
+    can_interface: can1
+    motor_id: 44
+    model: RS04
+    hard_limits: { pos_min: -1.6, pos_max: 0.1, vel_max: 4.0, tau_max: 30.0, temp_max: 70.0 }
+
+  # ----- Foot / ankle (RS02) ------------------------------------------------
+  foot_left_joint:
+    can_interface: can0
+    motor_id: 35
+    model: RS02
+    hard_limits: { pos_min: -0.5, pos_max: 0.5, vel_max: 4.0, tau_max: 8.0, temp_max: 65.0 }
+
+  foot_right_joint:
+    can_interface: can1
+    motor_id: 45
+    model: RS02
+    hard_limits: { pos_min: -0.5, pos_max: 0.5, vel_max: 4.0, tau_max: 8.0, temp_max: 65.0 }
+
+# ============================================================================
+# Server settings (WebSocket + HTTP)
+# ============================================================================
+server:
+  bind_addr: "0.0.0.0:9090"   # listen on all interfaces, port 9090
+  telemetry_default_hz: 30
+  telemetry_max_hz: 100
+
+# ============================================================================
+# Power board (Robstride PowerBoard) — battery / rail telemetry
+# ----------------------------------------------------------------------------
+# Lives on its own CAN bus (can4 in the V2 wiring). The runtime polls the
+# board at `poll_interval_ms` for a Type-03 status frame (battery V, motor
+# rail V, board temperature, fault word) and republishes the result to
+# every WS client through `Snapshot.power` / TelemetryFrame.power.
+#
+# Battery chemistry below describes the *pack we ship with* — currently
+# 13s2p Li-ion (NMC), so 13 series cells × 4.20 V max = 54.6 V fully
+# charged, 13 × 3.00 V = 39.0 V at the protected cutoff. The "fuel gauge"
+# in the operator app is a linear interpolation between those endpoints —
+# it's intentionally simple; replace with a coulomb counter or
+# OCV-vs-SOC table if you ever care about better than ±10 % accuracy.
+#
+# Comment out this block (or delete it) to skip power telemetry entirely;
+# the runtime will still come up cleanly without a power board attached.
+# ============================================================================
+power:
+  can_interface: can4
+  power_id: 170             # Robstride PowerBoard default address 0xAA (param 6006)
+  poll_interval_ms: 1000    # 1 Hz status polling — keeps the bus quiet
+  battery_cells: 13         # 13s pack (4.2 V × 13 = 54.6 V full)
+  cell_full_voltage: 3.40   # Li-ion full-charge per cell
+  cell_empty_voltage: 2.90  # cutoff per cell — pack BMS will likely trip first
