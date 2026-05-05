@@ -1,0 +1,321 @@
+// Bebop runtime API — bidirectional protobuf-over-WebSocket between the
+// Tauri operator app and `bebop-linux` running on the robot.
+//
+// This file is intentionally separate from `bebop.proto`: that one is the
+// BLE control surface (one-shot request/response, small messages, used for
+// setup/provisioning), while this one is a streaming bidirectional API
+// for live motor control + telemetry over a TCP/WS link.
+//
+// Codegen: `prost-build` picks this up via the glob in `build.rs`; the
+// Tauri app picks it up via `npm run gen-proto` which runs buf over the
+// containing directory.
+
+syntax = "proto3";
+
+package bebop.runtime.v1;
+
+// ---------------------------------------------------------------------------
+// Envelope: every WS frame is one of these (length-prefixed binary protobuf).
+// ---------------------------------------------------------------------------
+
+// Client (operator app) -> server (bebop-linux) on the robot.
+message ClientRuntimeMessage {
+  // Optional correlation id; server echoes it back in Ack/Error so the
+  // client can match responses to requests. Telemetry frames carry 0.
+  uint32 request_id = 100;
+
+  oneof payload {
+    SubscribeTelemetry  subscribe_telemetry    = 1;
+    UnsubscribeTelemetry unsubscribe_telemetry = 2;
+    GetSnapshot         get_snapshot           = 3;
+    SetMotorEnabled     set_motor_enabled      = 4;  // single joint
+    SetAllMotorsEnabled set_all_motors_enabled = 5;
+    SetMode             set_mode               = 6;
+    EmergencyStop       emergency_stop         = 7;
+    ResetEStop          reset_estop            = 8;
+    // Position-limit dial-in: command a hold target for an armed motor in
+    // DIAL_IN mode. Used by the operator app's slider to discover the
+    // mechanical envelope before raising hard_limits in the YAML.
+    SetMotorTarget      set_motor_target       = 9;
+    // Re-zero a single motor's mechanical origin to its current physical
+    // position. Used after reassembly when the joint's reported position
+    // no longer reflects mechanical neutral (e.g. encoder absolute origin
+    // ended up outside the safety envelope so the supervisor refuses to
+    // arm). Persisted in the motor's flash; effective immediately.
+    SetMechanicalZero   set_mechanical_zero    = 10;
+  }
+}
+
+// Server -> client. Streamed; not all messages are responses to a request.
+message ServerRuntimeMessage {
+  // Echoed from the corresponding ClientRuntimeMessage, or 0 for
+  // unsolicited (e.g. periodic telemetry, async E-STOP latch events).
+  uint32 request_id = 100;
+
+  oneof payload {
+    Ack                 ack             = 1;
+    Error               error           = 2;
+    Snapshot            snapshot        = 3;
+    TelemetryFrame      telemetry       = 4;  // ~30 Hz when subscribed
+    ModeChanged         mode_changed    = 5;
+    EStopLatched        estop_latched   = 6;
+    BusStatusUpdate     bus_status      = 7;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Operating mode
+// ---------------------------------------------------------------------------
+
+enum Mode {
+  MODE_UNSPECIFIED  = 0;
+  // Motors disabled. Telemetry still streams (so the operator can see
+  // current pose). Mode at boot.
+  MODE_IDLE         = 1;
+  // Per-motor enable/disable, hold-gain TX cycle, slew limit + watchdog
+  // enforced. Used during dial-in / bring-up.
+  MODE_DIAL_IN      = 2;
+  // Existing ONNX policy loop drives commands. Disarms all motors when
+  // leaving this mode.
+  MODE_RUN_POLICY   = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Per-motor state
+// ---------------------------------------------------------------------------
+
+message MotorState {
+  string joint_name    = 1;   // matches config YAML `joints[].name`
+  string can_interface = 2;   // e.g. "can1"
+  uint32 motor_id      = 3;   // Robstride node id (1..255)
+  string model         = 4;   // "RS01" .. "RS04"
+
+  // Armed = motor has accepted Enable and the supervisor is sending
+  // hold-gain commands. Implies powered and tracking.
+  bool   armed             = 5;
+  // True if no feedback frame has arrived within feedback_timeout_ms.
+  bool   feedback_stale    = 6;
+  // Robstride fault byte (bits per the protocol; 0 = healthy).
+  uint32 fault_bits        = 7;
+
+  float  position_rad      = 10;
+  float  velocity_rad_s    = 11;
+  float  torque_nm         = 12;
+  float  temperature_c     = 13;
+
+  // Most recent commanded position target, post-clamp and post-slew. In
+  // DialIn mode this is what the supervisor's hold cycle is asking the
+  // motor to track. When the motor is disarmed this is meaningless;
+  // callers should ignore it unless `armed` is true.
+  float  target_position_rad = 14;
+
+  // Hard limits from the YAML config, copied so the UI can render
+  // percent-of-limit bars without holding its own config copy.
+  float  pos_min_rad   = 20;
+  float  pos_max_rad   = 21;
+  float  vel_max       = 22;
+  float  tau_max       = 23;
+  float  temp_max      = 24;
+}
+
+// ---------------------------------------------------------------------------
+// CAN bus health
+// ---------------------------------------------------------------------------
+
+message BusEntry {
+  string can_interface = 1;
+  // From `ip -details link show <iface>`; e.g. "ERROR-ACTIVE",
+  // "ERROR-PASSIVE", "BUS-OFF". Empty if it couldn't be read.
+  string state         = 2;
+  bool   healthy       = 3;   // true iff state == "ERROR-ACTIVE"
+}
+
+// ---------------------------------------------------------------------------
+// Power-board telemetry (Robstride PowerBoard)
+// ---------------------------------------------------------------------------
+
+// One frame per snapshot/telemetry frame, holding the latest cached
+// status from the power board configured under `power:` in the
+// firmware's YAML config. `present = false` when no power board is
+// configured (older robots or bring-up rigs without a board); the UI
+// should hide the power card in that case.
+message PowerStats {
+  // True iff the firmware was configured with a `power:` block. Other
+  // fields are only meaningful when this is set.
+  bool   present              = 1;
+
+  // CAN bus and Robstride board address being polled.
+  string can_interface        = 2;
+  uint32 power_id             = 3;
+  // Firmware version reported by the board ("PBV1.00"); empty until the
+  // first version response arrives.
+  string firmware_version     = 4;
+
+  // Whether the firmware has received at least one Type-03 status
+  // response from the board. False at boot until polling succeeds.
+  bool   status_received      = 10;
+  // True if the most recent successful status response is older than
+  // ~3 × poll_interval — usually means the board lost power or the bus
+  // dropped frames. Operator UI should show this as a warning.
+  bool   status_stale         = 11;
+  // Milliseconds since the firmware last decoded a status response.
+  // Reads as 0 before the first response arrives; check `status_received`.
+  uint32 last_status_age_ms   = 12;
+
+  // Raw battery / VBUS voltage from the board sensor. Volts.
+  float  battery_voltage_v    = 20;
+  // Voltage on the motor branch downstream of the soft-start FET.
+  // During pre-charge / discharge this differs from battery_voltage.
+  float  motor_voltage_v      = 21;
+  // Internal board temperature, °C.
+  float  board_temperature_c  = 22;
+
+  // Decoded fault word (24 bits, low 16 are real faults; bits 20..23
+  // are rail on/off indicators). Zero on the low bits = no faults.
+  uint32 fault_bits           = 30;
+  // Human-readable fault decoding (or "normal" / "" when healthy).
+  string fault_description    = 31;
+  // Convenience flags decoded from `fault_bits >> 20`.
+  bool   rail_12v_on          = 32;
+  bool   soft_start_on        = 33;
+  bool   motor_rail_on        = 34;
+  bool   rail_24v_on          = 35;
+
+  // Per-branch currents from the most recent Type-04 query. Amps.
+  // Zero values are reported when no current frame has arrived yet.
+  float  current_al_a         = 40;
+  float  current_ar_a         = 41;
+  float  current_ll_a         = 42;
+  float  current_lr_a         = 43;
+  // Sum of the four branch currents for convenience. Amps.
+  float  total_motor_current_a = 44;
+
+  // Battery pack metadata copied from the firmware config so the UI can
+  // render a fuel-gauge bar without holding its own copy.
+  uint32 battery_cells        = 50;
+  float  pack_full_voltage_v  = 51;  // cell_full × cell_count
+  float  pack_empty_voltage_v = 52;  // cell_empty × cell_count
+  // Linear-interp state-of-charge in % (0..100). -1 means "unknown"
+  // (e.g. battery_voltage hasn't been received yet, or the linear model
+  // would extrapolate outside the configured range).
+  float  state_of_charge_pct  = 53;
+}
+
+// ---------------------------------------------------------------------------
+// Streamed telemetry
+// ---------------------------------------------------------------------------
+
+message TelemetryFrame {
+  uint64 host_unix_ms   = 1;
+  Mode   mode           = 2;
+  bool   estop_latched  = 3;
+  string estop_reason   = 4;
+  repeated MotorState motors = 10;
+  repeated BusEntry   buses  = 11;
+  // Latest power-board telemetry. `power.present = false` on robots
+  // without a power board configured. Optional so old clients can still
+  // decode the frame (default is `present=false`).
+  PowerStats power      = 12;
+}
+
+// One-shot reply to GetSnapshot — same content as TelemetryFrame.
+message Snapshot {
+  uint64 host_unix_ms   = 1;
+  Mode   mode           = 2;
+  bool   estop_latched  = 3;
+  string estop_reason   = 4;
+  repeated MotorState motors = 10;
+  repeated BusEntry   buses  = 11;
+  PowerStats power      = 12;
+}
+
+message BusStatusUpdate {
+  repeated BusEntry buses = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Client requests
+// ---------------------------------------------------------------------------
+
+message SubscribeTelemetry {
+  // Hint; server clamps to a sane range (default 30 Hz, max 100 Hz).
+  uint32 rate_hz = 1;
+}
+
+message UnsubscribeTelemetry {}
+
+message GetSnapshot {}
+
+message SetMotorEnabled {
+  string joint_name = 1;
+  bool   enabled    = 2;
+}
+
+message SetAllMotorsEnabled {
+  bool enabled = 1;
+}
+
+message SetMode {
+  Mode mode = 1;
+}
+
+// Latches the supervisor into E-STOP and disables every motor. Persists
+// until ResetEStop is sent.
+message EmergencyStop {
+  string reason = 1;
+}
+
+message ResetEStop {}
+
+// Set the hold-target for a single armed motor (DialIn mode only). The
+// supervisor clamps to the joint's hard_limits and slews from the previous
+// target at `slew.max_pos_step_per_tick` per 100 Hz tick, so an instant
+// jump from the operator UI is safely converted to a controlled move.
+//
+// Motor must be armed and the runtime must be in DIAL_IN mode; the call
+// is rejected otherwise.
+message SetMotorTarget {
+  string joint_name   = 1;
+  float  position_rad = 2;
+}
+
+// Re-zero a single motor's mechanical origin. The supervisor sends the
+// Robstride SET_ZERO (0x06) frame, which causes the motor to treat its
+// current physical position as the new 0 rad reference and to persist
+// that origin to flash. Subsequent telemetry frames will report
+// position relative to the new zero.
+//
+// Preconditions enforced by the firmware:
+//   - E-STOP not latched
+//   - The joint exists
+//   - The joint is currently *disarmed* (we won't reset the origin
+//     while a control loop is sending hold commands)
+//   - The joint's CAN bus is ERROR-ACTIVE (otherwise the SET_ZERO frame
+//     would be silently dropped)
+//
+// This is a destructive, persistent operation: it overwrites the motor's
+// stored origin. Operator UIs should confirm before sending.
+message SetMechanicalZero {
+  string joint_name = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Server responses / async events
+// ---------------------------------------------------------------------------
+
+message Ack {
+  bool   ok      = 1;
+  string message = 2;
+}
+
+message Error {
+  string message = 1;
+}
+
+message ModeChanged {
+  Mode mode = 1;
+}
+
+message EStopLatched {
+  string reason = 1;
+}
