@@ -10,9 +10,14 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  # Host-side checks: format, lint, tests. Runs on Linux so BlueZ and the
-  # real BLE server module are in the compile graph.
+  # ---------------------------------------------------------------------------
+  # bebop-agent (jetson-agent/) — on-device daemon (BLE GATT, container
+  # supervisor, OTA, controller subsystem). Runs the full host-side check
+  # matrix on x86_64 Linux so the Linux-only modules (bluer, evdev, the
+  # controller supervisor) are in the compile graph.
+  # ---------------------------------------------------------------------------
   rust:
+    name: agent · host checks (fmt, clippy, test)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -43,11 +48,10 @@ jobs:
       - name: test
         run: cargo test --workspace
 
-  # Produce a Jetson (arm64) build artifact so we always have something
-  # shippable on `main`. Built natively on a GitHub-hosted arm64 runner —
-  # no `cross`/QEMU/Docker layer required. Pinned to `ubuntu-22.04-arm`
+  # Native arm64 release build for the Jetson. Pinned to `ubuntu-22.04-arm`
   # (glibc 2.35) so the binary is compatible with JetPack 6 (Ubuntu 22.04).
   jetson:
+    name: agent · jetson (arm64) release build
     runs-on: ubuntu-22.04-arm
     needs: rust
     defaults:
@@ -76,4 +80,83 @@ jobs:
         with:
           name: bebop-agent-aarch64
           path: jetson-agent/target/release/bebop-agent
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # bebop-linux (firmware/bebop-linux/) — robot firmware: SocketCAN +
+  # ONNX Runtime control loop, and the protobuf-over-WS runtime API the
+  # operator app talks to. Same x86_64 host checks then a native arm64
+  # release build for deployment to the Jetson.
+  #
+  # System deps:
+  #   * protobuf-compiler — bebop-proto (path dep) generates Rust code
+  #     from .proto via prost-build at compile time.
+  #   * pkg-config + cmake — sometimes needed by the `ort` crate's
+  #     build script even when the `download-binaries` feature is
+  #     enabled (and is, by default).
+  # SocketCAN is pure-Rust (talks to the Linux kernel via libc) so no
+  # apt package is needed.
+  # ---------------------------------------------------------------------------
+  firmware-rust:
+    name: firmware · host checks (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: firmware/bebop-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (protoc, cmake)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config protobuf-compiler cmake
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.90.0"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware/bebop-linux
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test
+
+  firmware-jetson:
+    name: firmware · jetson (arm64) release build
+    runs-on: ubuntu-22.04-arm
+    needs: firmware-rust
+    defaults:
+      run:
+        working-directory: firmware/bebop-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (protoc, cmake)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config protobuf-compiler cmake
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.90.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware/bebop-linux
+
+      - name: Build bebop-linux (release)
+        run: cargo build --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bebop-linux-aarch64
+          path: firmware/bebop-linux/target/release/bebop-linux
           if-no-files-found: error
