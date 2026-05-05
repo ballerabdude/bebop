@@ -1,0 +1,143 @@
+# ============================================================================
+# Per-joint hard safety limits used by `motor_safety_check.py`.
+#
+# Conservative defaults. The dial-in tool will refuse to send commands that
+# would exceed these, will trigger E-STOP if feedback ever reports outside
+# them, and will *always* disable the motor on exit (atexit + signal handlers).
+#
+# Procedure for raising a limit:
+#   1.  Manually verify the joint can mechanically reach it.
+#   2.  Run the relevant test (e.g. `vel_probe`) at the *current* limit and
+#       confirm the motor tracks it without faults / temperature creep.
+#   3.  Edit this file, raise *one* limit by no more than ~25 %, re-run.
+#   4.  Repeat until you hit a real mechanical / thermal / current ceiling.
+# Never raise multiple limits at once — you lose the ability to attribute a
+# fault to the change.
+# ============================================================================
+
+defaults:
+  # Used as fallback when a joint omits a field. Tuned to be safe for
+  # *any* RS01–RS04 in a benchtop dial-in scenario.
+  hard_limits:
+    pos_min: -0.5             # rad — well inside the ±4π motor encoder range
+    pos_max:  0.5             # rad
+    vel_max:  2.0             # rad/s (~115 °/s)
+    tau_max:  8.0             # Nm — modest for any RS0x
+    temp_max: 65.0            # °C — keep well below firmware overtemp (~85 °C)
+    feedback_timeout_ms: 100  # E-STOP if no RX feedback frame within this window
+
+  # PD gains used while the motor is ARMED but no test is driving it.
+  # Stiffness is kept low; damping always > 0 so the motor never goes limp.
+  hold_gains:
+    kp: 5.0
+    kd: 1.0
+
+  # Default PD gains for active tests. May be overridden per-joint and per-test.
+  test_gains:
+    kp: 30.0
+    kd: 2.0
+
+  # Slew-rate limits for setpoint trajectories. The tool will never step a
+  # commanded position by more than `max_pos_step_per_tick` between TX cycles.
+  # Acts as a software jerk limit independent of motor-side gains.
+  slew:
+    max_pos_step_per_tick: 0.005   # rad — at 100 Hz tick = 0.5 rad/s slew cap
+    arm_ramp_s:            0.5     # seconds — gain ramp-in from disarmed → armed
+    abort_ramp_s:          0.3     # seconds — gain ramp-out on abort
+
+# ============================================================================
+# Per-joint configuration. Keys MUST match motor_bus.yaml `joints:` keys so
+# this file can be loaded alongside the existing motor config.
+# ============================================================================
+joints:
+  # ----- Hip abduction (RS04) ----------------------------------------------
+  hip_abduction_left_joint:
+    can_interface: can1       # CANHub channel 2 (left leg)
+    motor_id: 31
+    model: RS04
+    hard_limits:
+      pos_min: -0.6
+      pos_max:  0.6
+      vel_max:  3.0
+      tau_max: 25.0
+      temp_max: 70.0
+
+  hip_abduction_right_joint:
+    can_interface: can2       # CANHub channel 3 (right leg) — adjust if different
+    motor_id: 41
+    model: RS04
+    hard_limits:
+      pos_min: -0.6
+      pos_max:  0.6
+      vel_max:  3.0
+      tau_max: 25.0
+      temp_max: 70.0
+
+  # ----- Femur / hip pitch (RS03) ------------------------------------------
+  femur_left_joint:
+    can_interface: can1
+    motor_id: 32
+    model: RS03
+    hard_limits:
+      pos_min: -1.0
+      pos_max:  1.0
+      vel_max:  3.5
+      tau_max: 18.0
+      temp_max: 70.0
+
+  femur_right_joint:
+    can_interface: can2
+    motor_id: 42
+    model: RS03
+    hard_limits:
+      pos_min: -1.0
+      pos_max:  1.0
+      vel_max:  3.5
+      tau_max: 18.0
+      temp_max: 70.0
+
+  # ----- Shin / knee (RS04) -------------------------------------------------
+  shin_left_joint:
+    can_interface: can1
+    motor_id: 34
+    model: RS04
+    hard_limits:
+      pos_min: -1.6           # knee mostly flexes one way
+      pos_max:  0.1
+      vel_max:  4.0
+      tau_max: 30.0
+      temp_max: 70.0
+
+  shin_right_joint:
+    can_interface: can2
+    motor_id: 44
+    model: RS04
+    hard_limits:
+      pos_min: -1.6
+      pos_max:  0.1
+      vel_max:  4.0
+      tau_max: 30.0
+      temp_max: 70.0
+
+  # ----- Foot / ankle (RS02) ------------------------------------------------
+  foot_left_joint:
+    can_interface: can1
+    motor_id: 35
+    model: RS02
+    hard_limits:
+      pos_min: -0.5
+      pos_max:  0.5
+      vel_max:  4.0
+      tau_max:  8.0
+      temp_max: 65.0
+
+  foot_right_joint:
+    can_interface: can2
+    motor_id: 45
+    model: RS02
+    hard_limits:
+      pos_min: -0.5
+      pos_max:  0.5
+      vel_max:  4.0
+      tau_max:  8.0
+      temp_max: 65.0
