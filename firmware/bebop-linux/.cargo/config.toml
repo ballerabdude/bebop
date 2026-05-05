@@ -1,0 +1,13 @@
+# Project-local Cargo config.
+#
+# This repo lives under ~/Documents which on macOS is sync'd by
+# iCloud Drive's file provider. iCloud was indexing/uploading every
+# Rust build artifact and producing " 2"-suffixed sync conflict files
+# in target/, which made `cargo build` crawl or appear to hang during
+# the linker step.
+#
+# macOS file providers (iCloud, Dropbox, OneDrive, Google Drive)
+# skip any path whose last component ends in `.nosync`, so we point
+# Cargo's output there.
+[build]
+target-dir = "target.nosync"

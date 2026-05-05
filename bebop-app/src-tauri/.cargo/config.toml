@@ -1,0 +1,14 @@
+# Project-local Cargo config.
+#
+# This repo lives under ~/Documents which on macOS is sync'd by
+# iCloud Drive's file provider. iCloud was indexing/uploading every
+# Rust build artifact and producing " 2"-suffixed sync conflict files
+# in target/, which made `cargo build` (especially the linker step)
+# crawl or appear to hang at "Building 423/424: bebop-app(bin)".
+#
+# macOS file providers (iCloud, Dropbox, OneDrive, Google Drive)
+# skip any path whose last component ends in `.nosync`, so we point
+# Cargo's output there. Build performance returns to normal and no
+# conflict files are produced.
+[build]
+target-dir = "target.nosync"

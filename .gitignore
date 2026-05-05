@@ -1,5 +1,6 @@
 # Rust
 target/
+target.nosync/
 **/*.rs.bk
 Cargo.lock.bak
 
