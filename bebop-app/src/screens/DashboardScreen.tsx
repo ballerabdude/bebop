@@ -14,6 +14,7 @@ interface DashboardProps {
   wifi: WifiStatus;
   onReconfigure: () => void;
   onDisconnect: () => void;
+  onOpenMotors: () => void;
 }
 
 /// Live dashboard shown after initial setup succeeds. Stays connected via
@@ -23,6 +24,7 @@ export function DashboardScreen({
   wifi,
   onReconfigure,
   onDisconnect,
+  onOpenMotors,
 }: DashboardProps) {
   const [info, setInfo] = useState<DeviceInfo | null>(null);
   const [app, setApp] = useState<AppStatus | null>(null);
@@ -151,33 +153,65 @@ export function DashboardScreen({
 
       {error ? <Banner tone="error">{error}</Banner> : null}
 
-      {/* Wi-Fi card */}
-      <Card>
-        <div className="flex items-center justify-between py-1">
-          <div>
+      {/* Status cards. On desktop, Wi-Fi and OTA sit side by side above
+          the wider Robot Application card so the dashboard fills the
+          available width without forcing a long vertical scroll. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Wi-Fi card */}
+        <Card>
+          <div className="flex items-center justify-between py-1">
+            <div>
+              <div className="text-xs text-text-dim uppercase tracking-wider mb-1">
+                Wi-Fi
+              </div>
+              <div className="font-semibold">
+                {currentWifi.connected ? currentWifi.ssid : "Not connected"}
+              </div>
+              {currentWifi.connected && currentWifi.ipAddress ? (
+                <div className="text-text-dim text-[13px] mt-0.5">
+                  {currentWifi.ipAddress} · {currentWifi.signalDbm} dBm
+                </div>
+              ) : null}
+            </div>
+            <div>
+              <div
+                className={`w-2.5 h-2.5 rounded-full ${
+                  currentWifi.connected ? "bg-success" : "bg-text-dim/40"
+                }`}
+              />
+            </div>
+          </div>
+        </Card>
+
+        {/* OTA card */}
+        <Card>
+          <div className="py-1">
             <div className="text-xs text-text-dim uppercase tracking-wider mb-1">
-              Wi-Fi
+              System update
             </div>
-            <div className="font-semibold">
-              {currentWifi.connected
-                ? currentWifi.ssid
-                : "Not connected"}
-            </div>
-            {currentWifi.connected && currentWifi.ipAddress ? (
-              <div className="text-text-dim text-[13px] mt-0.5">
-                {currentWifi.ipAddress} · {currentWifi.signalDbm} dBm
+            {ota ? (
+              <div className="flex items-center justify-between">
+                <div className="font-semibold">{ota.state}</div>
+                {ota.progressPercent > 0 && ota.progressPercent < 100 ? (
+                  <span className="text-sm text-accent">
+                    {ota.progressPercent}%
+                  </span>
+                ) : null}
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-text-dim text-sm">
+                <Spinner />
+                Loading…
+              </div>
+            )}
+            {ota?.error ? (
+              <div className="text-[13px] text-[#ffb5b8] mt-0.5 truncate">
+                {ota.error}
               </div>
             ) : null}
           </div>
-          <div>
-            <div
-              className={`w-2.5 h-2.5 rounded-full ${
-                currentWifi.connected ? "bg-success" : "bg-text-dim/40"
-              }`}
-            />
-          </div>
-        </div>
-      </Card>
+        </Card>
+      </div>
 
       {/* Robot app card */}
       <Card>
@@ -310,45 +344,28 @@ export function DashboardScreen({
         </div>
       </Card>
 
-      {/* OTA card */}
-      <Card>
-        <div className="py-1">
-          <div className="text-xs text-text-dim uppercase tracking-wider mb-1">
-            System update
-          </div>
-          {ota ? (
-            <div className="flex items-center justify-between">
-              <div className="font-semibold">{ota.state}</div>
-              {ota.progressPercent > 0 && ota.progressPercent < 100 ? (
-                <span className="text-sm text-accent">
-                  {ota.progressPercent}%
-                </span>
-              ) : null}
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 text-text-dim text-sm">
-              <Spinner />
-              Loading…
-            </div>
-          )}
-          {ota?.error ? (
-            <div className="text-[13px] text-[#ffb5b8] mt-0.5 truncate">
-              {ota.error}
-            </div>
-          ) : null}
-        </div>
-      </Card>
-
       <div className="mt-auto pt-4 flex flex-col gap-3">
-        <Button onClick={checkForUpdate} loading={otaRunning}>
-          Check for updates
+        <Button
+          onClick={onOpenMotors}
+          disabled={!currentWifi.connected || !currentWifi.ipAddress}
+        >
+          Open motor bench
         </Button>
-        <Button variant="secondary" onClick={onReconfigure}>
-          Change Wi-Fi network
-        </Button>
-        <Button variant="ghost" onClick={onDisconnect}>
-          Disconnect &amp; start over
-        </Button>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+          <Button
+            variant="secondary"
+            onClick={checkForUpdate}
+            loading={otaRunning}
+          >
+            Check for updates
+          </Button>
+          <Button variant="secondary" onClick={onReconfigure}>
+            Change Wi-Fi network
+          </Button>
+          <Button variant="ghost" onClick={onDisconnect}>
+            Disconnect &amp; start over
+          </Button>
+        </div>
       </div>
     </div>
   );
