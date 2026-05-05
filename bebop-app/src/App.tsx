@@ -5,6 +5,7 @@ import type { DiscoveredRobot, WifiStatus } from "./ble";
 import { Spinner } from "./components/ui";
 import { ConfigScreen } from "./screens/ConfigScreen";
 import { ConnectByIpScreen } from "./screens/ConnectByIpScreen";
+import { ControllersScreen } from "./screens/ControllersScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { MotorBenchScreen } from "./screens/MotorBenchScreen";
 import { ScanScreen } from "./screens/ScanScreen";
@@ -20,6 +21,7 @@ type Step =
   | "config"
   | "dashboard"
   | "motors"
+  | "controllers"
   // IP-only path: skip BLE entirely. `direct-motors` is the same screen
   // as `motors` but with a back button that returns to the IP form rather
   // than to the (nonexistent) BLE dashboard.
@@ -40,6 +42,9 @@ function containerWidth(step: Step): string {
   if (step === "dashboard") return "max-w-3xl";
   return "max-w-[520px]";
 }
+
+// Step shown when the user opens "Bluetooth controllers" from the
+// dashboard. Same width as the wifi reconfig path for visual parity.
 
 function App() {
   const supported = bluetoothSupported();
@@ -117,7 +122,8 @@ function App() {
             {step === "dashboard" ||
             step === "wifi-reconfig" ||
             step === "motors" ||
-            step === "direct-motors"
+            step === "direct-motors" ||
+            step === "controllers"
               ? "Bebop"
               : "Bebop · Setup"}
           </div>
@@ -200,6 +206,14 @@ function App() {
             onReconfigure={() => setStep("wifi-reconfig")}
             onDisconnect={reset}
             onOpenMotors={() => setStep("motors")}
+            onOpenControllers={() => setStep("controllers")}
+          />
+        ) : null}
+
+        {!resuming && step === "controllers" && transport ? (
+          <ControllersScreen
+            transport={transport}
+            onDone={() => setStep("dashboard")}
           />
         ) : null}
 

@@ -72,3 +72,31 @@ export interface DiscoveredRobot {
   name: string;
   rssi: number;
 }
+
+/// One Bluetooth device returned by `scanControllers`. `kind` is
+/// `"gamepad"` when the agent's Class-of-Device / UUID / name
+/// heuristics match, `"unknown"` otherwise — the UI hides
+/// non-gamepads behind a "Show all" toggle.
+export interface DiscoveredController {
+  mac: string;
+  name: string;
+  rssi: number;
+  paired: boolean;
+  connected: boolean;
+  kind: "gamepad" | "unknown";
+}
+
+/// Live status of the agent's Bluetooth-controller subsystem. Mirrors
+/// `bebop.v1.ControllerStatus`. `armed` is true iff the deadman is
+/// held AND no e-stop is latched — i.e. velocity commands are
+/// flowing to bebop-linux.
+export interface ControllerStatus {
+  enabled: boolean;
+  pairedMac: string;
+  deviceName: string;
+  connected: boolean;
+  armed: boolean;
+  estopLatched: boolean;
+  lastEventUnixMs: number;
+  targetAddr: string;
+}

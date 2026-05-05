@@ -374,8 +374,10 @@ fn status_characteristic(state: AppState) -> Characteristic {
     }
 }
 
-/// Periodic push loop: every `STATUS_NOTIFY_INTERVAL`, send the latest
-/// app/wifi/ota status snapshot. Exits cleanly when the subscriber goes away.
+/// Periodic push loop: alternates between an `AppStatus` and a
+/// `ControllerStatus` snapshot every `STATUS_NOTIFY_INTERVAL` so the
+/// app's existing notify subscriber sees both without polling. Exits
+/// cleanly when the subscriber goes away.
 async fn status_notify_loop(
     state: AppState,
     mut notifier: bluer::gatt::local::CharacteristicNotifier,
@@ -384,13 +386,19 @@ async fn status_notify_loop(
     // Fire once immediately so subscribers see fresh data on connect.
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    let mut tick_index: u64 = 0;
     loop {
         ticker.tick().await;
         if notifier.is_stopped() {
             debug!("status notify session stopped by peer");
             break;
         }
-        match status_snapshot(&state).await {
+        let snapshot = if tick_index % 2 == 0 {
+            status_snapshot(&state).await
+        } else {
+            controller_status_snapshot(&state).await
+        };
+        match snapshot {
             Ok(bytes) => {
                 if let Err(e) = notifier.notify(bytes).await {
                     debug!(error = %e, "status notify ended");
@@ -399,6 +407,7 @@ async fn status_notify_loop(
             }
             Err(e) => warn!(error = %e, "failed to build status snapshot"),
         }
+        tick_index = tick_index.wrapping_add(1);
     }
 }
 
@@ -432,6 +441,26 @@ async fn status_snapshot(state: &AppState) -> Result<Vec<u8>> {
     envelope
         .encode(&mut buf)
         .context("encode status snapshot")?;
+    Ok(buf)
+}
+
+/// Build a `ControllerStatus` snapshot wrapped in an `AgentResponse`
+/// envelope (request_id == 0 marks it as unsolicited). Same convention
+/// as `status_snapshot`.
+async fn controller_status_snapshot(state: &AppState) -> Result<Vec<u8>> {
+    use bebop_proto::v1::ResponseStatus;
+
+    let payload = crate::controller::status(state).await;
+    let envelope = AgentResponse {
+        request_id: 0,
+        status: ResponseStatus::Ok as i32,
+        message: String::new(),
+        payload: Some(agent_response::Payload::ControllerStatus(payload)),
+    };
+    let mut buf = Vec::with_capacity(envelope.encoded_len());
+    envelope
+        .encode(&mut buf)
+        .context("encode controller status snapshot")?;
     Ok(buf)
 }
 

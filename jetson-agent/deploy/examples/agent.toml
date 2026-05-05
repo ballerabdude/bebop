@@ -77,3 +77,49 @@
 # How often to poll the manifest, in seconds.
 # Default: 300
 # poll_interval_secs = 300
+
+# --- Bluetooth gamepad teleop --------------------------------------------
+# [controller]
+#
+# Master switch for the controller subsystem. With no `paired_mac` set
+# the supervisor idles regardless, so leaving this `true` is safe even
+# on robots that have never paired a gamepad. Set false only if you
+# want to fully disable the subsystem (no scan/pair from the app).
+# Default: true
+# enabled = true
+#
+# UDP target the agent forwards `{xvel,yvel,angvel}` JSON to. Defaults
+# to bebop-linux's documented teleop endpoint on localhost. Change only
+# if bebop-linux runs on a different host.
+# Default: "127.0.0.1:10000"
+# target_addr = "127.0.0.1:10000"
+#
+# MAC + cached display name of the bound gamepad. Populated automatically
+# by the bebop-app pairing flow; clear them (or unpair from the app) to
+# forget the controller.
+# paired_mac = "AA:BB:CC:DD:EE:FF"
+# device_name = "DualSense Wireless Controller"
+#
+# Stick deadzone (radial, 0..1). Anything inside this radius is
+# clamped to centre.
+# Default: 0.10
+# deadzone = 0.10
+#
+# Velocity caps. Body-frame, ROS REP-103.
+# Default: 0.6 m/s, 1.5 rad/s
+# max_lin_vel = 0.6
+# max_ang_vel = 1.5
+#
+# Right-trigger threshold (0..1) above which the deadman is engaged.
+# Default: 0.5
+# deadman_threshold = 0.5
+#
+# If no input event arrives within this many milliseconds the agent
+# forces a zero-velocity command. Guards against a stalled pad.
+# Default: 200
+# watchdog_ms = 200
+#
+# How often to flush the latest command over UDP. 50 Hz matches the
+# bebop-linux outer loop and is plenty for body-velocity teleop.
+# Default: 50
+# send_rate_hz = 50

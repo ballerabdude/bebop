@@ -4,7 +4,9 @@ import type { BebopTransport } from "./transport";
 import type {
   AppState as AppStateLabel,
   AppStatus,
+  ControllerStatus,
   DeviceInfo,
+  DiscoveredController,
   DiscoveredRobot,
   OtaState as OtaStateLabel,
   OtaStatus,
@@ -27,18 +29,22 @@ import {
   ClientRequestSchema,
   ControlAppRequestSchema,
   GetAppStatusRequestSchema,
+  GetControllerStatusRequestSchema,
   GetDeviceInfoRequestSchema,
   GetOtaStatusRequestSchema,
   GetRobotConfigRequestSchema,
   GetWifiStatusRequestSchema,
   OtaState,
+  PairControllerRequestSchema,
   RobotConfigSchema,
   ResponseStatus,
+  ScanControllersRequestSchema,
   ScanWifiRequestSchema,
   SetAppImageRequestSchema,
   SetRobotConfigRequestSchema,
   SetWifiCredentialsRequestSchema,
   TriggerOtaRequestSchema,
+  UnpairControllerRequestSchema,
   type AgentResponse,
   type ClientRequest,
 } from "../proto/bebop_pb";
@@ -347,6 +353,57 @@ export class WebBluetoothTransport implements BebopTransport {
     };
   }
 
+  async scanControllers(timeoutMs: number): Promise<DiscoveredController[]> {
+    // The agent runs `bluetoothctl scan` for the requested window
+    // synchronously, so the BLE call doesn't return until the scan is
+    // done. Pad the request timeout to give it room.
+    const resp = await this.sendRequest(
+      {
+        case: "scanControllers",
+        value: create(ScanControllersRequestSchema, { timeoutMs }),
+      },
+      { timeoutMs: Math.max(timeoutMs + 5_000, 15_000) },
+    );
+    const result = expectPayload(resp, "controllerScanResult");
+    return result.devices.map((d) => ({
+      mac: d.mac,
+      name: d.name,
+      rssi: d.rssi,
+      paired: d.paired,
+      connected: d.connected,
+      kind: d.kind === "gamepad" ? "gamepad" : "unknown",
+    }));
+  }
+
+  async pairController(mac: string): Promise<ControllerStatus> {
+    const resp = await this.sendRequest(
+      {
+        case: "pairController",
+        value: create(PairControllerRequestSchema, { mac }),
+      },
+      // bluetoothctl pair can take a while if the user is slow to
+      // confirm on the controller side.
+      { timeoutMs: 30_000 },
+    );
+    return controllerStatusFromProto(expectPayload(resp, "controllerStatus"));
+  }
+
+  async unpairController(mac: string): Promise<ControllerStatus> {
+    const resp = await this.sendRequest({
+      case: "unpairController",
+      value: create(UnpairControllerRequestSchema, { mac }),
+    });
+    return controllerStatusFromProto(expectPayload(resp, "controllerStatus"));
+  }
+
+  async getControllerStatus(): Promise<ControllerStatus> {
+    const resp = await this.sendRequest({
+      case: "getControllerStatus",
+      value: create(GetControllerStatusRequestSchema),
+    });
+    return controllerStatusFromProto(expectPayload(resp, "controllerStatus"));
+  }
+
   // ---- internal helpers ------------------------------------------------
 
   private async sendRequest(
@@ -501,4 +558,20 @@ function appCommandFromLabel(c: "START" | "STOP" | "RESTART"): AppCommand {
     case "RESTART":
       return AppCommand.RESTART;
   }
+}
+
+function controllerStatusFromProto(
+  s: PayloadOf<"controllerStatus">,
+): ControllerStatus {
+  return {
+    enabled: s.enabled,
+    pairedMac: s.pairedMac,
+    deviceName: s.deviceName,
+    connected: s.connected,
+    armed: s.armed,
+    estopLatched: s.estopLatched,
+    // protobuf int64 → bigint; ms-since-epoch fits in a JS number.
+    lastEventUnixMs: Number(s.lastEventUnixMs),
+    targetAddr: s.targetAddr,
+  };
 }

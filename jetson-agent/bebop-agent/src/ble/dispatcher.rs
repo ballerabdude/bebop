@@ -3,12 +3,14 @@
 
 use bebop_proto::v1::{
     agent_response, client_request, AgentResponse, AppCommand, AppStatus, ClientRequest,
-    DeviceInfo, OtaStatus, ResponseStatus, RobotConfig, WifiScanResult, WifiStatus,
+    ControllerScanResult, ControllerStatus, DeviceInfo, DiscoveredController, OtaStatus,
+    ResponseStatus, RobotConfig, WifiScanResult, WifiStatus,
 };
 
 use crate::config::{self, AgentConfig};
+use crate::controller::bluez::{DeviceKind, DiscoveredDevice};
 use crate::error::AgentError;
-use crate::{containers, ota, state::AppState, wifi, AGENT_VERSION};
+use crate::{containers, controller, ota, state::AppState, wifi, AGENT_VERSION};
 
 /// Top-level dispatch.
 pub async fn handle(state: &AppState, req: ClientRequest) -> AgentResponse {
@@ -39,6 +41,18 @@ pub async fn handle(state: &AppState, req: ClientRequest) -> AgentResponse {
         client_request::Payload::GetOtaStatus(_) => ota_status(state, request_id).await,
         client_request::Payload::SetAppImage(req) => {
             set_app_image(state, request_id, req.image).await
+        }
+        client_request::Payload::ScanControllers(req) => {
+            scan_controllers(request_id, req.timeout_ms).await
+        }
+        client_request::Payload::PairController(req) => {
+            pair_controller(state, request_id, req.mac).await
+        }
+        client_request::Payload::UnpairController(req) => {
+            unpair_controller(state, request_id, req.mac).await
+        }
+        client_request::Payload::GetControllerStatus(_) => {
+            controller_status(state, request_id).await
         }
     }
 }
@@ -192,6 +206,58 @@ async fn trigger_ota(state: &AppState, request_id: u32, target_image: String) ->
     {
         Ok(()) => ok_response_with_message(request_id, "ota started"),
         Err(e) => err_response(request_id, ResponseStatus::Error, &e.to_string()),
+    }
+}
+
+async fn scan_controllers(request_id: u32, timeout_ms: u32) -> AgentResponse {
+    match controller::scan(timeout_ms).await {
+        Ok(devices) => {
+            let result = ControllerScanResult {
+                devices: devices.into_iter().map(into_proto_device).collect(),
+            };
+            ok_response(
+                request_id,
+                agent_response::Payload::ControllerScanResult(result),
+            )
+        }
+        Err(e) => err_response(request_id, ResponseStatus::Error, &e.to_string()),
+    }
+}
+
+async fn pair_controller(state: &AppState, request_id: u32, mac: String) -> AgentResponse {
+    if mac.trim().is_empty() {
+        return err_response(request_id, ResponseStatus::Error, "missing mac");
+    }
+    match controller::pair(state, mac.trim()).await {
+        Ok(()) => controller_status(state, request_id).await,
+        Err(e) => err_response(request_id, ResponseStatus::Error, &e.to_string()),
+    }
+}
+
+async fn unpair_controller(state: &AppState, request_id: u32, mac: String) -> AgentResponse {
+    match controller::unpair(state, mac.trim()).await {
+        Ok(()) => controller_status(state, request_id).await,
+        Err(e) => err_response(request_id, ResponseStatus::Error, &e.to_string()),
+    }
+}
+
+async fn controller_status(state: &AppState, request_id: u32) -> AgentResponse {
+    let s: ControllerStatus = controller::status(state).await;
+    ok_response(request_id, agent_response::Payload::ControllerStatus(s))
+}
+
+fn into_proto_device(d: DiscoveredDevice) -> DiscoveredController {
+    let kind = match d.kind {
+        DeviceKind::Gamepad => "gamepad",
+        DeviceKind::Unknown => "unknown",
+    };
+    DiscoveredController {
+        mac: d.mac,
+        name: d.name,
+        rssi: d.rssi,
+        paired: d.paired,
+        connected: d.connected,
+        kind: kind.into(),
     }
 }
 

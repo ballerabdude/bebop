@@ -17,6 +17,7 @@
 mod ble;
 mod config;
 mod containers;
+mod controller;
 mod error;
 mod ota;
 mod state;
@@ -67,6 +68,15 @@ async fn main() -> anyhow::Result<()> {
         tasks.spawn(async move {
             if let Err(e) = ble::run(s).await {
                 error!(error = ?e, "ble server exited");
+            }
+        });
+    }
+
+    {
+        let s = state.clone();
+        tasks.spawn(async move {
+            if let Err(e) = controller::run(s).await {
+                error!(error = ?e, "controller subsystem exited");
             }
         });
     }

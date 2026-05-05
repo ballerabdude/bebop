@@ -42,6 +42,11 @@ prost = "0.13"
 [target.'cfg(target_os = "linux")'.dependencies]
 bluer = { version = "0.17", features = ["bluetoothd", "l2cap", "rfcomm"] }
 
+# evdev for reading paired Bluetooth gamepad input. Linux-only because
+# /dev/input/event* is a Linux kernel surface; the controller subsystem
+# stubs out on other platforms via `controller/stub.rs`.
+evdev = { version = "0.13", features = ["tokio"] }
+
 [features]
 default = []
 # Compile without touching real system daemons (BlueZ, Docker, NetworkManager).

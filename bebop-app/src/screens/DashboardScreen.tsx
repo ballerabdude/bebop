@@ -15,6 +15,7 @@ interface DashboardProps {
   onReconfigure: () => void;
   onDisconnect: () => void;
   onOpenMotors: () => void;
+  onOpenControllers: () => void;
 }
 
 /// Live dashboard shown after initial setup succeeds. Stays connected via
@@ -25,6 +26,7 @@ export function DashboardScreen({
   onReconfigure,
   onDisconnect,
   onOpenMotors,
+  onOpenControllers,
 }: DashboardProps) {
   const [info, setInfo] = useState<DeviceInfo | null>(null);
   const [app, setApp] = useState<AppStatus | null>(null);
@@ -351,7 +353,10 @@ export function DashboardScreen({
         >
           Open motor bench
         </Button>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <Button variant="secondary" onClick={onOpenControllers}>
+            Bluetooth controller
+          </Button>
           <Button
             variant="secondary"
             onClick={checkForUpdate}

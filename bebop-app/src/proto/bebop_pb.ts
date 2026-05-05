@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file bebop.proto.
  */
 export const file_bebop: GenFile = /*@__PURE__*/
-  fileDesc("CgtiZWJvcC5wcm90bxIIYmVib3AudjEipAUKDUNsaWVudFJlcXVlc3QSEgoKcmVxdWVzdF9pZBgBIAEoDRI5Cg9nZXRfZGV2aWNlX2luZm8YCiABKAsyHi5iZWJvcC52MS5HZXREZXZpY2VJbmZvUmVxdWVzdEgAEi4KCXNjYW5fd2lmaRgLIAEoCzIZLmJlYm9wLnYxLlNjYW5XaWZpUmVxdWVzdEgAEkMKFHNldF93aWZpX2NyZWRlbnRpYWxzGAwgASgLMiMuYmVib3AudjEuU2V0V2lmaUNyZWRlbnRpYWxzUmVxdWVzdEgAEjkKD2dldF93aWZpX3N0YXR1cxgNIAEoCzIeLmJlYm9wLnYxLkdldFdpZmlTdGF0dXNSZXF1ZXN0SAASOwoQc2V0X3JvYm90X2NvbmZpZxgOIAEoCzIfLmJlYm9wLnYxLlNldFJvYm90Q29uZmlnUmVxdWVzdEgAEjsKEGdldF9yb2JvdF9jb25maWcYDyABKAsyHy5iZWJvcC52MS5HZXRSb2JvdENvbmZpZ1JlcXVlc3RIABI3Cg5nZXRfYXBwX3N0YXR1cxgQIAEoCzIdLmJlYm9wLnYxLkdldEFwcFN0YXR1c1JlcXVlc3RIABIyCgtjb250cm9sX2FwcBgRIAEoCzIbLmJlYm9wLnYxLkNvbnRyb2xBcHBSZXF1ZXN0SAASMgoLdHJpZ2dlcl9vdGEYEiABKAsyGy5iZWJvcC52MS5UcmlnZ2VyT3RhUmVxdWVzdEgAEjcKDmdldF9vdGFfc3RhdHVzGBMgASgLMh0uYmVib3AudjEuR2V0T3RhU3RhdHVzUmVxdWVzdEgAEjUKDXNldF9hcHBfaW1hZ2UYFCABKAsyHC5iZWJvcC52MS5TZXRBcHBJbWFnZVJlcXVlc3RIAEIJCgdwYXlsb2FkIv4CCg1BZ2VudFJlc3BvbnNlEhIKCnJlcXVlc3RfaWQYASABKA0SKAoGc3RhdHVzGAIgASgOMhguYmVib3AudjEuUmVzcG9uc2VTdGF0dXMSDwoHbWVzc2FnZRgDIAEoCRIrCgtkZXZpY2VfaW5mbxgKIAEoCzIULmJlYm9wLnYxLkRldmljZUluZm9IABI0ChB3aWZpX3NjYW5fcmVzdWx0GAsgASgLMhguYmVib3AudjEuV2lmaVNjYW5SZXN1bHRIABIrCgt3aWZpX3N0YXR1cxgMIAEoCzIULmJlYm9wLnYxLldpZmlTdGF0dXNIABItCgxyb2JvdF9jb25maWcYDSABKAsyFS5iZWJvcC52MS5Sb2JvdENvbmZpZ0gAEikKCmFwcF9zdGF0dXMYDiABKAsyEy5iZWJvcC52MS5BcHBTdGF0dXNIABIpCgpvdGFfc3RhdHVzGA8gASgLMhMuYmVib3AudjEuT3RhU3RhdHVzSABCCQoHcGF5bG9hZCIWChRHZXREZXZpY2VJbmZvUmVxdWVzdCJ0CgpEZXZpY2VJbmZvEhUKDXNlcmlhbF9udW1iZXIYASABKAkSDQoFbW9kZWwYAiABKAkSFQoNYWdlbnRfdmVyc2lvbhgDIAEoCRIXCg9qZXRwYWNrX3ZlcnNpb24YBCABKAkSEAoIaG9zdG5hbWUYBSABKAkiEQoPU2NhbldpZmlSZXF1ZXN0IlAKC1dpZmlOZXR3b3JrEgwKBHNzaWQYASABKAkSEgoKc2lnbmFsX2RibRgCIAEoBRIQCghzZWN1cml0eRgDIAEoCRINCgVzYXZlZBgEIAEoCCI5Cg5XaWZpU2NhblJlc3VsdBInCghuZXR3b3JrcxgBIAMoCzIVLmJlYm9wLnYxLldpZmlOZXR3b3JrIksKGVNldFdpZmlDcmVkZW50aWFsc1JlcXVlc3QSDAoEc3NpZBgBIAEoCRIQCghwYXNzd29yZBgCIAEoCRIOCgZoaWRkZW4YAyABKAgiFgoUR2V0V2lmaVN0YXR1c1JlcXVlc3QiVQoKV2lmaVN0YXR1cxIRCgljb25uZWN0ZWQYASABKAgSDAoEc3NpZBgCIAEoCRISCgppcF9hZGRyZXNzGAMgASgJEhIKCnNpZ25hbF9kYm0YBCABKAUipAEKC1JvYm90Q29uZmlnEhIKCnJvYm90X25hbWUYASABKAkSEAoIb3duZXJfaWQYAiABKAkSEAoIdGltZXpvbmUYAyABKAkSLwoFZXh0cmEYZCADKAsyIC5iZWJvcC52MS5Sb2JvdENvbmZpZy5FeHRyYUVudHJ5GiwKCkV4dHJhRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASI+ChVTZXRSb2JvdENvbmZpZ1JlcXVlc3QSJQoGY29uZmlnGAEgASgLMhUuYmVib3AudjEuUm9ib3RDb25maWciFwoVR2V0Um9ib3RDb25maWdSZXF1ZXN0IqsBCglBcHBTdGF0dXMSEAoIYXBwX25hbWUYASABKAkSDQoFaW1hZ2UYAiABKAkSFAoMaW1hZ2VfZGlnZXN0GAMgASgJEiEKBXN0YXRlGAQgASgOMhIuYmVib3AudjEuQXBwU3RhdGUSFAoMY29udGFpbmVyX2lkGAUgASgJEhcKD3N0YXJ0ZWRfYXRfdW5peBgGIAEoAxIVCg1yZXN0YXJ0X2NvdW50GAcgASgFIhUKE0dldEFwcFN0YXR1c1JlcXVlc3QiTAoRQ29udHJvbEFwcFJlcXVlc3QSEAoIYXBwX25hbWUYASABKAkSJQoHY29tbWFuZBgCIAEoDjIULmJlYm9wLnYxLkFwcENvbW1hbmQiIwoSU2V0QXBwSW1hZ2VSZXF1ZXN0Eg0KBWltYWdlGAEgASgJIikKEVRyaWdnZXJPdGFSZXF1ZXN0EhQKDHRhcmdldF9pbWFnZRgBIAEoCSKEAQoJT3RhU3RhdHVzEiEKBXN0YXRlGAEgASgOMhIuYmVib3AudjEuT3RhU3RhdGUSFQoNY3VycmVudF9pbWFnZRgCIAEoCRIUCgx0YXJnZXRfaW1hZ2UYAyABKAkSGAoQcHJvZ3Jlc3NfcGVyY2VudBgEIAEoDRINCgVlcnJvchgFIAEoCSIVChNHZXRPdGFTdGF0dXNSZXF1ZXN0KqcBCg5SZXNwb25zZVN0YXR1cxIfChtSRVNQT05TRV9TVEFUVVNfVU5TUEVDSUZJRUQQABIWChJSRVNQT05TRV9TVEFUVVNfT0sQARIZChVSRVNQT05TRV9TVEFUVVNfRVJST1IQAhIgChxSRVNQT05TRV9TVEFUVVNfVU5BVVRIT1JJWkVEEAMSHwobUkVTUE9OU0VfU1RBVFVTX0lOX1BST0dSRVNTEAQqmgEKCEFwcFN0YXRlEhkKFUFQUF9TVEFURV9VTlNQRUNJRklFRBAAEhUKEUFQUF9TVEFURV9TVE9QUEVEEAESFgoSQVBQX1NUQVRFX1NUQVJUSU5HEAISFQoRQVBQX1NUQVRFX1JVTk5JTkcQAxIVChFBUFBfU1RBVEVfQ1JBU0hFRBAEEhYKEkFQUF9TVEFURV9VUERBVElORxAFKm8KCkFwcENvbW1hbmQSGwoXQVBQX0NPTU1BTkRfVU5TUEVDSUZJRUQQABIVChFBUFBfQ09NTUFORF9TVEFSVBABEhQKEEFQUF9DT01NQU5EX1NUT1AQAhIXChNBUFBfQ09NTUFORF9SRVNUQVJUEAMqsQEKCE90YVN0YXRlEhkKFU9UQV9TVEFURV9VTlNQRUNJRklFRBAAEhIKDk9UQV9TVEFURV9JRExFEAESFgoST1RBX1NUQVRFX0NIRUNLSU5HEAISGQoVT1RBX1NUQVRFX0RPV05MT0FESU5HEAMSFgoST1RBX1NUQVRFX0FQUExZSU5HEAQSFQoRT1RBX1NUQVRFX1NVQ0NFU1MQBRIUChBPVEFfU1RBVEVfRkFJTEVEEAZiBnByb3RvMw");
+  fileDesc("CgtiZWJvcC5wcm90bxIIYmVib3AudjEipQcKDUNsaWVudFJlcXVlc3QSEgoKcmVxdWVzdF9pZBgBIAEoDRI5Cg9nZXRfZGV2aWNlX2luZm8YCiABKAsyHi5iZWJvcC52MS5HZXREZXZpY2VJbmZvUmVxdWVzdEgAEi4KCXNjYW5fd2lmaRgLIAEoCzIZLmJlYm9wLnYxLlNjYW5XaWZpUmVxdWVzdEgAEkMKFHNldF93aWZpX2NyZWRlbnRpYWxzGAwgASgLMiMuYmVib3AudjEuU2V0V2lmaUNyZWRlbnRpYWxzUmVxdWVzdEgAEjkKD2dldF93aWZpX3N0YXR1cxgNIAEoCzIeLmJlYm9wLnYxLkdldFdpZmlTdGF0dXNSZXF1ZXN0SAASOwoQc2V0X3JvYm90X2NvbmZpZxgOIAEoCzIfLmJlYm9wLnYxLlNldFJvYm90Q29uZmlnUmVxdWVzdEgAEjsKEGdldF9yb2JvdF9jb25maWcYDyABKAsyHy5iZWJvcC52MS5HZXRSb2JvdENvbmZpZ1JlcXVlc3RIABI3Cg5nZXRfYXBwX3N0YXR1cxgQIAEoCzIdLmJlYm9wLnYxLkdldEFwcFN0YXR1c1JlcXVlc3RIABIyCgtjb250cm9sX2FwcBgRIAEoCzIbLmJlYm9wLnYxLkNvbnRyb2xBcHBSZXF1ZXN0SAASMgoLdHJpZ2dlcl9vdGEYEiABKAsyGy5iZWJvcC52MS5UcmlnZ2VyT3RhUmVxdWVzdEgAEjcKDmdldF9vdGFfc3RhdHVzGBMgASgLMh0uYmVib3AudjEuR2V0T3RhU3RhdHVzUmVxdWVzdEgAEjUKDXNldF9hcHBfaW1hZ2UYFCABKAsyHC5iZWJvcC52MS5TZXRBcHBJbWFnZVJlcXVlc3RIABI8ChBzY2FuX2NvbnRyb2xsZXJzGBUgASgLMiAuYmVib3AudjEuU2NhbkNvbnRyb2xsZXJzUmVxdWVzdEgAEjoKD3BhaXJfY29udHJvbGxlchgWIAEoCzIfLmJlYm9wLnYxLlBhaXJDb250cm9sbGVyUmVxdWVzdEgAEj4KEXVucGFpcl9jb250cm9sbGVyGBcgASgLMiEuYmVib3AudjEuVW5wYWlyQ29udHJvbGxlclJlcXVlc3RIABJFChVnZXRfY29udHJvbGxlcl9zdGF0dXMYGCABKAsyJC5iZWJvcC52MS5HZXRDb250cm9sbGVyU3RhdHVzUmVxdWVzdEgAQgkKB3BheWxvYWQi+QMKDUFnZW50UmVzcG9uc2USEgoKcmVxdWVzdF9pZBgBIAEoDRIoCgZzdGF0dXMYAiABKA4yGC5iZWJvcC52MS5SZXNwb25zZVN0YXR1cxIPCgdtZXNzYWdlGAMgASgJEisKC2RldmljZV9pbmZvGAogASgLMhQuYmVib3AudjEuRGV2aWNlSW5mb0gAEjQKEHdpZmlfc2Nhbl9yZXN1bHQYCyABKAsyGC5iZWJvcC52MS5XaWZpU2NhblJlc3VsdEgAEisKC3dpZmlfc3RhdHVzGAwgASgLMhQuYmVib3AudjEuV2lmaVN0YXR1c0gAEi0KDHJvYm90X2NvbmZpZxgNIAEoCzIVLmJlYm9wLnYxLlJvYm90Q29uZmlnSAASKQoKYXBwX3N0YXR1cxgOIAEoCzITLmJlYm9wLnYxLkFwcFN0YXR1c0gAEikKCm90YV9zdGF0dXMYDyABKAsyEy5iZWJvcC52MS5PdGFTdGF0dXNIABJAChZjb250cm9sbGVyX3NjYW5fcmVzdWx0GBAgASgLMh4uYmVib3AudjEuQ29udHJvbGxlclNjYW5SZXN1bHRIABI3ChFjb250cm9sbGVyX3N0YXR1cxgRIAEoCzIaLmJlYm9wLnYxLkNvbnRyb2xsZXJTdGF0dXNIAEIJCgdwYXlsb2FkIhYKFEdldERldmljZUluZm9SZXF1ZXN0InQKCkRldmljZUluZm8SFQoNc2VyaWFsX251bWJlchgBIAEoCRINCgVtb2RlbBgCIAEoCRIVCg1hZ2VudF92ZXJzaW9uGAMgASgJEhcKD2pldHBhY2tfdmVyc2lvbhgEIAEoCRIQCghob3N0bmFtZRgFIAEoCSIRCg9TY2FuV2lmaVJlcXVlc3QiUAoLV2lmaU5ldHdvcmsSDAoEc3NpZBgBIAEoCRISCgpzaWduYWxfZGJtGAIgASgFEhAKCHNlY3VyaXR5GAMgASgJEg0KBXNhdmVkGAQgASgIIjkKDldpZmlTY2FuUmVzdWx0EicKCG5ldHdvcmtzGAEgAygLMhUuYmVib3AudjEuV2lmaU5ldHdvcmsiSwoZU2V0V2lmaUNyZWRlbnRpYWxzUmVxdWVzdBIMCgRzc2lkGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEg4KBmhpZGRlbhgDIAEoCCIWChRHZXRXaWZpU3RhdHVzUmVxdWVzdCJVCgpXaWZpU3RhdHVzEhEKCWNvbm5lY3RlZBgBIAEoCBIMCgRzc2lkGAIgASgJEhIKCmlwX2FkZHJlc3MYAyABKAkSEgoKc2lnbmFsX2RibRgEIAEoBSKkAQoLUm9ib3RDb25maWcSEgoKcm9ib3RfbmFtZRgBIAEoCRIQCghvd25lcl9pZBgCIAEoCRIQCgh0aW1lem9uZRgDIAEoCRIvCgVleHRyYRhkIAMoCzIgLmJlYm9wLnYxLlJvYm90Q29uZmlnLkV4dHJhRW50cnkaLAoKRXh0cmFFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIj4KFVNldFJvYm90Q29uZmlnUmVxdWVzdBIlCgZjb25maWcYASABKAsyFS5iZWJvcC52MS5Sb2JvdENvbmZpZyIXChVHZXRSb2JvdENvbmZpZ1JlcXVlc3QiqwEKCUFwcFN0YXR1cxIQCghhcHBfbmFtZRgBIAEoCRINCgVpbWFnZRgCIAEoCRIUCgxpbWFnZV9kaWdlc3QYAyABKAkSIQoFc3RhdGUYBCABKA4yEi5iZWJvcC52MS5BcHBTdGF0ZRIUCgxjb250YWluZXJfaWQYBSABKAkSFwoPc3RhcnRlZF9hdF91bml4GAYgASgDEhUKDXJlc3RhcnRfY291bnQYByABKAUiFQoTR2V0QXBwU3RhdHVzUmVxdWVzdCJMChFDb250cm9sQXBwUmVxdWVzdBIQCghhcHBfbmFtZRgBIAEoCRIlCgdjb21tYW5kGAIgASgOMhQuYmVib3AudjEuQXBwQ29tbWFuZCIjChJTZXRBcHBJbWFnZVJlcXVlc3QSDQoFaW1hZ2UYASABKAkiKQoRVHJpZ2dlck90YVJlcXVlc3QSFAoMdGFyZ2V0X2ltYWdlGAEgASgJIoQBCglPdGFTdGF0dXMSIQoFc3RhdGUYASABKA4yEi5iZWJvcC52MS5PdGFTdGF0ZRIVCg1jdXJyZW50X2ltYWdlGAIgASgJEhQKDHRhcmdldF9pbWFnZRgDIAEoCRIYChBwcm9ncmVzc19wZXJjZW50GAQgASgNEg0KBWVycm9yGAUgASgJIhUKE0dldE90YVN0YXR1c1JlcXVlc3QiLAoWU2NhbkNvbnRyb2xsZXJzUmVxdWVzdBISCgp0aW1lb3V0X21zGAEgASgNIiQKFVBhaXJDb250cm9sbGVyUmVxdWVzdBILCgNtYWMYASABKAkiJgoXVW5wYWlyQ29udHJvbGxlclJlcXVlc3QSCwoDbWFjGAEgASgJIhwKGkdldENvbnRyb2xsZXJTdGF0dXNSZXF1ZXN0InAKFERpc2NvdmVyZWRDb250cm9sbGVyEgsKA21hYxgBIAEoCRIMCgRuYW1lGAIgASgJEgwKBHJzc2kYAyABKAUSDgoGcGFpcmVkGAQgASgIEhEKCWNvbm5lY3RlZBgFIAEoCBIMCgRraW5kGAYgASgJIkcKFENvbnRyb2xsZXJTY2FuUmVzdWx0Ei8KB2RldmljZXMYASADKAsyHi5iZWJvcC52MS5EaXNjb3ZlcmVkQ29udHJvbGxlciK2AQoQQ29udHJvbGxlclN0YXR1cxIPCgdlbmFibGVkGAEgASgIEhIKCnBhaXJlZF9tYWMYAiABKAkSEwoLZGV2aWNlX25hbWUYAyABKAkSEQoJY29ubmVjdGVkGAQgASgIEg0KBWFybWVkGAUgASgIEhUKDWVzdG9wX2xhdGNoZWQYBiABKAgSGgoSbGFzdF9ldmVudF91bml4X21zGAcgASgDEhMKC3RhcmdldF9hZGRyGAggASgJKqcBCg5SZXNwb25zZVN0YXR1cxIfChtSRVNQT05TRV9TVEFUVVNfVU5TUEVDSUZJRUQQABIWChJSRVNQT05TRV9TVEFUVVNfT0sQARIZChVSRVNQT05TRV9TVEFUVVNfRVJST1IQAhIgChxSRVNQT05TRV9TVEFUVVNfVU5BVVRIT1JJWkVEEAMSHwobUkVTUE9OU0VfU1RBVFVTX0lOX1BST0dSRVNTEAQqmgEKCEFwcFN0YXRlEhkKFUFQUF9TVEFURV9VTlNQRUNJRklFRBAAEhUKEUFQUF9TVEFURV9TVE9QUEVEEAESFgoSQVBQX1NUQVRFX1NUQVJUSU5HEAISFQoRQVBQX1NUQVRFX1JVTk5JTkcQAxIVChFBUFBfU1RBVEVfQ1JBU0hFRBAEEhYKEkFQUF9TVEFURV9VUERBVElORxAFKm8KCkFwcENvbW1hbmQSGwoXQVBQX0NPTU1BTkRfVU5TUEVDSUZJRUQQABIVChFBUFBfQ09NTUFORF9TVEFSVBABEhQKEEFQUF9DT01NQU5EX1NUT1AQAhIXChNBUFBfQ09NTUFORF9SRVNUQVJUEAMqsQEKCE90YVN0YXRlEhkKFU9UQV9TVEFURV9VTlNQRUNJRklFRBAAEhIKDk9UQV9TVEFURV9JRExFEAESFgoST1RBX1NUQVRFX0NIRUNLSU5HEAISGQoVT1RBX1NUQVRFX0RPV05MT0FESU5HEAMSFgoST1RBX1NUQVRFX0FQUExZSU5HEAQSFQoRT1RBX1NUQVRFX1NVQ0NFU1MQBRIUChBPVEFfU1RBVEVfRkFJTEVEEAZiBnByb3RvMw");
 
 /**
  * @generated from message bebop.v1.ClientRequest
@@ -90,6 +90,30 @@ export type ClientRequest = Message<"bebop.v1.ClientRequest"> & {
      */
     value: SetAppImageRequest;
     case: "setAppImage";
+  } | {
+    /**
+     * @generated from field: bebop.v1.ScanControllersRequest scan_controllers = 21;
+     */
+    value: ScanControllersRequest;
+    case: "scanControllers";
+  } | {
+    /**
+     * @generated from field: bebop.v1.PairControllerRequest pair_controller = 22;
+     */
+    value: PairControllerRequest;
+    case: "pairController";
+  } | {
+    /**
+     * @generated from field: bebop.v1.UnpairControllerRequest unpair_controller = 23;
+     */
+    value: UnpairControllerRequest;
+    case: "unpairController";
+  } | {
+    /**
+     * @generated from field: bebop.v1.GetControllerStatusRequest get_controller_status = 24;
+     */
+    value: GetControllerStatusRequest;
+    case: "getControllerStatus";
   } | { case: undefined; value?: undefined };
 };
 
@@ -160,6 +184,18 @@ export type AgentResponse = Message<"bebop.v1.AgentResponse"> & {
      */
     value: OtaStatus;
     case: "otaStatus";
+  } | {
+    /**
+     * @generated from field: bebop.v1.ControllerScanResult controller_scan_result = 16;
+     */
+    value: ControllerScanResult;
+    case: "controllerScanResult";
+  } | {
+    /**
+     * @generated from field: bebop.v1.ControllerStatus controller_status = 17;
+     */
+    value: ControllerStatus;
+    case: "controllerStatus";
   } | { case: undefined; value?: undefined };
 };
 
@@ -597,6 +633,209 @@ export type GetOtaStatusRequest = Message<"bebop.v1.GetOtaStatusRequest"> & {
  */
 export const GetOtaStatusRequestSchema: GenMessage<GetOtaStatusRequest> = /*@__PURE__*/
   messageDesc(file_bebop, 19);
+
+/**
+ * @generated from message bebop.v1.ScanControllersRequest
+ */
+export type ScanControllersRequest = Message<"bebop.v1.ScanControllersRequest"> & {
+  /**
+   * Discovery duration in milliseconds. Defaults to ~8000 if zero.
+   *
+   * @generated from field: uint32 timeout_ms = 1;
+   */
+  timeoutMs: number;
+};
+
+/**
+ * Describes the message bebop.v1.ScanControllersRequest.
+ * Use `create(ScanControllersRequestSchema)` to create a new message.
+ */
+export const ScanControllersRequestSchema: GenMessage<ScanControllersRequest> = /*@__PURE__*/
+  messageDesc(file_bebop, 20);
+
+/**
+ * @generated from message bebop.v1.PairControllerRequest
+ */
+export type PairControllerRequest = Message<"bebop.v1.PairControllerRequest"> & {
+  /**
+   * BT MAC address (colon-separated, uppercase) as returned by
+   * ScanControllers. Agent runs `bluetoothctl pair / trust / connect`
+   * and persists the MAC to agent.toml on success.
+   *
+   * @generated from field: string mac = 1;
+   */
+  mac: string;
+};
+
+/**
+ * Describes the message bebop.v1.PairControllerRequest.
+ * Use `create(PairControllerRequestSchema)` to create a new message.
+ */
+export const PairControllerRequestSchema: GenMessage<PairControllerRequest> = /*@__PURE__*/
+  messageDesc(file_bebop, 21);
+
+/**
+ * @generated from message bebop.v1.UnpairControllerRequest
+ */
+export type UnpairControllerRequest = Message<"bebop.v1.UnpairControllerRequest"> & {
+  /**
+   * BT MAC to remove. If empty, the currently paired controller is
+   * unpaired.
+   *
+   * @generated from field: string mac = 1;
+   */
+  mac: string;
+};
+
+/**
+ * Describes the message bebop.v1.UnpairControllerRequest.
+ * Use `create(UnpairControllerRequestSchema)` to create a new message.
+ */
+export const UnpairControllerRequestSchema: GenMessage<UnpairControllerRequest> = /*@__PURE__*/
+  messageDesc(file_bebop, 22);
+
+/**
+ * @generated from message bebop.v1.GetControllerStatusRequest
+ */
+export type GetControllerStatusRequest = Message<"bebop.v1.GetControllerStatusRequest"> & {
+};
+
+/**
+ * Describes the message bebop.v1.GetControllerStatusRequest.
+ * Use `create(GetControllerStatusRequestSchema)` to create a new message.
+ */
+export const GetControllerStatusRequestSchema: GenMessage<GetControllerStatusRequest> = /*@__PURE__*/
+  messageDesc(file_bebop, 23);
+
+/**
+ * @generated from message bebop.v1.DiscoveredController
+ */
+export type DiscoveredController = Message<"bebop.v1.DiscoveredController"> & {
+  /**
+   * @generated from field: string mac = 1;
+   */
+  mac: string;
+
+  /**
+   * @generated from field: string name = 2;
+   */
+  name: string;
+
+  /**
+   * @generated from field: int32 rssi = 3;
+   */
+  rssi: number;
+
+  /**
+   * @generated from field: bool paired = 4;
+   */
+  paired: boolean;
+
+  /**
+   * @generated from field: bool connected = 5;
+   */
+  connected: boolean;
+
+  /**
+   * "gamepad" if the device's Class-of-Device or HID descriptor look
+   * like a gamepad/joystick; "unknown" otherwise. The mobile app
+   * hides non-gamepads by default.
+   *
+   * @generated from field: string kind = 6;
+   */
+  kind: string;
+};
+
+/**
+ * Describes the message bebop.v1.DiscoveredController.
+ * Use `create(DiscoveredControllerSchema)` to create a new message.
+ */
+export const DiscoveredControllerSchema: GenMessage<DiscoveredController> = /*@__PURE__*/
+  messageDesc(file_bebop, 24);
+
+/**
+ * @generated from message bebop.v1.ControllerScanResult
+ */
+export type ControllerScanResult = Message<"bebop.v1.ControllerScanResult"> & {
+  /**
+   * @generated from field: repeated bebop.v1.DiscoveredController devices = 1;
+   */
+  devices: DiscoveredController[];
+};
+
+/**
+ * Describes the message bebop.v1.ControllerScanResult.
+ * Use `create(ControllerScanResultSchema)` to create a new message.
+ */
+export const ControllerScanResultSchema: GenMessage<ControllerScanResult> = /*@__PURE__*/
+  messageDesc(file_bebop, 25);
+
+/**
+ * @generated from message bebop.v1.ControllerStatus
+ */
+export type ControllerStatus = Message<"bebop.v1.ControllerStatus"> & {
+  /**
+   * Whether the controller subsystem is enabled in agent.toml.
+   *
+   * @generated from field: bool enabled = 1;
+   */
+  enabled: boolean;
+
+  /**
+   * MAC + cached human-readable name of the currently bound controller.
+   * Empty when no controller has been paired.
+   *
+   * @generated from field: string paired_mac = 2;
+   */
+  pairedMac: string;
+
+  /**
+   * @generated from field: string device_name = 3;
+   */
+  deviceName: string;
+
+  /**
+   * Whether the OS sees the paired controller as currently connected.
+   *
+   * @generated from field: bool connected = 4;
+   */
+  connected: boolean;
+
+  /**
+   * True iff the deadman trigger is held AND the e-stop latch is clear.
+   * Velocity commands only flow downstream when this is true.
+   *
+   * @generated from field: bool armed = 5;
+   */
+  armed: boolean;
+
+  /**
+   * @generated from field: bool estop_latched = 6;
+   */
+  estopLatched: boolean;
+
+  /**
+   * Wall-clock timestamp of the most recent input event from the pad
+   * (milliseconds since the Unix epoch). Zero before any events arrive.
+   *
+   * @generated from field: int64 last_event_unix_ms = 7;
+   */
+  lastEventUnixMs: bigint;
+
+  /**
+   * UDP target the agent forwards teleop commands to (e.g. "127.0.0.1:10000").
+   *
+   * @generated from field: string target_addr = 8;
+   */
+  targetAddr: string;
+};
+
+/**
+ * Describes the message bebop.v1.ControllerStatus.
+ * Use `create(ControllerStatusSchema)` to create a new message.
+ */
+export const ControllerStatusSchema: GenMessage<ControllerStatus> = /*@__PURE__*/
+  messageDesc(file_bebop, 26);
 
 /**
  * @generated from enum bebop.v1.ResponseStatus

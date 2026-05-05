@@ -38,6 +38,9 @@ pub enum AgentError {
     #[error("container error: {0}")]
     Container(String),
 
+    #[error("controller error: {0}")]
+    Controller(String),
+
     // Scaffolding: surfaced once the OTA updater reports failures back over
     // BLE instead of just logging them.
     #[allow(dead_code)]

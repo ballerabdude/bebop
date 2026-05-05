@@ -28,6 +28,9 @@ pub struct AgentConfig {
 
     #[serde(default)]
     pub ota: OtaConfig,
+
+    #[serde(default)]
+    pub controller: ControllerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +124,79 @@ impl Default for OtaConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControllerConfig {
+    /// Master switch. With no `paired_mac` set the supervisor idles
+    /// regardless, so leaving this `true` is safe even on robots that
+    /// have never paired a controller.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// UDP `host:port` the agent forwards `{xvel,yvel,angvel}` JSON to.
+    /// Defaults to bebop-linux's documented teleop endpoint on
+    /// localhost; change only if bebop-linux runs on a different host.
+    #[serde(default = "default_controller_target_addr")]
+    pub target_addr: String,
+
+    /// MAC of the currently bound gamepad. Populated automatically by
+    /// the BLE-driven pairing flow; clear it (or unpair from the app)
+    /// to forget the device.
+    #[serde(default)]
+    pub paired_mac: String,
+
+    /// Cached human-readable name of the paired gamepad, for UI / logs.
+    #[serde(default)]
+    pub device_name: String,
+
+    /// Radial deadzone applied to each analog stick (0..1). Anything
+    /// inside this radius is treated as centred.
+    #[serde(default = "default_deadzone")]
+    pub deadzone: f32,
+
+    /// Maximum body-frame linear velocity emitted (m/s).
+    #[serde(default = "default_max_lin_vel")]
+    pub max_lin_vel: f32,
+
+    /// Maximum body-frame angular velocity emitted (rad/s).
+    #[serde(default = "default_max_ang_vel")]
+    pub max_ang_vel: f32,
+
+    /// Trigger threshold (0..1) above which the deadman is considered
+    /// engaged. R2 on a PS5 DualSense reports `ABS_RZ`; we normalise it
+    /// to 0..1 in `mapping.rs`.
+    #[serde(default = "default_deadman_threshold")]
+    pub deadman_threshold: f32,
+
+    /// Maximum gap between input events before the watchdog kicks in
+    /// and forces a zero-velocity command. Guards against a controller
+    /// that disconnects mid-motion.
+    #[serde(default = "default_watchdog_ms")]
+    pub watchdog_ms: u32,
+
+    /// How often to flush the latest velocity command over UDP.
+    /// 50 Hz is plenty for body-velocity teleop and matches the
+    /// firmware's outer control loop.
+    #[serde(default = "default_send_rate_hz")]
+    pub send_rate_hz: u32,
+}
+
+impl Default for ControllerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            target_addr: default_controller_target_addr(),
+            paired_mac: String::new(),
+            device_name: String::new(),
+            deadzone: default_deadzone(),
+            max_lin_vel: default_max_lin_vel(),
+            max_ang_vel: default_max_ang_vel(),
+            deadman_threshold: default_deadman_threshold(),
+            watchdog_ms: default_watchdog_ms(),
+            send_rate_hz: default_send_rate_hz(),
+        }
+    }
+}
+
 impl AgentConfig {
     pub fn load() -> Result<Self> {
         let path = config_path();
@@ -148,6 +224,7 @@ impl AgentConfig {
             ble: BleConfig::default(),
             app: AppConfig::default(),
             ota: OtaConfig::default(),
+            controller: ControllerConfig::default(),
         }
     }
 }
@@ -213,6 +290,36 @@ fn default_ota_poll_secs() -> u64 {
 
 fn default_channel() -> String {
     "stable".into()
+}
+
+fn default_controller_target_addr() -> String {
+    // bebop-linux's documented teleop UDP endpoint
+    // (firmware/bebop-linux/README.md).
+    "127.0.0.1:10000".into()
+}
+
+fn default_deadzone() -> f32 {
+    0.10
+}
+
+fn default_max_lin_vel() -> f32 {
+    0.6
+}
+
+fn default_max_ang_vel() -> f32 {
+    1.5
+}
+
+fn default_deadman_threshold() -> f32 {
+    0.5
+}
+
+fn default_watchdog_ms() -> u32 {
+    200
+}
+
+fn default_send_rate_hz() -> u32 {
+    50
 }
 
 fn default_true() -> bool {

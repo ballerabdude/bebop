@@ -1,6 +1,8 @@
 import type {
   AppStatus,
+  ControllerStatus,
   DeviceInfo,
+  DiscoveredController,
   DiscoveredRobot,
   OtaStatus,
   RobotConfig,
@@ -49,4 +51,17 @@ export interface BebopTransport {
 
   triggerOta(targetImage?: string): Promise<void>;
   getOtaStatus(): Promise<OtaStatus>;
+
+  /// Discover nearby Bluetooth devices (gamepads + others). The agent
+  /// runs `bluetoothctl scan` for `timeoutMs` and returns everything it
+  /// saw, with `kind == "gamepad"` for likely controllers. Default
+  /// timeout (when 0 is passed) is 8000 ms on the agent side.
+  scanControllers(timeoutMs: number): Promise<DiscoveredController[]>;
+  /// Pair, trust, connect, and persist `mac` as the active controller.
+  /// On success the agent immediately starts forwarding teleop input.
+  pairController(mac: string): Promise<ControllerStatus>;
+  /// Forget `mac` (or the currently paired controller if `mac` is
+  /// empty). Resolves with the post-unpair status.
+  unpairController(mac: string): Promise<ControllerStatus>;
+  getControllerStatus(): Promise<ControllerStatus>;
 }

@@ -3,7 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import type { BebopTransport } from "./transport";
 import type {
   AppStatus,
+  ControllerStatus,
   DeviceInfo,
+  DiscoveredController,
   DiscoveredRobot,
   OtaStatus,
   RobotConfig,
@@ -98,5 +100,23 @@ export class TauriTransport implements BebopTransport {
 
   async getOtaStatus(): Promise<OtaStatus> {
     return await invoke<OtaStatus>("ble_get_ota_status");
+  }
+
+  async scanControllers(timeoutMs: number): Promise<DiscoveredController[]> {
+    return await invoke<DiscoveredController[]>("ble_scan_controllers", {
+      timeoutMs,
+    });
+  }
+
+  async pairController(mac: string): Promise<ControllerStatus> {
+    return await invoke<ControllerStatus>("ble_pair_controller", { mac });
+  }
+
+  async unpairController(mac: string): Promise<ControllerStatus> {
+    return await invoke<ControllerStatus>("ble_unpair_controller", { mac });
+  }
+
+  async getControllerStatus(): Promise<ControllerStatus> {
+    return await invoke<ControllerStatus>("ble_get_controller_status");
   }
 }

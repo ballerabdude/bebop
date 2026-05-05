@@ -11,17 +11,21 @@ package bebop.v1;
 message ClientRequest {
   uint32 request_id = 1;
   oneof payload {
-    GetDeviceInfoRequest      get_device_info      = 10;
-    ScanWifiRequest           scan_wifi            = 11;
-    SetWifiCredentialsRequest set_wifi_credentials = 12;
-    GetWifiStatusRequest      get_wifi_status      = 13;
-    SetRobotConfigRequest     set_robot_config     = 14;
-    GetRobotConfigRequest     get_robot_config     = 15;
-    GetAppStatusRequest       get_app_status       = 16;
-    ControlAppRequest         control_app          = 17;
-    TriggerOtaRequest         trigger_ota          = 18;
-    GetOtaStatusRequest       get_ota_status       = 19;
-    SetAppImageRequest        set_app_image        = 20;
+    GetDeviceInfoRequest         get_device_info          = 10;
+    ScanWifiRequest              scan_wifi                = 11;
+    SetWifiCredentialsRequest    set_wifi_credentials     = 12;
+    GetWifiStatusRequest         get_wifi_status          = 13;
+    SetRobotConfigRequest        set_robot_config         = 14;
+    GetRobotConfigRequest        get_robot_config         = 15;
+    GetAppStatusRequest          get_app_status           = 16;
+    ControlAppRequest            control_app              = 17;
+    TriggerOtaRequest            trigger_ota              = 18;
+    GetOtaStatusRequest          get_ota_status           = 19;
+    SetAppImageRequest           set_app_image            = 20;
+    ScanControllersRequest       scan_controllers         = 21;
+    PairControllerRequest        pair_controller          = 22;
+    UnpairControllerRequest      unpair_controller        = 23;
+    GetControllerStatusRequest   get_controller_status    = 24;
   }
 }
 
@@ -30,12 +34,14 @@ message AgentResponse {
   ResponseStatus status = 2;
   string message = 3; // human readable error/info
   oneof payload {
-    DeviceInfo      device_info      = 10;
-    WifiScanResult  wifi_scan_result = 11;
-    WifiStatus      wifi_status      = 12;
-    RobotConfig     robot_config     = 13;
-    AppStatus       app_status       = 14;
-    OtaStatus       ota_status       = 15;
+    DeviceInfo            device_info             = 10;
+    WifiScanResult        wifi_scan_result        = 11;
+    WifiStatus            wifi_status             = 12;
+    RobotConfig           robot_config            = 13;
+    AppStatus             app_status              = 14;
+    OtaStatus             ota_status              = 15;
+    ControllerScanResult  controller_scan_result  = 16;
+    ControllerStatus      controller_status       = 17;
   }
 }
 
@@ -184,3 +190,70 @@ message OtaStatus {
 }
 
 message GetOtaStatusRequest {}
+
+// ---------------------------------------------------------------------------
+// Bluetooth gamepad pairing & teleop
+//
+// The agent acts as a BT Classic central for pairing arbitrary HID gamepads
+// (PS5 DualSense, Xbox, 8BitDo, generic). Once a pad is paired the agent
+// reads /dev/input/eventX and forwards body-velocity teleop commands as
+// JSON-over-UDP to bebop-linux. See bebop-agent/src/controller/ for the
+// implementation. Only one paired gamepad is active at a time; pairing a
+// new device replaces the previous binding.
+// ---------------------------------------------------------------------------
+
+message ScanControllersRequest {
+  // Discovery duration in milliseconds. Defaults to ~8000 if zero.
+  uint32 timeout_ms = 1;
+}
+
+message PairControllerRequest {
+  // BT MAC address (colon-separated, uppercase) as returned by
+  // ScanControllers. Agent runs `bluetoothctl pair / trust / connect`
+  // and persists the MAC to agent.toml on success.
+  string mac = 1;
+}
+
+message UnpairControllerRequest {
+  // BT MAC to remove. If empty, the currently paired controller is
+  // unpaired.
+  string mac = 1;
+}
+
+message GetControllerStatusRequest {}
+
+message DiscoveredController {
+  string mac       = 1;
+  string name      = 2;
+  int32  rssi      = 3;
+  bool   paired    = 4;
+  bool   connected = 5;
+  // "gamepad" if the device's Class-of-Device or HID descriptor look
+  // like a gamepad/joystick; "unknown" otherwise. The mobile app
+  // hides non-gamepads by default.
+  string kind      = 6;
+}
+
+message ControllerScanResult {
+  repeated DiscoveredController devices = 1;
+}
+
+message ControllerStatus {
+  // Whether the controller subsystem is enabled in agent.toml.
+  bool   enabled            = 1;
+  // MAC + cached human-readable name of the currently bound controller.
+  // Empty when no controller has been paired.
+  string paired_mac         = 2;
+  string device_name        = 3;
+  // Whether the OS sees the paired controller as currently connected.
+  bool   connected          = 4;
+  // True iff the deadman trigger is held AND the e-stop latch is clear.
+  // Velocity commands only flow downstream when this is true.
+  bool   armed              = 5;
+  bool   estop_latched      = 6;
+  // Wall-clock timestamp of the most recent input event from the pad
+  // (milliseconds since the Unix epoch). Zero before any events arrive.
+  int64  last_event_unix_ms = 7;
+  // UDP target the agent forwards teleop commands to (e.g. "127.0.0.1:10000").
+  string target_addr        = 8;
+}
