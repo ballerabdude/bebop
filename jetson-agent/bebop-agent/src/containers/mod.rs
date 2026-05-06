@@ -28,7 +28,6 @@ use crate::state::{AppLifecycle, AppRuntimeStatus, AppState};
 const NVIDIA_RUNTIME: &str = "nvidia";
 
 pub async fn run(state: AppState) -> anyhow::Result<()> {
-    let docker = connect().context("connect to docker")?;
     info!("container supervisor online");
 
     // Loop drives three states:
@@ -37,9 +36,19 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
     //   * bootstrapped, image unchanged -> poll health via reconcile.
     // OTA can flip image None<->Some at runtime; flags below let us
     // re-bootstrap without spamming the log.
+    //
+    // Docker connection is established lazily and re-established on
+    // failure: docker.service may not be installed yet (fresh Jetson)
+    // or may be racing us at boot. Bailing out would propagate up to
+    // `main`'s JoinSet supervisor and bring the whole agent down
+    // (taking BLE provisioning + the WS surface with it), causing a
+    // tight systemd restart loop. Instead we just idle until docker
+    // shows up.
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
     let mut bootstrapped = false;
     let mut idle_logged = false;
+    let mut docker: Option<Docker> = None;
+    let mut connect_warned = false;
 
     loop {
         let cfg = state.config().await;
@@ -57,19 +66,69 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
             }
             Some(_) => {
                 idle_logged = false;
-                if !bootstrapped {
-                    match ensure_running(&docker, &state).await {
-                        Ok(()) => bootstrapped = true,
-                        Err(e) => error!(error = ?e, "initial container start failed"),
+
+                // Lazily (re)connect. Only attempted when an image is
+                // configured so a docker-less Jetson stays silent.
+                if docker.is_none() {
+                    match connect() {
+                        Ok(d) => {
+                            info!("connected to docker");
+                            docker = Some(d);
+                            connect_warned = false;
+                        }
+                        Err(e) => {
+                            if !connect_warned {
+                                warn!(
+                                    error = ?e,
+                                    "docker not available yet; container supervisor \
+                                     will retry every 10s. Install/start docker.service \
+                                     to enable the robot app."
+                                );
+                                connect_warned = true;
+                            }
+                        }
                     }
-                } else if let Err(e) = reconcile(&docker, &state).await {
-                    warn!(error = ?e, "container reconcile error");
+                }
+
+                if let Some(d) = docker.as_ref() {
+                    if !bootstrapped {
+                        match ensure_running(d, &state).await {
+                            Ok(()) => bootstrapped = true,
+                            Err(e) => {
+                                error!(error = ?e, "initial container start failed");
+                                if looks_like_disconnect(&e) {
+                                    warn!("dropping docker handle; will reconnect");
+                                    docker = None;
+                                }
+                            }
+                        }
+                    } else if let Err(e) = reconcile(d, &state).await {
+                        warn!(error = ?e, "container reconcile error");
+                        if looks_like_disconnect(&e) {
+                            warn!("dropping docker handle; will reconnect");
+                            docker = None;
+                            bootstrapped = false;
+                        }
+                    }
                 }
             }
         }
 
         ticker.tick().await;
     }
+}
+
+/// Heuristic: did this error come from the docker daemon socket
+/// disappearing (daemon stopped, restarted, socket unmounted)? We use
+/// this to drop the cached `Docker` handle and reconnect on the next
+/// tick rather than wedging forever against a dead connection.
+fn looks_like_disconnect(err: &anyhow::Error) -> bool {
+    let s = format!("{err:#}").to_lowercase();
+    s.contains("socket not found")
+        || s.contains("connection refused")
+        || s.contains("broken pipe")
+        || s.contains("connection reset")
+        || s.contains("no such file or directory")
 }
 
 fn connect() -> anyhow::Result<Docker> {
