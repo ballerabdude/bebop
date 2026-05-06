@@ -11,8 +11,8 @@ use tracing::{debug, trace};
 /// Robstride communication types (bits 28-24 of extended frame ID)
 mod cmd {
     pub const GET_ID: u8 = 0x00;
-    pub const MOTOR_CTRL: u8 = 0x01;    // Operation control mode
-    pub const FEEDBACK: u8 = 0x02;       // Motor feedback response
+    pub const MOTOR_CTRL: u8 = 0x01; // Operation control mode
+    pub const FEEDBACK: u8 = 0x02; // Motor feedback response
     pub const ENABLE: u8 = 0x03;
     pub const STOP: u8 = 0x04;
     pub const SET_ZERO: u8 = 0x06;
@@ -39,16 +39,16 @@ mod param {
 
 /// Run modes
 mod mode {
-    pub const OPERATION: u8 = 0x00;      // MIT-like control
-    pub const POSITION_PP: u8 = 0x01;    // Profile Position
+    pub const OPERATION: u8 = 0x00; // MIT-like control
+    pub const POSITION_PP: u8 = 0x01; // Profile Position
     pub const VELOCITY: u8 = 0x02;
     pub const CURRENT: u8 = 0x03;
-    pub const POSITION_CSP: u8 = 0x05;   // Cyclic Synchronous Position
+    pub const POSITION_CSP: u8 = 0x05; // Cyclic Synchronous Position
 }
 
 /// Protocol constants (same for all models)
-const P_MIN: f32 = -12.57;  // -4π rad
-const P_MAX: f32 = 12.57;   // +4π rad
+const P_MIN: f32 = -12.57; // -4π rad
+const P_MAX: f32 = 12.57; // +4π rad
 const KP_MIN: f32 = 0.0;
 const KP_MAX: f32 = 5000.0;
 const KD_MIN: f32 = 0.0;
@@ -81,17 +81,12 @@ impl RobstrideMotor {
 
     /// Build the 29-bit extended CAN ID
     fn make_can_id(&self, cmd_type: u8, data_area2: u16) -> u32 {
-        let id = ((cmd_type as u32) << 24)
-            | ((data_area2 as u32) << 8)
-            | (self.can_id as u32);
-        id
+        ((cmd_type as u32) << 24) | ((data_area2 as u32) << 8) | (self.can_id as u32)
     }
 
     /// Build CAN ID for operation control mode
     fn make_ctrl_can_id(&self, torque_raw: u16) -> u32 {
-        ((cmd::MOTOR_CTRL as u32) << 24)
-            | ((torque_raw as u32) << 8)
-            | (self.can_id as u32)
+        ((cmd::MOTOR_CTRL as u32) << 24) | ((torque_raw as u32) << 8) | (self.can_id as u32)
     }
 
     /// Convert float to uint16 with given range
@@ -139,7 +134,7 @@ impl RobstrideMotor {
     pub fn enable_active_reporting(&self, can: &CanInterface, interval_ms: u8) -> Result<()> {
         let can_id = self.make_can_id(cmd::ACTIVE_REPORT, HOST_ID as u16);
         let mut data = [0u8; 8];
-        data[0] = 1;  // Enable
+        data[0] = 1; // Enable
         data[1] = interval_ms;
         can.send_extended(can_id, &data)?;
         debug!(
@@ -162,11 +157,8 @@ impl RobstrideMotor {
         );
         let kp_raw = Self::float_to_uint16(cmd.kp, KP_MIN, KP_MAX);
         let kd_raw = Self::float_to_uint16(cmd.kd, KD_MIN, KD_MAX);
-        let torque_raw = Self::float_to_uint16(
-            cmd.torque,
-            self.specs.torque_min,
-            self.specs.torque_max,
-        );
+        let torque_raw =
+            Self::float_to_uint16(cmd.torque, self.specs.torque_min, self.specs.torque_max);
 
         // Build CAN frame
         let can_id = self.make_ctrl_can_id(torque_raw);
@@ -217,7 +209,7 @@ impl RobstrideMotor {
         self.state.temperature = feedback.temperature;
         self.state.has_error = feedback.fault_bits != 0;
         self.state.error_code = feedback.fault_bits as u32;
-        self.state.is_enabled = feedback.mode_status == 0x02;  // Motor mode
+        self.state.is_enabled = feedback.mode_status == 0x02; // Motor mode
         self.state.last_update_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -230,7 +222,7 @@ impl RobstrideMotor {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
-        
+
         (now - self.state.last_update_ms) < max_age_ms
     }
 
@@ -242,12 +234,24 @@ impl RobstrideMotor {
         }
 
         let mut faults = Vec::new();
-        if bits & 0x01 != 0 { faults.push("Undervoltage"); }
-        if bits & 0x02 != 0 { faults.push("Overcurrent"); }
-        if bits & 0x04 != 0 { faults.push("Overtemperature"); }
-        if bits & 0x08 != 0 { faults.push("Magnetic encoding fault"); }
-        if bits & 0x10 != 0 { faults.push("Gridlock overload"); }
-        if bits & 0x20 != 0 { faults.push("Uncalibrated"); }
+        if bits & 0x01 != 0 {
+            faults.push("Undervoltage");
+        }
+        if bits & 0x02 != 0 {
+            faults.push("Overcurrent");
+        }
+        if bits & 0x04 != 0 {
+            faults.push("Overtemperature");
+        }
+        if bits & 0x08 != 0 {
+            faults.push("Magnetic encoding fault");
+        }
+        if bits & 0x10 != 0 {
+            faults.push("Gridlock overload");
+        }
+        if bits & 0x20 != 0 {
+            faults.push("Uncalibrated");
+        }
 
         Some(faults.join(", "))
     }

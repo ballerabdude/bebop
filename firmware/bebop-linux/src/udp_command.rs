@@ -166,18 +166,12 @@ impl UdpCommandListener {
 
     /// Get current command (thread-safe)
     pub fn get_command(&self) -> VelocityCommand {
-        self.state
-            .lock()
-            .map(|s| s.cmd.clone())
-            .unwrap_or_default()
+        self.state.lock().map(|s| s.cmd.clone()).unwrap_or_default()
     }
 
     /// Check if connected (receiving commands)
     pub fn is_connected(&self) -> bool {
-        self.state
-            .lock()
-            .map(|s| s.connected)
-            .unwrap_or(false)
+        self.state.lock().map(|s| s.connected).unwrap_or(false)
     }
 }
 
@@ -216,10 +210,8 @@ impl AsyncUdpListener {
             let mut buf = [0u8; 1024];
 
             loop {
-                let timeout = tokio::time::timeout(
-                    Duration::from_millis(100),
-                    socket.recv_from(&mut buf),
-                );
+                let timeout =
+                    tokio::time::timeout(Duration::from_millis(100), socket.recv_from(&mut buf));
 
                 match timeout.await {
                     Ok(Ok((len, addr))) => {

@@ -91,7 +91,7 @@ impl Policy {
             .context("Failed to extract output tensor")?;
 
         // Convert to Vec
-        let actions: Vec<f32> = data.iter().copied().collect();
+        let actions: Vec<f32> = data.to_vec();
 
         Ok(actions)
     }
@@ -174,7 +174,7 @@ mod tests {
     #[test]
     fn test_policy_controller_history() {
         // This test just verifies history buffer management
-        let mut buffer = vec![0.0; 30]; // Simulated buffer for 1 history step
+        let mut buffer = [0.0_f32; 30]; // Simulated buffer for 1 history step
 
         // Simulated frame
         let frame: Vec<f32> = (0..30).map(|i| i as f32).collect();

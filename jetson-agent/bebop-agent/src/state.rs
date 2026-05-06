@@ -140,6 +140,7 @@ impl AppState {
         self.inner.controller.read().await.clone()
     }
 
+    #[allow(dead_code)] // parallel API to set_wifi_status; reserved for future use
     pub async fn set_controller_status(&self, s: ControllerRuntimeStatus) {
         *self.inner.controller.write().await = s;
     }

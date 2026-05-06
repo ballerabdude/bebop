@@ -27,6 +27,9 @@ struct ResetFrame<'a> {
 /// the destination resolution path.
 pub struct TeleopSink {
     socket: UdpSocket,
+    // Kept around for diagnostics / future status reporting; the wire
+    // path uses the connected socket directly and never reads this.
+    #[allow(dead_code)]
     target: String,
 }
 
@@ -45,6 +48,7 @@ impl TeleopSink {
         })
     }
 
+    #[allow(dead_code)] // exposed for diagnostics / status reporting
     pub fn target(&self) -> &str {
         &self.target
     }

@@ -151,8 +151,7 @@ impl PowerBoard {
         can.send_extended(id, &data)?;
         debug!(
             power_id = self.power_id,
-            enabled,
-            "powerboard auto-report toggled"
+            enabled, "powerboard auto-report toggled"
         );
         Ok(())
     }
@@ -200,8 +199,14 @@ pub struct PowerCurrents {
 #[derive(Debug, Clone)]
 pub enum PowerFrame {
     Status(PowerStatus),
-    Currents { power_id: u8, currents: PowerCurrents },
-    Version { power_id: u8, version: String },
+    Currents {
+        power_id: u8,
+        currents: PowerCurrents,
+    },
+    Version {
+        power_id: u8,
+        version: String,
+    },
 }
 
 /// Try to interpret `frame` as a PowerBoard response. Returns `None` if
@@ -255,8 +260,7 @@ fn parse_status(power_id: u8, payload: &[u8]) -> PowerStatus {
     //   bit 21     : soft-start on/off
     //   bit 22     : VMBUS rail on/off
     //   bit 23     : 24V rail on/off
-    let fault_bits =
-        ((payload[5] as u32) << 16) | ((payload[6] as u32) << 8) | (payload[7] as u32);
+    let fault_bits = ((payload[5] as u32) << 16) | ((payload[6] as u32) << 8) | (payload[7] as u32);
 
     PowerStatus {
         power_id,
@@ -380,8 +384,8 @@ mod tests {
         payload[0..2].copy_from_slice(&5460u16.to_be_bytes());
         payload[2..4].copy_from_slice(&5440u16.to_be_bytes());
         payload[4] = 32; // 32 °C
-        // Set fault bit 5 = vbus undervoltage. With BE byte order the
-        // low fault byte lives at payload[7].
+                         // Set fault bit 5 = vbus undervoltage. With BE byte order the
+                         // low fault byte lives at payload[7].
         payload[7] = 0b0010_0000;
 
         let s = parse_status(0xAA, &payload);
@@ -419,7 +423,11 @@ mod tests {
         //               main rail). No real faults in bits 0..15.
         let payload = [0x12, 0x10, 0x12, 0x0C, 0x23, 0xD0, 0x00, 0x00];
         let s = parse_status(0xAA, &payload);
-        assert!((s.battery_voltage_v - 46.24).abs() < 1e-3, "v={}", s.battery_voltage_v);
+        assert!(
+            (s.battery_voltage_v - 46.24).abs() < 1e-3,
+            "v={}",
+            s.battery_voltage_v
+        );
         assert!((s.motor_voltage_v - 46.20).abs() < 1e-3);
         assert_eq!(s.board_temperature_c, 35.0);
         assert!(s.rail_12v_on);
@@ -486,7 +494,7 @@ mod tests {
         let mut payload = [0u8; 8];
         payload[0..2].copy_from_slice(&1500u16.to_be_bytes()); // 15.00 A
         payload[2..4].copy_from_slice(&1234u16.to_be_bytes()); // 12.34 A
-        payload[4..6].copy_from_slice(&500u16.to_be_bytes());  //  5.00 A
+        payload[4..6].copy_from_slice(&500u16.to_be_bytes()); //  5.00 A
         payload[6..8].copy_from_slice(&0u16.to_be_bytes());
         let c = parse_currents(&payload);
         assert!((c.al_current_a - 15.00).abs() < 1e-3);

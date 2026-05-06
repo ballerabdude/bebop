@@ -47,8 +47,8 @@ impl CanInterface {
 
     /// Send an extended frame (29-bit ID) - used by Robstride
     pub fn send_extended(&self, id: u32, data: &[u8]) -> Result<()> {
-        let extended_id =
-            ExtendedId::new(id).ok_or_else(|| anyhow::anyhow!("Invalid extended CAN ID: {}", id))?;
+        let extended_id = ExtendedId::new(id)
+            .ok_or_else(|| anyhow::anyhow!("Invalid extended CAN ID: {}", id))?;
 
         let frame = CanFrame::new(extended_id, data)
             .ok_or_else(|| anyhow::anyhow!("Failed to create CAN frame"))?;
@@ -178,8 +178,11 @@ impl ReceivedFrame {
         let temperature_raw = u16::from_be_bytes([self.data[6], self.data[7]]);
 
         // Convert to physical units (Robstride RS04 ranges)
-        let position =
-            Self::uint16_to_float(position_raw, -4.0 * std::f32::consts::PI, 4.0 * std::f32::consts::PI);
+        let position = Self::uint16_to_float(
+            position_raw,
+            -4.0 * std::f32::consts::PI,
+            4.0 * std::f32::consts::PI,
+        );
         let velocity = Self::uint16_to_float(velocity_raw, -15.0, 15.0);
         let torque = Self::uint16_to_float(torque_raw, -120.0, 120.0);
         let temperature = temperature_raw as f32 / 10.0;
@@ -212,7 +215,8 @@ impl ReceivedFrame {
         }
 
         // Parse payload (little-endian floats)
-        let position_rev = f32::from_le_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]);
+        let position_rev =
+            f32::from_le_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]);
         let velocity_rev_s =
             f32::from_le_bytes([self.data[4], self.data[5], self.data[6], self.data[7]]);
 
@@ -241,7 +245,8 @@ impl ReceivedFrame {
             return None;
         }
 
-        let axis_error = u32::from_le_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]);
+        let axis_error =
+            u32::from_le_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]);
         let axis_state = self.data[4];
         let procedure_result = self.data[5];
         let trajectory_done = (self.data[6] & 0x01) != 0;
@@ -280,8 +285,8 @@ pub struct RobstrideFeedback {
 #[derive(Debug, Clone)]
 pub struct ODriveEncoderFeedback {
     pub node_id: u8,
-    pub position: f32,  // radians
-    pub velocity: f32,  // rad/s
+    pub position: f32, // radians
+    pub velocity: f32, // rad/s
 }
 
 /// Parsed ODrive heartbeat

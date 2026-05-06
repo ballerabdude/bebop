@@ -61,10 +61,7 @@ pub async fn run_server(sup: Arc<Supervisor>, bind_addr: &str) -> Result<()> {
     Ok(())
 }
 
-async fn ws_upgrade(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state.sup))
 }
 
@@ -115,11 +112,11 @@ async fn handle_ws(socket: WebSocket, sup: Arc<Supervisor>) {
                         mode: m.as_proto() as i32,
                     }),
                 ),
-                SupervisorEvent::EStopLatched(reason) => Some(
-                    proto::server_runtime_message::Payload::EstopLatched(
+                SupervisorEvent::EStopLatched(reason) => {
+                    Some(proto::server_runtime_message::Payload::EstopLatched(
                         proto::EStopLatched { reason },
-                    ),
-                ),
+                    ))
+                }
                 SupervisorEvent::EStopReset
                 | SupervisorEvent::MotorArmed { .. }
                 | SupervisorEvent::MotorDisarmed { .. } => None,
@@ -157,9 +154,9 @@ async fn handle_ws(socket: WebSocket, sup: Arc<Supervisor>) {
 
                 // Side effects for messages that affect telemetry state: do this
                 // after dispatch so the response is consistent with the new state.
-                if let Ok(req) = <proto::ClientRuntimeMessage as bebop_proto::Message>::decode(
-                    bytes.as_ref(),
-                ) {
+                if let Ok(req) =
+                    <proto::ClientRuntimeMessage as bebop_proto::Message>::decode(bytes.as_ref())
+                {
                     if let Some(payload) = req.payload {
                         match payload {
                             proto::client_runtime_message::Payload::SubscribeTelemetry(s) => {

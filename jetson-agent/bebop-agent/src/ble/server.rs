@@ -393,7 +393,7 @@ async fn status_notify_loop(
             debug!("status notify session stopped by peer");
             break;
         }
-        let snapshot = if tick_index % 2 == 0 {
+        let snapshot = if tick_index.is_multiple_of(2) {
             status_snapshot(&state).await
         } else {
             controller_status_snapshot(&state).await

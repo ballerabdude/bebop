@@ -95,9 +95,7 @@ async fn main() -> Result<()> {
     );
 
     // Open every CAN bus. Pre-flight check refuses ERROR-PASSIVE / BUS-OFF.
-    let bus_pool = Arc::new(
-        BusPool::open(&cfg.can_interfaces).context("open CAN buses")?,
-    );
+    let bus_pool = Arc::new(BusPool::open(&cfg.can_interfaces).context("open CAN buses")?);
 
     // Build the supervisor. Stays in scope for the lifetime of `main` so its
     // `Drop` disables every motor before we leave.
@@ -109,9 +107,9 @@ async fn main() -> Result<()> {
 
     // Spawn the power-board poller (no-op if `power:` is omitted from
     // the YAML). The handle is collected so we can join it on shutdown.
-    let power_handle = supervisor.power_monitor().and_then(|monitor| {
-        spawn_power_monitor(monitor, bus_pool.clone(), shutdown_flag.clone())
-    });
+    let power_handle = supervisor
+        .power_monitor()
+        .and_then(|monitor| spawn_power_monitor(monitor, bus_pool.clone(), shutdown_flag.clone()));
 
     // Periodic supervisor tick: hold-cycle TX in DialIn mode + watchdog.
     let sup_tick = supervisor.clone();

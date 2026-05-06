@@ -25,10 +25,7 @@ fn fmt_err(e: &anyhow::Error) -> String {
 /// (Ack / Error / Snapshot / etc.) — or `None` for messages that don't
 /// produce a response (e.g. SubscribeTelemetry, where the response is the
 /// telemetry stream itself).
-pub fn handle_client_message(
-    sup: &Arc<Supervisor>,
-    bytes: &[u8],
-) -> proto::ServerRuntimeMessage {
+pub fn handle_client_message(sup: &Arc<Supervisor>, bytes: &[u8]) -> proto::ServerRuntimeMessage {
     let req = match proto::ClientRuntimeMessage::decode(bytes) {
         Ok(m) => m,
         Err(e) => {
@@ -47,7 +44,10 @@ pub fn handle_client_message(
     match payload {
         P::SubscribeTelemetry(s) => {
             let rate = s.rate_hz;
-            ack(request_id, format!("telemetry subscribed (rate hint = {rate} Hz)"))
+            ack(
+                request_id,
+                format!("telemetry subscribed (rate hint = {rate} Hz)"),
+            )
         }
         P::UnsubscribeTelemetry(_) => ack(request_id, "telemetry unsubscribed".into()),
         P::GetSnapshot(_) => snapshot_response(request_id, sup),
@@ -97,10 +97,7 @@ pub fn handle_client_message(
             let mode = match Mode::from_proto(mode_proto) {
                 Some(m) => m,
                 None => {
-                    return error_response(
-                        request_id,
-                        format!("unknown mode value {}", req.mode),
-                    )
+                    return error_response(request_id, format!("unknown mode value {}", req.mode))
                 }
             };
             match sup.set_mode(mode) {
@@ -123,13 +120,15 @@ pub fn handle_client_message(
                 error_response(request_id, "E-STOP not active".into())
             }
         }
-        P::SetMotorTarget(req) => match sup.set_target_position(&req.joint_name, req.position_rad) {
-            Ok(()) => ack(
-                request_id,
-                format!("{} target -> {:+.3} rad", req.joint_name, req.position_rad),
-            ),
-            Err(e) => error_response(request_id, fmt_err(&e)),
-        },
+        P::SetMotorTarget(req) => {
+            match sup.set_target_position(&req.joint_name, req.position_rad) {
+                Ok(()) => ack(
+                    request_id,
+                    format!("{} target -> {:+.3} rad", req.joint_name, req.position_rad),
+                ),
+                Err(e) => error_response(request_id, fmt_err(&e)),
+            }
+        }
         P::SetMechanicalZero(req) => match sup.set_mechanical_zero(&req.joint_name) {
             Ok(()) => ack(
                 request_id,
@@ -153,16 +152,13 @@ pub fn ack(request_id: u32, message: String) -> proto::ServerRuntimeMessage {
 pub fn error_response(request_id: u32, message: String) -> proto::ServerRuntimeMessage {
     proto::ServerRuntimeMessage {
         request_id,
-        payload: Some(proto::server_runtime_message::Payload::Error(proto::Error {
-            message,
-        })),
+        payload: Some(proto::server_runtime_message::Payload::Error(
+            proto::Error { message },
+        )),
     }
 }
 
-pub fn snapshot_response(
-    request_id: u32,
-    sup: &Arc<Supervisor>,
-) -> proto::ServerRuntimeMessage {
+pub fn snapshot_response(request_id: u32, sup: &Arc<Supervisor>) -> proto::ServerRuntimeMessage {
     proto::ServerRuntimeMessage {
         request_id,
         payload: Some(proto::server_runtime_message::Payload::Snapshot(

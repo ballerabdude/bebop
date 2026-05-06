@@ -272,8 +272,7 @@ impl Supervisor {
         {
             let g = entry.lock().unwrap();
             g.motor.enable(&can).with_context(|| {
-                let bus_state =
-                    read_can_state(&cfg.can_bus).unwrap_or_else(|| "?".into());
+                let bus_state = read_can_state(&cfg.can_bus).unwrap_or_else(|| "?".into());
                 format!(
                     "{}: failed to enable motor id {} on {} (bus state {}); \
                      check that the motor is powered, the CAN cable is \
@@ -470,8 +469,7 @@ impl Supervisor {
                 .lock()
                 .map_err(|p| anyhow!("motor mutex poisoned: {p}"))?;
             g.motor.set_zero(&can).with_context(|| {
-                let bus_state =
-                    read_can_state(&cfg.can_bus).unwrap_or_else(|| "?".into());
+                let bus_state = read_can_state(&cfg.can_bus).unwrap_or_else(|| "?".into());
                 format!(
                     "{}: failed to send SET_ZERO to motor id {} on {} (bus state {})",
                     joint, cfg.can_id, cfg.can_bus, bus_state

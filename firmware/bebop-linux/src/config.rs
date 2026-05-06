@@ -368,14 +368,10 @@ impl RobotConfig {
                 ));
             }
             if hard_limits.vel_max <= 0.0 || hard_limits.tau_max <= 0.0 {
-                return Err(anyhow!(
-                    "joint {name:?}: vel_max and tau_max must be > 0"
-                ));
+                return Err(anyhow!("joint {name:?}: vel_max and tau_max must be > 0"));
             }
             if hard_limits.feedback_timeout_ms <= 0.0 {
-                return Err(anyhow!(
-                    "joint {name:?}: feedback_timeout_ms must be > 0"
-                ));
+                return Err(anyhow!("joint {name:?}: feedback_timeout_ms must be > 0"));
             }
 
             let hold_gains = merge_gains(

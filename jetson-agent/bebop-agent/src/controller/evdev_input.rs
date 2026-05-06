@@ -114,13 +114,15 @@ pub fn open_for_mac(mac: &str) -> std::io::Result<Option<OpenedDevice>> {
 /// universal "primary face button" code) or one of its near siblings.
 /// On the DualSense the touchpad node has BTN_LEFT/BTN_RIGHT only and
 /// the motion-sensors node has no keys — both fail this check.
+///
+/// Note: `BTN_GAMEPAD` is an alias for `BTN_SOUTH` (0x130) and
+/// `BTN_JOYSTICK` is an alias for `BTN_TRIGGER` (0x120) in the kernel
+/// headers; evdev 0.13 only re-exports the canonical names.
 fn is_gamepad_node(device: &Device) -> bool {
     let Some(keys) = device.supported_keys() else {
         return false;
     };
-    keys.contains(KeyCode::BTN_SOUTH)
-        || keys.contains(KeyCode::BTN_GAMEPAD)
-        || keys.contains(KeyCode::BTN_JOYSTICK)
+    keys.contains(KeyCode::BTN_SOUTH) || keys.contains(KeyCode::BTN_TRIGGER)
 }
 
 /// Translate a single `evdev::InputEvent` into the platform-agnostic

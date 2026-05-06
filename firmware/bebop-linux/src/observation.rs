@@ -9,19 +9,19 @@ use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 /// IMU state
 #[derive(Debug, Clone, Default)]
 pub struct ImuState {
-    pub quaternion: [f32; 4],  // [w, x, y, z]
-    pub angular_velocity: [f32; 3],  // [x, y, z] rad/s
-    pub linear_acceleration: [f32; 3],  // [x, y, z] m/s²
+    pub quaternion: [f32; 4],          // [w, x, y, z]
+    pub angular_velocity: [f32; 3],    // [x, y, z] rad/s
+    pub linear_acceleration: [f32; 3], // [x, y, z] m/s²
 }
 
 impl ImuState {
     /// Compute projected gravity vector in body frame
     pub fn projected_gravity(&self) -> [f32; 3] {
         let quat = UnitQuaternion::from_quaternion(Quaternion::new(
-            self.quaternion[0],  // w
-            self.quaternion[1],  // x
-            self.quaternion[2],  // y
-            self.quaternion[3],  // z
+            self.quaternion[0], // w
+            self.quaternion[1], // x
+            self.quaternion[2], // y
+            self.quaternion[3], // z
         ));
 
         // Gravity in world frame (pointing down)
@@ -37,22 +37,22 @@ impl ImuState {
 /// Velocity command (from UDP or ROS)
 #[derive(Debug, Clone, Default)]
 pub struct VelocityCommand {
-    pub linear_x: f32,   // m/s (forward)
-    pub linear_y: f32,   // m/s (lateral)
-    pub angular_z: f32,  // rad/s (yaw)
+    pub linear_x: f32,  // m/s (forward)
+    pub linear_y: f32,  // m/s (lateral)
+    pub angular_z: f32, // rad/s (yaw)
 }
 
 /// Estimated base velocity
 #[derive(Debug, Clone, Default)]
 pub struct BaseVelocity {
-    pub linear: [f32; 3],  // [x, y, z] m/s in body frame
+    pub linear: [f32; 3], // [x, y, z] m/s in body frame
 }
 
 impl BaseVelocity {
     /// Update velocity estimate from wheel odometry and IMU
     pub fn update(
         &mut self,
-        wheel_velocities: &[f32],  // [left, right] rad/s
+        wheel_velocities: &[f32], // [left, right] rad/s
         imu: &ImuState,
         dt: f32,
         wheel_radius: f32,
@@ -122,7 +122,7 @@ impl ObservationBuilder {
             joint_velocities: vec![0.0; num_joints],
             default_positions: vec![0.0; num_joints],
             last_action: vec![0.0; dims::ACTION_DIM],
-            wheel_radius: 0.05,  // Default wheel radius
+            wheel_radius: 0.05, // Default wheel radius
         }
     }
 
@@ -170,7 +170,8 @@ impl ObservationBuilder {
             return;
         };
 
-        self.base_velocity.update(wheel_vels, &self.imu, dt, self.wheel_radius);
+        self.base_velocity
+            .update(wheel_vels, &self.imu, dt, self.wheel_radius);
     }
 
     /// Build the observation vector
@@ -189,22 +190,24 @@ impl ObservationBuilder {
 
         // 1. Base linear velocity (3)
         for i in 0..3 {
-            let vel = self.base_velocity.linear[i].clamp(-scales::CLIP_LIN_VEL, scales::CLIP_LIN_VEL);
+            let vel =
+                self.base_velocity.linear[i].clamp(-scales::CLIP_LIN_VEL, scales::CLIP_LIN_VEL);
             obs[idx] = vel * scales::SCALE_LIN_VEL;
             idx += 1;
         }
 
         // 2. Base angular velocity (3) - from IMU
         for i in 0..3 {
-            let vel = self.imu.angular_velocity[i].clamp(-scales::CLIP_ANG_VEL, scales::CLIP_ANG_VEL);
+            let vel =
+                self.imu.angular_velocity[i].clamp(-scales::CLIP_ANG_VEL, scales::CLIP_ANG_VEL);
             obs[idx] = vel * scales::SCALE_ANG_VEL;
             idx += 1;
         }
 
         // 3. Projected gravity (3)
         let gravity = self.imu.projected_gravity();
-        for i in 0..3 {
-            obs[idx] = gravity[i];
+        for &g in &gravity {
+            obs[idx] = g;
             idx += 1;
         }
 
@@ -289,7 +292,7 @@ mod tests {
     #[test]
     fn test_projected_gravity_upright() {
         let imu = ImuState {
-            quaternion: [1.0, 0.0, 0.0, 0.0],  // Identity quaternion
+            quaternion: [1.0, 0.0, 0.0, 0.0], // Identity quaternion
             ..Default::default()
         };
 
@@ -313,7 +316,7 @@ mod tests {
         assert_eq!(wheels.len(), 2);
 
         // Check scaling
-        assert!((legs[0] - 0.4).abs() < 0.01);  // 0.5 * 0.8 = 0.4
-        assert!((wheels[0] - 10.0).abs() < 0.01);  // 0.5 * 20 = 10
+        assert!((legs[0] - 0.4).abs() < 0.01); // 0.5 * 0.8 = 0.4
+        assert!((wheels[0] - 10.0).abs() < 0.01); // 0.5 * 20 = 10
     }
 }

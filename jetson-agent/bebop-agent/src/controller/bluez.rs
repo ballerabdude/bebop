@@ -37,6 +37,7 @@ pub enum DeviceKind {
 }
 
 impl DeviceKind {
+    #[allow(dead_code)] // exposed for future BLE/proto serialisation paths
     pub fn as_proto_str(self) -> &'static str {
         match self {
             DeviceKind::Gamepad => "gamepad",
