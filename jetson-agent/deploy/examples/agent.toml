@@ -123,3 +123,27 @@
 # bebop-linux outer loop and is plenty for body-velocity teleop.
 # Default: 50
 # send_rate_hz = 50
+
+# --- Network control surface ---------------------------------------------
+# [net]
+#
+# Mirror of the BLE GATT API exposed over a binary WebSocket so the
+# operator app can pair controllers / read status without a Bluetooth
+# link. This is what makes the "Connect by IP" path in bebop-app able to
+# manage the controller subsystem. Endpoints:
+#
+#   - GET /healthz  → "ok" (pre-flight probe)
+#   - GET /ws       → binary WebSocket (bebop.v1.ClientRequest in,
+#                     bebop.v1.AgentResponse out)
+#
+# Disable entirely (BLE-only deployment).
+# Default: false
+# disabled = false
+#
+# `host:port` to bind. `0.0.0.0` listens on every interface, which is
+# what you want when an operator laptop / tablet on the LAN should be
+# able to reach the agent. Set to `127.0.0.1:9091` for localhost-only.
+# The runtime-server (bebop-linux) defaults to :9090; this listener
+# should sit on a different port (default :9091).
+# Default: "0.0.0.0:9091"
+# ws_bind_addr = "0.0.0.0:9091"

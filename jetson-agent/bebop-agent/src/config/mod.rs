@@ -31,6 +31,9 @@ pub struct AgentConfig {
 
     #[serde(default)]
     pub controller: ControllerConfig,
+
+    #[serde(default)]
+    pub net: NetConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +123,36 @@ impl Default for OtaConfig {
             poll_interval_secs: default_ota_poll_secs(),
             manifest_url: None,
             channel: default_channel(),
+        }
+    }
+}
+
+/// Network control surface — same `bebop.v1.ClientRequest` /
+/// `AgentResponse` protobuf protocol as the BLE GATT server, but tunnelled
+/// over a TCP/WebSocket so a Tauri app already on the LAN can pair
+/// controllers / read status without going through Bluetooth pairing.
+///
+/// Default bind is `0.0.0.0:9091` so the operator app can reach the agent
+/// over the same Wi-Fi link it uses to talk to `bebop-linux` on `:9090`.
+/// Set to `"127.0.0.1:9091"` (or `disabled = true`) on robots that should
+/// only accept BLE provisioning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetConfig {
+    /// Disable the network control surface entirely. Useful for hardened
+    /// deployments where the agent should only be reachable over BLE.
+    #[serde(default)]
+    pub disabled: bool,
+
+    /// `host:port` to bind. `0.0.0.0` listens on every interface.
+    #[serde(default = "default_net_bind_addr")]
+    pub ws_bind_addr: String,
+}
+
+impl Default for NetConfig {
+    fn default() -> Self {
+        Self {
+            disabled: false,
+            ws_bind_addr: default_net_bind_addr(),
         }
     }
 }
@@ -225,6 +258,7 @@ impl AgentConfig {
             app: AppConfig::default(),
             ota: OtaConfig::default(),
             controller: ControllerConfig::default(),
+            net: NetConfig::default(),
         }
     }
 }
@@ -320,6 +354,10 @@ fn default_watchdog_ms() -> u32 {
 
 fn default_send_rate_hz() -> u32 {
     50
+}
+
+fn default_net_bind_addr() -> String {
+    "0.0.0.0:9091".into()
 }
 
 fn default_true() -> bool {

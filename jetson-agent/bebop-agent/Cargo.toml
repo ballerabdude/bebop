@@ -30,6 +30,12 @@ toml       = { workspace = true }
 bollard = { workspace = true }
 reqwest = { workspace = true }
 
+# Network control surface: axum-based protobuf-over-WS so the operator
+# app can pair controllers / read status without going through BLE.
+axum       = { workspace = true }
+tower      = { workspace = true }
+tower-http = { workspace = true }
+
 uuid  = { workspace = true }
 time  = { workspace = true }
 bytes = { workspace = true }

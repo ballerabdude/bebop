@@ -22,6 +22,7 @@ mod error;
 mod ota;
 mod state;
 mod wifi;
+mod ws;
 
 use anyhow::Context;
 use tracing::{error, info};
@@ -77,6 +78,18 @@ async fn main() -> anyhow::Result<()> {
         tasks.spawn(async move {
             if let Err(e) = controller::run(s).await {
                 error!(error = ?e, "controller subsystem exited");
+            }
+        });
+    }
+
+    // Network control surface — WS mirror of the BLE GATT API. Lets the
+    // operator app pair controllers / read status without going through
+    // BLE (the IP-only path in `bebop-app`).
+    {
+        let s = state.clone();
+        tasks.spawn(async move {
+            if let Err(e) = ws::run(s).await {
+                error!(error = ?e, "agent WS server exited");
             }
         });
     }

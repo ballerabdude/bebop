@@ -3,6 +3,7 @@ import { WebBluetoothTransport } from "./webBluetoothTransport";
 import type { BebopTransport } from "./transport";
 
 export type { BebopTransport } from "./transport";
+export { WsAgentTransport, DEFAULT_AGENT_PORT } from "./wsAgentTransport";
 export * from "./types";
 
 function isTauri(): boolean {

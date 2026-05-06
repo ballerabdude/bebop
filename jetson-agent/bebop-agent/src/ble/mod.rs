@@ -16,7 +16,9 @@
 //! pre-shared pairing code. Until then only `GetDeviceInfoRequest` is
 //! allowed.
 
-mod dispatcher;
+// Exposed `pub(crate)` so the network control surface (`crate::ws`) can
+// reuse the exact same request/response handler the BLE GATT server uses.
+pub(crate) mod dispatcher;
 mod framing;
 mod uuids;
 

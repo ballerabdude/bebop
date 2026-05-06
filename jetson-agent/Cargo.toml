@@ -40,6 +40,13 @@ bollard = "0.17"
 # HTTP (for OTA manifest checks)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
+# Network control surface (mirror of the BLE GATT server, for clients on
+# the LAN). Same `axum 0.7` we use in `bebop-linux`'s runtime server so
+# the two stacks stay in sync.
+axum       = { version = "0.7", features = ["ws", "macros"] }
+tower      = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
 # UUIDs, time, misc
 uuid = { version = "1.10", features = ["v4", "serde"] }
 time = { version = "0.3", features = ["serde", "formatting"] }
