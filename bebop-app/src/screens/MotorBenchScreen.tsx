@@ -17,6 +17,12 @@ interface MotorBenchProps {
   /** Optional override for the runtime port. Defaults to 9090. */
   runtimePort?: number;
   onBack: () => void;
+  /** When provided, render a "Bluetooth controller" link so the operator
+   *  can jump straight from dial-in to gamepad pairing without bouncing
+   *  through the dashboard. Only set on the BLE-supported path: the
+   *  controller subsystem lives behind `BebopTransport` (which the
+   *  IP-only path doesn't have). */
+  onOpenControllers?: () => void;
 }
 
 const MODE_LABEL: Record<RuntimeMode, string> = {
@@ -31,6 +37,7 @@ export function MotorBenchScreen({
   robotIp,
   runtimePort = 9090,
   onBack,
+  onOpenControllers,
 }: MotorBenchProps) {
   const transportRef = useRef<RuntimeTransport | null>(null);
   const [connecting, setConnecting] = useState(true);
@@ -445,9 +452,16 @@ export function MotorBenchScreen({
         )}
       </div>
 
-      <Button variant="ghost" onClick={onBack} className="self-center mt-2">
-        Back to dashboard
-      </Button>
+      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 mt-2">
+        {onOpenControllers ? (
+          <Button variant="ghost" onClick={onOpenControllers}>
+            Bluetooth controller
+          </Button>
+        ) : null}
+        <Button variant="ghost" onClick={onBack}>
+          Back to dashboard
+        </Button>
+      </div>
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { ConfigScreen } from "./screens/ConfigScreen";
 import { ConnectByIpScreen } from "./screens/ConnectByIpScreen";
 import { ControllersScreen } from "./screens/ControllersScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
+import { DirectControllersScreen } from "./screens/DirectControllersScreen";
 import { MotorBenchScreen } from "./screens/MotorBenchScreen";
 import { ScanScreen } from "./screens/ScanScreen";
 import { WelcomeScreen } from "./screens/WelcomeScreen";
@@ -24,9 +25,12 @@ type Step =
   | "controllers"
   // IP-only path: skip BLE entirely. `direct-motors` is the same screen
   // as `motors` but with a back button that returns to the IP form rather
-  // than to the (nonexistent) BLE dashboard.
+  // than to the (nonexistent) BLE dashboard. `direct-controllers` opens
+  // a WebSocket to the agent's network control surface (port 9091 by
+  // default) so the IP-only path can pair gamepads too.
   | "connect-ip"
-  | "direct-motors";
+  | "direct-motors"
+  | "direct-controllers";
 
 const SETUP_ORDER: Step[] = ["welcome", "scan", "wifi", "config", "dashboard"];
 
@@ -66,6 +70,12 @@ function App() {
   // robot. Only meaningful when BLE is supported.
   const [resuming, setResuming] = useState<boolean>(supported);
   const resumeStarted = useRef(false);
+  // Where the controllers screen should send the user when they tap
+  // "Back". Set whenever we transition into `controllers` so the back
+  // button mirrors the entry point (dashboard vs. motor bench).
+  const [controllersReturn, setControllersReturn] = useState<
+    "dashboard" | "motors"
+  >("dashboard");
 
   const setupIdx = SETUP_ORDER.indexOf(step);
   const progress =
@@ -123,7 +133,8 @@ function App() {
             step === "wifi-reconfig" ||
             step === "motors" ||
             step === "direct-motors" ||
-            step === "controllers"
+            step === "controllers" ||
+            step === "direct-controllers"
               ? "Bebop"
               : "Bebop · Setup"}
           </div>
@@ -206,14 +217,22 @@ function App() {
             onReconfigure={() => setStep("wifi-reconfig")}
             onDisconnect={reset}
             onOpenMotors={() => setStep("motors")}
-            onOpenControllers={() => setStep("controllers")}
+            onOpenControllers={() => {
+              setControllersReturn("dashboard");
+              setStep("controllers");
+            }}
           />
         ) : null}
 
         {!resuming && step === "controllers" && transport ? (
           <ControllersScreen
             transport={transport}
-            onDone={() => setStep("dashboard")}
+            onDone={() => setStep(controllersReturn)}
+            backLabel={
+              controllersReturn === "motors"
+                ? "Back to motor bench"
+                : "Back to dashboard"
+            }
           />
         ) : null}
 
@@ -221,6 +240,10 @@ function App() {
           <MotorBenchScreen
             robotIp={wifi.ipAddress}
             onBack={() => setStep("dashboard")}
+            onOpenControllers={() => {
+              setControllersReturn("motors");
+              setStep("controllers");
+            }}
           />
         ) : null}
 
@@ -229,6 +252,14 @@ function App() {
             robotIp={directIp.ip}
             runtimePort={directIp.port}
             onBack={() => setStep("connect-ip")}
+            onOpenControllers={() => setStep("direct-controllers")}
+          />
+        ) : null}
+
+        {!resuming && step === "direct-controllers" && directIp ? (
+          <DirectControllersScreen
+            robotIp={directIp.ip}
+            onBack={() => setStep("direct-motors")}
           />
         ) : null}
       </section>

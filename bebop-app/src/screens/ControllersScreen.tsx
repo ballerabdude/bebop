@@ -9,10 +9,13 @@ import { Banner, Button, Card, Spinner } from "../components/ui";
 
 interface ControllersScreenProps {
   transport: BebopTransport;
-  /// Called when the user taps "Back to dashboard". The screen is
-  /// reachable from the dashboard so we always have somewhere to
-  /// return to.
+  /// Called when the user taps the back button. The screen is
+  /// reachable from both the dashboard and the motor bench, so the
+  /// caller decides where "back" leads.
   onDone: () => void;
+  /// Label for the back button. Defaults to "Back to dashboard" so
+  /// existing call sites don't need updating.
+  backLabel?: string;
 }
 
 const SCAN_TIMEOUT_MS = 8_000;
@@ -28,6 +31,7 @@ const STATUS_POLL_MS = 1_000;
 export function ControllersScreen({
   transport,
   onDone,
+  backLabel = "Back to dashboard",
 }: ControllersScreenProps) {
   const [status, setStatus] = useState<ControllerStatus | null>(null);
   const [devices, setDevices] = useState<DiscoveredController[]>([]);
@@ -286,7 +290,7 @@ export function ControllersScreen({
           {scanning ? "Scanning…" : "Rescan"}
         </Button>
         <Button variant="ghost" onClick={onDone}>
-          Back to dashboard
+          {backLabel}
         </Button>
       </div>
     </div>
