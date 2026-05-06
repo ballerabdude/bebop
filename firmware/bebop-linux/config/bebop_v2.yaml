@@ -52,26 +52,26 @@ joints:
     can_interface: can0
     motor_id: 31
     model: RS04
-    hard_limits: { pos_min: -0.6, pos_max: 0.6, vel_max: 3.5, tau_max: 25.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -0.785398, pos_max: 0.785398, vel_max: 3.5, tau_max: 25.0, temp_max: 70.0 }
 
   hip_abduction_right_joint:
     can_interface: can1
     motor_id: 41
     model: RS04
-    hard_limits: { pos_min: -0.6, pos_max: 0.6, vel_max: 3.5, tau_max: 25.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -0.785398, pos_max: 0.785398, vel_max: 3.5, tau_max: 25.0, temp_max: 70.0 }
 
   # ----- Femur / hip pitch (RS03) -------------------------------------------
   femur_left_joint:
     can_interface: can0
     motor_id: 32
     model: RS03
-    hard_limits: { pos_min: -1.0, pos_max: 1.0, vel_max: 3.5, tau_max: 18.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -0.349066, pos_max: 0.785398, vel_max: 3.5, tau_max: 18.0, temp_max: 70.0 }
 
   femur_right_joint:
     can_interface: can1
     motor_id: 42
     model: RS03
-    hard_limits: { pos_min: -1.0, pos_max: 1.0, vel_max: 3.5, tau_max: 18.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -0.785398, pos_max: 0.349066, vel_max: 3.5, tau_max: 18.0, temp_max: 70.0 }
 
   # ----- Shin / knee (RS04) -------------------------------------------------
   shin_left_joint:
@@ -79,26 +79,26 @@ joints:
     motor_id: 34
     model: RS04
     # Knee mostly flexes one way; tighter than hip on the +ve side.
-    hard_limits: { pos_min: -1.6, pos_max: 0.1, vel_max: 4.0, tau_max: 30.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -0.785398, pos_max: 1.570796, vel_max: 4.0, tau_max: 30.0, temp_max: 70.0 }
 
   shin_right_joint:
     can_interface: can1
     motor_id: 44
     model: RS04
-    hard_limits: { pos_min: -1.6, pos_max: 0.1, vel_max: 4.0, tau_max: 30.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -1.570796, pos_max: 0.785398, vel_max: 4.0, tau_max: 30.0, temp_max: 70.0 }
 
   # ----- Foot / ankle (RS02) ------------------------------------------------
   foot_left_joint:
     can_interface: can0
     motor_id: 35
     model: RS02
-    hard_limits: { pos_min: -0.5, pos_max: 0.5, vel_max: 4.0, tau_max: 8.0, temp_max: 65.0 }
+    hard_limits: { pos_min: -0.523599, pos_max: 0.523599, vel_max: 4.0, tau_max: 8.0, temp_max: 65.0 }
 
   foot_right_joint:
     can_interface: can1
     motor_id: 45
     model: RS02
-    hard_limits: { pos_min: -0.5, pos_max: 0.5, vel_max: 4.0, tau_max: 8.0, temp_max: 65.0 }
+    hard_limits: { pos_min: -0.523599, pos_max: 0.523599, vel_max: 4.0, tau_max: 8.0, temp_max: 65.0 }
 
 # ============================================================================
 # Server settings (WebSocket + HTTP)
