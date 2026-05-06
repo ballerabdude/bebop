@@ -20,6 +20,10 @@
 #                                             # can* up at 1 Mbps via networkd
 #   sudo ./install-jetson.sh --setup-can-only # just configure CAN; don't
 #                                             # download or install binaries
+#   sudo ./install-jetson.sh --build-gs-usb   # build gs_usb out-of-tree if
+#                                             # the running kernel lacks it
+#                                             # (JetPack stock kernel does);
+#                                             # implies --setup-can
 #
 # Requires:
 #   * `gh` CLI authenticated (`gh auth login`) — needed both to download
@@ -47,11 +51,14 @@ INSTALL_AGENT=1
 INSTALL_LINUX=1
 SETUP_CAN=0
 SETUP_CAN_ONLY=0
+BUILD_GS_USB=0
 # 1 Mbps is the Robstride bus rate; bebop-linux assumes the same.
 CAN_BITRATE="${CAN_BITRATE:-1000000}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 usage() {
-    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -67,6 +74,7 @@ while [[ $# -gt 0 ]]; do
         --linux-only)     INSTALL_AGENT=0; shift ;;
         --setup-can)      SETUP_CAN=1; shift ;;
         --setup-can-only) SETUP_CAN=1; SETUP_CAN_ONLY=1; shift ;;
+        --build-gs-usb)   SETUP_CAN=1; BUILD_GS_USB=1; shift ;;
         *)                echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -120,9 +128,26 @@ EOF
 
     if modinfo gs_usb >/dev/null 2>&1; then
         modprobe gs_usb 2>/dev/null || true
+    elif [[ "${BUILD_GS_USB}" -eq 1 ]]; then
+        # JetPack's stock kernel ships without CONFIG_CAN_GS_USB. Build
+        # the module out-of-tree against the running kernel's headers.
+        echo "    gs_usb missing; building out-of-tree (--build-gs-usb)"
+        if [[ -x "${SCRIPT_DIR}/build-gs-usb.sh" ]]; then
+            "${SCRIPT_DIR}/build-gs-usb.sh"
+        else
+            echo "    ERROR: ${SCRIPT_DIR}/build-gs-usb.sh missing or not executable" >&2
+            exit 1
+        fi
     else
-        echo "    WARN: gs_usb not found in /lib/modules/$(uname -r); the kernel" >&2
-        echo "          shipped without it. Update kernel/modules or rebuild." >&2
+        cat >&2 <<EOF
+    WARN: gs_usb not found in /lib/modules/$(uname -r). NVIDIA's stock
+          JetPack 6 kernel ships without CONFIG_CAN_GS_USB, so the
+          USB-CAN hub has no driver. Build the module out-of-tree:
+
+              sudo ${SCRIPT_DIR}/build-gs-usb.sh
+
+          ...or re-run this installer with --build-gs-usb.
+EOF
     fi
 
     # 3) Bring all can* interfaces up at 1 Mbps via systemd-networkd.
@@ -207,11 +232,38 @@ EOF
     exit 1
 fi
 
-# `gh auth status` is the canonical "am I logged in" probe; it exits non-zero
-# (and prints a hint) if no host has a usable token.
+# `gh auth status` is the canonical "am I logged in" probe. Under sudo we
+# run as root, but most people run `gh auth login` from their normal
+# user account — so root's credential store is empty even when the
+# invoking user is logged in. If the calling user (SUDO_USER) is
+# authenticated, lift their token into GH_TOKEN; gh honours that env
+# var ahead of the on-disk credential store, and the rest of the
+# script then "just works" without us having to wrap every call.
 if ! gh auth status >/dev/null 2>&1; then
-    echo "gh is installed but not authenticated. Run: gh auth login" >&2
-    exit 1
+    if [[ -n "${SUDO_USER:-}" ]] \
+        && sudo -u "${SUDO_USER}" -H gh auth status >/dev/null 2>&1; then
+        echo "==> reusing gh auth from invoking user '${SUDO_USER}'"
+        GH_TOKEN_FROM_USER="$(sudo -u "${SUDO_USER}" -H gh auth token 2>/dev/null || true)"
+        if [[ -z "${GH_TOKEN_FROM_USER}" ]]; then
+            echo "could not extract a gh token from ${SUDO_USER}; run 'sudo gh auth login' instead." >&2
+            exit 1
+        fi
+        export GH_TOKEN="${GH_TOKEN_FROM_USER}"
+    else
+        cat >&2 <<EOF
+gh is installed but not authenticated for the current user (root).
+
+If you already ran 'gh auth login' as your normal user, you almost
+certainly want one of:
+
+  # easiest — re-run with the script (it will reuse SUDO_USER's auth):
+  sudo $0 $*
+
+  # or authenticate root explicitly:
+  sudo gh auth login
+EOF
+        exit 1
+    fi
 fi
 
 # ---------------------------------------------------------------------------
