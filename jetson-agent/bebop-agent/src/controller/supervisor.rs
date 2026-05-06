@@ -84,7 +84,7 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
                     // and only re-log once a minute so the journal isn't
                     // flooded when the controller is just off.
                     suppressed_count += 1;
-                    if suppressed_count % REPEAT_LOG_EVERY == 0 {
+                    if suppressed_count.is_multiple_of(REPEAT_LOG_EVERY) {
                         warn!(
                             error = %msg,
                             attempts = suppressed_count + 1,
