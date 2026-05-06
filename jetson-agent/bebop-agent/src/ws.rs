@@ -112,7 +112,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         let bytes = match frame {
             Ok(Message::Binary(b)) => b,
             Ok(Message::Text(t)) => {
-                warn!(?t, "ignoring text WS frame; agent control surface is binary protobuf only");
+                warn!(
+                    ?t,
+                    "ignoring text WS frame; agent control surface is binary protobuf only"
+                );
                 continue;
             }
             Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
