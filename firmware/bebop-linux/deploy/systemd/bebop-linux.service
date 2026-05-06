@@ -1,0 +1,40 @@
+[Unit]
+Description=Bebop V2 Linux runtime (SocketCAN + WebSocket API + ONNX policy)
+Documentation=https://github.com/ballerabdude/bebop
+# CAN interfaces are typically brought up via networkd / a shell script
+# before this service starts. We don't `Requires=` any of them by name
+# because the bus list is config-driven (see /etc/bebop/bebop_v2.yaml).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# The runtime opens raw SocketCAN sockets and binds 0.0.0.0:9090, so it
+# either needs CAP_NET_RAW + CAP_NET_BIND_SERVICE or just root. We pick
+# root for parity with bebop-agent. Tighten to a `bebop` user with
+# AmbientCapabilities=CAP_NET_RAW if you care.
+User=root
+Group=root
+
+Environment=RUST_LOG=info,bebop_linux=info
+# If you ship a libonnxruntime.so out-of-band (e.g. /opt/onnxruntime/lib),
+# point the loader at it here. The runtime starts cleanly without it; ONNX
+# is only required once a client transitions to RunPolicy mode.
+# Environment=LD_LIBRARY_PATH=/opt/onnxruntime/lib
+
+ExecStart=/usr/local/bin/bebop-linux --config /etc/bebop/bebop_v2.yaml
+
+# Boot retry: if a CAN bus isn't up yet we'll exit non-zero and try again.
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=10
+
+# Hardening — relaxed for raw CAN + low-level access.
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
