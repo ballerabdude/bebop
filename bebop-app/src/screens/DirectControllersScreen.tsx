@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { DEFAULT_AGENT_PORT, WsAgentTransport } from "../ble";
 import { Banner, Button, Spinner } from "../components/ui";
@@ -31,25 +31,25 @@ export function DirectControllersScreen({
   agentPort = DEFAULT_AGENT_PORT,
   onBack,
 }: DirectControllersScreenProps) {
-  // Keep a single transport instance across re-renders. We can't store
-  // it in `useState` directly because constructing it twice (React
-  // StrictMode dev double-mount) opens a second WS we never close; the
-  // ref + lazy-init dance is the standard fix.
-  const transportRef = useRef<WsAgentTransport | null>(null);
-  if (transportRef.current === null) {
-    transportRef.current = new WsAgentTransport(robotIp, agentPort);
-  }
-
-  const [connecting, setConnecting] = useState(true);
+  // Transport lives in state — and is constructed *inside* the effect,
+  // not at render time. An earlier version cached it in a ref with a
+  // lazy-init in render and nulled the ref in cleanup; that crashed on
+  // every effect re-run (React 18 StrictMode dev double-mount, or a
+  // change to `robotIp` / `agentPort`) because the ref was nulled
+  // before the next effect captured it, then the effect did
+  // `transportRef.current!.connectWs()` on a null ref and surfaced the
+  // resulting `TypeError` as if it were a network failure.
+  const [transport, setTransport] = useState<WsAgentTransport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    const t = transportRef.current!;
+    const t = new WsAgentTransport(robotIp, agentPort);
+
+    setTransport(null);
+    setError(null);
 
     void (async () => {
-      setConnecting(true);
-      setError(null);
       try {
         await t.connectWs();
       } catch (e) {
@@ -61,9 +61,18 @@ export function DirectControllersScreen({
           );
         }
         return;
-      } finally {
-        if (!cancelled) setConnecting(false);
       }
+      if (cancelled) {
+        // Lost the race against unmount / deps change; throw the
+        // socket away so the agent-side connection doesn't linger.
+        try {
+          t.disconnectWs();
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      setTransport(t);
     })();
 
     return () => {
@@ -76,20 +85,8 @@ export function DirectControllersScreen({
       } catch {
         /* ignore */
       }
-      transportRef.current = null;
     };
   }, [robotIp, agentPort]);
-
-  if (connecting) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 text-text-dim">
-        <Spinner large />
-        <div className="text-sm">
-          Connecting to agent at <code>{robotIp}:{agentPort}</code>…
-        </div>
-      </div>
-    );
-  }
 
   if (error) {
     return (
@@ -111,9 +108,20 @@ export function DirectControllersScreen({
     );
   }
 
+  if (!transport) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 text-text-dim">
+        <Spinner large />
+        <div className="text-sm">
+          Connecting to agent at <code>{robotIp}:{agentPort}</code>…
+        </div>
+      </div>
+    );
+  }
+
   return (
     <ControllersScreen
-      transport={transportRef.current!}
+      transport={transport}
       onDone={onBack}
       backLabel="Back to motor bench"
     />

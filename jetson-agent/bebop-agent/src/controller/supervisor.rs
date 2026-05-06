@@ -34,6 +34,12 @@ const EVENT_WAIT_TICK: Duration = Duration::from_millis(20);
 pub async fn run(state: AppState) -> anyhow::Result<()> {
     info!("controller supervisor online");
     let mut idle_logged = false;
+    // Tracks the last failure message we logged so we can suppress
+    // repeated identical errors (e.g. "controller is off" logged every
+    // 2 s for hours). Reset to None on success so the next failure is
+    // always logged once.
+    let mut last_logged_error: Option<String> = None;
+    let mut suppressed_count: u32 = 0;
 
     loop {
         let cfg = state.config().await.controller.clone();
@@ -50,6 +56,10 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
                 }
                 idle_logged = true;
             }
+            // Reset error de-dupe so the next failure after a config
+            // change (e.g. user re-pairs) gets logged immediately.
+            last_logged_error = None;
+            suppressed_count = 0;
             sleep(Duration::from_secs(5)).await;
             continue;
         }
@@ -58,9 +68,39 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
         match attach_and_run(&state, &cfg).await {
             Ok(()) => {
                 debug!("controller session ended cleanly; re-attaching");
+                if suppressed_count > 0 {
+                    info!(
+                        suppressed = suppressed_count,
+                        "controller recovered; suppressed repeated errors"
+                    );
+                }
+                last_logged_error = None;
+                suppressed_count = 0;
             }
             Err(e) => {
-                warn!(error = %e, "controller session ended with error");
+                let msg = e.to_string();
+                if last_logged_error.as_deref() == Some(msg.as_str()) {
+                    // Same failure as last time — keep counting silently
+                    // and only re-log once a minute so the journal isn't
+                    // flooded when the controller is just off.
+                    suppressed_count += 1;
+                    if suppressed_count % REPEAT_LOG_EVERY == 0 {
+                        warn!(
+                            error = %msg,
+                            attempts = suppressed_count + 1,
+                            mac = %cfg.paired_mac,
+                            "controller still failing; will keep retrying"
+                        );
+                    }
+                } else {
+                    warn!(
+                        error = %msg,
+                        mac = %cfg.paired_mac,
+                        "controller session ended with error"
+                    );
+                    last_logged_error = Some(msg);
+                    suppressed_count = 0;
+                }
             }
         }
 
@@ -75,6 +115,13 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
         sleep(RETRY_BACKOFF).await;
     }
 }
+
+/// Re-log a sustained failure once every N consecutive attempts so the
+/// user sees periodic confirmation that the agent is still trying,
+/// without filling the journal at the retry cadence. With a 2 s
+/// backoff and ~7 s per failed attach attempt, 30 ≈ once every ~3-4
+/// minutes.
+const REPEAT_LOG_EVERY: u32 = 30;
 
 /// One full attach cycle: BlueZ connect → evdev open → teleop loop
 /// until the controller drops or an unrecoverable error fires.

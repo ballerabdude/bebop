@@ -131,14 +131,63 @@ async fn bluetoothctl(args: &[&str]) -> Result<String> {
         .output()
         .await
         .map_err(|e| anyhow!("spawn bluetoothctl: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
-        return Err(anyhow!(
-            "bluetoothctl {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        // bluetoothctl writes most diagnostic output (including the
+        // human-readable "Failed to connect: org.bluez.Error.*"
+        // messages) to stdout, not stderr. Combine both so the caller
+        // sees an actionable reason rather than an empty string.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = format_bluetoothctl_failure(&stdout, &stderr);
+        return Err(anyhow!("bluetoothctl {:?} failed: {}", args, detail));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    // Even with a zero exit code, `connect` can report failure on
+    // stdout (e.g. "Failed to connect: org.bluez.Error.NotReady"). Map
+    // that to an error so callers can back off correctly.
+    if let Some(reason) = scan_for_failure(&stdout) {
+        return Err(anyhow!("bluetoothctl {:?} reported: {}", args, reason));
+    }
+    Ok(stdout.into_owned())
+}
+
+/// Combine stdout + stderr into one short, log-friendly line. We strip
+/// ANSI escapes, drop empty lines, and prefer the most recent failure
+/// line (bluetoothctl prints "Attempting..." first, then the failure).
+fn format_bluetoothctl_failure(stdout: &str, stderr: &str) -> String {
+    let mut lines: Vec<String> = stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(strip_ansi)
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if let Some(last_failure) = lines
+        .iter()
+        .rposition(|l| l.to_lowercase().contains("fail") || l.to_lowercase().contains("error"))
+    {
+        return lines.swap_remove(last_failure);
+    }
+    if let Some(last) = lines.pop() {
+        return last;
+    }
+    "(no output)".to_owned()
+}
+
+/// Detect failure lines in successful-exit `bluetoothctl` output. The
+/// shell command can return 0 even when `connect` failed; the only
+/// signal is a "Failed to connect: ..." line on stdout.
+fn scan_for_failure(stdout: &str) -> Option<String> {
+    for line in stdout.lines().map(strip_ansi) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("failed to") || lower.contains("error: ") {
+            return Some(trimmed.to_owned());
+        }
+    }
+    None
 }
 
 /// Parse the output of `bluetoothctl devices`. Each line is of the
@@ -372,5 +421,46 @@ Device AA:BB:CC:DD:EE:FF (public)
     fn class_hex_with_trailing_decimal_in_parens() {
         assert_eq!(parse_class_hex("0x002508 (9480)"), Some(0x002508));
         assert_eq!(parse_class_hex("002508"), Some(0x002508));
+    }
+
+    #[test]
+    fn format_failure_picks_the_failure_line_over_attempting() {
+        let stdout = "\
+Attempting to connect to E8:47:3A:B0:48:34
+Failed to connect: org.bluez.Error.NotReady br-connection-not-ready
+";
+        let s = format_bluetoothctl_failure(stdout, "");
+        assert!(s.contains("Failed to connect"));
+        assert!(s.contains("NotReady"));
+    }
+
+    #[test]
+    fn format_failure_falls_back_to_last_line_when_no_explicit_error() {
+        let s = format_bluetoothctl_failure("only line\n", "");
+        assert_eq!(s, "only line");
+    }
+
+    #[test]
+    fn format_failure_handles_empty() {
+        assert_eq!(format_bluetoothctl_failure("", ""), "(no output)");
+    }
+
+    #[test]
+    fn scan_for_failure_detects_failed_to_connect() {
+        let s = "\
+Attempting to connect to AA:BB:CC:DD:EE:FF
+Failed to connect: org.bluez.Error.NotReady br-connection-not-ready
+";
+        let f = scan_for_failure(s).expect("should detect failure");
+        assert!(f.contains("Failed to connect"));
+    }
+
+    #[test]
+    fn scan_for_failure_returns_none_on_success() {
+        let s = "\
+Attempting to connect to AA:BB:CC:DD:EE:FF
+Connection successful
+";
+        assert!(scan_for_failure(s).is_none());
     }
 }
