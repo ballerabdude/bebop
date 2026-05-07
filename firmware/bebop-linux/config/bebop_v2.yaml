@@ -116,12 +116,21 @@ server:
 # rail V, board temperature, fault word) and republishes the result to
 # every WS client through `Snapshot.power` / TelemetryFrame.power.
 #
-# Battery chemistry below describes the *pack we ship with* — currently
-# 13s2p Li-ion (NMC), so 13 series cells × 4.20 V max = 54.6 V fully
-# charged, 13 × 3.00 V = 39.0 V at the protected cutoff. The "fuel gauge"
-# in the operator app is a linear interpolation between those endpoints —
-# it's intentionally simple; replace with a coulomb counter or
-# OCV-vs-SOC table if you ever care about better than ±10 % accuracy.
+# Battery chemistry below describes the *pack we ship with* — a 13s LFP
+# (LiFePO4) pack managed by a JK-BMS, 40 Ah nominal. Per-cell endpoints
+# match the BMS's own SOC anchors (SOC-100% = 3.445 V, SOC-0% = 2.700 V),
+# giving a pack range of 13 × 3.45 = 44.85 V full → 13 × 2.70 = 35.10 V
+# empty. The pack BMS will trip on cell UVP (2.50 V) before we ever get
+# to the firmware's "0 %".
+#
+# The fuel gauge in the operator app is a linear interpolation between
+# those endpoints. LFP's OCV curve is famously flat between roughly 20 %
+# and 90 % SOC (cells sit at ~3.20–3.30 V across most of the discharge),
+# so this estimate is good for "full / mostly full / getting low / dead"
+# bucketing but should not be trusted to better than ±15 %. The on-pack
+# JK-BMS does coulomb counting and is the authoritative SOC source if
+# you need it — wire that in via the BMS's Bluetooth/UART protocol and
+# replace this block with a coulomb-counter feed when accuracy matters.
 #
 # Comment out this block (or delete it) to skip power telemetry entirely;
 # the runtime will still come up cleanly without a power board attached.
@@ -130,6 +139,6 @@ power:
   can_interface: can4
   power_id: 170             # Robstride PowerBoard default address 0xAA (param 6006)
   poll_interval_ms: 1000    # 1 Hz status polling — keeps the bus quiet
-  battery_cells: 13         # 13s pack (4.2 V × 13 = 54.6 V full)
-  cell_full_voltage: 3.40   # Li-ion full-charge per cell
-  cell_empty_voltage: 2.90  # cutoff per cell — pack BMS will likely trip first
+  battery_cells: 13         # 13s LFP pack (3.45 V × 13 = 44.85 V full)
+  cell_full_voltage: 3.45   # LFP SOC-100% anchor (matches JK-BMS setting)
+  cell_empty_voltage: 2.70  # LFP SOC-0%   anchor (matches JK-BMS setting)

@@ -237,9 +237,10 @@ impl Default for ServerConfig {
 ///
 /// Battery chemistry parameters are independent of the board itself and
 /// are used purely for the operator-facing "fuel gauge" (state-of-charge
-/// linear-interp from voltage). They default to a 13s2p Li-ion pack
-/// (Bebop V2's stock configuration: 13 cells × 4.2 V max = 54.6 V full,
-/// 13 × 3.0 V = 39.0 V empty).
+/// linear-interp from voltage). The defaults applied when YAML omits these
+/// fields are 13 cells × 4.20 V / 3.00 V (a generic Li-ion NMC pack);
+/// Bebop V2 itself ships with a 13s LFP pack, see `bebop_v2.yaml` for the
+/// matching 3.45 V / 2.70 V endpoints.
 #[derive(Debug, Clone)]
 pub struct PowerBoardConfig {
     pub can_interface: String,
