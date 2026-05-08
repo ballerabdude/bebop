@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 
+import { GamepadDriver } from "../components/GamepadDriver";
 import { Banner, Button, Spinner } from "../components/ui";
 import { getOrCreateRuntimeTransport } from "../runtime";
 import type {
@@ -272,8 +273,12 @@ export function MotorBenchScreen({
     <div className="flex flex-col gap-3">
       {/* Sticky toolbar: status, mode switcher, bulk controls + E-STOP. On
           desktop it lays out as one wide row so the operator always has
-          E-STOP one click away even while scrolling motor rows. */}
-      <div className="sticky top-0 z-10 -mx-5 px-5 sm:-mx-6 sm:px-6 pt-1 pb-3 bg-bg/85 backdrop-blur-md">
+          E-STOP one click away even while scrolling motor rows. On
+          mobile it stacks: status pill + bus chips, full-width mode
+          segmented control, and a final row with bulk controls and a
+          prominent E-STOP — keeping every control reachable with a
+          thumb. */}
+      <div className="sticky top-0 z-10 -mx-4 px-4 sm:-mx-6 sm:px-6 pt-1 pb-3 bg-bg/85 backdrop-blur-md">
         <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev px-3 py-2.5 flex flex-col gap-3 lg:flex-row lg:items-center lg:gap-5">
           {/* Status: mode pill + bus chips */}
           <div className="flex items-center gap-3 flex-wrap min-w-0">
@@ -292,7 +297,7 @@ export function MotorBenchScreen({
               </span>
             </div>
             <div className="hidden lg:block w-px h-5 bg-border" aria-hidden />
-            <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-x-3 gap-y-1 flex-wrap">
               {buses.map((b) => (
                 <div
                   key={b.canInterface}
@@ -317,9 +322,11 @@ export function MotorBenchScreen({
 
           <div className="hidden lg:block flex-1" aria-hidden />
 
-          {/* Mode switcher */}
+          {/* Mode switcher: full-width segmented control on mobile so each
+              option is comfortably tappable; auto-width on lg+ where it
+              shares the toolbar row with bulk controls. */}
           <div className="flex items-center gap-2">
-            <div className="inline-flex rounded-[var(--radius-card)] bg-bg-elev-2 p-0.5">
+            <div className="inline-flex w-full lg:w-auto rounded-[var(--radius-card)] bg-bg-elev-2 p-0.5">
               <SegButton
                 active={mode === "IDLE"}
                 onClick={() => setMode("IDLE")}
@@ -344,15 +351,17 @@ export function MotorBenchScreen({
             </div>
           </div>
 
-          {/* Bulk controls + E-STOP. On mobile this row wraps below the
-              switcher; on desktop it sits to its right. */}
+          {/* Bulk controls + E-STOP. On mobile this row stacks below the
+              switcher; on desktop it sits to its right. The E-STOP
+              button gets extra emphasis on phones — operators reach for
+              it under stress, so it's larger and visually anchored. */}
           <div className="flex items-center justify-between gap-2 lg:justify-end">
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-1 lg:flex-none">
               <Button
                 variant="secondary"
                 onClick={() => setAll(true)}
                 disabled={!!busy || mode !== "DIAL_IN" || estopLatched}
-                className="!py-2 !text-sm"
+                className="flex-1 lg:flex-none py-2.5! text-sm!"
               >
                 Enable all
               </Button>
@@ -360,7 +369,7 @@ export function MotorBenchScreen({
                 variant="secondary"
                 onClick={() => setAll(false)}
                 disabled={!!busy}
-                className="!py-2 !text-sm"
+                className="flex-1 lg:flex-none py-2.5! text-sm!"
               >
                 Disable all
               </Button>
@@ -368,7 +377,7 @@ export function MotorBenchScreen({
             <Button
               onClick={eStop}
               disabled={busy === "estop" || estopLatched}
-              className="!bg-danger !text-white hover:!bg-[#e94a50] !py-2 !text-sm"
+              className="bg-danger! text-white! hover:bg-[#e94a50]! py-2.5! text-sm! shrink-0 min-w-[88px]"
             >
               E-STOP
             </Button>
@@ -419,11 +428,28 @@ export function MotorBenchScreen({
         </div>
       ) : null}
 
-      {/* Motor table. The grid template scales: on small screens we keep
-          things tight; on md+ we let the joint name and limits columns
-          breathe so labels never truncate. */}
+      {/* Bluetooth-gamepad bridge. Renders nothing when no pad is
+          connected, so it doesn't take up space in the layout for
+          users that aren't using a controller. Wired to the same
+          callbacks the click-and-drag dial uses so the throttling /
+          coalescing logic stays in one place. */}
+      <GamepadDriver
+        motors={motors}
+        mode={mode}
+        estopLatched={estopLatched}
+        onSetTarget={sendTarget}
+        onEStop={eStop}
+        onResetEStop={resetEStop}
+        onToggleArm={toggleMotor}
+      />
+
+      {/* Motor table. On md+ this is a true 6-column grid (joint, limits,
+          and four numeric readouts). On phones we collapse to a stacked
+          card per joint so nothing overflows the viewport horizontally
+          and tap targets stay generous. The header row is hidden on
+          mobile because each row labels its own readouts inline. */}
       <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev overflow-hidden">
-        <div className={MOTOR_GRID + " px-3 py-2 text-[11px] uppercase tracking-wider text-text-dim border-b border-border"}>
+        <div className={MOTOR_HEADER + " px-3 py-2 text-[11px] uppercase tracking-wider text-text-dim border-b border-border"}>
           <div>Joint</div>
           <div>Limits</div>
           <div className="text-right">Pos (rad)</div>
@@ -466,12 +492,16 @@ export function MotorBenchScreen({
   );
 }
 
-// Shared grid template for header + rows so the columns stay aligned. The
-// joint column gets a comfortable minmax so names like "hip_pitch_left"
-// always fit; numeric columns lock to a fixed width so they line up
-// regardless of magnitude.
+// Shared grid template for header + rows so the columns stay aligned on
+// md+ screens. On mobile the row uses flex-col so each motor reads as a
+// stacked card (joint header, limit bars, inline numeric readouts) and
+// nothing overflows the narrow viewport. The joint column gets a
+// comfortable minmax so names like "hip_pitch_left" always fit; numeric
+// columns lock to a fixed width so they line up regardless of magnitude.
+const MOTOR_HEADER =
+  "hidden md:grid md:grid-cols-[minmax(180px,2fr)_minmax(240px,3fr)_88px_88px_88px_72px] gap-3";
 const MOTOR_GRID =
-  "grid grid-cols-[minmax(140px,2fr)_minmax(180px,3fr)_72px_72px_72px_64px] md:grid-cols-[minmax(180px,2fr)_minmax(240px,3fr)_88px_88px_88px_72px] gap-3";
+  "flex flex-col gap-2.5 md:grid md:grid-cols-[minmax(180px,2fr)_minmax(240px,3fr)_88px_88px_88px_72px] md:gap-3 md:items-center";
 
 function SegButton({
   active,
@@ -489,7 +519,7 @@ function SegButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`px-3 py-1.5 text-sm font-semibold rounded-[calc(var(--radius-card)-4px)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer ${
+      className={`flex-1 lg:flex-none px-3 py-2 lg:py-1.5 text-sm font-semibold rounded-[calc(var(--radius-card)-4px)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer ${
         active
           ? "bg-accent text-white shadow-sm"
           : "text-text-dim hover:text-text"
@@ -560,13 +590,13 @@ function MotorRow({
           onClick={() => onToggle(!motor.armed)}
           disabled={busy || (!motor.armed && !canArm)}
           aria-label={`${motor.armed ? "Disarm" : "Arm"} ${motor.jointName}`}
-          className={`shrink-0 inline-flex items-center justify-center w-9 h-5 rounded-full transition-colors ${
+          className={`shrink-0 inline-flex items-center justify-center w-11 h-6 md:w-9 md:h-5 rounded-full transition-colors ${
             motor.armed ? "bg-success" : "bg-text-dim/30"
           } ${busy ? "opacity-60" : ""} disabled:opacity-40`}
         >
           <span
-            className={`inline-block w-4 h-4 bg-white rounded-full transition-transform ${
-              motor.armed ? "translate-x-2" : "-translate-x-2"
+            className={`inline-block w-5 h-5 md:w-4 md:h-4 bg-white rounded-full transition-transform ${
+              motor.armed ? "translate-x-2.5 md:translate-x-2" : "-translate-x-2.5 md:-translate-x-2"
             }`}
             aria-hidden
           />
@@ -643,7 +673,26 @@ function MotorRow({
         <LimitBar label="tau" pct={tauPct} />
         <LimitBar label="T" pct={tempPct} />
       </div>
-      <div className="text-right tabular-nums self-center leading-tight">
+      {/* Mobile-only readouts: a single horizontal strip beneath the
+          bars so each joint fits in a viewport-width card without
+          horizontal scrolling. Hidden on md+ where the four
+          readout cells below take over. */}
+      <div className="md:hidden grid grid-cols-4 gap-2 text-[12px] tabular-nums pt-1 border-t border-border/50 mt-0.5">
+        <MobileReadout label="pos">
+          <div>{fmt(motor.position)}</div>
+          {canDrive ? (
+            <div className="text-[10px] text-text-dim leading-tight">
+              → {fmt(motor.target)}
+            </div>
+          ) : null}
+        </MobileReadout>
+        <MobileReadout label="vel">{fmt(motor.velocity)}</MobileReadout>
+        <MobileReadout label="tau">{fmt(motor.torque)}</MobileReadout>
+        <MobileReadout label="T °C">{motor.temperature.toFixed(1)}</MobileReadout>
+      </div>
+      {/* Desktop-only readout cells. These participate in the parent's
+          6-column grid so the columns line up across rows. */}
+      <div className="hidden md:block text-right tabular-nums self-center leading-tight">
         <div>{fmt(motor.position)}</div>
         {canDrive ? (
           <div
@@ -654,15 +703,32 @@ function MotorRow({
           </div>
         ) : null}
       </div>
-      <div className="text-right tabular-nums self-center">
+      <div className="hidden md:block text-right tabular-nums self-center">
         {fmt(motor.velocity)}
       </div>
-      <div className="text-right tabular-nums self-center">
+      <div className="hidden md:block text-right tabular-nums self-center">
         {fmt(motor.torque)}
       </div>
-      <div className="text-right tabular-nums self-center">
+      <div className="hidden md:block text-right tabular-nums self-center">
         {motor.temperature.toFixed(1)}
       </div>
+    </div>
+  );
+}
+
+function MobileReadout({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-col leading-tight min-w-0">
+      <span className="text-[10px] uppercase tracking-wider text-text-dim">
+        {label}
+      </span>
+      <span className="text-text font-semibold truncate">{children}</span>
     </div>
   );
 }

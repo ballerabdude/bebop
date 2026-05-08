@@ -126,7 +126,7 @@ function App() {
 
   return (
     <main className={`flex flex-col min-h-full mx-auto font-sans w-full ${width}`}>
-      <header className="px-5 pt-5 pb-3 sm:px-6 sm:pt-6">
+      <header className="px-4 pt-4 pb-3 sm:px-6 sm:pt-6">
         <div className="flex items-center justify-between mb-2.5 gap-3">
           <div className="text-sm tracking-[0.08em] uppercase text-text-dim">
             {step === "dashboard" ||
@@ -149,7 +149,7 @@ function App() {
         ) : null}
       </header>
 
-      <section className="flex-1 px-5 pt-2 pb-6 sm:px-6 flex flex-col">
+      <section className="flex-1 px-4 pt-2 pb-6 sm:px-6 flex flex-col">
         {resuming ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-dim">
             <Spinner />

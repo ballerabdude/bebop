@@ -14,29 +14,54 @@ Today:
 * **Setup wizard** — scan for nearby robots over BLE, connect, configure
   Wi-Fi, name the robot, choose owner + timezone.
 * **Dashboard** — live app status (container state, image) and OTA status
-  with a "check for updates" action.
+  with a "check for updates" action; also lets the operator
+  start / stop / restart the robot-app container and edit the
+  configured image.
+* **Connect by IP** — skip BLE entirely when the robot is already on
+  the LAN. The IP-only path goes straight to the motor bench and the
+  agent control surface (`WsAgentTransport`).
+* **Motor bench** — live per-joint telemetry, dial-in slider with
+  re-zero affordance, power-board card, sticky toolbar with E-STOP.
+* **Bluetooth gamepad dial-in** — pair an 8BitDo / DualSense / Xbox /
+  Switch Pro pad to your phone or laptop, drive the active joint's
+  target with the left stick. See [Bluetooth controllers](#bluetooth-controllers).
+* **Robot-side gamepad pairing** — pair a controller to the robot's
+  BlueZ stack for body-velocity teleop forwarded to `bebop-linux`
+  over UDP. Owned by `jetson-agent/bebop-agent/src/controller/`; the
+  app just orchestrates the scan/pair/unpair RPCs.
 
 Planned:
 
 * Re-pair / switch between multiple robots owned by the same user.
 * Manage robot settings after initial provisioning.
 * Surface logs and diagnostics for support escalations.
-* Trigger robot application controls (start / stop / restart).
+* Body-velocity drive teleop from the phone-paired controller (would
+  need a new runtime / agent WS message; today the app-side gamepad
+  drives joint targets only).
 
 ## Architecture
 
 The UI talks to the robot through a `BebopTransport` abstraction
-(`src/ble/transport.ts`). Two implementations ship today:
+(`src/ble/transport.ts`). Three implementations ship today:
 
-| Transport              | When it&rsquo;s picked              | Where it lives                                        |
-| ---------------------- | ----------------------------------- | ----------------------------------------------------- |
-| `TauriTransport`       | Inside the Tauri shell (desktop / mobile) | `src/ble/tauriTransport.ts`, `src-tauri/src/ble.rs`   |
-| `WebBluetoothTransport`| Plain browser with Web Bluetooth (Chrome, Edge) | `src/ble/webBluetoothTransport.ts`                    |
+| Transport              | When it&rsquo;s picked                                | Where it lives                                        |
+| ---------------------- | ----------------------------------------------------- | ----------------------------------------------------- |
+| `TauriTransport`       | Inside the Tauri shell (desktop / mobile)             | `src/ble/tauriTransport.ts`, `src-tauri/src/ble.rs`   |
+| `WebBluetoothTransport`| Plain browser with Web Bluetooth (Chrome, Edge)       | `src/ble/webBluetoothTransport.ts`                    |
+| `WsAgentTransport`     | The "Connect by IP" flow — talks to the agent's network control surface over WebSocket on port 9091 instead of BLE | `src/ble/wsAgentTransport.ts`                         |
 
-There is no user-facing toggle — `createTransport()` picks the right
-one at runtime: Tauri if its internals are present on `window`,
-otherwise Web Bluetooth. If neither is available the app shows a
-&ldquo;Bluetooth unavailable&rdquo; screen.
+`createTransport()` picks Tauri or Web Bluetooth at runtime based on
+what's available on `window`. The IP-only path constructs a
+`WsAgentTransport` directly when the user types in an IP. If no
+BLE backend is available the app falls back to the IP form
+automatically; if BLE *is* available the welcome screen offers both
+paths.
+
+The runtime side (motor bench, telemetry, joint targets) is a
+separate WS to `bebop-linux` itself (`src/runtime/wsTransport.ts`,
+default port 9090). It carries a different protobuf envelope
+(`bebop.runtime.v1.*`) and runs at much higher frame rates than the
+agent WS — telemetry pushes at 30 Hz by default.
 
 `TauriTransport` calls Rust commands defined in `src-tauri/src/ble/`,
 which are backed by [`btleplug`](https://github.com/deviceplug/btleplug)
@@ -58,6 +83,76 @@ agent. On this side the bindings come from:
 > macOS only: the first time the app accesses Bluetooth, the system will
 > prompt for permission. For release builds you&rsquo;ll also need to set
 > `NSBluetoothAlwaysUsageDescription` in the bundle&rsquo;s `Info.plist`.
+
+## Bluetooth controllers
+
+There are two distinct BT-controller flows and they connect at
+different layers:
+
+| Flow                 | Pairs to                | Drives                                                                | Where it lives                                       |
+| -------------------- | ----------------------- | --------------------------------------------------------------------- | ---------------------------------------------------- |
+| Robot-side teleop    | The robot (BlueZ)       | Body velocity (xvel/yvel/angvel) → bebop-linux UDP                    | `jetson-agent/bebop-agent/src/controller/`           |
+| App-side dial-in     | Your phone / laptop     | Per-joint target position via the existing runtime WS `setMotorTarget`| `src/input/`, `src/components/GamepadDriver.tsx`     |
+
+The app-side flow uses the [Web Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API)
+and works with any pad the browser/WebView surfaces. The pad never
+touches the robot's BT stack; it stays paired to the device running
+bebop-app.
+
+### Layout auto-detection
+
+The driver supports both common HID layouts and picks one per pad in
+`src/input/mapping.ts`:
+
+| Layout      | Picked when                              | Examples                                              |
+| ----------- | ---------------------------------------- | ----------------------------------------------------- |
+| `standard`  | `Gamepad.mapping === "standard"`         | Xbox Wireless, DualSense over BT, 8BitDo in **X-input** mode (hold START + Y for 3 s) |
+| `dinput`    | Anything else (8BitDo / generic HID)     | 8BitDo Mobile / Pro 2 / Zero 2 in their default Android mode, generic HID pads |
+
+The active layout name appears as a small badge on the controller
+card. Each layout knows the chord text printed on its physical pad,
+so the on-screen hints read **"LB / RB"** under standard and
+**"L1 / R1"** under D-input — matching what the user sees on the
+hardware. Logical intents (`prevJoint`, `nextJoint`, `deadman`,
+`estop`, `resetEStop`, `armToggle`) are the same across layouts;
+consumers just read `snapshot.logical.*` and don't deal with raw
+button indices.
+
+### Bindings (in the motor bench)
+
+When a pad is detected on the **motor bench** screen, a controller
+card appears with these bindings (chord names shown as
+`standard / dinput` where they differ):
+
+* **LB / L1**, **RB / R1** — cycle the active joint
+* **Left stick ↕** — nudge the active joint's target position (rate
+  scaled by trigger pressure; capped at the firmware slew ceiling)
+* **RT / R2** held — deadman; release to halt motion immediately
+* **L3 (left-stick click)** — arm / disarm the active joint
+* **B / Circle** — latch the runtime E-STOP
+* **A / Cross** — clear a latched E-STOP
+
+### Tuning the dial-in rate
+
+Two coordinated knobs decide how fast a stick deflection moves the
+joint target:
+
+| Knob                              | Lives in                                              | Notes                                                                                       |
+| --------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `FULL_RATE_RAD_S`                 | `src/components/GamepadDriver.tsx`                    | Per-second rate at full stick + full trigger. Currently `1.5` rad/s (~86°/s).               |
+| `slew.max_pos_step_per_tick`      | `firmware/bebop-linux/config/bebop_v2.yaml`           | Hard ceiling enforced on the firmware side at 100 Hz. Default `0.005` rad → `0.5` rad/s cap. |
+
+The firmware silently clamps at its slew cap, so any
+`FULL_RATE_RAD_S` above `max_pos_step_per_tick × 100` just feels
+capped. To genuinely move faster:
+
+1. Bump `slew.max_pos_step_per_tick` in the firmware YAML and
+   restart `bebop-linux`.
+2. Bump `FULL_RATE_RAD_S` to the same ceiling on the app side.
+3. Watch the per-joint **Δ** chip in the motor row while you push
+   the stick — if it grows on aggressive moves, the joint can't
+   actually keep up at the new rate and you'll start wearing the PD
+   loop.
 
 ## BLE protocol
 
@@ -106,10 +201,16 @@ Prerequisites:
 bebop-app/
 ├── src/                  # React + TypeScript UI
 │   ├── App.tsx           # App shell + flow orchestration
-│   ├── ble/              # Transport interface + Tauri / Web Bluetooth impls
+│   ├── ble/              # BebopTransport + Tauri / Web Bluetooth / WS-agent impls
+│   ├── runtime/          # bebop-linux runtime WS client (motor bench, telemetry)
+│   ├── input/            # Web Gamepad API hook + per-layout button mapping
 │   ├── proto/            # Generated protobuf bindings (npm run gen-proto)
-│   ├── components/       # Shared UI primitives
-│   └── screens/          # Welcome, Scan, Wifi, Config, Done (setup wizard)
+│   │   ├── bebop_pb.ts            # Agent envelope (BLE + WS-agent)
+│   │   └── bebop_runtime_pb.ts    # bebop-linux runtime envelope
+│   ├── components/       # Shared UI primitives + GamepadDriver
+│   └── screens/          # Welcome, Scan, Wifi, Config, Done, Dashboard,
+│                         # ConnectByIp, MotorBench, Controllers,
+│                         # DirectControllers
 ├── src-tauri/            # Rust / Tauri shell
 │   ├── src/ble/          # Tauri commands + btleplug-based BLE central
 │   └── src/lib.rs        # invoke_handler + managed state registration

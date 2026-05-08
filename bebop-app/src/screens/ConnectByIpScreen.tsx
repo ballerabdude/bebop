@@ -143,28 +143,41 @@ export function ConnectByIpScreen({
 
       <Card>
         <div className="flex flex-col gap-3 py-2">
-          <Field label="Robot IP address">
+          <Field
+            label="Robot IP or hostname"
+            hint="Use the LAN IP (e.g. 192.168.1.42) or a hostname like bebop.local."
+          >
             <input
               autoFocus
-              inputMode="decimal"
+              // Default text keyboard on mobile so hostnames like
+              // "bebop.local" are typeable; "url" hints the keyboard
+              // toward `.` and `/` which is handy for both IPv4 dots
+              // and DNS labels. We deliberately don't use
+              // `inputMode="decimal"` here — it locks iOS / Android to
+              // a numeric keypad with no letters.
+              inputMode="url"
+              type="text"
               autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
               spellCheck={false}
               value={ip}
               onChange={(e) => setIp(e.target.value)}
-              placeholder="192.168.1.42"
-              className="w-full bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-2.5 text-text outline-none focus:border-accent"
+              placeholder="192.168.1.42 or bebop.local"
+              className="w-full bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-3 text-text outline-none focus:border-accent text-base"
             />
           </Field>
           <Field label="Port" hint="The runtime server defaults to 9090.">
             <input
               type="number"
+              inputMode="numeric"
               min={1}
               max={65535}
               value={port}
               onChange={(e) =>
                 setPort(parseInt(e.target.value || "0", 10) || DEFAULT_PORT)
               }
-              className="w-full bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-2.5 text-text outline-none focus:border-accent"
+              className="w-full bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-3 text-text outline-none focus:border-accent text-base"
             />
           </Field>
         </div>
