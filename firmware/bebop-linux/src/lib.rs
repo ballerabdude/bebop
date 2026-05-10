@@ -21,6 +21,7 @@ pub mod config;
 pub mod mode;
 pub mod observation;
 pub mod policy;
+pub mod policy_runner;
 pub mod powerboard;
 pub mod robstride;
 pub mod safety;

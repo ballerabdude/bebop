@@ -12,13 +12,14 @@
 use anyhow::{Context, Result};
 use bebop_linux::config::RobotConfig;
 use bebop_linux::mode::Mode;
+use bebop_linux::policy_runner::PolicyRunner;
 use bebop_linux::safety::power_monitor::spawn_power_monitor;
 use bebop_linux::safety::supervisor::spawn_rx_threads;
 use bebop_linux::safety::{BusPool, Supervisor};
 use bebop_linux::server;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal;
 use tracing::{error, info, warn};
@@ -27,12 +28,16 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 #[derive(Debug, Clone)]
 struct Args {
     config: PathBuf,
+    /// Path to the trained policy ONNX. If `None`, defaults to
+    /// `<config_dir>/policy.onnx` (sibling of the joint YAML).
+    policy: Option<PathBuf>,
 }
 
 impl Default for Args {
     fn default() -> Self {
         Self {
             config: PathBuf::from("config/bebop_v2.yaml"),
+            policy: None,
         }
     }
 }
@@ -49,6 +54,12 @@ fn parse_args() -> Args {
                     i += 1;
                 }
             }
+            "--policy" | "-p" => {
+                if i + 1 < cli.len() {
+                    args.policy = Some(PathBuf::from(&cli[i + 1]));
+                    i += 1;
+                }
+            }
             "--help" | "-h" => {
                 println!(
                     "bebop-linux v2 runtime\n\
@@ -58,6 +69,8 @@ fn parse_args() -> Args {
                      OPTIONS:\n  \
                        -c, --config <PATH>   Joint config YAML \
                                               [default: config/bebop_v2.yaml]\n  \
+                       -p, --policy <PATH>   Trained policy ONNX \
+                                              [default: <config_dir>/policy.onnx]\n  \
                        -h, --help            Print help\n"
                 );
                 std::process::exit(0);
@@ -70,6 +83,21 @@ fn parse_args() -> Args {
         i += 1;
     }
     args
+}
+
+/// Resolve the policy ONNX path. The CLI override wins; otherwise we pick
+/// `<config_dir>/policy.onnx` so the operator can ship the policy as a
+/// drop-in next to `bebop_v2.yaml`.
+fn resolve_policy_path(args: &Args) -> PathBuf {
+    if let Some(p) = args.policy.as_ref() {
+        return p.clone();
+    }
+    let cfg_dir = args
+        .config
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    cfg_dir.join("policy.onnx")
 }
 
 #[tokio::main]
@@ -111,8 +139,30 @@ async fn main() -> Result<()> {
         .power_monitor()
         .and_then(|monitor| spawn_power_monitor(monitor, bus_pool.clone(), shutdown_flag.clone()));
 
-    // Periodic supervisor tick: hold-cycle TX in DialIn mode + watchdog.
+    // Try to load the trained policy. Soft-fail: if the file is missing
+    // or doesn't match the expected I/O contract, log a warning and
+    // continue — DialIn / Idle still work without a policy on disk.
+    let policy_path = resolve_policy_path(&args);
+    let policy_runner: Arc<Mutex<Option<PolicyRunner>>> =
+        match PolicyRunner::new(supervisor.clone(), &policy_path) {
+            Ok(pr) => {
+                info!(model = %policy_path.display(), "policy loaded; RunPolicy mode is available");
+                Arc::new(Mutex::new(Some(pr)))
+            }
+            Err(e) => {
+                warn!(
+                    model = %policy_path.display(),
+                    error = %e,
+                    "policy not loaded; RunPolicy mode will be a no-op"
+                );
+                Arc::new(Mutex::new(None))
+            }
+        };
+
+    // Periodic supervisor tick: hold-cycle TX in DialIn mode, RunPolicy
+    // inference + TX in RunPolicy mode, watchdog every cycle.
     let sup_tick = supervisor.clone();
+    let pr_tick = policy_runner.clone();
     let shutdown_tick = shutdown_flag.clone();
     let tick_handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_millis(10));
@@ -123,8 +173,16 @@ async fn main() -> Result<()> {
                 break;
             }
             sup_tick.run_watchdog();
-            if sup_tick.mode() == Mode::DialIn {
-                sup_tick.tick_dial_in_hold();
+            match sup_tick.mode() {
+                Mode::DialIn => sup_tick.tick_dial_in_hold(),
+                Mode::RunPolicy => {
+                    if let Ok(mut g) = pr_tick.lock() {
+                        if let Some(pr) = g.as_mut() {
+                            pr.tick();
+                        }
+                    }
+                }
+                Mode::Idle => {}
             }
         }
     });

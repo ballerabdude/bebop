@@ -45,7 +45,7 @@ JOINT_NAMES_ALL = [
 
 BEBOP_V2_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/workspace/bebop_bot/usd/bebopv2/bebopv2.usda",
+        usd_path="/workspace/bebop_bot/sim/usd/bebopv2/bebopv2.usda",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,

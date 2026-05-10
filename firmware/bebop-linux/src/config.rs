@@ -24,9 +24,28 @@ pub mod timing {
 }
 
 /// Observation and action dimensions (must match training!).
+///
+/// Bebop V2 (humanoid, 8 leg joints, no wheels). Observation layout matches
+/// `sim/bebop_training/envs/bebop_v2_base_cfg.py::PolicyCfg` declaration
+/// order:
+///
+/// ```text
+///   [ 0.. 3)  base_lin_vel       (m/s, body frame)
+///   [ 3.. 6)  base_ang_vel       (rad/s, body frame)
+///   [ 6.. 9)  projected_gravity  (unit vector in body frame)
+///   [ 9..17)  joint_pos_rel      (rad, JOINT_NAMES order)
+///   [17..25)  joint_vel_rel      (rad/s, JOINT_NAMES order)
+///   [25..33)  last_action        (raw NN output, JOINT_NAMES order)
+///   [33..36)  velocity_commands  (vx, vy, wz)
+/// ```
+///
+/// Action layout: 8 floats, JOINT_NAMES order, raw NN output. Each output
+/// is mapped to a position target via
+/// `target = default_pos + ACTION_SCALE * action` (default_pos = 0 for all
+/// 8 joints in this robot).
 pub mod dims {
-    pub const OBS_DIM: usize = 30;
-    pub const ACTION_DIM: usize = 6;
+    pub const OBS_DIM: usize = 36;
+    pub const ACTION_DIM: usize = 8;
     pub const HISTORY_STEPS: usize = 1;
     pub const TOTAL_OBS_DIM: usize = OBS_DIM * HISTORY_STEPS;
 }
@@ -37,22 +56,13 @@ pub mod scales {
     pub const SCALE_ANG_VEL: f32 = 1.0;
     pub const SCALE_DOF_POS: f32 = 1.0;
     pub const SCALE_DOF_VEL: f32 = 1.0;
-    pub const SCALE_ACTION_LEGS: f32 = 0.8;
-    /// Legacy v1 (wheeled) constant. Unused on v2; retained so the legacy
-    /// observation/policy modules continue to compile while RunPolicy mode
-    /// is stubbed pending a v2-trained ONNX model.
-    pub const SCALE_ACTION_WHEELS: f32 = 20.0;
+    /// Action -> position-target gain. Matches
+    /// `bebop_v2_base_cfg.py::ActionsCfg.joints_pos.scale = 0.8`.
+    pub const SCALE_ACTION: f32 = 0.8;
 
     pub const CLIP_LIN_VEL: f32 = 3.0;
     pub const CLIP_ANG_VEL: f32 = 10.0;
     pub const CLIP_DOF_VEL: f32 = 15.0;
-}
-
-/// Observation-time clipping (legacy name kept; used by `observation.rs`).
-pub mod limits {
-    pub const MAX_LEG_POS_RAD: f32 = 1.6;
-    /// Legacy v1 (wheeled) constant. See `scales::SCALE_ACTION_WHEELS`.
-    pub const MAX_WHEEL_VEL_RAD_S: f32 = 20.0;
 }
 
 // ===========================================================================

@@ -145,7 +145,12 @@ services:
       - ~/.isaac_sim/data:/home/${USER}/.local/share/ov/data:rw
       - .:/workspace/bebop_bot:rw
       - /mnt/synology-home-files:/home-files:rw
-      - ./sim/logs:/workspace/bebop_bot/sim/logs:rw
+      # NOTE: Do NOT add an explicit `./sim/logs:...` bind mount here.
+      # The repo-root mount above already exposes `sim/logs` inside the
+      # container. Adding a separate bind mount causes the Docker daemon
+      # to auto-create a missing host path as `root:root`, which then
+      # blocks the in-container user from writing PPO logs (rsl_rl
+      # training crashes with `[Errno 13] Permission denied: 'logs/rsl_rl'`).
     runtime: nvidia
     deploy:
       resources:

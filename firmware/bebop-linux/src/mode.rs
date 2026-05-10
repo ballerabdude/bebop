@@ -20,8 +20,10 @@ pub enum Mode {
     /// Per-motor enable/disable, slew-limited hold cycle, watchdog. Used
     /// for bench bring-up and safety-limit dial-in.
     DialIn = 2,
-    /// ONNX policy drives the joints. Currently a stub for v2 pending a
-    /// re-trained model.
+    /// ONNX policy drives the joints. The runtime loads `policy.onnx`
+    /// (sibling of the joint YAML by default; override with `--policy`)
+    /// and runs the 36-dim observation -> 8-dim action MLP at 100 Hz via
+    /// [`crate::policy_runner::PolicyRunner`].
     RunPolicy = 3,
 }
 
