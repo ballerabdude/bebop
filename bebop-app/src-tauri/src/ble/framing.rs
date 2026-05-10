@@ -1,7 +1,7 @@
 //! Length-prefixed BLE framing.
 //!
 //! Mirrors `bebop-agent/src/ble/framing.rs` and
-//! `mobile/bebop-app/src/ble/protocol.ts` — keep all three in sync.
+//! `bebop-app/src/ble/protocol.ts` — keep all three in sync.
 
 use bytes::{Buf, BufMut, BytesMut};
 

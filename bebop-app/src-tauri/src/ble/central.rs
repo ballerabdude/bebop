@@ -1,6 +1,6 @@
 //! Native BLE central built on `btleplug`.
 //!
-//! Wire format mirrors `mobile/bebop-app/src/ble/webBluetoothTransport.ts`
+//! Wire format mirrors `bebop-app/src/ble/webBluetoothTransport.ts`
 //! and the agent in `jetson-agent/bebop-agent/src/ble/server.rs`:
 //!   * scan for peripherals advertising the Bebop service UUID
 //!   * connect, discover services + characteristics
