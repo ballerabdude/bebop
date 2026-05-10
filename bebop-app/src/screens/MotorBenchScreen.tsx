@@ -168,6 +168,28 @@ export function MotorBenchScreen({
     [refreshAfter],
   );
 
+  // "Run policy" composite action: switch to RUN_POLICY mode first, then
+  // arm every joint. Order matters — the firmware's `arm()` only accepts
+  // DialIn or RunPolicy, and we want to land in the regime where the
+  // policy is actually driving before we enable bus-level torque. The
+  // policy runner does not enable motors itself, so without this step
+  // RunPolicy silently sends PD commands at disabled motors and looks
+  // broken on the operator's first attempt.
+  //
+  // Also gracefully handles the in-DialIn case: if the operator already
+  // dialed-in and motors are armed, switching to RunPolicy preserves the
+  // arm state (firmware-side) so the second `setAllMotorsEnabled(true)`
+  // is a no-op rather than a bus-level re-enable round-trip.
+  const runPolicy = useCallback(
+    () =>
+      refreshAfter("run-policy", async () => {
+        const t = transportRef.current!;
+        await t.setMode("RUN_POLICY");
+        await t.setAllMotorsEnabled(true);
+      }),
+    [refreshAfter],
+  );
+
   // Throttled per-joint target sender. The dial-in slider can fire a
   // dozen `setMotorTarget` events per second while dragging; rather than
   // queueing one in-flight request per pixel we keep a single pending
@@ -268,6 +290,7 @@ export function MotorBenchScreen({
   const mode = snapshot?.mode ?? "UNSPECIFIED";
   const estopLatched = snapshot?.estopLatched ?? false;
   const estopReason = snapshot?.estopReason ?? "";
+  const armedCount = motors.filter((m) => m.armed).length;
 
   return (
     <div className="flex flex-col gap-3">
@@ -360,7 +383,11 @@ export function MotorBenchScreen({
               <Button
                 variant="secondary"
                 onClick={() => setAll(true)}
-                disabled={!!busy || mode !== "DIAL_IN" || estopLatched}
+                disabled={
+                  !!busy ||
+                  (mode !== "DIAL_IN" && mode !== "RUN_POLICY") ||
+                  estopLatched
+                }
                 className="flex-1 lg:flex-none py-2.5! text-sm!"
               >
                 Enable all
@@ -428,6 +455,30 @@ export function MotorBenchScreen({
         </div>
       ) : null}
 
+      {/* Policy-mode status banner. Renders an explicit affordance for
+          the "switch to RUN_POLICY + arm every joint" composite action
+          because the segmented mode pill alone is too easy to miss
+          (and on its own does nothing visible — the policy runner sends
+          PD commands at whatever motors are armed, so RunPolicy with
+          everything disarmed silently looks broken).
+          Three states:
+            - Idle / DialIn: outlined "Run policy" CTA + short explainer.
+            - RunPolicy with not-all-armed: warning state with a
+              one-tap "Enable all" so the operator can recover without
+              re-reading the toolbar.
+            - RunPolicy with everything armed: green confirmation. */}
+      {!estopLatched && mode !== "UNSPECIFIED" ? (
+        <PolicyBanner
+          mode={mode}
+          armedCount={armedCount}
+          totalMotors={motors.length}
+          busy={busy}
+          onRunPolicy={runPolicy}
+          onEnableAll={() => setAll(true)}
+          onStop={() => setMode("IDLE")}
+        />
+      ) : null}
+
       {/* Bluetooth-gamepad bridge. Renders nothing when no pad is
           connected, so it doesn't take up space in the layout for
           users that aren't using a controller. Wired to the same
@@ -469,6 +520,7 @@ export function MotorBenchScreen({
               busy={busy === `motor:${m.jointName}`}
               zeroBusy={busy === `zero:${m.jointName}`}
               dialIn={mode === "DIAL_IN"}
+              runPolicy={mode === "RUN_POLICY"}
               estopLatched={estopLatched}
               onToggle={(enabled) => toggleMotor(m.jointName, enabled)}
               onSetTarget={(value) => sendTarget(m.jointName, value)}
@@ -502,6 +554,121 @@ const MOTOR_HEADER =
   "hidden md:grid md:grid-cols-[minmax(180px,2fr)_minmax(240px,3fr)_88px_88px_88px_72px] gap-3";
 const MOTOR_GRID =
   "flex flex-col gap-2.5 md:grid md:grid-cols-[minmax(180px,2fr)_minmax(240px,3fr)_88px_88px_88px_72px] md:gap-3 md:items-center";
+
+/// Composite "run policy" affordance + live status. See call site for
+/// state-by-state behaviour. Lifted out of the main render so the JSX of
+/// MotorBenchScreen stays close to the dial-in flow it grew up around.
+function PolicyBanner({
+  mode,
+  armedCount,
+  totalMotors,
+  busy,
+  onRunPolicy,
+  onEnableAll,
+  onStop,
+}: {
+  mode: RuntimeMode;
+  armedCount: number;
+  totalMotors: number;
+  busy: string | null;
+  onRunPolicy: () => void;
+  onEnableAll: () => void;
+  onStop: () => void;
+}) {
+  const runBusy = busy === "run-policy";
+  const enableAllBusy = busy === "all:true";
+  const stopBusy = busy === "mode:IDLE";
+
+  if (mode !== "RUN_POLICY") {
+    return (
+      <div className="rounded-[var(--radius-card)] border border-success/30 bg-success/5 px-3.5 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="text-[13px] leading-relaxed">
+          <div className="text-text font-semibold mb-0.5">Run trained policy</div>
+          <div className="text-text-dim">
+            Hands the joints to <code className="text-text">policy.onnx</code>{" "}
+            (loaded by <code className="text-text">bebop-linux</code> at boot)
+            and enables every motor so the policy can drive. Stops by switching
+            back to Idle.
+          </div>
+        </div>
+        <Button
+          onClick={onRunPolicy}
+          loading={runBusy}
+          disabled={!!busy}
+          className="bg-success! text-white! hover:brightness-110! py-2.5! text-sm! shrink-0"
+        >
+          Run policy
+        </Button>
+      </div>
+    );
+  }
+
+  // mode === RUN_POLICY
+  const everythingArmed = totalMotors > 0 && armedCount === totalMotors;
+  if (!everythingArmed) {
+    return (
+      <div className="rounded-[var(--radius-card)] border border-yellow-500/40 bg-yellow-500/5 px-3.5 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="text-[13px] leading-relaxed">
+          <div className="text-yellow-700 dark:text-yellow-300 font-semibold mb-0.5">
+            Policy is in control, but only {armedCount}/{totalMotors} motors are
+            armed
+          </div>
+          <div className="text-text-dim">
+            The policy is sending PD commands at 100&nbsp;Hz; disabled motors
+            ignore them. Enable every joint or fall back to Idle.
+          </div>
+        </div>
+        <div className="flex gap-2 shrink-0">
+          <Button
+            variant="secondary"
+            onClick={onStop}
+            loading={stopBusy}
+            disabled={!!busy}
+            className="py-2.5! text-sm!"
+          >
+            Stop
+          </Button>
+          <Button
+            onClick={onEnableAll}
+            loading={enableAllBusy}
+            disabled={!!busy}
+            className="bg-success! text-white! hover:brightness-110! py-2.5! text-sm!"
+          >
+            Enable all
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-[var(--radius-card)] border border-success/40 bg-success/10 px-3.5 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+      <div className="text-[13px] leading-relaxed">
+        <div className="text-success font-semibold mb-0.5 flex items-center gap-2">
+          <span
+            className="inline-block w-2 h-2 rounded-full bg-success animate-pulse"
+            aria-hidden
+          />
+          Policy is driving — {armedCount}/{totalMotors} motors armed
+        </div>
+        <div className="text-text-dim">
+          Targets are coming from <code className="text-text">policy.onnx</code>{" "}
+          at 100&nbsp;Hz. Hard limits and slew caps still apply. Tap Stop or
+          E-STOP to take back control.
+        </div>
+      </div>
+      <Button
+        variant="secondary"
+        onClick={onStop}
+        loading={stopBusy}
+        disabled={!!busy}
+        className="py-2.5! text-sm! shrink-0"
+      >
+        Stop
+      </Button>
+    </div>
+  );
+}
 
 function SegButton({
   active,
@@ -537,6 +704,7 @@ function MotorRow({
   busy,
   zeroBusy,
   dialIn,
+  runPolicy,
   estopLatched,
   onToggle,
   onSetTarget,
@@ -546,6 +714,7 @@ function MotorRow({
   busy: boolean;
   zeroBusy: boolean;
   dialIn: boolean;
+  runPolicy: boolean;
   estopLatched: boolean;
   onToggle: (enabled: boolean) => void;
   onSetTarget: (value: number) => void;
@@ -562,11 +731,14 @@ function MotorRow({
   const stale = motor.feedbackStale && motor.armed;
   const fault = motor.faultBits !== 0;
 
-  // Toggling on requires DialIn mode and no E-STOP.
-  const canArm = dialIn && !estopLatched;
+  // Toggling on requires DialIn or RunPolicy mode and no E-STOP. The
+  // firmware allows arming in either; in RunPolicy this is how the
+  // operator gives the policy something to drive.
+  const canArm = (dialIn || runPolicy) && !estopLatched;
   // Driving the position slider requires arming + DialIn mode + no E-STOP.
   // The firmware enforces the same rule, but disabling the control
-  // upfront is a clearer affordance.
+  // upfront is a clearer affordance. In RunPolicy the policy is the
+  // driver, so the slider stays hidden.
   const canDrive = dialIn && !estopLatched && motor.armed;
   // Re-zero is allowed only when the joint is disarmed and there's no
   // E-STOP. Mode doesn't matter — the firmware accepts SET_ZERO from

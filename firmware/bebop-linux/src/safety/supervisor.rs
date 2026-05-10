@@ -149,8 +149,16 @@ impl Supervisor {
         if prev == requested {
             return Ok(());
         }
-        // Always disarm motors when leaving a mode that might have armed them.
-        if matches!(prev, Mode::DialIn | Mode::RunPolicy) {
+        // Disarm only when leaving the powered-motor regime (DialIn /
+        // RunPolicy) for Idle. Transitioning between DialIn and RunPolicy
+        // *preserves* arm state on purpose: the operator arms once in
+        // DialIn (where slider drive lets them prove the hold loop), then
+        // hands the wheel to the policy without forcing a re-enable
+        // round-trip on the bus. The policy runner doesn't enable motors
+        // itself; if we disarmed here, RunPolicy would silently send PD
+        // commands at disabled motors and look "broken" on the operator's
+        // first try.
+        if matches!(prev, Mode::DialIn | Mode::RunPolicy) && requested == Mode::Idle {
             self.disarm_all_internal(BreachReason::Operator(format!(
                 "mode change {:?} -> {:?}",
                 prev, requested
@@ -212,9 +220,14 @@ impl Supervisor {
         if self.estop_active() {
             return Err(anyhow!("cannot arm while E-STOP is latched"));
         }
-        if self.mode() != Mode::DialIn {
+        // Arming is allowed in either powered-motor mode. DialIn is the
+        // canonical bring-up entry point, but the operator also needs to
+        // arm in RunPolicy: the policy runner does not enable motors on
+        // its own, so the "arm-then-let-the-policy-drive" flow has to
+        // work without bouncing through DialIn on every entry.
+        if !matches!(self.mode(), Mode::DialIn | Mode::RunPolicy) {
             return Err(anyhow!(
-                "arming is only allowed in DialIn mode (currently {:?})",
+                "arming is only allowed in DialIn or RunPolicy mode (currently {:?})",
                 self.mode()
             ));
         }

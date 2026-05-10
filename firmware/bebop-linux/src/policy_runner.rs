@@ -39,6 +39,7 @@
 //! with the live readout. Convention is XYZW per [`crate::observation::ImuState`].
 
 use anyhow::{anyhow, Context, Result};
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -99,8 +100,35 @@ impl PolicyRunner {
             default_positions[slot] = joint.default_position;
         }
 
-        let controller = PolicyController::new(model_path)
-            .with_context(|| format!("load policy ONNX from {}", model_path.display()))?;
+        // `PolicyController::new` -> `Session::builder()` triggers `ort`'s
+        // lazy dylib lookup. With `feature = "load-dynamic"`, that lookup
+        // calls `.expect("Failed to load ONNX Runtime dylib")` if
+        // libonnxruntime.so cannot be dlopen'd (see ort/src/lib.rs:191).
+        // We intercept that panic so bebop-linux can still come up in
+        // Idle/DialIn modes when the dylib is missing on the Jetson —
+        // RunPolicy will simply be a no-op until the operator installs
+        // the lib (or sets `ORT_DYLIB_PATH`) and restarts the service.
+        let controller = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+            PolicyController::new(model_path)
+        })) {
+            Ok(result) => {
+                result.with_context(|| format!("load policy ONNX from {}", model_path.display()))?
+            }
+            Err(panic_payload) => {
+                let msg = panic_payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                return Err(anyhow!(
+                    "ORT panicked loading policy from {}: {msg}. \
+                     Most likely libonnxruntime.so cannot be dlopen'd; install \
+                     it (e.g. via Microsoft's aarch64 prebuilt) or set \
+                     ORT_DYLIB_PATH. RunPolicy mode will be unavailable.",
+                    model_path.display()
+                ));
+            }
+        };
         let mut obs_builder = ObservationBuilder::new();
         obs_builder.set_default_positions(&default_positions);
 
