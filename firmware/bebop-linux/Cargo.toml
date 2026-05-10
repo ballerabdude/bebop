@@ -27,8 +27,26 @@ axum = { version = "0.7", features = ["ws", "macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
-# ONNX Runtime for neural network inference
-ort = "2.0.0-rc.11"
+# ONNX Runtime for neural network inference.
+#
+# We use the `load-dynamic` feature so the build does NOT statically link
+# a prebuilt `libonnxruntime.{a,so}`. Two reasons:
+#
+#   1. CI is pinned to ubuntu-22.04-arm (glibc 2.35) for JetPack 6
+#      compatibility, but the default `download-binaries` feature pulls
+#      a prebuilt blob compiled against newer glibc / libstdc++
+#      (uses `__isoc23_strtol*` from glibc 2.38 and `__cxa_call_terminate`
+#      from a newer libstdc++), which fails to link in CI.
+#   2. On the Jetson we want the JetPack-supplied, CUDA-enabled
+#      `libonnxruntime.so` anyway, not pyke's CPU-only prebuilt.
+#
+# At runtime, `ort` reads the dylib path from the `ORT_DYLIB_PATH` env
+# var; if unset it falls back to `libonnxruntime.so` resolved via the
+# normal linker search path (LD_LIBRARY_PATH, /usr/lib/aarch64-linux-gnu,
+# /usr/local/lib, ...). The first ORT call is what triggers the dlopen,
+# so unit tests that don't construct a `Session` still pass without the
+# lib being installed.
+ort = { version = "2.0.0-rc.11", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
 ndarray = "0.16"
 
 # Serialization
