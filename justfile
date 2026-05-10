@@ -80,6 +80,13 @@ lab-up:
 lab-down:
     docker compose --profile lab down
 
+# Isaac Sim is launchable from inside this container via
+# `/workspace/isaaclab/isaaclab.sh -s`, so no separate sim-shell is needed.
+#
+# Open an interactive shell in the running Isaac Lab container.
+lab-shell:
+    docker exec -it bebop_isaac_lab bash
+
 # --- ROS 2 dev container ---------------------------------------------------
 
 # Build (or rebuild) only the ROS 2 dev image.
@@ -89,6 +96,14 @@ ros2-build:
 # Open an interactive shell in the running ROS 2 dev container.
 ros2-shell:
     docker exec -it bebop_ros2 bash
+
+# Re-expand bebopv2.xacro into bebopv2.urdf (with absolute mesh paths).
+# Runs inside bebop_ros2; pass extra flags through, e.g.
+#   `just ros2-urdf --mesh-prefix /workspace/bebop_bot/ros2/src/bebopv2_description/meshes`
+ros2-urdf *FLAGS:
+    docker exec -it bebop_ros2 bash -lc \
+        'source /ros_ws_entrypoint.sh && \
+         "$ROS_WS"/src/bebopv2_description/scripts/xacro-to-urdf.sh {{FLAGS}}'
 
 # --- Firmware (PlatformIO) -------------------------------------------------
 

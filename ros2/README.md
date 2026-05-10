@@ -58,13 +58,160 @@ on the same host.
 ## Why the workspace is host-side
 
 `src/` lives on the host and is bind-mounted into the container at
-`/home/$USER/master_ros2_ws/src`. That way `colcon build` artifacts
+`$ROS_WS/src` — i.e. `/home/<your-host-user>/master_ros2_ws/src`,
+where `<your-host-user>` is baked in at image-build time from the
+`$USER` env var on the host. That way `colcon build` artifacts
 (`build/`, `install/`, `log/`) can stay inside the container while you
 edit packages from your host IDE.
+
+> Inside the container, prefer the `$ROS_WS` env var (set as a Docker
+> `ENV` in the Dockerfile) over `$USER`. The compose `command: bash`
+> launches a non-login shell, so `$USER` is **not** populated; commands
+> like `cd /home/$USER/...` expand to `cd /home//...` and fail. `$HOME`
+> and `$ROS_WS` are baked into the image and always work.
 
 The container is named `bebop_ros2` and joins both the `sim` and `lab`
 docker-compose profiles, so any time you bring up Isaac Sim or Isaac Lab,
 the ROS 2 dev container comes along with it.
+
+## URDF mesh paths
+
+`src/bebopv2_description/urdf/bebopv2.urdf` references its meshes using
+**absolute container paths** instead of the conventional
+`package://bebopv2_description/...` or relative `../meshes/...` form:
+
+```xml
+<mesh filename="file:///workspace/bebop_bot/ros2_ws/src/bebopv2_description/meshes/base_link.stl" .../>
+```
+
+This is deliberate. When the URDF is opened in **Isaac Sim** to be
+converted to USD, the importer runs in a context where it cannot resolve
+ROS-style `package://` URIs or relative paths — it doesn't have the
+ROS package index loaded, and its working directory isn't the URDF's
+parent. The only form it can reliably resolve is a `file://` URI
+pointing at a path that exists **inside the Isaac Sim container**.
+
+Because both `bebop_ros2` and the Isaac containers bind-mount this
+workspace at the same path (`/workspace/bebop_bot/ros2_ws`), hard-coding
+that absolute path works everywhere we care about: ROS 2 tooling
+(`robot_state_publisher`, RViz), Isaac Sim's URDF importer, and Isaac
+Lab. If you move the workspace mount point in `docker-compose.yml`,
+you'll need to regenerate the URDF (or sed the paths) to match.
+
+### Regenerating the URDF from the xacro
+
+`bebopv2.urdf` is a flat, mesh-path-rewritten artifact derived from
+`bebopv2.xacro`. To regenerate it, use the helper script
+[`src/bebopv2_description/scripts/xacro-to-urdf.sh`](src/bebopv2_description/scripts/xacro-to-urdf.sh),
+which runs `xacro` and then rewrites every `<mesh filename="...">` to
+an absolute prefix you control.
+
+From the host (most convenient):
+
+```sh
+just ros2-urdf
+# Override the mesh prefix:
+just ros2-urdf --mesh-prefix /workspace/bebop_bot/ros2/src/bebopv2_description/meshes
+# Preview without writing:
+just ros2-urdf --check
+```
+
+Or directly inside `bebop_ros2`:
+
+```sh
+source /ros_ws_entrypoint.sh
+"$ROS_WS"/src/bebopv2_description/scripts/xacro-to-urdf.sh
+```
+
+Defaults match what's currently committed:
+
+| Flag             | Default                                                                  |
+|------------------|--------------------------------------------------------------------------|
+| `--in`           | `src/bebopv2_description/urdf/bebopv2.xacro`                             |
+| `--out`          | `src/bebopv2_description/urdf/bebopv2.urdf`                              |
+| `--mesh-prefix`  | `/workspace/bebop_bot/ros2_ws/src/bebopv2_description/meshes`            |
+
+The script relies on `xacro` (declared in `package.xml`) and `python3`
+(part of the base image), both available in `bebop_ros2` once the
+overlay is sourced.
+
+### Importing the URDF into Isaac Sim (URDF → USD)
+
+Once `bebopv2.urdf` is regenerated, convert it to USD inside the Isaac
+Lab container (Isaac Sim is launchable from there via
+`/workspace/isaaclab/isaaclab.sh -s`):
+
+1. `just lab-up && just lab-shell`
+2. Launch Isaac Sim: `/workspace/isaaclab/isaaclab.sh -s`
+3. In the Isaac Sim UI: **File → Import**, pick the URDF importer, and
+   point it at
+   `/workspace/bebop_bot/ros2/src/bebopv2_description/urdf/bebopv2.urdf`.
+4. Configure the importer panel — see settings below.
+5. Click **Import**. The importer writes USD into `USD Output` and
+   creates `/World/bebopv2` (or `/bebopv2`) on the stage.
+6. Run the post-import fixup script — see below.
+
+#### URDF importer settings
+
+Use exactly these values in the URDF importer panel:
+
+| Section     | Field                  | Value                                |
+|-------------|------------------------|--------------------------------------|
+| Model       | USD Output             | `/workspace/bebop_bot/sim/usd/`      |
+| Model       | ROS Package List       | *(leave empty — no rows)*            |
+| Colliders   | Collision From Visuals | unchecked                            |
+| Colliders   | Allow Self-Collision   | unchecked                            |
+| Options     | Merge Mesh             | unchecked                            |
+| Options     | Debug Mode             | unchecked                            |
+
+Notes:
+
+- **USD Output** points at the bind-mounted `sim/usd/` directory in
+  this repo, so the generated USD lands directly under version control
+  (or, in practice, under `sim/usd/bebopv2/`). The repo currently keeps
+  the previous import as `sim/usd/bebopv2.bak/` for reference.
+- **ROS Package List** stays empty because the URDF uses absolute
+  `file://` mesh paths (see "URDF mesh paths" above) — there are no
+  `package://` URIs that need resolving.
+- **Collision From Visuals** stays off because the URDF already
+  declares explicit `<collision>` geometry per link; we don't want the
+  importer to also generate convex hulls from the visual meshes.
+- **Allow Self-Collision** stays off; we'll enable it only on links
+  that need it (in the post-import fixup or in the Isaac Lab env), to
+  avoid spurious foot ↔ shin contacts that wreck training.
+- **Merge Mesh** stays off so each link keeps its own mesh prim — that
+  preserves the URDF's joint structure 1:1, which the policy and
+  `robot_state_publisher` both depend on.
+
+#### Post-import fixup
+
+The URDF importer leaves the asset in three states that need fixing
+for a free-standing biped:
+
+- it adds a **fixed root joint** that anchors `base_link` to world
+  (we want a free-floating base so PhysX simulates gravity);
+- the robot prim sits at world origin, but `base_link`'s frame is at
+  the **hip**, so half the robot spawns through the floor;
+- there's no **IMU sensor** on `base_link`, but the on-robot stack and
+  the trained policy both consume `/imu/data` (orientation, angular
+  velocity, linear acceleration of the base frame).
+
+Run [`sim/scripts/post_import_bebopv2.py`](../sim/scripts/post_import_bebopv2.py)
+once after import to:
+
+1. disable the root joint,
+2. ensure `base_link` is dynamic (not kinematic),
+3. translate the robot up by 0.65 m so the feet land on the ground plane,
+4. attach a 200 Hz IMU prim (`Imu_Sensor`) under
+   `<robot>/Geometry/base_link`.
+
+The script is idempotent — re-running it is safe.
+
+In Isaac Sim: open **Window → Script Editor**, paste the file's
+contents (or use **Open** and point it at
+`/workspace/bebop_bot/sim/scripts/post_import_bebopv2.py`), and hit
+**Run**. Then press **Play** — the robot should fall under gravity onto
+the ground plane.
 
 ## Common commands
 
@@ -79,13 +226,22 @@ just ros2-build     # rebuild only the bebop_ros2 image
 just ros2-shell     # interactive shell in the running bebop_ros2
 ```
 
-Inside the container (after the entrypoint runs):
+Inside the container — when you `exec` in (e.g. via `just ros2-shell`),
+you land in a fresh shell that does **not** have ROS or the workspace
+overlay sourced. Run these three commands first, every time, before
+doing any ROS work:
 
 ```sh
-cd /home/$USER/master_ros2_ws
-colcon build --symlink-install
-source install/setup.bash
+source /ros_ws_entrypoint.sh   # sources /opt/ros/jazzy + bootstraps micro-ROS
+colcon build                   # build (or rebuild) the workspace
+source install/setup.bash      # overlay the freshly built workspace
+```
+
+After that the workspace is sourced and you can run ROS commands:
+
+```sh
 ros2 launch bebop_pilot ...
+ros2 topic list
 ```
 
 ## Development workflow
@@ -104,17 +260,93 @@ just lab-up             # or just sim-up
 # 3. Open an interactive shell in the running ros2 container.
 just ros2-shell
 
-# 4. Inside the container — the workspace is already sourced.
+# 4. Inside the container — bootstrap the env, build, and overlay.
+source /ros_ws_entrypoint.sh
+colcon build
+source install/setup.bash
+
+# 5. Now you can launch / inspect.
 ros2 launch bebop_pilot bringup.launch.py
 ros2 topic echo /joint_states
 
-# 5. (Optional) Tail the Teensy debug serial from the host.
+# 6. (Optional) Tail the Teensy debug serial from the host.
 cat /dev/ttyACM1
 ```
 
 `/dev` is bind-mounted into the container, so `/dev/ttyACM*` shows up
 inside without any extra config — adding/removing the Teensy while the
 container is running works.
+
+## Working with the robot in RViz
+
+`bebopv2_description` ships a ready-made launch file that brings up
+`robot_state_publisher`, `joint_state_publisher_gui`, and `rviz2`
+preloaded with `config/display.rviz` — i.e. a one-liner to view and
+manually pose the robot.
+
+X11 is already wired into the `bebop_ros2` container in
+`docker-compose.yml` (`DISPLAY` env + `/tmp/.X11-unix` bind-mount), so
+RViz windows render on your host display.
+
+### One-time host setup
+
+```sh
+xhost +local:docker        # allow the container to talk to your X server
+```
+
+(You only need to do this once per login session, or until you reboot.)
+
+### Launch
+
+From the repo root:
+
+```sh
+just lab-up                # or `just sim-up` — brings up bebop_ros2
+just ros2-shell            # exec into the container
+```
+
+Then **inside the container**:
+
+```sh
+source /ros_ws_entrypoint.sh
+colcon build
+source install/setup.bash
+
+ros2 launch bebopv2_description display.launch.py
+```
+
+You should get:
+
+- An **RViz** window with the robot model loaded and TF visualized.
+- A **`joint_state_publisher_gui`** window with a slider per joint —
+  drag the sliders to manually pose the robot in real time.
+
+### Useful flags
+
+- Hide the slider GUI and use a plain `joint_state_publisher` (joints
+  default to zero):
+
+  ```sh
+  ros2 launch bebopv2_description display.launch.py gui:=false
+  ```
+
+- View **live** joint angles from the Teensy instead of slider input —
+  start the micro-ROS agent against `/dev/ttyACM0` (see "micro-ROS
+  agent" below) in one shell, and `display.launch.py gui:=false` in
+  another. `robot_state_publisher` will TF the live `/joint_states` into
+  RViz so the model mirrors the real robot.
+
+### Troubleshooting
+
+- `Could not connect to display` / `Authorization required` → run
+  `xhost +local:docker` on the host (above).
+- `rviz2: command not found` inside the container → you skipped
+  `source /ros_ws_entrypoint.sh`. ROS isn't on `PATH` in a fresh
+  `exec`'d shell until that runs.
+- Robot shows in the TF tree but **meshes are missing / blank** → the
+  URDF references absolute container paths under
+  `/workspace/bebop_bot/ros2_ws/...` (see "URDF mesh paths"). Make sure
+  that bind-mount actually exists in the running container.
 
 ## micro-ROS agent
 
@@ -147,7 +379,7 @@ If the entrypoint's heuristic ever bails out (e.g. you partially deleted
 something), do it manually:
 
 ```sh
-cd /home/$USER/master_ros2_ws
+cd "$ROS_WS"
 rm -rf src/micro_ros_setup src/uros build install log
 
 git clone -b jazzy \
