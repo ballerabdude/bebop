@@ -3,16 +3,16 @@
     customLayerData = {
         string creator = "URDF USD Converter v0.1.0"
     }
-    doc = """Generated from Composed Stage of root layer /tmp/tmpv_w_q60j/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmp6lfb044p/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/usd/usdex/bebopv2.usdc
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/usdex/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/usd/temp/bebopv2.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/temp/bebopv2.usd
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/usd/bebopv2/payloads/base.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/bebopv2/payloads/base.usd
 """
     kilogramsPerUnit = 1
     metersPerUnit = 1

@@ -4,16 +4,16 @@
         string creator = "URDF USD Converter v0.1.0"
     }
     defaultPrim = "bebopv2"
-    doc = """Generated from Composed Stage of root layer /tmp/tmpv_w_q60j/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmp6lfb044p/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/usd/usdex/bebopv2.usdc
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/usdex/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/usd/temp/bebopv2.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/temp/bebopv2.usd
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/usd/bebopv2/payloads/base.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/bebopv2/payloads/base.usd
 """
     kilogramsPerUnit = 1
     metersPerUnit = 1
@@ -26,38 +26,38 @@ over "bebopv2" (
 {
     custom rel isaac:physics:robotJoints
     prepend rel isaac:physics:robotJoints = [
-        </bebopv2/Physics/hip_abduction_left_joint>,
         </bebopv2/Physics/hip_abduction_right_joint>,
+        </bebopv2/Physics/hip_abduction_left_joint>,
         </bebopv2/Physics/root_joint>,
-        </bebopv2/Physics/femur_left_joint>,
         </bebopv2/Physics/femur_right_joint>,
-        </bebopv2/Physics/shin_left_joint>,
+        </bebopv2/Physics/femur_left_joint>,
         </bebopv2/Physics/shin_right_joint>,
-        </bebopv2/Physics/foot_left_joint>,
+        </bebopv2/Physics/shin_left_joint>,
         </bebopv2/Physics/foot_right_joint>,
+        </bebopv2/Physics/foot_left_joint>,
     ]
     custom rel isaac:physics:robotLinks
     prepend rel isaac:physics:robotLinks = [
         </bebopv2/Geometry/base_link>,
-        </bebopv2/Geometry/base_link/hip_abduction_left_1_1>,
-        </bebopv2/Geometry/base_link/hip_abduction_right_1_1>,
-        </bebopv2/Geometry/base_link/hip_abduction_left_1_1/femur_left_1_1>,
-        </bebopv2/Geometry/base_link/hip_abduction_right_1_1/femur_right_1_1>,
-        </bebopv2/Geometry/base_link/hip_abduction_left_1_1/femur_left_1_1/shin_left_1_1>,
-        </bebopv2/Geometry/base_link/hip_abduction_right_1_1/femur_right_1_1/shin_right_1_1>,
-        </bebopv2/Geometry/base_link/hip_abduction_left_1_1/femur_left_1_1/shin_left_1_1/foot_left_1_1>,
-        </bebopv2/Geometry/base_link/hip_abduction_right_1_1/femur_right_1_1/shin_right_1_1/foot_right_1_1>,
+        </bebopv2/Geometry/base_link/hip_abduction_right_1>,
+        </bebopv2/Geometry/base_link/hip_abduction_left_1>,
+        </bebopv2/Geometry/base_link/hip_abduction_right_1/femur_right_1>,
+        </bebopv2/Geometry/base_link/hip_abduction_left_1/femur_left_1>,
+        </bebopv2/Geometry/base_link/hip_abduction_right_1/femur_right_1/shin_right_1>,
+        </bebopv2/Geometry/base_link/hip_abduction_left_1/femur_left_1/shin_left_1>,
+        </bebopv2/Geometry/base_link/hip_abduction_right_1/femur_right_1/shin_right_1/foot_right_1>,
+        </bebopv2/Geometry/base_link/hip_abduction_left_1/femur_left_1/shin_left_1/foot_left_1>,
     ]
 
     over "Physics"
     {
-        over "hip_abduction_left_joint" (
+        over "hip_abduction_right_joint" (
             prepend apiSchemas = ["IsaacJointAPI"]
         )
         {
         }
 
-        over "hip_abduction_right_joint" (
+        over "hip_abduction_left_joint" (
             prepend apiSchemas = ["IsaacJointAPI"]
         )
         {
@@ -69,19 +69,13 @@ over "bebopv2" (
         {
         }
 
-        over "femur_left_joint" (
-            prepend apiSchemas = ["IsaacJointAPI"]
-        )
-        {
-        }
-
         over "femur_right_joint" (
             prepend apiSchemas = ["IsaacJointAPI"]
         )
         {
         }
 
-        over "shin_left_joint" (
+        over "femur_left_joint" (
             prepend apiSchemas = ["IsaacJointAPI"]
         )
         {
@@ -93,13 +87,19 @@ over "bebopv2" (
         {
         }
 
-        over "foot_left_joint" (
+        over "shin_left_joint" (
             prepend apiSchemas = ["IsaacJointAPI"]
         )
         {
         }
 
         over "foot_right_joint" (
+            prepend apiSchemas = ["IsaacJointAPI"]
+        )
+        {
+        }
+
+        over "foot_left_joint" (
             prepend apiSchemas = ["IsaacJointAPI"]
         )
         {
@@ -112,19 +112,19 @@ over "bebopv2" (
             prepend apiSchemas = ["IsaacLinkAPI"]
         )
         {
-            over "hip_abduction_left_1_1" (
+            over "hip_abduction_right_1" (
                 prepend apiSchemas = ["IsaacLinkAPI"]
             )
             {
-                over "femur_left_1_1" (
+                over "femur_right_1" (
                     prepend apiSchemas = ["IsaacLinkAPI"]
                 )
                 {
-                    over "shin_left_1_1" (
+                    over "shin_right_1" (
                         prepend apiSchemas = ["IsaacLinkAPI"]
                     )
                     {
-                        over "foot_left_1_1" (
+                        over "foot_right_1" (
                             prepend apiSchemas = ["IsaacLinkAPI"]
                         )
                         {
@@ -133,19 +133,19 @@ over "bebopv2" (
                 }
             }
 
-            over "hip_abduction_right_1_1" (
+            over "hip_abduction_left_1" (
                 prepend apiSchemas = ["IsaacLinkAPI"]
             )
             {
-                over "femur_right_1_1" (
+                over "femur_left_1" (
                     prepend apiSchemas = ["IsaacLinkAPI"]
                 )
                 {
-                    over "shin_right_1_1" (
+                    over "shin_left_1" (
                         prepend apiSchemas = ["IsaacLinkAPI"]
                     )
                     {
-                        over "foot_right_1_1" (
+                        over "foot_left_1" (
                             prepend apiSchemas = ["IsaacLinkAPI"]
                         )
                         {

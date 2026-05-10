@@ -4,16 +4,16 @@
         string creator = "URDF USD Converter v0.1.0"
     }
     defaultPrim = "bebopv2"
-    doc = """Generated from Composed Stage of root layer /tmp/tmpv_w_q60j/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmp6lfb044p/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/usd/usdex/bebopv2.usdc
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/usdex/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/usd/temp/bebopv2.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/temp/bebopv2.usd
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/usd/bebopv2/payloads/base.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/bebopv2/payloads/base.usd
 """
     kilogramsPerUnit = 1
     metersPerUnit = 1
@@ -27,22 +27,6 @@ over "bebopv2"
 {
     over "Physics"
     {
-        def MjcActuator "hip_abduction_left_joint_actuator"
-        {
-            uniform double mjc:forceRange:max = 100
-            uniform double mjc:forceRange:min = -100
-            custom rel mjc:target
-            prepend rel mjc:target = </bebopv2/Physics/hip_abduction_left_joint>
-        }
-
-        def MjcActuator "hip_abduction_right_joint_actuator"
-        {
-            uniform double mjc:forceRange:max = 100
-            uniform double mjc:forceRange:min = -100
-            custom rel mjc:target
-            prepend rel mjc:target = </bebopv2/Physics/hip_abduction_right_joint>
-        }
-
         def MjcActuator "femur_left_joint_actuator"
         {
             uniform double mjc:forceRange:max = 100
@@ -91,13 +75,29 @@ over "bebopv2"
             prepend rel mjc:target = </bebopv2/Physics/foot_right_joint>
         }
 
-        over "hip_abduction_left_joint" (
+        def MjcActuator "hip_abduction_right_joint_actuator"
+        {
+            uniform double mjc:forceRange:max = 100
+            uniform double mjc:forceRange:min = -100
+            custom rel mjc:target
+            prepend rel mjc:target = </bebopv2/Physics/hip_abduction_right_joint>
+        }
+
+        def MjcActuator "hip_abduction_left_joint_actuator"
+        {
+            uniform double mjc:forceRange:max = 100
+            uniform double mjc:forceRange:min = -100
+            custom rel mjc:target
+            prepend rel mjc:target = </bebopv2/Physics/hip_abduction_left_joint>
+        }
+
+        over "hip_abduction_right_joint" (
             delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
         )
         {
         }
 
-        over "hip_abduction_right_joint" (
+        over "hip_abduction_left_joint" (
             delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
         )
         {
@@ -107,19 +107,13 @@ over "bebopv2"
         {
         }
 
-        over "femur_left_joint" (
-            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
-        )
-        {
-        }
-
         over "femur_right_joint" (
             delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
         )
         {
         }
 
-        over "shin_left_joint" (
+        over "femur_left_joint" (
             delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
         )
         {
@@ -131,7 +125,7 @@ over "bebopv2"
         {
         }
 
-        over "foot_left_joint" (
+        over "shin_left_joint" (
             delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
         )
         {
@@ -142,44 +136,36 @@ over "bebopv2"
         )
         {
         }
+
+        over "foot_left_joint" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+        )
+        {
+        }
     }
 
     over "Geometry"
     {
         over "base_link"
         {
-            over "hip_abduction_left_1_1"
+            over "hip_abduction_right_1"
             {
-                over "femur_left_1_1"
+                over "femur_right_1"
                 {
-                    over "shin_left_1_1"
+                    over "shin_right_1"
                     {
-                        over "foot_left_1_1"
+                        over "foot_right_1"
                         {
+                            over "foot_right_1"
+                            {
+                            }
+
+                            over "foot_right_1_1"
+                            {
+                            }
                         }
 
-                        over "shin_left_1_1"
-                        {
-                        }
-                    }
-
-                    over "femur_left_1_1"
-                    {
-                    }
-                }
-
-                over "hip_abduction_left_1_1"
-                {
-                }
-            }
-
-            over "hip_abduction_right_1_1"
-            {
-                over "femur_right_1_1"
-                {
-                    over "shin_right_1_1"
-                    {
-                        over "foot_right_1_1"
+                        over "shin_right_1"
                         {
                         }
 
@@ -188,9 +174,17 @@ over "bebopv2"
                         }
                     }
 
+                    over "femur_right_1"
+                    {
+                    }
+
                     over "femur_right_1_1"
                     {
                     }
+                }
+
+                over "hip_abduction_right_1"
+                {
                 }
 
                 over "hip_abduction_right_1_1"
@@ -198,7 +192,55 @@ over "bebopv2"
                 }
             }
 
+            over "hip_abduction_left_1"
+            {
+                over "femur_left_1"
+                {
+                    over "shin_left_1"
+                    {
+                        over "foot_left_1"
+                        {
+                            over "foot_left_1"
+                            {
+                            }
+
+                            over "foot_left_1_1"
+                            {
+                            }
+                        }
+
+                        over "shin_left_1"
+                        {
+                        }
+
+                        over "shin_left_1_1"
+                        {
+                        }
+                    }
+
+                    over "femur_left_1"
+                    {
+                    }
+
+                    over "femur_left_1_1"
+                    {
+                    }
+                }
+
+                over "hip_abduction_left_1"
+                {
+                }
+
+                over "hip_abduction_left_1_1"
+                {
+                }
+            }
+
             over "base_link"
+            {
+            }
+
+            over "base_link_1"
             {
             }
         }

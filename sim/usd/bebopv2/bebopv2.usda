@@ -7,8 +7,8 @@
                 double radius = 5
             }
             dictionary Perspective = {
-                double3 position = (0.5002401147902947, -0.9891477480222053, 0.0845285935846028)
-                double3 target = (-0.18236657250183552, 1.2897591161054318, 0.38583542724755876)
+                double3 position = (1.1892621441979887, 0.7149535146793418, 0.8611070388532127)
+                double3 target = (-0.9918247379127407, -0.1987411373700526, 0.2742384884075929)
             }
             dictionary Right = {
                 double3 position = (0, -5, 0)
@@ -28,16 +28,16 @@
         }
     }
     defaultPrim = "bebopv2"
-    doc = """Generated from Composed Stage of root layer /tmp/tmpv_w_q60j/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmp6lfb044p/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/usd/usdex/bebopv2.usdc
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/usdex/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/usd/temp/bebopv2.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/temp/bebopv2.usd
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/usd/bebopv2/payloads/base.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/bebopv2/payloads/base.usd
 """
     kilogramsPerUnit = 1
     metersPerUnit = 1
@@ -82,94 +82,14 @@ def Xform "bebopv2" (
     string isaac:version (
         displayName = "Version"
     )
-    quatf xformOp:orient = (1, 0, 0, 0)
-    float3 xformOp:scale = (1, 1, 1)
-    double3 xformOp:translate = (0, 0, 0.6539092050794861)
-    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
-
-    over "Geometry"
-    {
-        over "base_link"
-        {
-            string isaac:nameOverride (
-                displayName = "Name Override"
-            )
-
-            def IsaacImuSensor "imu_sensor"
-            {
-                int angularVelocityFilterWidth = 10
-                bool enabled = 1
-                int linearAccelerationFilterWidth = 10
-                int orientationFilterWidth = 10
-                quatd xformOp:orient = (1, 0, 0, 0)
-                double3 xformOp:scale = (1, 1, 1)
-                double3 xformOp:translate = (0, 0, 0)
-                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
-            }
-
-            over "hip_abduction_left_1_1"
-            {
-                string isaac:nameOverride (
-                    displayName = "Name Override"
-                )
-
-                over "femur_left_1_1"
-                {
-                    over "shin_left_1_1"
-                    {
-                        over "foot_left_1_1" (
-                            prepend apiSchemas = ["PhysxContactReportAPI"]
-                        )
-                        {
-                            float physxContactReport:threshold = 1
-                        }
-                    }
-                }
-            }
-
-            over "hip_abduction_right_1_1"
-            {
-                string isaac:nameOverride (
-                    displayName = "Name Override"
-                )
-
-                over "femur_right_1_1"
-                {
-                    over "shin_right_1_1"
-                    {
-                        over "foot_right_1_1" (
-                            prepend apiSchemas = ["PhysxContactReportAPI"]
-                        )
-                        {
-                            float physxContactReport:threshold = 1
-                        }
-                    }
-                }
-            }
-        }
-    }
+    double3 xformOp:translate = (0, 0, 0.65)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
 
     over "Physics"
     {
-        over "root_joint" (
-            active = false
-        )
+        over "root_joint"
         {
-            bool[] isaac:actuator (
-                displayName = "Actuator"
-            )
-            string isaac:NameOverride (
-                displayName = "Joint Name Override"
-            )
-            token[] isaac:physics:DofOffsetOpOrder (
-                displayName = "Dof Offset Op Order"
-            )
-        }
-
-        over "hip_abduction_left_joint"
-        {
-            float state:angular:physics:position = 0
-            float state:angular:physics:velocity = 0
+            bool physics:jointEnabled = 0
         }
 
         over "hip_abduction_right_joint"
@@ -178,7 +98,7 @@ def Xform "bebopv2" (
             float state:angular:physics:velocity = 0
         }
 
-        over "femur_left_joint"
+        over "hip_abduction_left_joint"
         {
             float state:angular:physics:position = 0
             float state:angular:physics:velocity = 0
@@ -190,7 +110,7 @@ def Xform "bebopv2" (
             float state:angular:physics:velocity = 0
         }
 
-        over "shin_left_joint"
+        over "femur_left_joint"
         {
             float state:angular:physics:position = 0
             float state:angular:physics:velocity = 0
@@ -202,7 +122,7 @@ def Xform "bebopv2" (
             float state:angular:physics:velocity = 0
         }
 
-        over "foot_left_joint"
+        over "shin_left_joint"
         {
             float state:angular:physics:position = 0
             float state:angular:physics:velocity = 0
@@ -212,6 +132,75 @@ def Xform "bebopv2" (
         {
             float state:angular:physics:position = 0
             float state:angular:physics:velocity = 0
+        }
+
+        over "foot_left_joint"
+        {
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+    }
+
+    over "Geometry"
+    {
+        over "base_link"
+        {
+            string isaac:nameOverride (
+                displayName = "Name Override"
+            )
+
+            over "hip_abduction_right_1"
+            {
+                over "femur_right_1"
+                {
+                    over "shin_right_1"
+                    {
+                        over "foot_right_1"
+                        {
+                        }
+                    }
+                }
+            }
+
+            over "hip_abduction_left_1"
+            {
+                string isaac:nameOverride (
+                    displayName = "Name Override"
+                )
+
+                over "femur_left_1"
+                {
+                    over "shin_left_1"
+                    {
+                        over "foot_left_1"
+                        {
+                        }
+                    }
+                }
+            }
+
+            over "base_link"
+            {
+                token visibility = "inherited"
+            }
+
+            over "base_link_1"
+            {
+                token visibility = "inherited"
+            }
+
+            def IsaacImuSensor "Imu_Sensor"
+            {
+                int angularVelocityFilterWidth = 1
+                bool enabled = 1
+                int linearAccelerationFilterWidth = 1
+                int orientationFilterWidth = 1
+                float sensorPeriod = 0.005
+                quatd xformOp:orient = (1, 0, 0, 0)
+                double3 xformOp:scale = (1, 1, 1)
+                double3 xformOp:translate = (0, 0, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+            }
         }
     }
     variantSet "Physics" = {
@@ -329,11 +318,17 @@ over "OmniverseKit_Persp" (
     float exposure:time = 0.02
     float focalLength = 18.147562
     float focusDistance = 400
-    custom uniform vector3d omni:kit:centerOfInterest = (0, 0, -2.3979479128863477)
-    float3 xformOp:rotateXYZ = (97.21841, -1.9083329e-14, 16.674667)
+    custom uniform vector3d omni:kit:centerOfInterest = (0, 0, -2.4364713419207926)
+    float3 xformOp:rotateXYZ = (76.06221, 7.6333315e-14, 112.729645)
     float3 xformOp:scale = (1, 1, 1)
-    double3 xformOp:translate = (0.5002401147902947, -0.9891477480222053, 0.0845285935846028)
+    double3 xformOp:translate = (1.1892621441979887, 0.7149535146793418, 0.8611070388532127)
     uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+}
+
+def PhysicsScene "PhysicsScene" (
+    prepend apiSchemas = ["PhysxSceneAPI", "NewtonSceneAPI"]
+)
+{
 }
 
 over "OmniverseKit_Front" (
@@ -409,11 +404,5 @@ over "OmniverseKit_Top" (
     float3 xformOp:scale = (1, 1, 1)
     double3 xformOp:translate = (0, 0, 5)
     uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
-}
-
-def PhysicsScene "PhysicsScene" (
-    prepend apiSchemas = ["PhysxSceneAPI", "NewtonSceneAPI"]
-)
-{
 }
 
