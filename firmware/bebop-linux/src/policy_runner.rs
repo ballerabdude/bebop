@@ -178,14 +178,17 @@ impl PolicyRunner {
         }
 
         // 1) Pull real joint feedback from the supervisor and lay it out in
-        //    policy-slot order.
+        //    policy-slot order. Capture each joint's armed state too so we
+        //    can skip TX for joints the operator hasn't enabled yet.
         let snapshots = sup.snapshot_motors();
         let mut joint_pos = [0.0_f32; NUM_JOINTS];
         let mut joint_vel = [0.0_f32; NUM_JOINTS];
+        let mut armed = [false; NUM_JOINTS];
         for (slot, &idx) in self.joint_indices.iter().enumerate() {
             let s = &snapshots[idx];
             joint_pos[slot] = s.position;
             joint_vel[slot] = s.velocity;
+            armed[slot] = s.armed;
         }
 
         // 2) Synthetic "no IMU" observation block. Replace with live IMU
@@ -247,12 +250,24 @@ impl PolicyRunner {
         //    per-joint pos_min..pos_max and slew-limit per tick.
         let targets = scale_actions_to_targets(&action, &self.default_positions);
 
-        // 8) Push to motors. Use per-joint hold_gains for kp/kd; these
-        //    should ideally match the gains baked into the training-time
-        //    actuator config (see `BEBOP_V2_CFG.actuators` in
+        // 8) Push to motors. Skip joints the operator hasn't armed: a
+        //    disabled motor ignores PD commands at the bus level, and
+        //    flooding the bus with TX traffic for not-yet-armed joints
+        //    starves the *armed* joints' feedback frames (the watchdog
+        //    only allows ~100 ms before latching E-STOP, and a sequential
+        //    `arm_all` over 8 motors takes ~160 ms; without this filter
+        //    every re-arm in RunPolicy mode trips the feedback watchdog
+        //    on whichever joint was armed first).
+        //
+        //    Use per-joint hold_gains for kp/kd; these should ideally
+        //    match the gains baked into the training-time actuator
+        //    config (see `BEBOP_V2_CFG.actuators` in
         //    `bebop_v2_base_cfg.py`). They currently differ — known
         //    sim-to-real gap.
         for (slot, &idx) in self.joint_indices.iter().enumerate() {
+            if !armed[slot] {
+                continue;
+            }
             let cfg = &sup.cfg().joints[idx];
             let kp = cfg.hold_gains.kp;
             let kd = cfg.hold_gains.kd;
