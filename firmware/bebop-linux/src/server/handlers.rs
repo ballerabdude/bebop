@@ -4,6 +4,7 @@
 //! The corresponding `ServerRuntimeMessage` is returned for the caller to
 //! write back to the WS sink.
 
+use crate::imu::ImuShared;
 use crate::mode::Mode;
 use crate::safety::limits::BreachReason;
 use crate::safety::Supervisor;
@@ -25,7 +26,12 @@ fn fmt_err(e: &anyhow::Error) -> String {
 /// (Ack / Error / Snapshot / etc.) — or `None` for messages that don't
 /// produce a response (e.g. SubscribeTelemetry, where the response is the
 /// telemetry stream itself).
-pub fn handle_client_message(sup: &Arc<Supervisor>, bytes: &[u8]) -> proto::ServerRuntimeMessage {
+pub fn handle_client_message(
+    sup: &Arc<Supervisor>,
+    imu: &ImuShared,
+    imu_present: bool,
+    bytes: &[u8],
+) -> proto::ServerRuntimeMessage {
     let req = match proto::ClientRuntimeMessage::decode(bytes) {
         Ok(m) => m,
         Err(e) => {
@@ -50,7 +56,7 @@ pub fn handle_client_message(sup: &Arc<Supervisor>, bytes: &[u8]) -> proto::Serv
             )
         }
         P::UnsubscribeTelemetry(_) => ack(request_id, "telemetry unsubscribed".into()),
-        P::GetSnapshot(_) => snapshot_response(request_id, sup),
+        P::GetSnapshot(_) => snapshot_response(request_id, sup, imu, imu_present),
         P::SetMotorEnabled(req) => {
             let result = if req.enabled {
                 sup.arm(&req.joint_name)
@@ -158,11 +164,16 @@ pub fn error_response(request_id: u32, message: String) -> proto::ServerRuntimeM
     }
 }
 
-pub fn snapshot_response(request_id: u32, sup: &Arc<Supervisor>) -> proto::ServerRuntimeMessage {
+pub fn snapshot_response(
+    request_id: u32,
+    sup: &Arc<Supervisor>,
+    imu: &ImuShared,
+    imu_present: bool,
+) -> proto::ServerRuntimeMessage {
     proto::ServerRuntimeMessage {
         request_id,
         payload: Some(proto::server_runtime_message::Payload::Snapshot(
-            crate::server::telemetry::build_snapshot(sup),
+            crate::server::telemetry::build_snapshot(sup, imu, imu_present),
         )),
     }
 }

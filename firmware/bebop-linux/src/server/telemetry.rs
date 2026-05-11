@@ -1,5 +1,6 @@
 //! Build telemetry / snapshot frames from the supervisor's current state.
 
+use crate::imu::ImuShared;
 use crate::mode::Mode;
 use crate::powerboard::describe_faults;
 use crate::safety::limits::MotorSnapshot;
@@ -146,7 +147,53 @@ fn build_power_stats(sup: &Arc<Supervisor>) -> proto::PowerStats {
     }
 }
 
-pub fn build_snapshot(sup: &Arc<Supervisor>) -> proto::Snapshot {
+/// Snapshot the shared IMU state into the wire proto. Always returns a
+/// value (never `None`) so older clients that ignore the field still
+/// decode the frame cleanly; the `present` flag is what UIs check to
+/// decide whether to render an orientation widget.
+fn build_imu_stats(imu: &ImuShared, present: bool) -> proto::ImuStats {
+    if !present {
+        return proto::ImuStats {
+            present: false,
+            ..Default::default()
+        };
+    }
+    let now = Instant::now();
+    let (received, stale, last_update_age_ms, quat, heading_acc) = match imu.lock() {
+        Ok(g) => {
+            let stale = g.is_stale(now);
+            let age = g.age_ms(now);
+            (
+                g.quaternion.is_some(),
+                stale,
+                age,
+                g.quaternion.unwrap_or([0.0, 0.0, 0.0, 0.0]),
+                g.heading_accuracy_rad,
+            )
+        }
+        // Poisoned mutex is exceptional but not worth crashing the WS
+        // pump over — fall back to "no reading, stale" so the UI can
+        // still render the rest of the frame.
+        Err(_) => (false, true, 0, [0.0; 4], 0.0),
+    };
+    proto::ImuStats {
+        present: true,
+        received,
+        stale,
+        last_update_age_ms,
+        quaternion_x: quat[0],
+        quaternion_y: quat[1],
+        quaternion_z: quat[2],
+        quaternion_w: quat[3],
+        heading_accuracy_rad: heading_acc,
+    }
+}
+
+pub fn build_snapshot(
+    sup: &Arc<Supervisor>,
+    imu: &ImuShared,
+    imu_present: bool,
+) -> proto::Snapshot {
     let motors = sup.snapshot_motors();
     let mode_proto = sup.mode().as_proto() as i32;
     let estop_latched = sup.estop_active();
@@ -159,10 +206,15 @@ pub fn build_snapshot(sup: &Arc<Supervisor>) -> proto::Snapshot {
         motors: motors.iter().map(motor_state_to_proto).collect(),
         buses: collect_buses(sup),
         power: Some(build_power_stats(sup)),
+        imu: Some(build_imu_stats(imu, imu_present)),
     }
 }
 
-pub fn build_telemetry(sup: &Arc<Supervisor>) -> proto::TelemetryFrame {
+pub fn build_telemetry(
+    sup: &Arc<Supervisor>,
+    imu: &ImuShared,
+    imu_present: bool,
+) -> proto::TelemetryFrame {
     let motors = sup.snapshot_motors();
     let mode_proto = sup.mode().as_proto() as i32;
     let estop_latched = sup.estop_active();
@@ -175,6 +227,7 @@ pub fn build_telemetry(sup: &Arc<Supervisor>) -> proto::TelemetryFrame {
         motors: motors.iter().map(motor_state_to_proto).collect(),
         buses: collect_buses(sup),
         power: Some(build_power_stats(sup)),
+        imu: Some(build_imu_stats(imu, imu_present)),
     }
 }
 

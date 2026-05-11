@@ -295,6 +295,19 @@ pub struct RobotConfig {
     pub can_interfaces: Vec<String>,
     pub server: ServerConfig,
     pub power: Option<PowerBoardConfig>,
+    /// When set, [`crate::imu`] streams fused orientation into the shared
+    /// state consumed by the WS telemetry pump. Policy observations still
+    /// use synthetic IMU until explicitly wired.
+    pub imu: Option<ImuConfig>,
+}
+
+/// Optional BNO080/BNO085 I²C reader (see `imu:` in the joint YAML).
+#[derive(Debug, Clone)]
+pub struct ImuConfig {
+    pub i2c_device: String,
+    pub i2c_address: u8,
+    /// Argument to `bno080::BNO080::enable_rotation_vector` (report period).
+    pub rotation_vector_period_ms: u16,
 }
 
 impl RobotConfig {
@@ -478,11 +491,32 @@ impl RobotConfig {
         let mut can_interfaces: Vec<String> = interfaces.into_iter().collect();
         can_interfaces.sort();
 
+        let imu = raw
+            .imu
+            .map(|raw_imu| -> Result<ImuConfig> {
+                let i2c_device = raw_imu
+                    .i2c_device
+                    .unwrap_or_else(|| "/dev/i2c-7".to_string());
+                let i2c_address = raw_imu.i2c_address.unwrap_or(0x4A);
+                let rotation_vector_period_ms = raw_imu.rotation_vector_period_ms.unwrap_or(50);
+                if rotation_vector_period_ms == 0 {
+                    return Err(anyhow!("imu.rotation_vector_period_ms must be >= 1"));
+                }
+                Ok(ImuConfig {
+                    i2c_device,
+                    i2c_address,
+                    rotation_vector_period_ms,
+                })
+            })
+            .transpose()
+            .context("invalid `imu:` section")?;
+
         Ok(Self {
             joints,
             can_interfaces,
             server,
             power,
+            imu,
         })
     }
 
@@ -537,6 +571,14 @@ struct RawConfig {
     joints: serde_yaml::Mapping,
     server: Option<RawServer>,
     power: Option<RawPower>,
+    imu: Option<RawImu>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawImu {
+    i2c_device: Option<String>,
+    i2c_address: Option<u8>,
+    rotation_vector_period_ms: Option<u16>,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -76,6 +76,23 @@ export interface PowerView {
   stateOfChargePct: number;
 }
 
+/// Orientation telemetry view. Mirrors the firmware's `ImuStats` proto.
+/// Always present in the view layer; `present === false` when the
+/// firmware has no `imu:` block configured — the UI should hide the
+/// orientation card in that case. `received === false` until the
+/// BNO08x produces its first usable quaternion.
+///
+/// `quaternion` is `[qx, qy, qz, qw]` in Hamilton (XYZW) order to match
+/// the policy-side convention. Identity orientation is `(0, 0, 0, 1)`.
+export interface ImuView {
+  present: boolean;
+  received: boolean;
+  stale: boolean;
+  lastUpdateAgeMs: number;
+  quaternion: [number, number, number, number];
+  headingAccuracyRad: number;
+}
+
 export interface RuntimeSnapshot {
   hostUnixMs: number;
   mode: RuntimeMode;
@@ -86,4 +103,7 @@ export interface RuntimeSnapshot {
   /// Always present in the view layer; `power.present === false` when
   /// the firmware has no `power:` block configured.
   power: PowerView;
+  /// Always present in the view layer; `imu.present === false` when
+  /// the firmware has no `imu:` block configured.
+  imu: ImuView;
 }

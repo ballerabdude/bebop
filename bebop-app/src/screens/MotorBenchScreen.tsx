@@ -5,6 +5,7 @@ import { GamepadDriver } from "../components/GamepadDriver";
 import { Banner, Button, Spinner } from "../components/ui";
 import { getOrCreateRuntimeTransport } from "../runtime";
 import type {
+  ImuView,
   MotorView,
   PowerView,
   RuntimeMode,
@@ -287,6 +288,7 @@ export function MotorBenchScreen({
   const motors = snapshot?.motors ?? [];
   const buses = snapshot?.buses ?? [];
   const power = snapshot?.power;
+  const imu = snapshot?.imu;
   const mode = snapshot?.mode ?? "UNSPECIFIED";
   const estopLatched = snapshot?.estopLatched ?? false;
   const estopReason = snapshot?.estopReason ?? "";
@@ -434,8 +436,14 @@ export function MotorBenchScreen({
       {/* Power-board card. Hidden when the firmware has no `power:`
           block configured (older robots / bring-up rigs). Always visible
           regardless of mode so the operator can keep an eye on battery
-          level while dialing in joints. */}
-      {power && power.present ? <PowerCard power={power} /> : null}
+          level while dialing in joints. On md+ the orientation card
+          shares a row with it; on phones each gets its own row. */}
+      {(power && power.present) || (imu && imu.present) ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {power && power.present ? <PowerCard power={power} /> : null}
+          {imu && imu.present ? <OrientationCard imu={imu} /> : null}
+        </div>
+      ) : null}
 
       {/* Dial-in cheat sheet. Shows only in DialIn mode, summarising the
           discovery loop the YAML is structured around. The intent is to
@@ -1323,6 +1331,284 @@ function RailPill({
       {label}
     </span>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Orientation card (IMU rotation-vector visualization)
+// ---------------------------------------------------------------------------
+
+/// Live orientation indicator driven by the BNO080/BNO085 rotation
+/// vector. Renders a labelled box rotating in 3D so the operator can
+/// quickly tell whether the robot is upright, leaning, or has flipped,
+/// plus numeric roll/pitch/yaw readouts.
+///
+/// The quaternion comes in XYZW (Hamilton) order. We convert it to a 3x3
+/// rotation matrix and then to a CSS `matrix3d(...)` transform: this is
+/// singularity-free, unlike Euler-angle decomposition, so the cube keeps
+/// rotating smoothly even at gimbal-lock orientations. The Euler readout
+/// underneath is for human consumption only and is allowed to flicker
+/// near pitch = ±90°.
+///
+/// Sensor frame note: the BNO08x sensor sits in whatever orientation the
+/// PCB ended up bolted to the chassis; we don't attempt a body-frame
+/// rotation here. The card is meant as a *qualitative* indicator —
+/// "robot is upright" / "robot is tipping" — not a calibrated attitude
+/// readout. Calibration of the sensor-to-body frame is the operator's
+/// job once the IMU is being wired into the policy observations.
+function OrientationCard({ imu }: { imu: ImuView }) {
+  const [qx, qy, qz, qw] = imu.quaternion;
+  const norm = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+  const matrix3d = useMemo(
+    () =>
+      norm > 1e-6
+        ? quaternionToCssMatrix3d(qx / norm, qy / norm, qz / norm, qw / norm)
+        : "matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1)",
+    [qx, qy, qz, qw, norm],
+  );
+  const [rollDeg, pitchDeg, yawDeg] = useMemo(
+    () => quaternionToEulerDeg(qx, qy, qz, qw),
+    [qx, qy, qz, qw],
+  );
+
+  const usable = imu.received && !imu.stale && norm > 1e-6;
+  const headingDeg = (imu.headingAccuracyRad * 180) / Math.PI;
+
+  return (
+    <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev px-3.5 py-3 flex flex-col gap-2.5">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] uppercase tracking-wider text-text-dim font-semibold">
+            Orientation
+          </span>
+          <span className="text-[10px] text-text-dim font-mono">BNO08x</span>
+        </div>
+        <div className="flex items-center gap-1.5 text-[11px] text-text-dim">
+          {imu.received ? (
+            <span title={`Last quaternion ${imu.lastUpdateAgeMs} ms ago`}>
+              {imu.lastUpdateAgeMs} ms
+            </span>
+          ) : (
+            <span className="italic">no fix yet</span>
+          )}
+          {imu.stale ? (
+            <>
+              <span aria-hidden>·</span>
+              <span className="text-yellow-700 dark:text-yellow-300 font-semibold">
+                stale
+              </span>
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Cube + readouts: on phones they stack, on md+ they sit side-by-side
+          so the 3D widget and the numeric readout share the card row. */}
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+        <div
+          className="self-center shrink-0 [perspective:520px] [perspective-origin:50%_45%]"
+          aria-hidden
+        >
+          <div
+            className={`relative w-[110px] h-[110px] [transform-style:preserve-3d] transition-transform duration-100 ease-out ${
+              usable ? "opacity-100" : "opacity-40"
+            }`}
+            style={{ transform: matrix3d }}
+          >
+            <OrientationFace
+              label="FWD"
+              color="bg-accent/30 border-accent/70 text-accent"
+              transform="translateZ(40px)"
+            />
+            <OrientationFace
+              label="BACK"
+              color="bg-bg-elev-2 border-border text-text-dim"
+              transform="rotateY(180deg) translateZ(40px)"
+            />
+            <OrientationFace
+              label="R"
+              color="bg-bg-elev-2 border-border text-text-dim"
+              transform="rotateY(90deg) translateZ(40px)"
+            />
+            <OrientationFace
+              label="L"
+              color="bg-bg-elev-2 border-border text-text-dim"
+              transform="rotateY(-90deg) translateZ(40px)"
+            />
+            <OrientationFace
+              label="TOP"
+              color="bg-success/25 border-success/60 text-success"
+              transform="rotateX(90deg) translateZ(40px)"
+            />
+            <OrientationFace
+              label="BOT"
+              color="bg-bg-elev-2 border-border text-text-dim"
+              transform="rotateX(-90deg) translateZ(40px)"
+            />
+          </div>
+        </div>
+
+        <div className="flex-1 min-w-0 grid grid-cols-3 gap-x-3 gap-y-1.5 text-[12px]">
+          <OrientationReadout
+            label="Roll"
+            value={usable ? `${rollDeg.toFixed(1)}°` : "—"}
+            hint="Rotation about body X axis (lean left/right)"
+          />
+          <OrientationReadout
+            label="Pitch"
+            value={usable ? `${pitchDeg.toFixed(1)}°` : "—"}
+            hint="Rotation about body Y axis (lean forward/back)"
+          />
+          <OrientationReadout
+            label="Yaw"
+            value={usable ? `${yawDeg.toFixed(1)}°` : "—"}
+            hint="Rotation about body Z axis (heading)"
+          />
+          <div className="col-span-3 grid grid-cols-4 gap-x-2 gap-y-0 text-[11px] tabular-nums text-text-dim">
+            <span title="quaternion x">
+              qx <span className="text-text">{qx.toFixed(2)}</span>
+            </span>
+            <span title="quaternion y">
+              qy <span className="text-text">{qy.toFixed(2)}</span>
+            </span>
+            <span title="quaternion z">
+              qz <span className="text-text">{qz.toFixed(2)}</span>
+            </span>
+            <span title="quaternion w">
+              qw <span className="text-text">{qw.toFixed(2)}</span>
+            </span>
+          </div>
+          {imu.headingAccuracyRad > 0 ? (
+            <div className="col-span-3 text-[11px] text-text-dim">
+              Heading accuracy ±{headingDeg.toFixed(1)}° (1σ)
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {!imu.received ? (
+        <div className="text-xs text-text-dim italic">
+          Waiting for first rotation-vector frame from BNO08x…
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function OrientationFace({
+  label,
+  color,
+  transform,
+}: {
+  label: string;
+  color: string;
+  transform: string;
+}) {
+  return (
+    <div
+      className={`absolute inset-0 m-auto w-[80px] h-[80px] border rounded-md flex items-center justify-center text-[10px] font-semibold tracking-wider [backface-visibility:hidden] ${color}`}
+      style={{
+        transform,
+        top: "50%",
+        left: "50%",
+        marginLeft: "-40px",
+        marginTop: "-40px",
+      }}
+    >
+      {label}
+    </div>
+  );
+}
+
+function OrientationReadout({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  return (
+    <div className="flex flex-col leading-tight" title={hint}>
+      <span className="text-[10px] uppercase tracking-wider text-text-dim">
+        {label}
+      </span>
+      <span className="text-text tabular-nums font-semibold">{value}</span>
+    </div>
+  );
+}
+
+/// Build a CSS `matrix3d(...)` transform from a unit XYZW quaternion.
+///
+/// The 3x3 rotation matrix is laid out column-major into the top-left
+/// 3x3 of a 4x4 CSS transform (the homogeneous translation column is
+/// zero). The robot/sensor frame is X-forward, Y-left, Z-up; CSS uses
+/// X-right, Y-down, Z-toward-viewer. We flip Y (negate the Y-row and
+/// Y-column) so positive pitch (nose-up) renders nose-up rather than
+/// nose-down on the screen — i.e. the cube tilts the way the operator
+/// expects when the physical robot tilts.
+function quaternionToCssMatrix3d(
+  x: number,
+  y: number,
+  z: number,
+  w: number,
+): string {
+  const xx = x * x,
+    yy = y * y,
+    zz = z * z;
+  const xy = x * y,
+    xz = x * z,
+    yz = y * z;
+  const wx = w * x,
+    wy = w * y,
+    wz = w * z;
+
+  // Row-major rotation matrix (m[row][col]).
+  const m00 = 1 - 2 * (yy + zz);
+  const m01 = 2 * (xy - wz);
+  const m02 = 2 * (xz + wy);
+  const m10 = 2 * (xy + wz);
+  const m11 = 1 - 2 * (xx + zz);
+  const m12 = 2 * (yz - wx);
+  const m20 = 2 * (xz - wy);
+  const m21 = 2 * (yz + wx);
+  const m22 = 1 - 2 * (xx + yy);
+
+  // CSS matrix3d is column-major. To flip the Y axis we negate every
+  // element touching exactly one Y index (the off-diagonals m01, m10,
+  // m12, m21); diagonal m11 stays positive.
+  return (
+    `matrix3d(` +
+    `${m00},${-m10},${m20},0,` +
+    `${-m01},${m11},${-m21},0,` +
+    `${m02},${-m12},${m22},0,` +
+    `0,0,0,1)`
+  );
+}
+
+/// Decompose an XYZW quaternion to ZYX-Tait-Bryan Euler angles (roll,
+/// pitch, yaw), in degrees. Singularity-aware: clamps `asin` argument to
+/// [-1, 1] so we don't return NaN near pitch = ±90°.
+function quaternionToEulerDeg(
+  x: number,
+  y: number,
+  z: number,
+  w: number,
+): [number, number, number] {
+  const sinrCosp = 2 * (w * x + y * z);
+  const cosrCosp = 1 - 2 * (x * x + y * y);
+  const roll = Math.atan2(sinrCosp, cosrCosp);
+
+  const sinp = 2 * (w * y - z * x);
+  const pitch =
+    Math.abs(sinp) >= 1 ? (Math.PI / 2) * Math.sign(sinp) : Math.asin(sinp);
+
+  const sinyCosp = 2 * (w * z + x * y);
+  const cosyCosp = 1 - 2 * (y * y + z * z);
+  const yaw = Math.atan2(sinyCosp, cosyCosp);
+
+  const r2d = 180 / Math.PI;
+  return [roll * r2d, pitch * r2d, yaw * r2d];
 }
 
 // ---------------------------------------------------------------------------

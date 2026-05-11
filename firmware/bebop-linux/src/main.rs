@@ -11,6 +11,7 @@
 
 use anyhow::{Context, Result};
 use bebop_linux::config::RobotConfig;
+use bebop_linux::imu;
 use bebop_linux::mode::Mode;
 use bebop_linux::policy_runner::PolicyRunner;
 use bebop_linux::safety::power_monitor::spawn_power_monitor;
@@ -131,6 +132,17 @@ async fn main() -> Result<()> {
 
     // Spawn one OS thread per CAN bus to drain feedback frames.
     let shutdown_flag = Arc::new(AtomicBool::new(false));
+
+    // Shared latest IMU reading (always present; the I²C reader fills it
+    // when an `imu:` block exists in the YAML, otherwise stays at default
+    // and the telemetry builder reports `present = false` so the
+    // operator UI hides the orientation card).
+    let imu_shared = imu::new_shared();
+    let imu_present = cfg.imu.is_some();
+    let imu_handle = cfg.imu.as_ref().and_then(|imu_cfg| {
+        imu::spawn_imu_thread(imu_cfg.clone(), shutdown_flag.clone(), imu_shared.clone())
+    });
+
     let rx_handles = spawn_rx_threads(supervisor.clone(), bus_pool.clone(), shutdown_flag.clone());
 
     // Spawn the power-board poller (no-op if `power:` is omitted from
@@ -189,9 +201,10 @@ async fn main() -> Result<()> {
 
     // Run the WS server in its own task so we can also wait for ctrl-c.
     let server_sup = supervisor.clone();
+    let server_imu = imu_shared.clone();
     let bind_addr = cfg.server.bind_addr.clone();
     let server_handle = tokio::spawn(async move {
-        if let Err(e) = server::run_server(server_sup, &bind_addr).await {
+        if let Err(e) = server::run_server(server_sup, server_imu, imu_present, &bind_addr).await {
             error!(error = %e, "server task exited with error");
         }
     });
@@ -219,6 +232,9 @@ async fn main() -> Result<()> {
         let _ = h.join();
     }
     if let Some(h) = power_handle {
+        let _ = h.join();
+    }
+    if let Some(h) = imu_handle {
         let _ = h.join();
     }
 

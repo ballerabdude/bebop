@@ -16,6 +16,7 @@
 //!
 //! All three feed a shared mpsc to the WS sink writer.
 
+use crate::imu::ImuShared;
 use crate::safety::{Supervisor, SupervisorEvent};
 use crate::server::handlers::{encode, handle_client_message};
 use crate::server::telemetry::{build_telemetry, telemetry_envelope};
@@ -36,10 +37,25 @@ use tracing::{debug, info, warn};
 #[derive(Clone)]
 pub struct AppState {
     pub sup: Arc<Supervisor>,
+    /// Latest IMU rotation-vector reading. Populated by [`crate::imu`]
+    /// when the YAML has an `imu:` block; left at default otherwise.
+    pub imu: ImuShared,
+    /// True when the firmware was configured with an `imu:` block (drives
+    /// the `ImuStats.present` proto flag).
+    pub imu_present: bool,
 }
 
-pub async fn run_server(sup: Arc<Supervisor>, bind_addr: &str) -> Result<()> {
-    let state = AppState { sup };
+pub async fn run_server(
+    sup: Arc<Supervisor>,
+    imu: ImuShared,
+    imu_present: bool,
+    bind_addr: &str,
+) -> Result<()> {
+    let state = AppState {
+        sup,
+        imu,
+        imu_present,
+    };
     // Permissive CORS: the operator app is served from a different origin
     // (e.g. tauri://localhost or a dev http://localhost:1420), and we're
     // on the LAN. WebSockets aren't subject to CORS but the /healthz
@@ -62,10 +78,15 @@ pub async fn run_server(sup: Arc<Supervisor>, bind_addr: &str) -> Result<()> {
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state.sup))
+    ws.on_upgrade(move |socket| handle_ws(socket, state))
 }
 
-async fn handle_ws(socket: WebSocket, sup: Arc<Supervisor>) {
+async fn handle_ws(socket: WebSocket, state: AppState) {
+    let AppState {
+        sup,
+        imu,
+        imu_present,
+    } = state;
     info!("ws client connected");
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<proto::ServerRuntimeMessage>(256);
@@ -81,6 +102,7 @@ async fn handle_ws(socket: WebSocket, sup: Arc<Supervisor>) {
     // Task: telemetry pump.
     let tx_tele = tx.clone();
     let sup_tele = sup.clone();
+    let imu_tele = imu.clone();
     let tele_state_tele = telemetry_state.clone();
     let telemetry_task = tokio::spawn(async move {
         loop {
@@ -93,7 +115,7 @@ async fn handle_ws(socket: WebSocket, sup: Arc<Supervisor>) {
             if !subscribed {
                 continue;
             }
-            let frame = build_telemetry(&sup_tele);
+            let frame = build_telemetry(&sup_tele, &imu_tele, imu_present);
             let env = telemetry_envelope(frame);
             if tx_tele.send(env).await.is_err() {
                 break;
@@ -150,7 +172,7 @@ async fn handle_ws(socket: WebSocket, sup: Arc<Supervisor>) {
     while let Some(frame) = stream.next().await {
         match frame {
             Ok(Message::Binary(bytes)) => {
-                let response = handle_client_message(&sup, &bytes);
+                let response = handle_client_message(&sup, &imu, imu_present, &bytes);
 
                 // Side effects for messages that affect telemetry state: do this
                 // after dispatch so the response is consistent with the new state.

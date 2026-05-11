@@ -37,6 +37,9 @@
 //!
 //! When an IMU lands, replace the synthetic block in [`PolicyRunner::tick`]
 //! with the live readout. Convention is XYZW per [`crate::observation::ImuState`].
+//! Until then, optional `imu:` in the robot YAML enables [`crate::imu`]
+//! (publishes the rotation vector to the WS server so the operator UI can
+//! visualize orientation; does not change policy observations).
 
 use anyhow::{anyhow, Context, Result};
 use std::panic::AssertUnwindSafe;
@@ -249,6 +252,13 @@ impl PolicyRunner {
         //    The supervisor's `safe_send_ctrl` will clamp again to
         //    per-joint pos_min..pos_max and slew-limit per tick.
         let targets = scale_actions_to_targets(&action, &self.default_positions);
+
+        // debug!(
+        //     observation = ?obs.as_slice(),
+        //     raw_action = ?action.as_slice(),
+        //     position_targets_rad = ?targets.as_slice(),
+        //     "policy tick: 36-dim obs → raw action → scaled joint targets (rad)"
+        // );
 
         // 8) Push to motors. Skip joints the operator hasn't armed: a
         //    disabled motor ignores PD commands at the bus level, and

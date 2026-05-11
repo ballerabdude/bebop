@@ -22,7 +22,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file bebop_runtime.proto.
  */
 export const file_bebop_runtime: GenFile = /*@__PURE__*/
-  fileDesc("ChNiZWJvcF9ydW50aW1lLnByb3RvEhBiZWJvcC5ydW50aW1lLnYxIqQFChRDbGllbnRSdW50aW1lTWVzc2FnZRISCgpyZXF1ZXN0X2lkGGQgASgNEkMKE3N1YnNjcmliZV90ZWxlbWV0cnkYASABKAsyJC5iZWJvcC5ydW50aW1lLnYxLlN1YnNjcmliZVRlbGVtZXRyeUgAEkcKFXVuc3Vic2NyaWJlX3RlbGVtZXRyeRgCIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVUZWxlbWV0cnlIABI1CgxnZXRfc25hcHNob3QYAyABKAsyHS5iZWJvcC5ydW50aW1lLnYxLkdldFNuYXBzaG90SAASPgoRc2V0X21vdG9yX2VuYWJsZWQYBCABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldE1vdG9yRW5hYmxlZEgAEkcKFnNldF9hbGxfbW90b3JzX2VuYWJsZWQYBSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbE1vdG9yc0VuYWJsZWRIABItCghzZXRfbW9kZRgGIAEoCzIZLmJlYm9wLnJ1bnRpbWUudjEuU2V0TW9kZUgAEjkKDmVtZXJnZW5jeV9zdG9wGAcgASgLMh8uYmVib3AucnVudGltZS52MS5FbWVyZ2VuY3lTdG9wSAASMwoLcmVzZXRfZXN0b3AYCCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlJlc2V0RVN0b3BIABI8ChBzZXRfbW90b3JfdGFyZ2V0GAkgASgLMiAuYmVib3AucnVudGltZS52MS5TZXRNb3RvclRhcmdldEgAEkIKE3NldF9tZWNoYW5pY2FsX3plcm8YCiABKAsyIy5iZWJvcC5ydW50aW1lLnYxLlNldE1lY2hhbmljYWxaZXJvSABCCQoHcGF5bG9hZCKVAwoUU2VydmVyUnVudGltZU1lc3NhZ2USEgoKcmVxdWVzdF9pZBhkIAEoDRIkCgNhY2sYASABKAsyFS5iZWJvcC5ydW50aW1lLnYxLkFja0gAEigKBWVycm9yGAIgASgLMhcuYmVib3AucnVudGltZS52MS5FcnJvckgAEi4KCHNuYXBzaG90GAMgASgLMhouYmVib3AucnVudGltZS52MS5TbmFwc2hvdEgAEjUKCXRlbGVtZXRyeRgEIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuVGVsZW1ldHJ5RnJhbWVIABI1Cgxtb2RlX2NoYW5nZWQYBSABKAsyHS5iZWJvcC5ydW50aW1lLnYxLk1vZGVDaGFuZ2VkSAASNwoNZXN0b3BfbGF0Y2hlZBgGIAEoCzIeLmJlYm9wLnJ1bnRpbWUudjEuRVN0b3BMYXRjaGVkSAASNwoKYnVzX3N0YXR1cxgHIAEoCzIhLmJlYm9wLnJ1bnRpbWUudjEuQnVzU3RhdHVzVXBkYXRlSABCCQoHcGF5bG9hZCLmAgoKTW90b3JTdGF0ZRISCgpqb2ludF9uYW1lGAEgASgJEhUKDWNhbl9pbnRlcmZhY2UYAiABKAkSEAoIbW90b3JfaWQYAyABKA0SDQoFbW9kZWwYBCABKAkSDQoFYXJtZWQYBSABKAgSFgoOZmVlZGJhY2tfc3RhbGUYBiABKAgSEgoKZmF1bHRfYml0cxgHIAEoDRIUCgxwb3NpdGlvbl9yYWQYCiABKAISFgoOdmVsb2NpdHlfcmFkX3MYCyABKAISEQoJdG9ycXVlX25tGAwgASgCEhUKDXRlbXBlcmF0dXJlX2MYDSABKAISGwoTdGFyZ2V0X3Bvc2l0aW9uX3JhZBgOIAEoAhITCgtwb3NfbWluX3JhZBgUIAEoAhITCgtwb3NfbWF4X3JhZBgVIAEoAhIPCgd2ZWxfbWF4GBYgASgCEg8KB3RhdV9tYXgYFyABKAISEAoIdGVtcF9tYXgYGCABKAIiQQoIQnVzRW50cnkSFQoNY2FuX2ludGVyZmFjZRgBIAEoCRINCgVzdGF0ZRgCIAEoCRIPCgdoZWFsdGh5GAMgASgIIukECgpQb3dlclN0YXRzEg8KB3ByZXNlbnQYASABKAgSFQoNY2FuX2ludGVyZmFjZRgCIAEoCRIQCghwb3dlcl9pZBgDIAEoDRIYChBmaXJtd2FyZV92ZXJzaW9uGAQgASgJEhcKD3N0YXR1c19yZWNlaXZlZBgKIAEoCBIUCgxzdGF0dXNfc3RhbGUYCyABKAgSGgoSbGFzdF9zdGF0dXNfYWdlX21zGAwgASgNEhkKEWJhdHRlcnlfdm9sdGFnZV92GBQgASgCEhcKD21vdG9yX3ZvbHRhZ2VfdhgVIAEoAhIbChNib2FyZF90ZW1wZXJhdHVyZV9jGBYgASgCEhIKCmZhdWx0X2JpdHMYHiABKA0SGQoRZmF1bHRfZGVzY3JpcHRpb24YHyABKAkSEwoLcmFpbF8xMnZfb24YICABKAgSFQoNc29mdF9zdGFydF9vbhghIAEoCBIVCg1tb3Rvcl9yYWlsX29uGCIgASgIEhMKC3JhaWxfMjR2X29uGCMgASgIEhQKDGN1cnJlbnRfYWxfYRgoIAEoAhIUCgxjdXJyZW50X2FyX2EYKSABKAISFAoMY3VycmVudF9sbF9hGCogASgCEhQKDGN1cnJlbnRfbHJfYRgrIAEoAhIdChV0b3RhbF9tb3Rvcl9jdXJyZW50X2EYLCABKAISFQoNYmF0dGVyeV9jZWxscxgyIAEoDRIbChNwYWNrX2Z1bGxfdm9sdGFnZV92GDMgASgCEhwKFHBhY2tfZW1wdHlfdm9sdGFnZV92GDQgASgCEhsKE3N0YXRlX29mX2NoYXJnZV9wY3QYNSABKAIi/wEKDlRlbGVtZXRyeUZyYW1lEhQKDGhvc3RfdW5peF9tcxgBIAEoBBIkCgRtb2RlGAIgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlEhUKDWVzdG9wX2xhdGNoZWQYAyABKAgSFAoMZXN0b3BfcmVhc29uGAQgASgJEiwKBm1vdG9ycxgKIAMoCzIcLmJlYm9wLnJ1bnRpbWUudjEuTW90b3JTdGF0ZRIpCgVidXNlcxgLIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkSKwoFcG93ZXIYDCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlBvd2VyU3RhdHMi+QEKCFNuYXBzaG90EhQKDGhvc3RfdW5peF9tcxgBIAEoBBIkCgRtb2RlGAIgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlEhUKDWVzdG9wX2xhdGNoZWQYAyABKAgSFAoMZXN0b3BfcmVhc29uGAQgASgJEiwKBm1vdG9ycxgKIAMoCzIcLmJlYm9wLnJ1bnRpbWUudjEuTW90b3JTdGF0ZRIpCgVidXNlcxgLIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkSKwoFcG93ZXIYDCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlBvd2VyU3RhdHMiPAoPQnVzU3RhdHVzVXBkYXRlEikKBWJ1c2VzGAEgAygLMhouYmVib3AucnVudGltZS52MS5CdXNFbnRyeSIlChJTdWJzY3JpYmVUZWxlbWV0cnkSDwoHcmF0ZV9oehgBIAEoDSIWChRVbnN1YnNjcmliZVRlbGVtZXRyeSINCgtHZXRTbmFwc2hvdCI2Cg9TZXRNb3RvckVuYWJsZWQSEgoKam9pbnRfbmFtZRgBIAEoCRIPCgdlbmFibGVkGAIgASgIIiYKE1NldEFsbE1vdG9yc0VuYWJsZWQSDwoHZW5hYmxlZBgBIAEoCCIvCgdTZXRNb2RlEiQKBG1vZGUYASABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUiHwoNRW1lcmdlbmN5U3RvcBIOCgZyZWFzb24YASABKAkiDAoKUmVzZXRFU3RvcCI6Cg5TZXRNb3RvclRhcmdldBISCgpqb2ludF9uYW1lGAEgASgJEhQKDHBvc2l0aW9uX3JhZBgCIAEoAiInChFTZXRNZWNoYW5pY2FsWmVybxISCgpqb2ludF9uYW1lGAEgASgJIiIKA0FjaxIKCgJvaxgBIAEoCBIPCgdtZXNzYWdlGAIgASgJIhgKBUVycm9yEg8KB21lc3NhZ2UYASABKAkiMwoLTW9kZUNoYW5nZWQSJAoEbW9kZRgBIAEoDjIWLmJlYm9wLnJ1bnRpbWUudjEuTW9kZSIeCgxFU3RvcExhdGNoZWQSDgoGcmVhc29uGAEgASgJKlIKBE1vZGUSFAoQTU9ERV9VTlNQRUNJRklFRBAAEg0KCU1PREVfSURMRRABEhAKDE1PREVfRElBTF9JThACEhMKD01PREVfUlVOX1BPTElDWRADYgZwcm90bzM");
+  fileDesc("ChNiZWJvcF9ydW50aW1lLnByb3RvEhBiZWJvcC5ydW50aW1lLnYxIqQFChRDbGllbnRSdW50aW1lTWVzc2FnZRISCgpyZXF1ZXN0X2lkGGQgASgNEkMKE3N1YnNjcmliZV90ZWxlbWV0cnkYASABKAsyJC5iZWJvcC5ydW50aW1lLnYxLlN1YnNjcmliZVRlbGVtZXRyeUgAEkcKFXVuc3Vic2NyaWJlX3RlbGVtZXRyeRgCIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVUZWxlbWV0cnlIABI1CgxnZXRfc25hcHNob3QYAyABKAsyHS5iZWJvcC5ydW50aW1lLnYxLkdldFNuYXBzaG90SAASPgoRc2V0X21vdG9yX2VuYWJsZWQYBCABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldE1vdG9yRW5hYmxlZEgAEkcKFnNldF9hbGxfbW90b3JzX2VuYWJsZWQYBSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbE1vdG9yc0VuYWJsZWRIABItCghzZXRfbW9kZRgGIAEoCzIZLmJlYm9wLnJ1bnRpbWUudjEuU2V0TW9kZUgAEjkKDmVtZXJnZW5jeV9zdG9wGAcgASgLMh8uYmVib3AucnVudGltZS52MS5FbWVyZ2VuY3lTdG9wSAASMwoLcmVzZXRfZXN0b3AYCCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlJlc2V0RVN0b3BIABI8ChBzZXRfbW90b3JfdGFyZ2V0GAkgASgLMiAuYmVib3AucnVudGltZS52MS5TZXRNb3RvclRhcmdldEgAEkIKE3NldF9tZWNoYW5pY2FsX3plcm8YCiABKAsyIy5iZWJvcC5ydW50aW1lLnYxLlNldE1lY2hhbmljYWxaZXJvSABCCQoHcGF5bG9hZCKVAwoUU2VydmVyUnVudGltZU1lc3NhZ2USEgoKcmVxdWVzdF9pZBhkIAEoDRIkCgNhY2sYASABKAsyFS5iZWJvcC5ydW50aW1lLnYxLkFja0gAEigKBWVycm9yGAIgASgLMhcuYmVib3AucnVudGltZS52MS5FcnJvckgAEi4KCHNuYXBzaG90GAMgASgLMhouYmVib3AucnVudGltZS52MS5TbmFwc2hvdEgAEjUKCXRlbGVtZXRyeRgEIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuVGVsZW1ldHJ5RnJhbWVIABI1Cgxtb2RlX2NoYW5nZWQYBSABKAsyHS5iZWJvcC5ydW50aW1lLnYxLk1vZGVDaGFuZ2VkSAASNwoNZXN0b3BfbGF0Y2hlZBgGIAEoCzIeLmJlYm9wLnJ1bnRpbWUudjEuRVN0b3BMYXRjaGVkSAASNwoKYnVzX3N0YXR1cxgHIAEoCzIhLmJlYm9wLnJ1bnRpbWUudjEuQnVzU3RhdHVzVXBkYXRlSABCCQoHcGF5bG9hZCLmAgoKTW90b3JTdGF0ZRISCgpqb2ludF9uYW1lGAEgASgJEhUKDWNhbl9pbnRlcmZhY2UYAiABKAkSEAoIbW90b3JfaWQYAyABKA0SDQoFbW9kZWwYBCABKAkSDQoFYXJtZWQYBSABKAgSFgoOZmVlZGJhY2tfc3RhbGUYBiABKAgSEgoKZmF1bHRfYml0cxgHIAEoDRIUCgxwb3NpdGlvbl9yYWQYCiABKAISFgoOdmVsb2NpdHlfcmFkX3MYCyABKAISEQoJdG9ycXVlX25tGAwgASgCEhUKDXRlbXBlcmF0dXJlX2MYDSABKAISGwoTdGFyZ2V0X3Bvc2l0aW9uX3JhZBgOIAEoAhITCgtwb3NfbWluX3JhZBgUIAEoAhITCgtwb3NfbWF4X3JhZBgVIAEoAhIPCgd2ZWxfbWF4GBYgASgCEg8KB3RhdV9tYXgYFyABKAISEAoIdGVtcF9tYXgYGCABKAIiQQoIQnVzRW50cnkSFQoNY2FuX2ludGVyZmFjZRgBIAEoCRINCgVzdGF0ZRgCIAEoCRIPCgdoZWFsdGh5GAMgASgIIukECgpQb3dlclN0YXRzEg8KB3ByZXNlbnQYASABKAgSFQoNY2FuX2ludGVyZmFjZRgCIAEoCRIQCghwb3dlcl9pZBgDIAEoDRIYChBmaXJtd2FyZV92ZXJzaW9uGAQgASgJEhcKD3N0YXR1c19yZWNlaXZlZBgKIAEoCBIUCgxzdGF0dXNfc3RhbGUYCyABKAgSGgoSbGFzdF9zdGF0dXNfYWdlX21zGAwgASgNEhkKEWJhdHRlcnlfdm9sdGFnZV92GBQgASgCEhcKD21vdG9yX3ZvbHRhZ2VfdhgVIAEoAhIbChNib2FyZF90ZW1wZXJhdHVyZV9jGBYgASgCEhIKCmZhdWx0X2JpdHMYHiABKA0SGQoRZmF1bHRfZGVzY3JpcHRpb24YHyABKAkSEwoLcmFpbF8xMnZfb24YICABKAgSFQoNc29mdF9zdGFydF9vbhghIAEoCBIVCg1tb3Rvcl9yYWlsX29uGCIgASgIEhMKC3JhaWxfMjR2X29uGCMgASgIEhQKDGN1cnJlbnRfYWxfYRgoIAEoAhIUCgxjdXJyZW50X2FyX2EYKSABKAISFAoMY3VycmVudF9sbF9hGCogASgCEhQKDGN1cnJlbnRfbHJfYRgrIAEoAhIdChV0b3RhbF9tb3Rvcl9jdXJyZW50X2EYLCABKAISFQoNYmF0dGVyeV9jZWxscxgyIAEoDRIbChNwYWNrX2Z1bGxfdm9sdGFnZV92GDMgASgCEhwKFHBhY2tfZW1wdHlfdm9sdGFnZV92GDQgASgCEhsKE3N0YXRlX29mX2NoYXJnZV9wY3QYNSABKAIiqAIKDlRlbGVtZXRyeUZyYW1lEhQKDGhvc3RfdW5peF9tcxgBIAEoBBIkCgRtb2RlGAIgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlEhUKDWVzdG9wX2xhdGNoZWQYAyABKAgSFAoMZXN0b3BfcmVhc29uGAQgASgJEiwKBm1vdG9ycxgKIAMoCzIcLmJlYm9wLnJ1bnRpbWUudjEuTW90b3JTdGF0ZRIpCgVidXNlcxgLIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkSKwoFcG93ZXIYDCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlBvd2VyU3RhdHMSJwoDaW11GA0gASgLMhouYmVib3AucnVudGltZS52MS5JbXVTdGF0cyKiAgoIU25hcHNob3QSFAoMaG9zdF91bml4X21zGAEgASgEEiQKBG1vZGUYAiABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUSFQoNZXN0b3BfbGF0Y2hlZBgDIAEoCBIUCgxlc3RvcF9yZWFzb24YBCABKAkSLAoGbW90b3JzGAogAygLMhwuYmVib3AucnVudGltZS52MS5Nb3RvclN0YXRlEikKBWJ1c2VzGAsgAygLMhouYmVib3AucnVudGltZS52MS5CdXNFbnRyeRIrCgVwb3dlchgMIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuUG93ZXJTdGF0cxInCgNpbXUYDSABKAsyGi5iZWJvcC5ydW50aW1lLnYxLkltdVN0YXRzIjwKD0J1c1N0YXR1c1VwZGF0ZRIpCgVidXNlcxgBIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkiJQoSU3Vic2NyaWJlVGVsZW1ldHJ5Eg8KB3JhdGVfaHoYASABKA0iFgoUVW5zdWJzY3JpYmVUZWxlbWV0cnkiDQoLR2V0U25hcHNob3QiNgoPU2V0TW90b3JFbmFibGVkEhIKCmpvaW50X25hbWUYASABKAkSDwoHZW5hYmxlZBgCIAEoCCImChNTZXRBbGxNb3RvcnNFbmFibGVkEg8KB2VuYWJsZWQYASABKAgiLwoHU2V0TW9kZRIkCgRtb2RlGAEgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlIh8KDUVtZXJnZW5jeVN0b3ASDgoGcmVhc29uGAEgASgJIgwKClJlc2V0RVN0b3AiOgoOU2V0TW90b3JUYXJnZXQSEgoKam9pbnRfbmFtZRgBIAEoCRIUCgxwb3NpdGlvbl9yYWQYAiABKAIiJwoRU2V0TWVjaGFuaWNhbFplcm8SEgoKam9pbnRfbmFtZRgBIAEoCSIiCgNBY2sSCgoCb2sYASABKAgSDwoHbWVzc2FnZRgCIAEoCSIYCgVFcnJvchIPCgdtZXNzYWdlGAEgASgJIjMKC01vZGVDaGFuZ2VkEiQKBG1vZGUYASABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUiHgoMRVN0b3BMYXRjaGVkEg4KBnJlYXNvbhgBIAEoCSLOAQoISW11U3RhdHMSDwoHcHJlc2VudBgBIAEoCBIQCghyZWNlaXZlZBgKIAEoCBINCgVzdGFsZRgLIAEoCBIaChJsYXN0X3VwZGF0ZV9hZ2VfbXMYDCABKA0SFAoMcXVhdGVybmlvbl94GBQgASgCEhQKDHF1YXRlcm5pb25feRgVIAEoAhIUCgxxdWF0ZXJuaW9uX3oYFiABKAISFAoMcXVhdGVybmlvbl93GBcgASgCEhwKFGhlYWRpbmdfYWNjdXJhY3lfcmFkGBggASgCKlIKBE1vZGUSFAoQTU9ERV9VTlNQRUNJRklFRBAAEg0KCU1PREVfSURMRRABEhAKDE1PREVfRElBTF9JThACEhMKD01PREVfUlVOX1BPTElDWRADYgZwcm90bzM=");
 
 /**
  * Client (operator app) -> server (bebop-linux) on the robot.
@@ -579,6 +579,15 @@ export type TelemetryFrame = Message<"bebop.runtime.v1.TelemetryFrame"> & {
    * @generated from field: bebop.runtime.v1.PowerStats power = 12;
    */
   power?: PowerStats | undefined;
+
+  /**
+   * Latest IMU rotation-vector reading. `imu.present = false` on robots
+   * built without the optional BNO080/BNO085. Optional so old clients
+   * can still decode the frame.
+   *
+   * @generated from field: bebop.runtime.v1.ImuStats imu = 13;
+   */
+  imu?: ImuStats | undefined;
 };
 
 /**
@@ -628,6 +637,11 @@ export type Snapshot = Message<"bebop.runtime.v1.Snapshot"> & {
    * @generated from field: bebop.runtime.v1.PowerStats power = 12;
    */
   power?: PowerStats | undefined;
+
+  /**
+   * @generated from field: bebop.runtime.v1.ImuStats imu = 13;
+   */
+  imu?: ImuStats | undefined;
 };
 
 /**
@@ -924,6 +938,92 @@ export type EStopLatched = Message<"bebop.runtime.v1.EStopLatched"> & {
  */
 export const EStopLatchedSchema: GenMessage<EStopLatched> = /*@__PURE__*/
   messageDesc(file_bebop_runtime, 21);
+
+/**
+ * Latest fused orientation reading from the optional BNO080/BNO085 IMU.
+ * `present = false` when the firmware was built/configured without an
+ * `imu:` block in the YAML (the UI should hide the orientation card in
+ * that case). `received = false` after first boot until the sensor
+ * produces a usable quaternion. Quaternion convention matches
+ * `bno080::wrapper::BNO080::rotation_quaternion`: `[qx, qy, qz, qw]`
+ * with `qw` last (Hamilton, XYZW order); identity is `(0, 0, 0, 1)`.
+ *
+ * Lives at the bottom of the file (rather than next to `PowerStats`)
+ * so adding it doesn't shift the descriptor indices of every following
+ * message, which would force a churn-y diff in the buf-es generated
+ * TypeScript bindings.
+ *
+ * @generated from message bebop.runtime.v1.ImuStats
+ */
+export type ImuStats = Message<"bebop.runtime.v1.ImuStats"> & {
+  /**
+   * True iff `imu:` is configured in the firmware YAML.
+   *
+   * @generated from field: bool present = 1;
+   */
+  present: boolean;
+
+  /**
+   * True after the first rotation-vector frame has been decoded.
+   *
+   * @generated from field: bool received = 10;
+   */
+  received: boolean;
+
+  /**
+   * True if no fresh rotation-vector frame has arrived in ~3× the
+   * sensor's report period. Operator UI should grey out the widget.
+   *
+   * @generated from field: bool stale = 11;
+   */
+  stale: boolean;
+
+  /**
+   * Milliseconds since the last successful quaternion read. 0 before
+   * the first frame; check `received`.
+   *
+   * @generated from field: uint32 last_update_age_ms = 12;
+   */
+  lastUpdateAgeMs: number;
+
+  /**
+   * Rotation vector. Hamilton convention, XYZW order — matches the
+   * policy's `ImuState.quaternion` field.
+   *
+   * @generated from field: float quaternion_x = 20;
+   */
+  quaternionX: number;
+
+  /**
+   * @generated from field: float quaternion_y = 21;
+   */
+  quaternionY: number;
+
+  /**
+   * @generated from field: float quaternion_z = 22;
+   */
+  quaternionZ: number;
+
+  /**
+   * @generated from field: float quaternion_w = 23;
+   */
+  quaternionW: number;
+
+  /**
+   * BNO08x-reported heading-accuracy estimate (radians, 1σ). 0 until
+   * the sensor has converged.
+   *
+   * @generated from field: float heading_accuracy_rad = 24;
+   */
+  headingAccuracyRad: number;
+};
+
+/**
+ * Describes the message bebop.runtime.v1.ImuStats.
+ * Use `create(ImuStatsSchema)` to create a new message.
+ */
+export const ImuStatsSchema: GenMessage<ImuStats> = /*@__PURE__*/
+  messageDesc(file_bebop_runtime, 22);
 
 /**
  * @generated from enum bebop.runtime.v1.Mode

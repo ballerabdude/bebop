@@ -76,6 +76,12 @@ bebop-proto = { path = "../../jetson-agent/bebop-proto" }
 prost = "0.13"
 bytes = "1.7"
 
+# BNO080/BNO085 over Linux I²C (SHTP). Used for optional IMU tracing until
+# the policy path consumes live `ImuState`.
+bno080 = "0.1.3"
+embedded-hal = { version = "0.2.7", features = ["unproven"] }
+i2cdev = "0.5.1"
+
 [profile.release]
 opt-level = 3
 lto = true

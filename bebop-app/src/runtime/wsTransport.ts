@@ -38,9 +38,11 @@ import {
   type MotorState as ProtoMotorState,
   type BusEntry as ProtoBusEntry,
   type PowerStats as ProtoPowerStats,
+  type ImuStats as ProtoImuStats,
 } from "../proto/bebop_runtime_pb";
 import type {
   BusView,
+  ImuView,
   MotorView,
   PowerView,
   RuntimeMode,
@@ -361,8 +363,35 @@ function snapshotFromProto(s: Snapshot | TelemetryFrame): RuntimeSnapshot {
     motors: s.motors.map(motorFromProto),
     buses: s.buses.map(busFromProto),
     power: powerFromProto(s.power),
+    imu: imuFromProto(s.imu),
   };
 }
+
+function imuFromProto(p: ProtoImuStats | undefined): ImuView {
+  // Older firmware (or a decode where the field is absent) collapses to
+  // "no IMU configured" — `present=false` hides the orientation card in
+  // the operator UI.
+  if (!p) {
+    return EMPTY_IMU_VIEW;
+  }
+  return {
+    present: p.present,
+    received: p.received,
+    stale: p.stale,
+    lastUpdateAgeMs: p.lastUpdateAgeMs,
+    quaternion: [p.quaternionX, p.quaternionY, p.quaternionZ, p.quaternionW],
+    headingAccuracyRad: p.headingAccuracyRad,
+  };
+}
+
+const EMPTY_IMU_VIEW: ImuView = {
+  present: false,
+  received: false,
+  stale: true,
+  lastUpdateAgeMs: 0,
+  quaternion: [0, 0, 0, 1],
+  headingAccuracyRad: 0,
+};
 
 function powerFromProto(p: ProtoPowerStats | undefined): PowerView {
   // Older firmware (or a transient decode where the field is absent)

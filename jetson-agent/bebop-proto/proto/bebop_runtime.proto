@@ -216,6 +216,10 @@ message TelemetryFrame {
   // without a power board configured. Optional so old clients can still
   // decode the frame (default is `present=false`).
   PowerStats power      = 12;
+  // Latest IMU rotation-vector reading. `imu.present = false` on robots
+  // built without the optional BNO080/BNO085. Optional so old clients
+  // can still decode the frame.
+  ImuStats imu          = 13;
 }
 
 // One-shot reply to GetSnapshot — same content as TelemetryFrame.
@@ -227,6 +231,7 @@ message Snapshot {
   repeated MotorState motors = 10;
   repeated BusEntry   buses  = 11;
   PowerStats power      = 12;
+  ImuStats imu          = 13;
 }
 
 message BusStatusUpdate {
@@ -318,4 +323,43 @@ message ModeChanged {
 
 message EStopLatched {
   string reason = 1;
+}
+
+// ---------------------------------------------------------------------------
+// IMU telemetry (BNO080/BNO085 rotation vector)
+// ---------------------------------------------------------------------------
+
+// Latest fused orientation reading from the optional BNO080/BNO085 IMU.
+// `present = false` when the firmware was built/configured without an
+// `imu:` block in the YAML (the UI should hide the orientation card in
+// that case). `received = false` after first boot until the sensor
+// produces a usable quaternion. Quaternion convention matches
+// `bno080::wrapper::BNO080::rotation_quaternion`: `[qx, qy, qz, qw]`
+// with `qw` last (Hamilton, XYZW order); identity is `(0, 0, 0, 1)`.
+//
+// Lives at the bottom of the file (rather than next to `PowerStats`)
+// so adding it doesn't shift the descriptor indices of every following
+// message, which would force a churn-y diff in the buf-es generated
+// TypeScript bindings.
+message ImuStats {
+  // True iff `imu:` is configured in the firmware YAML.
+  bool   present                = 1;
+  // True after the first rotation-vector frame has been decoded.
+  bool   received               = 10;
+  // True if no fresh rotation-vector frame has arrived in ~3× the
+  // sensor's report period. Operator UI should grey out the widget.
+  bool   stale                  = 11;
+  // Milliseconds since the last successful quaternion read. 0 before
+  // the first frame; check `received`.
+  uint32 last_update_age_ms     = 12;
+
+  // Rotation vector. Hamilton convention, XYZW order — matches the
+  // policy's `ImuState.quaternion` field.
+  float  quaternion_x           = 20;
+  float  quaternion_y           = 21;
+  float  quaternion_z           = 22;
+  float  quaternion_w           = 23;
+  // BNO08x-reported heading-accuracy estimate (radians, 1σ). 0 until
+  // the sensor has converged.
+  float  heading_accuracy_rad   = 24;
 }
