@@ -228,10 +228,7 @@ pub fn spawn_imu_thread(
              continuing on the assumption the chip is streaming anyway"
         ),
         Err(e) => {
-            error!(
-                ?e,
-                "IMU: SET_FEATURE for 0x28 failed; thread not started"
-            );
+            error!(?e, "IMU: SET_FEATURE for 0x28 failed; thread not started");
             return None;
         }
     }

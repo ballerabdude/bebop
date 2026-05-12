@@ -541,18 +541,14 @@ impl RobotConfig {
                 let spi_device = raw_imu
                     .spi_device
                     .unwrap_or_else(|| "/dev/spidev0.0".to_string());
-                let int_chip = raw_imu
-                    .int_chip
-                    .unwrap_or_else(|| "gpiochip0".to_string());
-                let int_line = raw_imu
-                    .int_line
-                    .ok_or_else(|| anyhow!("imu.int_line is required (GPIO line offset within `int_chip`)"))?;
-                let rst_chip = raw_imu
-                    .rst_chip
-                    .unwrap_or_else(|| "gpiochip0".to_string());
-                let rst_line = raw_imu
-                    .rst_line
-                    .ok_or_else(|| anyhow!("imu.rst_line is required (GPIO line offset within `rst_chip`)"))?;
+                let int_chip = raw_imu.int_chip.unwrap_or_else(|| "gpiochip0".to_string());
+                let int_line = raw_imu.int_line.ok_or_else(|| {
+                    anyhow!("imu.int_line is required (GPIO line offset within `int_chip`)")
+                })?;
+                let rst_chip = raw_imu.rst_chip.unwrap_or_else(|| "gpiochip0".to_string());
+                let rst_line = raw_imu.rst_line.ok_or_else(|| {
+                    anyhow!("imu.rst_line is required (GPIO line offset within `rst_chip`)")
+                })?;
                 let rotation_vector_period_ms = raw_imu.rotation_vector_period_ms.unwrap_or(50);
                 if rotation_vector_period_ms == 0 {
                     return Err(anyhow!("imu.rotation_vector_period_ms must be >= 1"));
