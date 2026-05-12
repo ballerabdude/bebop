@@ -90,8 +90,8 @@ impl RobstrideSpecs {
     };
 
     pub const RS02: Self = Self {
-        torque_min: -25.0,
-        torque_max: 25.0,
+        torque_min: -17.0,
+        torque_max: 17.0,
         velocity_min: -30.0,
         velocity_max: 30.0,
         kp_max: 500.0,

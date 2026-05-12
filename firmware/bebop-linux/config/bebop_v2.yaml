@@ -58,14 +58,14 @@ joints:
     can_interface: can0
     motor_id: 31
     model: RS04
-    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 3.5, tau_max: 25.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 3.5, tau_max: 55.0, temp_max: 70.0 }
     hold_gains:  { kp: 40.0,  kd: 3.0 }
 
   hip_abduction_right_joint:
     can_interface: can1
     motor_id: 41
     model: RS04
-    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 3.5, tau_max: 25.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 3.5, tau_max: 55.0, temp_max: 70.0 }
     hold_gains:  { kp: 40.0,  kd: 3.0 }
 
   # ----- Femur / hip pitch (RS03) -------------------------------------------
@@ -73,15 +73,15 @@ joints:
     can_interface: can0
     motor_id: 32
     model: RS03
-    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 3.5, tau_max: 25.0, temp_max: 70.0 }
-    hold_gains:  { kp: 80.0,  kd: 3.0 }
+    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 3.5, tau_max: 55.0, temp_max: 70.0 }
+    hold_gains:  { kp: 160.0, kd: 6.0 }
 
   femur_right_joint:
     can_interface: can1
     motor_id: 42
     model: RS03
-    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 3.5, tau_max: 25.0, temp_max: 70.0 }
-    hold_gains:  { kp: 80.0,  kd: 3.0 }
+    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 3.5, tau_max: 55.0, temp_max: 70.0 }
+    hold_gains:  { kp: 160.0, kd: 6.0 }
 
   # ----- Shin / knee (RS04) -------------------------------------------------
   shin_left_joint:
@@ -105,17 +105,18 @@ joints:
     can_interface: can0
     motor_id: 35
     model: RS02
-    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 4.0, tau_max: 8.0, temp_max: 65.0 }
-    # Ankle has the smallest lever arm and an RS02 (kp_max=500), so keep
-    # this one modest to avoid chatter on the foot plate.
-    hold_gains:  { kp: 30.0,  kd: 1.5 }
+    # RS02 datasheet: rated 6 Nm @ 100 rpm, peak 17 Nm (stall, T-N curve at 36 V).
+    # Cap at the manufacturer's peak — anything above is outside the stall point.
+    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 4.0, tau_max: 417.0, temp_max: 65.0 }
+    # Hold gains at the firmware's RS02 kp_max / kd_max ceiling (500 / 5) for max ankle stiffness.
+    hold_gains:  { kp: 150.0, kd: 2.50 }
 
   foot_right_joint:
     can_interface: can1
     motor_id: 45
     model: RS02
-    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 4.0, tau_max: 8.0, temp_max: 65.0 }
-    hold_gains:  { kp: 30.0,  kd: 1.5 }
+    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 4.0, tau_max: 417.0, temp_max: 65.0 }
+    hold_gains:  { kp: 150.0, kd: 2.50 }
 
 # ============================================================================
 # IMU (Adafruit BNO085 breakout on SPI) — optional
