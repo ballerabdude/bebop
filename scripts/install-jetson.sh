@@ -24,6 +24,15 @@
 #                                             # the running kernel lacks it
 #                                             # (JetPack stock kernel does);
 #                                             # implies --setup-can
+#   sudo ./install-jetson.sh --setup-imu      # also configure IMU access:
+#                                             # udev rule giving the `bebop`
+#                                             # group rw on /dev/spidev* and
+#                                             # /dev/gpiochip* (so bebop-linux
+#                                             # can open SPI + INT/RST GPIOs
+#                                             # without root)
+#   sudo ./install-jetson.sh --setup-imu-only # just configure IMU access;
+#                                             # don't download or install
+#                                             # binaries
 #
 # Requires:
 #   * `gh` CLI authenticated (`gh auth login`) — needed both to download
@@ -52,13 +61,20 @@ INSTALL_LINUX=1
 SETUP_CAN=0
 SETUP_CAN_ONLY=0
 BUILD_GS_USB=0
+SETUP_IMU=0
+SETUP_IMU_ONLY=0
 # 1 Mbps is the Robstride bus rate; bebop-linux assumes the same.
 CAN_BITRATE="${CAN_BITRATE:-1000000}"
+# Group that owns /dev/spidev* and /dev/gpiochip* after `--setup-imu`.
+# Defaults to `bebop` (which the JetPack OEM setup creates alongside the
+# `bebop` login user); override if you run the runtime under a
+# different account.
+IMU_GROUP="${IMU_GROUP:-bebop}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-    sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -75,6 +91,8 @@ while [[ $# -gt 0 ]]; do
         --setup-can)      SETUP_CAN=1; shift ;;
         --setup-can-only) SETUP_CAN=1; SETUP_CAN_ONLY=1; shift ;;
         --build-gs-usb)   SETUP_CAN=1; BUILD_GS_USB=1; shift ;;
+        --setup-imu)      SETUP_IMU=1; shift ;;
+        --setup-imu-only) SETUP_IMU=1; SETUP_IMU_ONLY=1; shift ;;
         *)                echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -198,6 +216,121 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# IMU setup helper
+# ---------------------------------------------------------------------------
+#
+# The Bebop V2 IMU is a BNO085 wired for SPI (see
+# `firmware/bebop-linux/config/bebop_v2.yaml` for the pinout). At
+# runtime `bebop-linux` opens three device nodes:
+#
+#   * /dev/spidev0.0 (the SPI controller exposed by jetson-io's `spi1`)
+#   * /dev/gpiochip0 (twice: line 144 for INT/HINTN, line 106 for RST)
+#
+# JetPack ships these as root-only (mode 0600, owner root:root), so the
+# runtime fails its first `BNO08x::new_spi(...)` call with
+# `PermissionDenied`. This function drops a udev rule that hands them
+# to `${IMU_GROUP}` (default `bebop`, matching the OEM login group), so
+# the runtime can come up as a regular service user without sudo.
+#
+# Caveat: enabling `spi1` itself is a one-time, *interactive*
+# device-tree change made via `sudo /opt/nvidia/jetson-io/jetson-io.py`
+# and requires a reboot. This function detects the missing
+# `/dev/spidev0.0` and prints clear instructions instead of trying to
+# automate that step (the jetson-io API is brittle enough that we'd
+# rather a human run it once than fail half a setup mid-script).
+setup_imu() {
+    echo "==> configuring IMU access (SPI + GPIO udev rule, group=${IMU_GROUP})"
+
+    # 1) Make sure the target group exists. JetPack OEM setup creates a
+    #    `bebop` group alongside the `bebop` user; if someone's overriding
+    #    IMU_GROUP and we can't find it, bail out clearly rather than
+    #    silently writing a rule no user will benefit from.
+    if ! getent group "${IMU_GROUP}" >/dev/null 2>&1; then
+        cat >&2 <<EOF
+    ERROR: group '${IMU_GROUP}' does not exist on this system. Either:
+
+        # use a group that already exists (e.g. the JetPack default
+        # 'bebop' if you're logged in as bebop, or just dialout):
+        sudo IMU_GROUP=dialout $0 --setup-imu-only
+
+        # or create one and add yourself to it:
+        sudo groupadd ${IMU_GROUP}
+        sudo usermod -aG ${IMU_GROUP} <your-login-user>
+        # log out + back in, then re-run this script.
+EOF
+        exit 1
+    fi
+
+    # 2) Drop a udev rule covering every SPI controller and gpiochip
+    #    on the system. We're not specific about which spidev / chip
+    #    because the YAML config picks the active one — and bebop-linux
+    #    refuses to start if it picks the wrong one. The rule is cheap
+    #    (matches happen on device-add, no runtime cost).
+    install -d -m 0755 /etc/udev/rules.d
+    cat > /etc/udev/rules.d/99-bebop-imu.rules <<EOF
+# Bebop V2 IMU (BNO085 over SPI + INT/RST GPIO).
+#
+# Hand /dev/spidev* and /dev/gpiochip* to the ${IMU_GROUP} group so the
+# bebop-linux runtime can open the SPI bus and toggle the INT/RST
+# GPIOs without root. Specific lines are picked up by gpiod inside the
+# binary; see firmware/bebop-linux/config/bebop_v2.yaml for the active
+# pinout. Remove this file to revert to the default root-only access.
+KERNEL=="spidev*",   GROUP="${IMU_GROUP}", MODE="0660"
+KERNEL=="gpiochip*", GROUP="${IMU_GROUP}", MODE="0660"
+EOF
+    echo "    wrote /etc/udev/rules.d/99-bebop-imu.rules"
+
+    # 3) Reload + apply to nodes that are already present. The
+    #    SUBSYSTEM matchers cover both the in-tree (`spidev`) and the
+    #    legacy ("gpio") sysfs paths for the gpiochip devices.
+    udevadm control --reload-rules
+    udevadm trigger --subsystem-match=spidev 2>/dev/null || true
+    udevadm trigger --subsystem-match=gpio   2>/dev/null || true
+
+    # 4) Status: list whatever's there now so the operator can tell at a
+    #    glance whether the rule actually took effect.
+    echo
+    echo "    Current IMU device nodes:"
+    if compgen -G "/dev/spidev*" >/dev/null; then
+        ls -l /dev/spidev* 2>/dev/null | sed 's/^/      /'
+    else
+        cat <<'EOF'
+      (none — /dev/spidev0.0 is not present)
+      The Jetson's SPI controller isn't enabled at the device-tree level.
+      Run jetson-io to turn on `spi1` (40-pin header pins 19/21/23/24)
+      and then reboot:
+
+          sudo /opt/nvidia/jetson-io/jetson-io.py
+          # → Configure 40-pin expansion header → Configure header pins
+          #   manually → toggle `spi1` → Back → Save → Save and reboot
+          sudo reboot
+
+      After the reboot re-run `--setup-imu` (or the full installer) so
+      this script can verify /dev/spidev0.0 came up.
+EOF
+    fi
+    if compgen -G "/dev/gpiochip*" >/dev/null; then
+        ls -l /dev/gpiochip* 2>/dev/null | sed 's/^/      /'
+    else
+        echo "      (none — no /dev/gpiochip* nodes found; very unusual on Jetson)"
+    fi
+
+    # 5) If the invoking user isn't already in the group, nudge them.
+    #    Tilde-expanding $SUDO_USER on the way in works even when this
+    #    script is run via `sudo -E` from a remote machine.
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        if id -nG "${SUDO_USER}" 2>/dev/null | tr ' ' '\n' | grep -qx "${IMU_GROUP}"; then
+            echo "    user '${SUDO_USER}' is already a member of '${IMU_GROUP}'"
+        else
+            echo
+            echo "    NOTE: user '${SUDO_USER}' is NOT in group '${IMU_GROUP}'."
+            echo "    Add them and log out + back in for the new group to take effect:"
+            echo "        sudo usermod -aG ${IMU_GROUP} ${SUDO_USER}"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Sanity checks
 # ---------------------------------------------------------------------------
 
@@ -206,9 +339,12 @@ if [[ "${EUID}" -ne 0 ]]; then
     exit 1
 fi
 
-# --setup-can-only short-circuits before we touch gh / artifacts.
-if [[ "${SETUP_CAN_ONLY}" -eq 1 ]]; then
-    setup_can
+# --setup-can-only / --setup-imu-only short-circuit before we touch
+# gh / artifacts so an operator can run them from a freshly-cloned
+# checkout without needing a CI build artifact to be available.
+if [[ "${SETUP_CAN_ONLY}" -eq 1 || "${SETUP_IMU_ONLY}" -eq 1 ]]; then
+    [[ "${SETUP_CAN_ONLY}" -eq 1 ]] && setup_can
+    [[ "${SETUP_IMU_ONLY}" -eq 1 ]] && setup_imu
     exit 0
 fi
 
@@ -446,12 +582,17 @@ if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# CAN (opt-in via --setup-can; runs before we (re)start bebop-linux so the
-# buses are up by the time the runtime tries to open them).
+# Hardware (opt-in). Both run before we (re)start bebop-linux so the
+# bus + the IMU device nodes are usable by the time the runtime tries
+# to open them.
 # ---------------------------------------------------------------------------
 
 if [[ "${SETUP_CAN}" -eq 1 ]]; then
     setup_can
+fi
+
+if [[ "${SETUP_IMU}" -eq 1 ]]; then
+    setup_imu
 fi
 
 # ---------------------------------------------------------------------------
