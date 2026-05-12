@@ -3,15 +3,20 @@
 # Installs (or upgrades) the latest bebop-agent + bebop-linux on the Jetson
 # you're currently shelled into.
 #
-# Pulls binaries from the most recent successful `ci` workflow run on the
-# `main` branch, plus the matching systemd units / config templates (so a
-# fresh checkout is *not* required on the Jetson).
+# bebop-linux is shipped as a single tarball (binary + bebop_v2.yaml +
+# policy.onnx + policy.onnx.data + systemd unit) so the runtime, the
+# joint config, and the policy weights all move together. The default
+# source is the latest GitHub Release tagged `firmware/v*`. For
+# pre-release main builds use `--run-id` to pull from a CI workflow run.
+#
+# bebop-agent still ships as a bare binary; its config / unit are fetched
+# from `main` via the GitHub contents API as before.
 #
 # Usage:
-#   sudo ./install-jetson.sh                  # latest green main, both daemons
-#   sudo ./install-jetson.sh --run-id 1234    # pin to a specific CI run id
-#   sudo ./install-jetson.sh --branch dev     # latest green run on a branch
-#   sudo ./install-jetson.sh --start-linux    # also `systemctl enable --now bebop-linux`
+#   sudo ./install-jetson.sh                  # latest firmware Release + latest green main agent
+#   sudo ./install-jetson.sh --release firmware/v0.2.0   # pin bebop-linux to a tagged release
+#   sudo ./install-jetson.sh --run-id 1234    # pin both daemons to a CI run (pre-release path)
+#   sudo ./install-jetson.sh --branch dev     # latest green agent build on a branch
 #   sudo ./install-jetson.sh --skip-prereqs   # don't touch system packages
 #   sudo ./install-jetson.sh --agent-only     # skip bebop-linux
 #   sudo ./install-jetson.sh --linux-only     # skip bebop-agent
@@ -35,13 +40,18 @@
 #                                             # binaries
 #
 # Requires:
-#   * `gh` CLI authenticated (`gh auth login`) — needed both to download
-#     the workflow artifacts and to fetch the deploy/config files via the
-#     contents API (works for private repos).
+#   * `gh` CLI authenticated (`gh auth login`) — needed to list/download
+#     Releases, workflow artifacts, and (for the agent) the deploy/config
+#     files via the contents API (works for private repos).
 #   * arm64 Linux — the artifacts are aarch64 only.
 #
-# Idempotent: existing /etc/bebop/agent.toml and /etc/bebop/bebop_v2.yaml
-# are *not* clobbered; only the binaries and unit files are replaced.
+# Idempotency:
+#   * /etc/bebop/agent.toml is preserved if present (one-time bootstrap).
+#   * /etc/bebop/bebop_v2.yaml AND /etc/bebop/policy.onnx{,.data} are
+#     replaced unconditionally on every run — the firmware bundle is the
+#     source of truth and they're versioned together as a unit. The
+#     previous bebop_v2.yaml is saved as bebop_v2.yaml.bak so a bad
+#     config push can be rolled back without re-downloading.
 
 set -euo pipefail
 
@@ -52,10 +62,14 @@ set -euo pipefail
 REPO="${BEBOP_REPO:-ballerabdude/bebop}"
 BRANCH="${BEBOP_BRANCH:-main}"
 WORKFLOW="${BEBOP_WORKFLOW:-ci}"
+# Glob matched against tag names when --release is not specified.
+# Latest matching Release wins. Tag your firmware cuts as e.g.
+# `firmware/v0.2.0` and they'll be picked up automatically.
+RELEASE_GLOB="${BEBOP_RELEASE_GLOB:-firmware/v*}"
 
 RUN_ID=""
+RELEASE_TAG=""
 SKIP_PREREQS=0
-START_LINUX=0
 INSTALL_AGENT=1
 INSTALL_LINUX=1
 SETUP_CAN=0
@@ -74,18 +88,25 @@ IMU_GROUP="${IMU_GROUP:-bebop}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-    sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
+    # Print every leading `#`-comment line up to the first blank line that
+    # follows a comment block — i.e. the full doc header at the top of
+    # this file, without us having to maintain a hard-coded line range.
+    awk '
+        NR == 1 { next }                       # skip shebang
+        /^#/    { sub(/^# ?/, ""); print; next }
+        /^$/    { exit }                       # stop at the first blank line
+    ' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)        usage; exit 0 ;;
         --run-id)         RUN_ID="$2"; shift 2 ;;
+        --release)        RELEASE_TAG="$2"; shift 2 ;;
         --branch)         BRANCH="$2"; shift 2 ;;
         --workflow)       WORKFLOW="$2"; shift 2 ;;
         --repo)           REPO="$2"; shift 2 ;;
         --skip-prereqs)   SKIP_PREREQS=1; shift ;;
-        --start-linux)    START_LINUX=1; shift ;;
         --agent-only)     INSTALL_LINUX=0; shift ;;
         --linux-only)     INSTALL_AGENT=0; shift ;;
         --setup-can)      SETUP_CAN=1; shift ;;
@@ -403,10 +424,31 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# Resolve the CI run we'll pull artifacts from
+# Resolve sources
 # ---------------------------------------------------------------------------
+#
+# bebop-agent → CI workflow artifact (no Releases for the agent yet).
+# bebop-linux → GitHub Release tagged `firmware/v*`, unless `--run-id`
+#               is passed, in which case it falls back to the CI artifact
+#               for that run (used for pre-release main builds).
+#
+# We only resolve the inputs we actually need: e.g. installing
+# `--linux-only` from a Release shouldn't have to find a green CI run.
 
-if [[ -z "${RUN_ID}" ]]; then
+NEED_RUN_ID=0
+NEED_RELEASE=0
+if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
+    NEED_RUN_ID=1
+fi
+if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
+    if [[ -n "${RUN_ID}" ]]; then
+        NEED_RUN_ID=1
+    else
+        NEED_RELEASE=1
+    fi
+fi
+
+if [[ "${NEED_RUN_ID}" -eq 1 && -z "${RUN_ID}" ]]; then
     echo "==> resolving latest successful '${WORKFLOW}' run on ${REPO}@${BRANCH}"
     RUN_ID="$(gh run list \
         --repo "${REPO}" \
@@ -421,7 +463,35 @@ if [[ -z "${RUN_ID}" ]]; then
         exit 1
     fi
 fi
-echo "    using run id: ${RUN_ID}"
+[[ -n "${RUN_ID}" ]] && echo "    using run id: ${RUN_ID}"
+
+if [[ "${NEED_RELEASE}" -eq 1 && -z "${RELEASE_TAG}" ]]; then
+    echo "==> resolving latest GitHub Release matching '${RELEASE_GLOB}'"
+    # gh's `--exclude-pre-releases` / `--exclude-drafts` give us
+    # production cuts only. The list is creation-time descending so
+    # `.[0]` is the newest matching tag.
+    RELEASE_TAG="$(gh release list \
+        --repo "${REPO}" \
+        --exclude-pre-releases \
+        --exclude-drafts \
+        --limit 50 \
+        --json tagName \
+        --jq "[.[] | select(.tagName | test(\"^${RELEASE_GLOB//\*/.*}$\"))] | .[0].tagName // empty")"
+    if [[ -z "${RELEASE_TAG}" ]]; then
+        cat >&2 <<EOF
+no Release matching '${RELEASE_GLOB}' found on ${REPO}.
+
+Either:
+  * cut one by tagging a commit and pushing it:
+      git tag firmware/v0.1.0 && git push origin firmware/v0.1.0
+    (the 'ci' workflow's firmware-jetson job will build + publish it), or
+  * install a pre-release build straight off main:
+      sudo $0 --run-id <ci-run-id>
+EOF
+        exit 1
+    fi
+fi
+[[ -n "${RELEASE_TAG}" ]] && echo "    using firmware release: ${RELEASE_TAG}"
 
 # ---------------------------------------------------------------------------
 # Stage everything in a tempdir so a partial failure leaves the system alone.
@@ -464,24 +534,62 @@ if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
 fi
 
 if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
-    echo "==> downloading bebop-linux-aarch64 artifact"
-    mkdir -p "${WORK_DIR}/linux-artifact"
-    gh run download "${RUN_ID}" \
-        --repo "${REPO}" \
-        --name bebop-linux-aarch64 \
-        --dir "${WORK_DIR}/linux-artifact"
-    LINUX_BIN="${WORK_DIR}/linux-artifact/bebop-linux"
-    if [[ ! -f "${LINUX_BIN}" ]]; then
-        echo "bebop-linux binary missing from artifact" >&2
+    # Download the firmware bundle (binary + bebop_v2.yaml + policy.onnx +
+    # policy.onnx.data + bebop-linux.service + VERSION). The CI artifact
+    # and Release asset are byte-identical and use the same filename.
+    mkdir -p "${WORK_DIR}/linux-bundle" "${WORK_DIR}/linux-download"
+    if [[ -n "${RELEASE_TAG}" ]]; then
+        echo "==> downloading firmware bundle from release ${RELEASE_TAG}"
+        gh release download "${RELEASE_TAG}" \
+            --repo "${REPO}" \
+            --pattern "bebop-linux-aarch64.tar.gz" \
+            --pattern "bebop-linux-aarch64.tar.gz.sha256" \
+            --clobber \
+            --dir "${WORK_DIR}/linux-download"
+    else
+        echo "==> downloading firmware bundle from CI run ${RUN_ID}"
+        gh run download "${RUN_ID}" \
+            --repo "${REPO}" \
+            --name bebop-linux-aarch64 \
+            --dir "${WORK_DIR}/linux-download"
+    fi
+
+    LINUX_TARBALL="${WORK_DIR}/linux-download/bebop-linux-aarch64.tar.gz"
+    if [[ ! -f "${LINUX_TARBALL}" ]]; then
+        echo "bebop-linux bundle missing from download (expected ${LINUX_TARBALL})" >&2
         exit 1
     fi
+
+    # Verify checksum when one was shipped. The CI step writes it next to
+    # the tarball; older artifacts won't have one — don't hard-fail in
+    # that case so emergency rollbacks to older Releases still work.
+    if [[ -f "${WORK_DIR}/linux-download/bebop-linux-aarch64.tar.gz.sha256" ]]; then
+        echo "==> verifying bundle checksum"
+        (cd "${WORK_DIR}/linux-download" && sha256sum -c bebop-linux-aarch64.tar.gz.sha256)
+    else
+        echo "    (no .sha256 alongside the tarball — skipping checksum verify)"
+    fi
+
+    echo "==> extracting firmware bundle"
+    tar -C "${WORK_DIR}/linux-bundle" -xzf "${LINUX_TARBALL}"
+
+    LINUX_BIN="${WORK_DIR}/linux-bundle/bin/bebop-linux"
+    LINUX_YAML="${WORK_DIR}/linux-bundle/config/bebop_v2.yaml"
+    LINUX_ONNX="${WORK_DIR}/linux-bundle/config/policy.onnx"
+    LINUX_ONNX_DATA="${WORK_DIR}/linux-bundle/config/policy.onnx.data"
+    LINUX_UNIT="${WORK_DIR}/linux-bundle/systemd/bebop-linux.service"
+    for f in "${LINUX_BIN}" "${LINUX_YAML}" "${LINUX_ONNX}" "${LINUX_ONNX_DATA}" "${LINUX_UNIT}"; do
+        if [[ ! -f "${f}" ]]; then
+            echo "bundle is missing $(basename "${f}") (looked at ${f})" >&2
+            exit 1
+        fi
+    done
     chmod +x "${LINUX_BIN}"
 
-    echo "==> fetching bebop-linux deploy assets"
-    fetch_repo_file "firmware/bebop-linux/deploy/systemd/bebop-linux.service" \
-        "${WORK_DIR}/bebop-linux.service"
-    fetch_repo_file "firmware/bebop-linux/config/bebop_v2.yaml" \
-        "${WORK_DIR}/bebop_v2.yaml"
+    if [[ -f "${WORK_DIR}/linux-bundle/VERSION" ]]; then
+        echo "    bundle VERSION:"
+        sed 's/^/      /' "${WORK_DIR}/linux-bundle/VERSION"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -570,15 +678,29 @@ if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
     echo "==> installing bebop-linux → /usr/local/bin/bebop-linux"
     install -m 0755 "${LINUX_BIN}" /usr/local/bin/bebop-linux
 
-    if [[ ! -f /etc/bebop/bebop_v2.yaml ]]; then
-        echo "==> writing default /etc/bebop/bebop_v2.yaml"
-        install -m 0644 "${WORK_DIR}/bebop_v2.yaml" /etc/bebop/bebop_v2.yaml
+    # Replace bebop_v2.yaml on every install; back up the previous copy
+    # so a bad rollout can be reverted without re-downloading. The
+    # firmware bundle is the source of truth: joint limits, IMU pinout,
+    # CAN bus assignments must all match the policy that ships with it.
+    if [[ -f /etc/bebop/bebop_v2.yaml ]] \
+       && ! cmp -s /etc/bebop/bebop_v2.yaml "${LINUX_YAML}"; then
+        echo "==> updating /etc/bebop/bebop_v2.yaml (previous saved as .bak)"
+        install -m 0644 /etc/bebop/bebop_v2.yaml /etc/bebop/bebop_v2.yaml.bak
     else
-        echo "==> /etc/bebop/bebop_v2.yaml already present, leaving as-is"
+        echo "==> writing /etc/bebop/bebop_v2.yaml"
     fi
+    install -m 0644 "${LINUX_YAML}" /etc/bebop/bebop_v2.yaml
 
-    install -m 0644 "${WORK_DIR}/bebop-linux.service" \
-        /etc/systemd/system/bebop-linux.service
+    # Policy weights. `bebop-linux` resolves `--policy` to
+    # `<config_dir>/policy.onnx` by default, so dropping both files
+    # alongside the YAML is all the runtime needs. Both files MUST come
+    # from the same training export — `policy.onnx` references
+    # `policy.onnx.data` by relative path inside the graph.
+    echo "==> installing policy → /etc/bebop/policy.onnx{,.data}"
+    install -m 0644 "${LINUX_ONNX}"      /etc/bebop/policy.onnx
+    install -m 0644 "${LINUX_ONNX_DATA}" /etc/bebop/policy.onnx.data
+
+    install -m 0644 "${LINUX_UNIT}" /etc/systemd/system/bebop-linux.service
 fi
 
 # ---------------------------------------------------------------------------
@@ -610,25 +732,15 @@ if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
 fi
 
 if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
-    if [[ "${START_LINUX}" -eq 1 ]]; then
-        echo "==> enabling + (re)starting bebop-linux"
-        systemctl enable --now bebop-linux.service
-        systemctl restart bebop-linux.service
-    else
-        # Install but don't start: bebop-linux drives motors and assumes the
-        # CAN buses listed in /etc/bebop/bebop_v2.yaml are already up. Pass
-        # --start-linux once you've configured CAN to flip this on.
-        echo "==> bebop-linux installed (NOT started)."
-        echo "    bring up CAN, then: sudo systemctl enable --now bebop-linux"
-        echo "    or re-run with --start-linux"
-    fi
+    echo "==> enabling + (re)starting bebop-linux"
+    systemctl enable --now bebop-linux.service
+    systemctl restart bebop-linux.service
 fi
 
 echo
 echo "Done. Status:"
 [[ "${INSTALL_AGENT}" -eq 1 ]] && systemctl --no-pager --lines=0 status bebop-agent || true
-[[ "${INSTALL_LINUX}" -eq 1 && "${START_LINUX}" -eq 1 ]] \
-    && systemctl --no-pager --lines=0 status bebop-linux || true
+[[ "${INSTALL_LINUX}" -eq 1 ]] && systemctl --no-pager --lines=0 status bebop-linux || true
 
 echo
 echo "Logs:"

@@ -86,6 +86,71 @@ cargo build --release
 cargo test
 ```
 
+## Releasing & deploying to a Jetson
+
+`bebop-linux` ships as a single tarball that bundles the aarch64 binary,
+the joint config (`bebop_v2.yaml`), the ONNX policy (`policy.onnx` +
+`policy.onnx.data`), and the systemd unit. The robot's runtime, config
+and policy weights are always rolled forward together so a "good build"
+on the Jetson is exactly the contents of one tarball.
+
+### Cutting a release
+
+```bash
+# from a clean main checkout
+git tag firmware/v0.2.0
+git push origin firmware/v0.2.0
+```
+
+The `firmware-jetson` job in `.github/workflows/ci.yml` builds the
+binary on `ubuntu-22.04-arm`, packs `bebop-linux-aarch64.tar.gz`
+(`bin/`, `config/`, `systemd/`, `VERSION`) with a sibling `.sha256`,
+and publishes both to a GitHub Release named after the tag.
+
+### Installing on the Jetson
+
+The `scripts/install-jetson.sh` installer fetches the latest matching
+Release by default. From any reasonably fresh checkout on the robot:
+
+```bash
+sudo ./scripts/install-jetson.sh --linux-only
+```
+
+That one command installs the latest tagged firmware bundle, writes the
+config and policy into `/etc/bebop/`, installs the systemd unit, and
+enables + restarts `bebop-linux.service`.
+
+For pinned or pre-release installs:
+
+```bash
+sudo ./scripts/install-jetson.sh --linux-only --release firmware/v0.2.0
+sudo ./scripts/install-jetson.sh --linux-only --run-id N
+```
+
+It lays things down as:
+
+```
+/usr/local/bin/bebop-linux
+/etc/bebop/bebop_v2.yaml          # overwritten; previous saved as .yaml.bak
+/etc/bebop/policy.onnx            # graph
+/etc/bebop/policy.onnx.data       # external-data weights (must travel with policy.onnx)
+/etc/systemd/system/bebop-linux.service
+```
+
+The unit invokes `bebop-linux --config /etc/bebop/bebop_v2.yaml`, which
+resolves `--policy` to `<config-dir>/policy.onnx` by default — so the
+policy files just need to sit next to the YAML.
+
+### Rolling back
+
+Either re-run the installer pointing at the previous tag
+(`--release firmware/v0.1.9`) or restore the saved YAML on its own:
+
+```bash
+sudo mv /etc/bebop/bebop_v2.yaml.bak /etc/bebop/bebop_v2.yaml
+sudo systemctl restart bebop-linux
+```
+
 ## Running
 
 ### Basic Usage

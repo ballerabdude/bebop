@@ -3,7 +3,16 @@ name: ci
 on:
   push:
     branches: [main]
+    # Tag pushes matching `firmware/v*` (e.g. firmware/v0.2.0) trigger a
+    # bebop-linux release build whose bundle is published to GitHub Releases.
+    # `install-jetson.sh` pulls from there by default.
+    tags: ["firmware/v*"]
   pull_request:
+
+permissions:
+  contents: write   # required so `firmware-jetson` can create / update a
+                    # GitHub Release on tag pushes. All other jobs run as
+                    # read-only and don't consume this.
 
 env:
   CARGO_TERM_COLOR: always
@@ -155,8 +164,52 @@ jobs:
       - name: Build bebop-linux (release)
         run: cargo build --release
 
+      # Pack the binary together with the configs, the ONNX policy (graph +
+      # external-data weights), and the systemd unit into a single tarball.
+      # This is what the Jetson installer consumes — one download, one
+      # untar, everything matches the same git SHA.
+      - name: Stage firmware bundle
+        working-directory: firmware/bebop-linux
+        run: |
+          set -euo pipefail
+          rm -rf bundle
+          install -d bundle/bin bundle/config bundle/systemd
+          install -m 0755 target/release/bebop-linux       bundle/bin/bebop-linux
+          install -m 0644 config/bebop_v2.yaml             bundle/config/bebop_v2.yaml
+          install -m 0644 config/policy.onnx               bundle/config/policy.onnx
+          install -m 0644 config/policy.onnx.data          bundle/config/policy.onnx.data
+          install -m 0644 deploy/systemd/bebop-linux.service \
+                                                           bundle/systemd/bebop-linux.service
+          # Capture build provenance so the installer can log what it laid down.
+          {
+            echo "sha=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > bundle/VERSION
+          tar -C bundle -czf bebop-linux-aarch64.tar.gz .
+          sha256sum bebop-linux-aarch64.tar.gz > bebop-linux-aarch64.tar.gz.sha256
+          ls -lh bebop-linux-aarch64.tar.gz*
+
+      # Always upload as a workflow artifact so `install-jetson.sh --run-id N`
+      # can grab a pre-release build straight off `main`.
       - uses: actions/upload-artifact@v4
         with:
           name: bebop-linux-aarch64
-          path: firmware/bebop-linux/target/release/bebop-linux
+          path: |
+            firmware/bebop-linux/bebop-linux-aarch64.tar.gz
+            firmware/bebop-linux/bebop-linux-aarch64.tar.gz.sha256
           if-no-files-found: error
+
+      # On tag pushes (`firmware/v*`) attach the same bundle to a GitHub
+      # Release. Default install path on the Jetson uses
+      # `gh release download` against this Release.
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/firmware/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            firmware/bebop-linux/bebop-linux-aarch64.tar.gz
+            firmware/bebop-linux/bebop-linux-aarch64.tar.gz.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true
