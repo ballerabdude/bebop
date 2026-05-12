@@ -308,6 +308,25 @@ pub struct ImuConfig {
     pub i2c_address: u8,
     /// Argument to `bno080::BNO080::enable_rotation_vector` (report period).
     pub rotation_vector_period_ms: u16,
+    /// Constant **sensor-to-body** rotation, stored as a unit quaternion
+    /// in XYZW order. Every raw BNO reading is post-multiplied by this
+    /// before publishing, so downstream consumers always see a body-frame
+    /// (REP-103 / FLU) orientation regardless of how the chip is glued
+    /// to the chassis.
+    ///
+    /// Concretely, if the BNO reports `q_world_sensor`, we publish
+    /// `q_world_body = q_world_sensor · q_sensor_body`, where
+    /// `q_sensor_body` is the rotation that takes a body-frame vector
+    /// and expresses it in sensor coordinates.
+    ///
+    /// Identity `(0, 0, 0, 1)` when the YAML omits `imu.mount`, so
+    /// pre-existing configs behave exactly as before.
+    pub mount_quat_sensor_body: [f32; 4],
+}
+
+impl ImuConfig {
+    /// XYZW identity — sensor frame and body frame coincide.
+    pub const IDENTITY_QUAT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 }
 
 impl RobotConfig {
@@ -502,10 +521,15 @@ impl RobotConfig {
                 if rotation_vector_period_ms == 0 {
                     return Err(anyhow!("imu.rotation_vector_period_ms must be >= 1"));
                 }
+                let mount_quat_sensor_body = match raw_imu.mount {
+                    Some(m) => build_mount_quat_sensor_body(&m)?,
+                    None => ImuConfig::IDENTITY_QUAT,
+                };
                 Ok(ImuConfig {
                     i2c_device,
                     i2c_address,
                     rotation_vector_period_ms,
+                    mount_quat_sensor_body,
                 })
             })
             .transpose()
@@ -579,6 +603,20 @@ struct RawImu {
     i2c_device: Option<String>,
     i2c_address: Option<u8>,
     rotation_vector_period_ms: Option<u16>,
+    mount: Option<RawMount>,
+}
+
+/// Per-axis mount remap: for each sensor axis, "which body axis does this
+/// sensor axis point along when the robot is at rest at identity?"
+///
+/// Body frame is REP-103 / FLU (`+x = forward`, `+y = left`, `+z = up`).
+/// Accepted values are `"+x"`, `"-x"`, `"+y"`, `"-y"`, `"+z"`, `"-z"`.
+/// All three fields are required when `mount:` is present.
+#[derive(Debug, Default, Deserialize)]
+struct RawMount {
+    sensor_x: Option<String>,
+    sensor_y: Option<String>,
+    sensor_z: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -640,6 +678,95 @@ struct RawPower {
     cell_empty_voltage: Option<f32>,
 }
 
+/// Parse one of `"+x"`, `"-x"`, `"+y"`, `"-y"`, `"+z"`, `"-z"` (a leading
+/// `+` is optional) into the corresponding signed unit vector in body
+/// frame. Whitespace is tolerated, casing is not significant.
+fn parse_axis_remap(spec: &str, field: &str) -> Result<[f32; 3]> {
+    let trimmed = spec.trim();
+    let (sign, rest) = match trimmed.as_bytes().first() {
+        Some(b'+') => (1.0_f32, &trimmed[1..]),
+        Some(b'-') => (-1.0_f32, &trimmed[1..]),
+        _ => (1.0_f32, trimmed),
+    };
+    let axis = match rest.trim().to_ascii_lowercase().as_str() {
+        "x" => [1.0, 0.0, 0.0],
+        "y" => [0.0, 1.0, 0.0],
+        "z" => [0.0, 0.0, 1.0],
+        other => {
+            return Err(anyhow!(
+                "imu.mount.{field}: invalid axis spec {other:?} \
+                 (expected one of +x, -x, +y, -y, +z, -z)"
+            ));
+        }
+    };
+    Ok([axis[0] * sign, axis[1] * sign, axis[2] * sign])
+}
+
+/// Build the constant `q_sensor_body` rotation from a `mount:` block.
+///
+/// Each `sensor_*` field describes where that sensor axis points in body
+/// frame. The columns of the implied 3×3 matrix are therefore the sensor
+/// axes expressed in body coordinates (= `R_body_sensor`). We:
+///
+/// 1. Build `R_body_sensor` directly from the three columns.
+/// 2. Reject anything that isn't a proper right-handed rotation
+///    (`det != +1` — covers duplicate axes, parallel columns, and
+///    accidental reflections).
+/// 3. Invert and convert to a unit quaternion `q_sensor_body` in XYZW.
+///
+/// Used by `imu.rs` as a post-multiplier: `q_world_body = q_world_sensor *
+/// q_sensor_body`.
+fn build_mount_quat_sensor_body(raw: &RawMount) -> Result<[f32; 4]> {
+    use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
+
+    let sensor_x = raw
+        .sensor_x
+        .as_deref()
+        .ok_or_else(|| anyhow!("imu.mount: missing sensor_x"))?;
+    let sensor_y = raw
+        .sensor_y
+        .as_deref()
+        .ok_or_else(|| anyhow!("imu.mount: missing sensor_y"))?;
+    let sensor_z = raw
+        .sensor_z
+        .as_deref()
+        .ok_or_else(|| anyhow!("imu.mount: missing sensor_z"))?;
+
+    let cx = parse_axis_remap(sensor_x, "sensor_x")?;
+    let cy = parse_axis_remap(sensor_y, "sensor_y")?;
+    let cz = parse_axis_remap(sensor_z, "sensor_z")?;
+
+    let r_body_sensor = Matrix3::from_columns(&[
+        Vector3::new(cx[0], cx[1], cx[2]),
+        Vector3::new(cy[0], cy[1], cy[2]),
+        Vector3::new(cz[0], cz[1], cz[2]),
+    ]);
+
+    let det = r_body_sensor.determinant();
+    if (det - 1.0).abs() > 1e-3 {
+        return Err(anyhow!(
+            "imu.mount: (sensor_x={sensor_x:?}, sensor_y={sensor_y:?}, sensor_z={sensor_z:?}) \
+             does not form a proper right-handed rotation (det = {det:.3}). \
+             Two axes likely collide or the handedness is flipped — pick a permutation \
+             whose determinant is +1."
+        ));
+    }
+
+    // Safe after the det check above: the columns are an orthonormal basis.
+    let rot_b_s = Rotation3::from_matrix_unchecked(r_body_sensor);
+    let q_sensor_body = UnitQuaternion::from_rotation_matrix(&rot_b_s)
+        .inverse()
+        .into_inner();
+    // nalgebra::Quaternion stores `coords = [i, j, k, w]` (= XYZW), which is
+    // exactly the convention `ImuShared` / `ImuState` expect.
+    Ok([
+        q_sensor_body.coords.x,
+        q_sensor_body.coords.y,
+        q_sensor_body.coords.z,
+        q_sensor_body.coords.w,
+    ])
+}
+
 fn merge_limits(defaults: Option<&RawLimits>, joint: Option<&RawLimits>) -> SafetyLimits {
     let pick = |get: fn(&RawLimits) -> Option<f32>, fallback: f32| {
         joint
@@ -686,5 +813,128 @@ fn merge_slew(defaults: Option<&RawSlew>, joint: Option<&RawSlew>) -> SlewParams
         ),
         arm_ramp_s: pick(|s| s.arm_ramp_s, SlewParams::DEFAULT.arm_ramp_s),
         abort_ramp_s: pick(|s| s.abort_ramp_s, SlewParams::DEFAULT.abort_ramp_s),
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod imu_mount_tests {
+    use super::*;
+
+    /// Apply `q_sensor_body` to a sensor-frame vector and return the body-
+    /// frame components. Mirrors what `imu.rs` does at runtime (via the
+    /// `q_world_body = q_world_sensor · q_sensor_body` post-multiply) but
+    /// exposed here as a plain rotation so the assertions are obvious.
+    fn rotate_sensor_to_body(q_sb_xyzw: [f32; 4], v_sensor: [f32; 3]) -> [f32; 3] {
+        use nalgebra::{Quaternion, UnitQuaternion, Vector3};
+        // q_sensor_body takes a body-frame vector → sensor coords, so the
+        // inverse takes a sensor-frame vector → body coords.
+        let q = UnitQuaternion::from_quaternion(Quaternion::new(
+            q_sb_xyzw[3],
+            q_sb_xyzw[0],
+            q_sb_xyzw[1],
+            q_sb_xyzw[2],
+        ));
+        let v = q.inverse() * Vector3::new(v_sensor[0], v_sensor[1], v_sensor[2]);
+        [v.x, v.y, v.z]
+    }
+
+    fn approx(a: [f32; 3], b: [f32; 3]) -> bool {
+        (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5 && (a[2] - b[2]).abs() < 1e-5
+    }
+
+    #[test]
+    fn identity_mount_is_default() {
+        assert_eq!(ImuConfig::IDENTITY_QUAT, [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    /// Sensor +X = right (body -Y), sensor +Y = forward (body +X),
+    /// sensor +Z = up (body +Z) — the Bebop V2 mounting. Each sensor unit
+    /// vector should map to the expected body unit vector.
+    fn bebop_v2_mount() -> [f32; 4] {
+        build_mount_quat_sensor_body(&RawMount {
+            sensor_x: Some("-y".into()),
+            sensor_y: Some("+x".into()),
+            sensor_z: Some("+z".into()),
+        })
+        .expect("valid right-handed mount")
+    }
+
+    #[test]
+    fn bebop_v2_mount_maps_sensor_axes_to_body_axes() {
+        let q = bebop_v2_mount();
+        assert!(
+            approx(rotate_sensor_to_body(q, [1.0, 0.0, 0.0]), [0.0, -1.0, 0.0]),
+            "sensor +X should map to body -Y (right)"
+        );
+        assert!(
+            approx(rotate_sensor_to_body(q, [0.0, 1.0, 0.0]), [1.0, 0.0, 0.0]),
+            "sensor +Y should map to body +X (forward)"
+        );
+        assert!(
+            approx(rotate_sensor_to_body(q, [0.0, 0.0, 1.0]), [0.0, 0.0, 1.0]),
+            "sensor +Z should map to body +Z (up)"
+        );
+    }
+
+    #[test]
+    fn rejects_reflection() {
+        // sensor_x=+y, sensor_y=+x, sensor_z=+z is a permutation with
+        // determinant -1 — a reflection, not a rotation.
+        let err = build_mount_quat_sensor_body(&RawMount {
+            sensor_x: Some("+y".into()),
+            sensor_y: Some("+x".into()),
+            sensor_z: Some("+z".into()),
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("proper right-handed rotation"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_axes() {
+        let err = build_mount_quat_sensor_body(&RawMount {
+            sensor_x: Some("+x".into()),
+            sensor_y: Some("+x".into()),
+            sensor_z: Some("+z".into()),
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("proper right-handed rotation"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_axis_token() {
+        let err = build_mount_quat_sensor_body(&RawMount {
+            sensor_x: Some("+w".into()),
+            sensor_y: Some("+x".into()),
+            sensor_z: Some("+z".into()),
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid axis spec"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn missing_axis_fails_with_clear_error() {
+        let err = build_mount_quat_sensor_body(&RawMount {
+            sensor_x: None,
+            sensor_y: Some("+x".into()),
+            sensor_z: Some("+z".into()),
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("missing sensor_x"),
+            "unexpected error: {err}"
+        );
     }
 }

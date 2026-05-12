@@ -127,13 +127,36 @@ joints:
 # still uses synthetic IMU until live readings are wired into
 # `PolicyRunner`.
 #
-# imu:
-#   i2c_device: "/dev/i2c-7"          # default if omitted
-#   i2c_address: 74                  # 0x4a, default if omitted
-#   rotation_vector_period_ms: 50    # report cadence hint to the sensor
+# `mount:` describes how the chip is physically glued to the chassis. For
+# each sensor axis, say which **body** axis it points along when the robot
+# is upright at rest. Body frame is REP-103 / FLU: `+x = forward`,
+# `+y = left`, `+z = up`. Accepted values are `+x`, `-x`, `+y`, `-y`,
+# `+z`, `-z`; the config loader rejects any combination whose 3×3 matrix
+# is not a proper right-handed rotation (det ≠ +1), e.g. duplicate axes
+# or accidental reflections.
+#
+# The runtime post-multiplies every raw BNO reading by this constant
+# rotation, so every downstream consumer (telemetry widget, future policy
+# observation builder, ROS bridge) sees `q_world_body` — a single,
+# body-frame orientation independent of mounting.
+#
+# Defaults (all optional):
+#   i2c_device:                 "/dev/i2c-7"
+#   i2c_address:                74          # 0x4a
+#   rotation_vector_period_ms:  50          # report cadence hint to the sensor
+#   mount:                      identity (sensor frame == body frame)
 # ============================================================================
 
-imu: {}
+imu:
+  # Bebop V2 PCB orientation: BNO chip sits flat on the back of the torso
+  # with its silkscreen +X pointing toward the robot's *right* shoulder,
+  # +Y toward the *front* of the chest, +Z out the *back* of the PCB
+  # (= up, away from the spine). That is a +90° yaw of the sensor frame
+  # relative to FLU body frame.
+  mount:
+    sensor_x: "-y"   # sensor +X → body -Y  (robot's right)
+    sensor_y: "+x"   # sensor +Y → body +X  (forward)
+    sensor_z: "+z"   # sensor +Z → body +Z  (up)
 
 # ============================================================================
 # Server settings (WebSocket + HTTP)

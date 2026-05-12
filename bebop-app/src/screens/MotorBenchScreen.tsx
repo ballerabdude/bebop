@@ -1342,35 +1342,49 @@ function RailPill({
 /// quickly tell whether the robot is upright, leaning, or has flipped,
 /// plus numeric roll/pitch/yaw readouts.
 ///
-/// The quaternion comes in XYZW (Hamilton) order. We convert it to a 3x3
-/// rotation matrix and then to a CSS `matrix3d(...)` transform: this is
-/// singularity-free, unlike Euler-angle decomposition, so the cube keeps
-/// rotating smoothly even at gimbal-lock orientations. The Euler readout
-/// underneath is for human consumption only and is allowed to flicker
-/// near pitch = ±90°.
+/// # Frame contract with the firmware
 ///
-/// Sensor frame note: the BNO08x sensor sits in whatever orientation the
-/// PCB ended up bolted to the chassis; we don't attempt a body-frame
-/// rotation here. The card is meant as a *qualitative* indicator —
-/// "robot is upright" / "robot is tipping" — not a calibrated attitude
-/// readout. Calibration of the sensor-to-body frame is the operator's
-/// job once the IMU is being wired into the policy observations.
+/// `imu.quaternion` arrives as **body-frame XYZW (Hamilton)**: the
+/// firmware (`bebop-linux/src/imu.rs`) has already composed the
+/// `imu.mount:` rotation from `bebop_v2.yaml` and renormalized to unit
+/// length before publishing. So we treat the four floats as a unit
+/// body-frame attitude and feed them to both the CSS-matrix render and
+/// the Euler decomposition without any further rotation.
+///
+/// The bno080 crate seeds its cached quaternion at all-zeros before
+/// the first SHTP report, and that pre-init state still propagates as
+/// `received = false`. We gate the whole card on `received && !stale`
+/// to avoid rendering an "identity" cube while no real data is flowing
+/// — and as a belt-and-braces measure we also fall back to identity
+/// if a non-finite or near-zero quaternion ever slips through.
+///
+/// The Euler readout is for human consumption only and is allowed to
+/// flicker near pitch = ±90° (gimbal lock); the cube is singularity-
+/// free since the CSS matrix path doesn't go through Euler.
 function OrientationCard({ imu }: { imu: ImuView }) {
-  const [qx, qy, qz, qw] = imu.quaternion;
-  const norm = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+  const [rawX, rawY, rawZ, rawW] = imu.quaternion;
+  const norm = Math.sqrt(
+    rawX * rawX + rawY * rawY + rawZ * rawZ + rawW * rawW,
+  );
+  // Per the firmware contract `norm ≈ 1` whenever `received = true`. We
+  // still divide here so a stale / pre-init / non-finite reading
+  // renders as identity instead of feeding a degenerate quaternion to
+  // either the CSS matrix or the Euler decomposition.
+  const haveQuat = imu.received && norm > 1e-6 && Number.isFinite(norm);
+  const [qx, qy, qz, qw] = haveQuat
+    ? [rawX / norm, rawY / norm, rawZ / norm, rawW / norm]
+    : [0, 0, 0, 1];
+
   const matrix3d = useMemo(
-    () =>
-      norm > 1e-6
-        ? quaternionToCssMatrix3d(qx / norm, qy / norm, qz / norm, qw / norm)
-        : "matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1)",
-    [qx, qy, qz, qw, norm],
+    () => quaternionToCssMatrix3d(qx, qy, qz, qw),
+    [qx, qy, qz, qw],
   );
   const [rollDeg, pitchDeg, yawDeg] = useMemo(
     () => quaternionToEulerDeg(qx, qy, qz, qw),
     [qx, qy, qz, qw],
   );
 
-  const usable = imu.received && !imu.stale && norm > 1e-6;
+  const usable = haveQuat && !imu.stale;
   const headingDeg = (imu.headingAccuracyRad * 180) / Math.PI;
 
   return (
@@ -1425,12 +1439,12 @@ function OrientationCard({ imu }: { imu: ImuView }) {
               transform="rotateY(180deg) translateZ(40px)"
             />
             <OrientationFace
-              label="R"
+              label="L"
               color="bg-bg-elev-2 border-border text-text-dim"
               transform="rotateY(90deg) translateZ(40px)"
             />
             <OrientationFace
-              label="L"
+              label="R"
               color="bg-bg-elev-2 border-border text-text-dim"
               transform="rotateY(-90deg) translateZ(40px)"
             />
@@ -1538,15 +1552,30 @@ function OrientationReadout({
   );
 }
 
-/// Build a CSS `matrix3d(...)` transform from a unit XYZW quaternion.
+/// Build a CSS `matrix3d(...)` transform from a unit XYZW quaternion
+/// expressed in **body frame** (REP-103 / FLU: +x forward, +y left,
+/// +z up), per the wire-protocol contract documented on `OrientationCard`.
 ///
-/// The 3x3 rotation matrix is laid out column-major into the top-left
-/// 3x3 of a 4x4 CSS transform (the homogeneous translation column is
-/// zero). The robot/sensor frame is X-forward, Y-left, Z-up; CSS uses
-/// X-right, Y-down, Z-toward-viewer. We flip Y (negate the Y-row and
-/// Y-column) so positive pitch (nose-up) renders nose-up rather than
-/// nose-down on the screen — i.e. the cube tilts the way the operator
-/// expects when the physical robot tilts.
+/// The cube's local faces are laid out in CSS coordinates:
+///
+/// - `+Z` = FWD face, toward the viewer.
+/// - `+X` = robot-left face, to the operator's right in this rear-view
+///   convention.
+/// - `-Y` = TOP face, upward on screen.
+///
+/// Body axes are FLU (`+X forward`, `+Y left`, `+Z up`), so the render path
+/// must conjugate the body rotation matrix into CSS basis, not merely flip
+/// the screen Y axis:
+///
+/// ```text
+/// css_x =  body_y
+/// css_y = -body_z
+/// css_z =  body_x
+/// ```
+///
+/// This makes yaw = -90° put the FWD face on the left side of the widget,
+/// and makes roll rotate around the visible FWD/BACK axis instead of around
+/// the screen's horizontal axis.
 function quaternionToCssMatrix3d(
   x: number,
   y: number,
@@ -1574,14 +1603,30 @@ function quaternionToCssMatrix3d(
   const m21 = 2 * (yz + wx);
   const m22 = 1 - 2 * (xx + yy);
 
-  // CSS matrix3d is column-major. To flip the Y axis we negate every
-  // element touching exactly one Y index (the off-diagonals m01, m10,
-  // m12, m21); diagonal m11 stays positive.
+  // Change basis from body FLU to CSS screen coordinates. If `R` is the
+  // body-frame rotation matrix above, this is `C * R * C^-1` with:
+  //
+  //   C = [ 0  1  0 ]   (css_x =  body_y)
+  //       [ 0  0 -1 ]   (css_y = -body_z)
+  //       [ 1  0  0 ]   (css_z =  body_x)
+  //
+  // CSS matrix3d is column-major, so the row-major matrix is packed by
+  // columns below.
+  const c00 = m11;
+  const c01 = -m12;
+  const c02 = m10;
+  const c10 = -m21;
+  const c11 = m22;
+  const c12 = -m20;
+  const c20 = m01;
+  const c21 = -m02;
+  const c22 = m00;
+
   return (
     `matrix3d(` +
-    `${m00},${-m10},${m20},0,` +
-    `${-m01},${m11},${-m21},0,` +
-    `${m02},${-m12},${m22},0,` +
+    `${c00},${c10},${c20},0,` +
+    `${c01},${c11},${c21},0,` +
+    `${c02},${c12},${c22},0,` +
     `0,0,0,1)`
   );
 }

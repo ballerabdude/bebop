@@ -987,8 +987,20 @@ export type ImuStats = Message<"bebop.runtime.v1.ImuStats"> & {
   lastUpdateAgeMs: number;
 
   /**
-   * Rotation vector. Hamilton convention, XYZW order — matches the
-   * policy's `ImuState.quaternion` field.
+   * Body-frame orientation as a unit quaternion (Hamilton, XYZW).
+   *
+   * Frame contract: the firmware applies any `imu.mount:` rotation
+   * declared in the joint YAML *before* publishing, so this is already
+   * in body frame (REP-103 / FLU: +x forward, +y left, +z up). UIs and
+   * the future PolicyRunner IMU feed can render / consume it as a
+   * calibrated body-frame attitude with no further rotation. Matches
+   * `bebop_linux::observation::ImuState::quaternion`.
+   *
+   * Normalization contract: while `received = true`, the producer
+   * guarantees |q| = 1 within float precision. Before the first frame
+   * (received = false) the components are all zero — consumers must
+   * gate on `received` rather than e.g. computing Euler angles
+   * directly from raw fields.
    *
    * @generated from field: float quaternion_x = 20;
    */
