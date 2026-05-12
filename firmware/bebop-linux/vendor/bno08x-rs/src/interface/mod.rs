@@ -1,0 +1,161 @@
+// Copyright 2025 Au-Zone Technologies Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Communication interface abstractions for the BNO08x driver.
+//!
+//! This module provides the [`SensorInterface`] trait that abstracts
+//! communication with the BNO08x sensor, along with a concrete SPI
+//! implementation.
+//!
+//! # Modules
+//!
+//! - [`delay`] - Timing utilities for sensor communication
+//! - [`gpio`] - GPIO abstractions for interrupt and reset pins
+//! - [`spi`] - SPI communication interface
+//! - [`spidev`] - Linux spidev wrapper
+//!
+//! # Example
+//!
+//! Most users should use the high-level [`BNO08x`](crate::BNO08x) constructors
+//! rather than working with interfaces directly.
+
+// pub mod i2c;
+pub mod delay;
+pub mod gpio;
+pub mod spi;
+pub mod spidev;
+
+use core::ops::Shl;
+
+/// Trait for sensor communication interfaces.
+///
+/// This trait abstracts the communication layer for the BNO08x sensor,
+/// allowing the driver to work with different transport mechanisms (SPI, I2C).
+///
+/// The default implementation uses SPI via Linux spidev.
+pub trait SensorInterface {
+    /// Error type returned by interface operations
+    type SensorError;
+
+    /// Initialize the interface hardware.
+    ///
+    /// Called once during driver initialization to set up GPIO pins,
+    /// SPI configuration, etc.
+    fn setup(&mut self) -> Result<(), Self::SensorError>;
+
+    /// Write a complete SHTP packet to the sensor.
+    fn write_packet(&mut self, packet: &[u8]) -> Result<(), Self::SensorError>;
+
+    /// Read the next available packet from the sensor.
+    ///
+    /// Returns the number of bytes read (up to the buffer size).
+    fn read_packet(&mut self, recv_buf: &mut [u8]) -> Result<usize, Self::SensorError>;
+
+    /// Wait for sensor data and read when available.
+    ///
+    /// # Arguments
+    ///
+    /// * `recv_buf` - Buffer to store the received packet
+    /// * `max_ms` - Maximum time to wait for data (milliseconds)
+    fn read_with_timeout(
+        &mut self,
+        recv_buf: &mut [u8],
+        max_ms: usize,
+    ) -> Result<usize, Self::SensorError>;
+
+    /// Send a packet and immediately read the response.
+    fn send_and_receive_packet(
+        &mut self,
+        send_buf: &[u8],
+        recv_buf: &mut [u8],
+    ) -> Result<usize, Self::SensorError>;
+
+    /// Does this interface require a soft reset after init?
+    fn requires_soft_reset(&self) -> bool;
+}
+
+// pub use self::i2c::I2cInterface;
+pub use self::spi::SpiInterface;
+
+pub(crate) const PACKET_HEADER_LENGTH: usize = 4;
+pub(crate) const MAX_CARGO_DATA_LENGTH: usize = 2048 - PACKET_HEADER_LENGTH;
+
+struct SensorCommon {}
+
+impl SensorCommon {
+    fn parse_packet_header(packet: &[u8]) -> usize {
+        const CONTINUATION_FLAG_MASK: u16 = 0x80;
+        const CONTINUATION_FLAG_CLEAR: u16 = !(CONTINUATION_FLAG_MASK);
+        if packet.len() < PACKET_HEADER_LENGTH {
+            return 0;
+        }
+        //Bits 14:0 are used to indicate the total number of bytes in the body plus
+        // header maximum packet length is ... PACKET_HEADER_LENGTH
+        let raw_pack_len: u16 =
+            (packet[0] as u16) + ((packet[1] as u16) & CONTINUATION_FLAG_CLEAR).shl(8);
+
+        let mut packet_len: usize = raw_pack_len as usize;
+        if packet_len > MAX_CARGO_DATA_LENGTH {
+            // we sometimes get garbage packets of [0xFF, 0xFF, 0xFF, 0xFF]
+            packet_len = 0; //PACKET_HEADER_LENGTH;
+        }
+        packet_len
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::ops::Shr;
+
+    #[test]
+    fn test_parse_packet_header() {
+        let short_packet: [u8; 2] = [13, 15];
+        let size = SensorCommon::parse_packet_header(&short_packet);
+        assert_eq!(0, size, "truncated packet header should have length zero");
+
+        let long_packet_len: usize = 1024;
+        let mut raw_packet: [u8; PACKET_HEADER_LENGTH] = [
+            (long_packet_len & 0xFF) as u8,
+            long_packet_len.shr(8) as u8,
+            0,
+            0,
+        ];
+        let size = SensorCommon::parse_packet_header(&raw_packet);
+        assert_eq!(size, long_packet_len, "verify > 255 packet length");
+
+        //now set the continuation flag
+        raw_packet[1] |= 0x80;
+        let size = SensorCommon::parse_packet_header(&raw_packet);
+        assert_eq!(size, long_packet_len, "verify continuation packet");
+
+        let short_packet_len: usize = 36;
+        raw_packet = [
+            (short_packet_len & 0xFF) as u8,
+            short_packet_len.shr(8) as u8,
+            0,
+            0,
+        ];
+        let size = SensorCommon::parse_packet_header(&raw_packet);
+        assert_eq!(size, short_packet_len, "verify short packet");
+
+        raw_packet[1] |= 0x80;
+        let size = SensorCommon::parse_packet_header(&raw_packet);
+        assert_eq!(size, short_packet_len, "verify short packet continuation");
+
+        // first (uncontinued) packet
+        raw_packet = [20_u8, 1_u8, 0, 0];
+        let size = SensorCommon::parse_packet_header(&raw_packet);
+        assert_eq!(size, 276, "verify > 255 packet length");
+
+        //from actual received packet
+        raw_packet = [19_u8, 129_u8, 0, 1];
+        let size = SensorCommon::parse_packet_header(&raw_packet);
+        assert_eq!(size, 275, "verify > 255 packet length");
+
+        // Test garbage packet [0xFF, 0xFF, ...] returns 0
+        let garbage_packet: [u8; PACKET_HEADER_LENGTH] = [0xFF, 0xFF, 0xFF, 0xFF];
+        let size = SensorCommon::parse_packet_header(&garbage_packet);
+        assert_eq!(size, 0, "garbage packet should return zero length");
+    }
+}

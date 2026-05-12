@@ -1,0 +1,66 @@
+# ====================================================================
+# VENDORED COPY (forked from crates.io bno08x-rs 2.0.1).
+#
+# Why we vendor instead of using `bno08x-rs = "2.0.1"`:
+#
+#   1. `driver.rs` hardcodes `report_enabled: [bool; 16]` and indexes
+#      it by raw SH-2 report ID. Any report ID >= 16 panics the
+#      driver. AR/VR-Stabilized Rotation Vector (0x28) and AR/VR-
+#      Stabilized Game Rotation Vector (0x29) — the EMI-hardened
+#      rotation reports the Bebop V2 firmware specifically needs to
+#      avoid yaw lock-up near the motors — both fall outside this
+#      range. Patched to `[bool; 256]`.
+#
+#   2. The upstream crate has no parser or accessor for 0x28 / 0x29.
+#      We add them, mirroring the existing 0x05 / 0x08 paths.
+#
+# Each Bebop-side hunk is annotated with a `BEBOP-PATCH [N/4]` comment
+# in the source. See `PATCHES.md` next to this file for the full
+# rationale per patch, the re-vendoring procedure, and the
+# upstream-tracking table to fill in as we get PRs accepted.
+# ====================================================================
+
+[package]
+name = "bno08x-rs"
+description = "BNO08x IMU User Space Driver"
+repository = "https://github.com/EdgeFirstAI/bno08x-rs"
+documentation = "https://docs.rs/bno08x-rs"
+license = "Apache-2.0"
+version = "2.0.1"
+edition = "2021"
+readme = "README.md"
+keywords = ["imu", "sensor", "bno08x", "embedded", "spi"]
+categories = ["hardware-support", "embedded"]
+authors = ["Au-Zone Technologies Inc."]
+homepage = "https://edgefirst.ai/"
+rust-version = "1.90"
+
+exclude = ["sonar-project.properties", ".github/"]
+
+[lib]
+name = "bno08x_rs"
+path = "src/lib.rs"
+
+[features]
+default = []
+
+[dependencies]
+gpiod = "0.3.0"
+log = "0.4.25"
+spidev = "0.7.1"
+
+[dev-dependencies]
+env_logger = "0.11"
+
+# docs.rs configuration
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# Cargo profiles
+# Reference: ~/Documents/SPS/11-cicd-pipelines.md
+
+[profile.profiling]
+# Inherits from release but with debug symbols for coverage/profiling
+inherits = "release"
+debug = true

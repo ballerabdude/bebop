@@ -1,0 +1,14 @@
+.DS_Store
+/target
+**/*.rs.bk
+.idea
+target*/
+.vscode/
+build*/
+*-rs/
+*sbom.json
+
+sonar.py
+env.sh
+sonar-report.json
+TODO.md
