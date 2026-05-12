@@ -13,6 +13,17 @@ path = "src/lib.rs"
 name = "bebop-linux"
 path = "src/main.rs"
 
+# Hardware smoke test for the BNO080/BNO085 over SPI. Independent of the
+# main runtime — pulls in `bno08x-rs` and talks straight to `/dev/spidev0.0`
+# with INT/RST GPIOs provided on the CLI. Use this to verify the wiring
+# and the SPI-mode jumpers when bringing up a new IMU. The production
+# `imu.rs` path uses the same crate / bus / pin assignments. See
+# `src/bin/imu_probe.rs` for CLI usage and `config/bebop_v2.yaml` for
+# the canonical pinout.
+[[bin]]
+name = "imu-probe"
+path = "src/bin/imu_probe.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full", "rt-multi-thread", "time", "sync", "signal", "net", "macros"] }
@@ -76,11 +87,28 @@ bebop-proto = { path = "../../jetson-agent/bebop-proto" }
 prost = "0.13"
 bytes = "1.7"
 
-# BNO080/BNO085 over Linux I²C (SHTP). Used for optional IMU tracing until
-# the policy path consumes live `ImuState`.
-bno080 = "0.1.3"
-embedded-hal = { version = "0.2.7", features = ["unproven"] }
-i2cdev = "0.5.1"
+# BNO080/BNO085 over Linux SPI (`spidev` + `gpiod`). Used by both the
+# `imu-probe` diagnostic bin and the production `imu.rs` path.
+#
+# We point at a *vendored* copy of `bno08x-rs` 2.0.1 (rather than the
+# crates.io version) so we can patch:
+#
+#   1. `report_enabled: [bool; 16]` → `[_; 256]`, otherwise enabling
+#      report 0x28 (AR/VR Stabilized Rotation Vector — the EMI-hardened
+#      replacement for 0x05 used by the old Teensy firmware in
+#      `firmware/bebop-locomotion/include/BNO085_IMU.h`) panics the
+#      driver on the first feature-response message.
+#   2. Adds parsing + accessors for SH-2 reports 0x28 and 0x29 (the
+#      AR/VR-Stabilized rotation reports), which the upstream crate
+#      does not handle at all.
+#
+# See `vendor/bno08x-rs/Cargo.toml` for the patch markers and
+# re-vendoring notes.
+bno08x-rs = { path = "vendor/bno08x-rs" }
+
+# Argument parsing for the `imu-probe` diagnostic binary. Pulled in via
+# the `derive` feature so the probe can declare its CLI as a struct.
+clap = { version = "4", features = ["derive"] }
 
 [profile.release]
 opt-level = 3

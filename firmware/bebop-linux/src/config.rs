@@ -301,12 +301,32 @@ pub struct RobotConfig {
     pub imu: Option<ImuConfig>,
 }
 
-/// Optional BNO080/BNO085 I²C reader (see `imu:` in the joint YAML).
+/// Optional BNO080/BNO085 SPI reader (see `imu:` in the robot YAML).
+///
+/// The BNO talks SHTP over SPI (mode 3, ≤ 3 MHz) with two host-side
+/// GPIOs: an active-low **INT** (`HINTN`) so the host knows when the
+/// chip has a packet ready, and an active-low **RST** the host pulses
+/// at boot to bring the chip into a clean SPI-mode session. See
+/// `config/bebop_v2.yaml`'s `imu:` block for the canonical Bebop V2
+/// pinout and a wiring diagram.
 #[derive(Debug, Clone)]
 pub struct ImuConfig {
-    pub i2c_device: String,
-    pub i2c_address: u8,
-    /// Argument to `bno080::BNO080::enable_rotation_vector` (report period).
+    /// SPI character device — e.g. `/dev/spidev0.0` on Jetson Orin Nano
+    /// after `spi1` is enabled in `jetson-io.py`.
+    pub spi_device: String,
+    /// GPIO chip (e.g. `gpiochip0`) hosting the BNO `INT`/`HINTN` line.
+    pub int_chip: String,
+    /// Line offset within `int_chip`. Look up with `gpioinfo`; for
+    /// Jetson Orin Nano this is the gpiochip line that backs the
+    /// physical header pin INT is wired to (see the YAML pinout table).
+    pub int_line: u32,
+    /// GPIO chip hosting the BNO `RST`/`RSTN` line.
+    pub rst_chip: String,
+    /// Line offset within `rst_chip` for `RST`.
+    pub rst_line: u32,
+    /// SH-2 sensor-report cadence hint, in milliseconds. Lower = more
+    /// samples/sec; bounded by the chip's gyro rate (1 kHz). Anything
+    /// ≥ 5 ms is comfortably safe.
     pub rotation_vector_period_ms: u16,
     /// Constant **sensor-to-body** rotation, stored as a unit quaternion
     /// in XYZW order. Every raw BNO reading is post-multiplied by this
@@ -513,10 +533,26 @@ impl RobotConfig {
         let imu = raw
             .imu
             .map(|raw_imu| -> Result<ImuConfig> {
-                let i2c_device = raw_imu
-                    .i2c_device
-                    .unwrap_or_else(|| "/dev/i2c-7".to_string());
-                let i2c_address = raw_imu.i2c_address.unwrap_or(0x4A);
+                // The defaults match the validated Bebop V2 pinout (see
+                // `config/bebop_v2.yaml`): SPI device + INT/RST GPIOs
+                // matching Jetson Orin Nano's `gpiochip0:144` (header
+                // pin 7, PAC.06) and `gpiochip0:106` (header pin 31,
+                // PQ.06). Override per-robot when the wiring differs.
+                let spi_device = raw_imu
+                    .spi_device
+                    .unwrap_or_else(|| "/dev/spidev0.0".to_string());
+                let int_chip = raw_imu
+                    .int_chip
+                    .unwrap_or_else(|| "gpiochip0".to_string());
+                let int_line = raw_imu
+                    .int_line
+                    .ok_or_else(|| anyhow!("imu.int_line is required (GPIO line offset within `int_chip`)"))?;
+                let rst_chip = raw_imu
+                    .rst_chip
+                    .unwrap_or_else(|| "gpiochip0".to_string());
+                let rst_line = raw_imu
+                    .rst_line
+                    .ok_or_else(|| anyhow!("imu.rst_line is required (GPIO line offset within `rst_chip`)"))?;
                 let rotation_vector_period_ms = raw_imu.rotation_vector_period_ms.unwrap_or(50);
                 if rotation_vector_period_ms == 0 {
                     return Err(anyhow!("imu.rotation_vector_period_ms must be >= 1"));
@@ -526,8 +562,11 @@ impl RobotConfig {
                     None => ImuConfig::IDENTITY_QUAT,
                 };
                 Ok(ImuConfig {
-                    i2c_device,
-                    i2c_address,
+                    spi_device,
+                    int_chip,
+                    int_line,
+                    rst_chip,
+                    rst_line,
                     rotation_vector_period_ms,
                     mount_quat_sensor_body,
                 })
@@ -600,8 +639,17 @@ struct RawConfig {
 
 #[derive(Debug, Default, Deserialize)]
 struct RawImu {
-    i2c_device: Option<String>,
-    i2c_address: Option<u8>,
+    /// SPI character device. Defaults to `/dev/spidev0.0` (Jetson Orin
+    /// Nano `spi1`).
+    spi_device: Option<String>,
+    /// GPIO chip for `INT` (`HINTN`). Defaults to `gpiochip0`.
+    int_chip: Option<String>,
+    /// Line offset within `int_chip`. **Required.**
+    int_line: Option<u32>,
+    /// GPIO chip for `RST`. Defaults to `gpiochip0`.
+    rst_chip: Option<String>,
+    /// Line offset within `rst_chip`. **Required.**
+    rst_line: Option<u32>,
     rotation_vector_period_ms: Option<u16>,
     mount: Option<RawMount>,
 }

@@ -105,7 +105,7 @@ joints:
     can_interface: can0
     motor_id: 35
     model: RS02
-    hard_limits: { pos_min: -0.523599, pos_max: 0.523599, vel_max: 4.0, tau_max: 8.0, temp_max: 65.0 }
+    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 4.0, tau_max: 8.0, temp_max: 65.0 }
     # Ankle has the smallest lever arm and an RS02 (kp_max=500), so keep
     # this one modest to avoid chatter on the foot plate.
     hold_gains:  { kp: 30.0,  kd: 1.5 }
@@ -114,21 +114,65 @@ joints:
     can_interface: can1
     motor_id: 45
     model: RS02
-    hard_limits: { pos_min: -0.523599, pos_max: 0.523599, vel_max: 4.0, tau_max: 8.0, temp_max: 65.0 }
+    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 4.0, tau_max: 8.0, temp_max: 65.0 }
     hold_gains:  { kp: 30.0,  kd: 1.5 }
 
 # ============================================================================
-# IMU (BNO080/BNO085 on I²C) — optional
+# IMU (Adafruit BNO085 breakout on SPI) — optional
 # ----------------------------------------------------------------------------
-# When present (e.g. `imu: {}` for defaults), the runtime opens the I²C
-# device, enables the BNO08x rotation-vector report, and republishes the
-# latest fused quaternion through `Snapshot.imu` / `TelemetryFrame.imu`
-# so the operator app can render a live orientation indicator. RunPolicy
-# still uses synthetic IMU until live readings are wired into
-# `PolicyRunner`.
+# When this block is present, the runtime opens `spi_device`, pulses the
+# BNO into a clean SPI session via `rst_*`, subscribes to SH-2 report
+# 0x28 (AR/VR-Stabilized Rotation Vector — the EMI-hardened replacement
+# for the magnetometer-locking 0x05), and republishes the latest fused
+# quaternion through `Snapshot.imu` / `TelemetryFrame.imu` so the
+# operator app can render a live orientation indicator. RunPolicy still
+# uses synthetic IMU until live readings are wired into `PolicyRunner`.
 #
-# `mount:` describes how the chip is physically glued to the chassis. For
-# each sensor axis, say which **body** axis it points along when the robot
+# # Bebop V2 wiring (the configuration below assumes this wiring)
+#
+# The Adafruit BNO085 breakout is mounted on the back of the torso PCB.
+# The breakout's silkscreen labels change meaning when the board is set
+# to **SPI mode** (PS0 = PS1 = 3V3); this is the table that matters:
+#
+#     ┌─────────────────┬──────────────────────────┬─────────────────────────────┐
+#     │ Adafruit label  │ SPI-mode function        │ Jetson Orin Nano header pin │
+#     ├─────────────────┼──────────────────────────┼─────────────────────────────┤
+#     │ VIN             │ 3–5 V supply (regulated) │ pin 1 or 17 (3V3)           │
+#     │ GND             │ ground                   │ any GND                     │
+#     │ SCL             │ SCK (clock, input)       │ pin 23 (SPI1_SCK)           │
+#     │ SDA             │ MISO (data out of BNO)   │ pin 21 (SPI1_MISO)          │
+#     │ DI              │ MOSI (data into BNO)     │ pin 19 (SPI1_MOSI)          │
+#     │ CS              │ chip select              │ pin 24 (SPI1_CS0)           │
+#     │ INT (HINTN)     │ interrupt to host (LOW)  │ pin 7  (PAC.06)             │
+#     │ RST             │ reset (active LOW)       │ pin 31 (PQ.06)              │
+#     │ P0              │ mode select bit 0 = HIGH │ tied to 3V3                 │
+#     │ P1              │ mode select bit 1 = HIGH │ tied to 3V3                 │
+#     └─────────────────┴──────────────────────────┴─────────────────────────────┘
+#
+# `SDA` / `DI` are deliberately *swapped at the BNO side* relative to
+# what the silkscreen looks like — the breakout reuses the I²C labels
+# for SPI pins (`SDA` = MISO, `DI` = MOSI). Get this swap wrong and the
+# `imu-probe` binary fails stage 2 with `InvalidChipId(0)` even though
+# all the wires read continuous. Don't ask how we know.
+#
+# # GPIO line numbers (Jetson Orin Nano dev kit)
+#
+# Header pins on Orin Nano map to `gpiochip0` lines as follows — these
+# are what `int_chip:` / `int_line:` and `rst_chip:` / `rst_line:`
+# below refer to. Cross-check with `sudo gpioinfo gpiochip0`.
+#
+#     pin 7  → gpiochip0 line 144 (PAC.06)   ← INT (HINTN) on this robot
+#     pin 31 → gpiochip0 line 106 (PQ.06)    ← RST on this robot
+#
+# Note: pins 11, 12, 13, 15, 16, 18, 22, 26, 29, 32, 33, 35, 36, 37,
+# 38, 40 are also `gpiochip0` lines (mapping in `bebop-linux/src/config.rs`
+# and in `imu_probe.rs` docs). The AON chip (`gpiochip1`, `tegra234-gpio-aon`)
+# is NOT broken out to the 40-pin header — do not pick a line from there.
+#
+# # `mount:` block
+#
+# Describes how the chip is physically glued to the chassis. For each
+# sensor axis, say which **body** axis it points along when the robot
 # is upright at rest. Body frame is REP-103 / FLU: `+x = forward`,
 # `+y = left`, `+z = up`. Accepted values are `+x`, `-x`, `+y`, `-y`,
 # `+z`, `-z`; the config loader rejects any combination whose 3×3 matrix
@@ -140,14 +184,31 @@ joints:
 # observation builder, ROS bridge) sees `q_world_body` — a single,
 # body-frame orientation independent of mounting.
 #
-# Defaults (all optional):
-#   i2c_device:                 "/dev/i2c-7"
-#   i2c_address:                74          # 0x4a
-#   rotation_vector_period_ms:  50          # report cadence hint to the sensor
-#   mount:                      identity (sensor frame == body frame)
+# # Defaults (when a key is omitted)
+#
+#   spi_device:                "/dev/spidev0.0"
+#   int_chip:                  "gpiochip0"
+#   int_line:                  (required — no sensible default)
+#   rst_chip:                  "gpiochip0"
+#   rst_line:                  (required — no sensible default)
+#   rotation_vector_period_ms: 50      # 20 Hz report cadence hint
+#   mount:                     identity (sensor frame == body frame)
 # ============================================================================
 
 imu:
+  # SPI controller + INT/RST GPIOs for the Bebop V2 wiring above. These
+  # values were validated on-bench with `cargo run --bin imu-probe`
+  # streaming a clean 20 Hz quaternion at `|q| = 1.0` over 10 s. If you
+  # rewire on a different robot, update both this block AND the wiring
+  # comment at the top of this section, then re-run `imu-probe` to
+  # confirm before launching the main binary.
+  spi_device: "/dev/spidev0.0"
+  int_chip:   "gpiochip0"
+  int_line:   144                       # header pin 7  (PAC.06)
+  rst_chip:   "gpiochip0"
+  rst_line:   106                       # header pin 31 (PQ.06)
+  rotation_vector_period_ms: 50
+
   # Bebop V2 PCB orientation: BNO chip sits flat on the back of the torso
   # with its silkscreen +X pointing toward the robot's *right* shoulder,
   # +Y toward the *front* of the chest, +Z out the *back* of the PCB

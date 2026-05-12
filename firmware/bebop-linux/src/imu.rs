@@ -1,22 +1,48 @@
-//! Optional BNO080/BNO085 I²C reader that publishes fused orientation
-//! into a shared state so the WS server can ship it to operator clients.
+//! BNO080/BNO085 SPI reader that publishes fused orientation into a
+//! shared state so the WS server can ship it to operator clients.
 //!
-//! The policy stack still uses synthetic IMU in [`crate::policy_runner`];
-//! this module exists to surface the live rotation vector in the operator
-//! app (motor-bench orientation card) before the policy path is wired up
-//! to consume real IMU readings.
+//! ## Why SPI + report 0x28
+//!
+//! Earlier revisions of this file talked to the BNO over I²C and asked
+//! the chip for SH-2 report **0x05** (the plain magnetometer-fused
+//! rotation vector). That setup worked on the bench but locked up
+//! near the leg motors: the brushless drive currents bias the BNO's
+//! magnetometer enough that its fusion filter rejects all subsequent
+//! mag updates, freezing yaw indefinitely until a hard reset.
+//!
+//! The fix is to migrate to **SPI** (so we have a dedicated INT line
+//! for low-latency reads) and subscribe to report **0x28**
+//! ("AR/VR-Stabilized Rotation Vector"), which is the same report the
+//! old Teensy firmware used in
+//! `firmware/bebop-locomotion/include/BNO085_IMU.h`. 0x28 uses the
+//! same Q14 wire format as 0x05 but goes through a separate fusion
+//! pipeline inside the chip that aggressively filters magnetometer
+//! disturbances. The trade-off is that absolute yaw drifts very
+//! slowly until the chip re-establishes a clean mag reference; in
+//! exchange the yaw axis stays *responsive* under motor noise instead
+//! of locking.
+//!
+//! The crates.io copy of `bno08x-rs` (v2.0.1) cannot enable any
+//! report whose ID is ≥ 16 (it indexes a `[bool; 16]` array with the
+//! raw ID, which would panic on 0x28). We therefore vendor and patch
+//! the crate in `vendor/bno08x-rs/`; see the `BEBOP-PATCH` markers in
+//! that copy and the dependency comment in `Cargo.toml`.
+//!
+//! ## Frame contract
+//!
+//! The mount-rotation pipeline carries over from the I²C version
+//! verbatim — see [`ImuSnapshot`] for the body-frame XYZW unit
+//! quaternion contract. The shape of the snapshot, its staleness
+//! semantics, and the post-multiply with `mount_quat_sensor_body` are
+//! unchanged from the I²C era so the telemetry pump and operator-app
+//! widgets don't need to know we switched buses.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use bno080::interface::I2cInterface;
-use bno080::wrapper::BNO080;
-use embedded_hal::blocking::delay::DelayMs;
-use embedded_hal::blocking::i2c::{Read, Write, WriteRead};
-use i2cdev::core::I2CDevice;
-use i2cdev::linux::{LinuxI2CDevice, LinuxI2CError};
+use bno08x_rs::{BNO08x, SENSOR_REPORTID_ARVR_STABILIZED_RV};
 use tracing::{error, info, warn};
 
 use crate::config::ImuConfig;
@@ -74,7 +100,7 @@ impl ImuSnapshot {
 
 /// Shared handle on the latest [`ImuSnapshot`].
 ///
-/// Cloned into the I²C reader thread (writer) and the WS server's
+/// Cloned into the SPI reader thread (writer) and the WS server's
 /// telemetry builder (reader). A plain [`Mutex`] is sufficient here:
 /// updates happen at the sensor's report period (~20 Hz at the default
 /// 50 ms) and the telemetry pump reads at ≤100 Hz, so contention is
@@ -83,79 +109,9 @@ pub type ImuShared = Arc<Mutex<ImuSnapshot>>;
 
 /// Allocate a fresh shared snapshot. Initial state is "no quaternion
 /// yet, stale" — safe to wire into the telemetry builder before the
-/// I²C reader thread starts (or when no IMU is configured at all).
+/// SPI reader thread starts (or when no IMU is configured at all).
 pub fn new_shared() -> ImuShared {
     Arc::new(Mutex::new(ImuSnapshot::default()))
-}
-
-/// `embedded-hal` delay backed by `std::thread::sleep`.
-struct ThreadDelay;
-
-impl DelayMs<u8> for ThreadDelay {
-    fn delay_ms(&mut self, ms: u8) {
-        std::thread::sleep(Duration::from_millis(ms as u64));
-    }
-}
-
-/// Bridges `LinuxI2CDevice` (single-slave `i2cdev` file) to `embedded-hal` I²C
-/// traits expected by `bno080::I2cInterface`.
-struct EhLinuxI2c {
-    dev: LinuxI2CDevice,
-    slave: u8,
-}
-
-impl EhLinuxI2c {
-    fn open(path: &str, slave: u8) -> Result<Self, LinuxI2CError> {
-        let dev = LinuxI2CDevice::new(path, u16::from(slave))?;
-        Ok(Self { dev, slave })
-    }
-
-    fn check_addr(&self, addr: u8) -> Result<(), LinuxI2CError> {
-        if addr != self.slave {
-            return Err(LinuxI2CError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "unexpected I²C address 0x{addr:02x} (device is 0x{:02x})",
-                    self.slave
-                ),
-            )));
-        }
-        Ok(())
-    }
-}
-
-impl Read for EhLinuxI2c {
-    type Error = LinuxI2CError;
-
-    fn read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), Self::Error> {
-        self.check_addr(address)?;
-        self.dev.read(buffer)
-    }
-}
-
-impl Write for EhLinuxI2c {
-    type Error = LinuxI2CError;
-
-    fn write(&mut self, address: u8, bytes: &[u8]) -> Result<(), Self::Error> {
-        self.check_addr(address)?;
-        self.dev.write(bytes)
-    }
-}
-
-impl WriteRead for EhLinuxI2c {
-    type Error = LinuxI2CError;
-
-    fn write_read(
-        &mut self,
-        address: u8,
-        bytes: &[u8],
-        buffer: &mut [u8],
-    ) -> Result<(), Self::Error> {
-        // BNO08x does not use a repeated-start read; separate transactions match
-        // `bno080::interface::i2c` expectations.
-        self.write(address, bytes)?;
-        self.read(address, buffer)
-    }
 }
 
 /// Hamilton quaternion product in XYZW order. Used to bake the constant
@@ -179,11 +135,11 @@ fn quat_mul_xyzw(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 /// Normalize an XYZW quaternion to unit length. Returns the XYZW
 /// identity `(0, 0, 0, 1)` for inputs whose squared norm is below a
 /// tiny threshold — this only fires before the first BNO report has
-/// arrived (the bno080 crate's cached value starts at all-zeros) and
-/// avoids a divide-by-zero rather than silently propagating an
-/// unphysical quaternion.
+/// arrived (the driver's cached value starts at all-zeros) and avoids
+/// a divide-by-zero rather than silently propagating an unphysical
+/// quaternion.
 ///
-/// In normal operation the BNO080 emits a unit quaternion and the
+/// In normal operation the BNO emits a unit quaternion and the
 /// constant mount multiply preserves that, so this just trims off the
 /// ~1e-6 of float drift that accumulates after the composition.
 #[inline]
@@ -198,106 +154,153 @@ fn quat_normalize_xyzw(q: [f32; 4]) -> [f32; 4] {
 }
 
 /// Spawn a background thread that initializes the IMU and publishes
-/// rotation-vector quaternions into `shared` for the WS server to ship.
-/// Returns `None` if the I²C device cannot be opened.
+/// AR/VR-stabilized rotation-vector quaternions into `shared` for the
+/// WS server to ship.
+///
+/// Returns `None` if the SPI device or either GPIO line can't be
+/// opened, or if the SHTP boot handshake fails. The caller logs the
+/// error and continues — the rest of the runtime operates fine
+/// without a live IMU (synthetic IMU is used in the policy path).
 pub fn spawn_imu_thread(
     cfg: ImuConfig,
     shutdown: Arc<AtomicBool>,
     shared: ImuShared,
 ) -> Option<JoinHandle<()>> {
-    let path = cfg.i2c_device.clone();
-    let addr = cfg.i2c_address;
-    let rv_ms = cfg.rotation_vector_period_ms;
+    let period_ms = cfg.rotation_vector_period_ms;
     let mount_quat = cfg.mount_quat_sensor_body;
 
     // Seed the period so the telemetry builder's stale check has a
     // sane budget even before the first successful read.
     if let Ok(mut g) = shared.lock() {
-        g.report_period_ms = rv_ms;
+        g.report_period_ms = period_ms;
     }
 
-    match EhLinuxI2c::open(&path, addr) {
-        Ok(i2c) => Some(std::thread::spawn(move || {
-            run_imu_loop(i2c, addr, rv_ms, mount_quat, shutdown, shared);
-        })),
+    // Note we bring up the chip on the *caller's* thread so any
+    // hardware failure (missing /dev/spidev*, wrong GPIO line, dead
+    // chip) surfaces synchronously and gets logged at startup
+    // instead of vanishing into a spawned thread that exits silently.
+    let mut imu = match BNO08x::new_spi(
+        &cfg.spi_device,
+        &cfg.int_chip,
+        cfg.int_line,
+        &cfg.rst_chip,
+        cfg.rst_line,
+    ) {
+        Ok(imu) => imu,
         Err(e) => {
             error!(
-                error = %e,
-                device = %path,
-                address = format!("0x{addr:02x}"),
-                "IMU: failed to open I²C device; thread not started"
+                ?e,
+                spi = %cfg.spi_device,
+                int = format!("{}:{}", cfg.int_chip, cfg.int_line),
+                rst = format!("{}:{}", cfg.rst_chip, cfg.rst_line),
+                "IMU: failed to open SPI / GPIO lines; thread not started"
             );
-            None
+            return None;
+        }
+    };
+
+    if let Err(e) = imu.init() {
+        error!(
+            ?e,
+            "IMU: SHTP boot handshake failed; thread not started \
+             (hint: check the BNO SPI-mode jumpers, INT/RST wiring, \
+             or that no previous run left a feature subscription \
+             active without a power-cycle)"
+        );
+        return None;
+    }
+
+    // Subscribe to 0x28 (AR/VR-Stabilized Rotation Vector). Some
+    // BNO085 firmware revisions don't auto-emit the GET_FEATURE_RESP
+    // bno08x-rs polls for, so `enable_report` may return `Ok(false)`
+    // even when the chip is happily streaming the report on the data
+    // channel. We treat that case as a soft warning (the stream loop
+    // below is the source of truth on whether reports actually
+    // arrive). See `src/bin/imu_probe.rs` for the same logic.
+    match imu.enable_report(SENSOR_REPORTID_ARVR_STABILIZED_RV, period_ms) {
+        Ok(true) => info!(
+            period_ms,
+            "IMU: enabled report 0x28 (AR/VR-Stabilized Rotation Vector)"
+        ),
+        Ok(false) => warn!(
+            period_ms,
+            "IMU: no GET_FEATURE_RESP for 0x28 within 2 s; \
+             continuing on the assumption the chip is streaming anyway"
+        ),
+        Err(e) => {
+            error!(
+                ?e,
+                "IMU: SET_FEATURE for 0x28 failed; thread not started"
+            );
+            return None;
         }
     }
-}
 
-fn run_imu_loop(
-    i2c: EhLinuxI2c,
-    i2c_address: u8,
-    rotation_vector_period_ms: u16,
-    mount_quat_sensor_body: [f32; 4],
-    shutdown: Arc<AtomicBool>,
-    shared: ImuShared,
-) {
-    let iface = I2cInterface::new(i2c, i2c_address);
-    let mut imu = BNO080::new_with_interface(iface);
-    let mut delay = ThreadDelay;
-
-    if let Err(e) = imu.init(&mut delay) {
-        error!(?e, "IMU: init failed");
-        return;
-    }
-    if let Err(e) = imu.enable_rotation_vector(rotation_vector_period_ms) {
-        error!(?e, "IMU: enable_rotation_vector failed");
-        return;
-    }
-
-    let mount_is_identity = mount_quat_sensor_body == ImuConfig::IDENTITY_QUAT;
+    let mount_is_identity = mount_quat == ImuConfig::IDENTITY_QUAT;
     info!(
-        period_ms = rotation_vector_period_ms,
-        mount_quat_sensor_body = ?mount_quat_sensor_body,
+        period_ms,
+        spi = %cfg.spi_device,
+        mount_quat_sensor_body = ?mount_quat,
         mount_is_identity,
-        "IMU: streaming rotation vector into shared state (policy still uses synthetic IMU)"
+        "IMU: streaming AR/VR-stabilized rotation vector into shared state \
+         (policy still uses synthetic IMU)"
     );
 
-    while !shutdown.load(Ordering::SeqCst) {
-        let _ = imu.handle_all_messages(&mut delay, 25);
-        match imu.rotation_quaternion() {
-            Ok([qx, qy, qz, qw]) => {
-                // The bno080 crate returns the SHTP rotation vector in
-                // (i, j, k, real) order, i.e. XYZW. Compose with the
-                // mount rotation so what we publish is `q_world_body`,
-                // not the raw `q_world_sensor`. When `mount:` is omitted
-                // from the YAML this multiply is a no-op (identity quat).
-                //
-                // The final `quat_normalize_xyzw` enforces the
-                // `ImuSnapshot.quaternion` contract: a *unit* body-frame
-                // quaternion. The bno080 crate's cached buffer starts
-                // at all-zeros before the first report, so without
-                // normalization we'd briefly publish `(0, 0, 0, 0)` —
-                // which trips downstream Euler decompositions in
-                // confusing ways (see the operator-app orientation
-                // card's Roll/Pitch/Yaw readout).
-                let q_world_sensor = [qx, qy, qz, qw];
-                let q_world_body = if mount_is_identity {
-                    quat_normalize_xyzw(q_world_sensor)
-                } else {
-                    quat_normalize_xyzw(quat_mul_xyzw(q_world_sensor, mount_quat_sensor_body))
-                };
-                let acc = imu.heading_accuracy();
-                if let Ok(mut g) = shared.lock() {
-                    g.quaternion = Some(q_world_body);
-                    g.heading_accuracy_rad = acc;
-                    g.last_update = Some(Instant::now());
-                    g.report_period_ms = rotation_vector_period_ms;
+    Some(std::thread::spawn(move || {
+        // Loop body inlined here (rather than a `run_imu_loop` helper)
+        // so we don't have to name `BNO08x`'s sensor-interface generic
+        // parameter — `new_spi` returns a concrete but unwieldy type
+        // that's easier to capture-by-move into a closure than to
+        // declare in a function signature.
+        let mut imu = imu; // re-bind as `mut` so the closure can call &mut self methods
+        while !shutdown.load(Ordering::SeqCst) {
+            // Pump SHTP messages; 25 ms per-message timeout matches
+            // the diagnostic probe so a quiet bus doesn't stall the
+            // loop.
+            let _ = imu.handle_all_messages(25);
+
+            // Read the AR/VR-stabilized cache populated by the
+            // vendored-crate parser. The bno08x-rs cache returns the
+            // SHTP rotation vector in (i, j, k, real) order, i.e.
+            // XYZW. Compose with the mount rotation so what we publish
+            // is `q_world_body`, not the raw `q_world_sensor`. When
+            // `mount:` is omitted from the YAML this multiply is a
+            // no-op (identity quat).
+            //
+            // The final `quat_normalize_xyzw` enforces the
+            // `ImuSnapshot.quaternion` contract: a *unit* body-frame
+            // quaternion. The driver's cached buffer starts at all-
+            // zeros before the first report, so without normalization
+            // we'd briefly publish `(0, 0, 0, 0)` — which trips
+            // downstream Euler decompositions in confusing ways (see
+            // the operator-app orientation card's Roll/Pitch/Yaw
+            // readout).
+            match imu.arvr_stabilized_rotation_quaternion() {
+                Ok([qx, qy, qz, qw]) => {
+                    let q_world_sensor = [qx, qy, qz, qw];
+                    let q_world_body = if mount_is_identity {
+                        quat_normalize_xyzw(q_world_sensor)
+                    } else {
+                        quat_normalize_xyzw(quat_mul_xyzw(q_world_sensor, mount_quat))
+                    };
+                    let acc = imu.arvr_stabilized_rotation_acc();
+                    if let Ok(mut g) = shared.lock() {
+                        g.quaternion = Some(q_world_body);
+                        g.heading_accuracy_rad = acc;
+                        g.last_update = Some(Instant::now());
+                        g.report_period_ms = period_ms;
+                    }
                 }
+                Err(e) => warn!(
+                    target: "bebop_linux::imu",
+                    ?e,
+                    "arvr_stabilized_rotation_quaternion read"
+                ),
             }
-            Err(e) => warn!(target: "bebop_linux::imu", ?e, "rotation_quaternion read"),
+            std::thread::sleep(Duration::from_millis(2));
         }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    info!(target: "bebop_linux::imu", "IMU thread exiting");
+        info!(target: "bebop_linux::imu", "IMU thread exiting");
+    }))
 }
 
 #[cfg(test)]
@@ -349,7 +352,7 @@ mod tests {
 
     #[test]
     fn normalize_rescales_non_unit_input() {
-        // Same situation observed in the operator-app screenshot:
+        // Same situation we used to see in the operator-app screenshot:
         // values that decompose as something close to (≈0, 0, -0.55, 0.55)
         // — norm ~0.778, not unit. The widget's Euler readout was
         // computing roll/pitch/yaw straight from these and producing
@@ -368,7 +371,7 @@ mod tests {
 
     #[test]
     fn normalize_zero_returns_identity() {
-        // bno080 crate seeds its rotation_quaternion buffer with all
+        // The driver seeds its rotation-quaternion buffer with all
         // zeros before the first report arrives. We must not propagate
         // (0, 0, 0, 0) downstream.
         let out = quat_normalize_xyzw([0.0; 4]);
