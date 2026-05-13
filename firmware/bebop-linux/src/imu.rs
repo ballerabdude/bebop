@@ -1,5 +1,7 @@
-//! BNO080/BNO085 SPI reader that publishes fused orientation into a
-//! shared state so the WS server can ship it to operator clients.
+//! BNO080/BNO085 SPI reader that publishes fused orientation **and**
+//! body-frame angular velocity into a shared state so both the WS
+//! server (telemetry) and the policy runner (observation builder) can
+//! consume them.
 //!
 //! ## Why SPI + report 0x28
 //!
@@ -22,6 +24,13 @@
 //! exchange the yaw axis stays *responsive* under motor noise instead
 //! of locking.
 //!
+//! In parallel we subscribe to **report 0x02** ("Calibrated
+//! Gyroscope") so the policy observation builder has a real
+//! body-frame angular velocity input. The BNO chip applies its own
+//! bias-tracking calibration to 0x02, so this is the right report to
+//! use for closed-loop control — the uncalibrated variant (0x07) is
+//! noticeably noisier in the steady state.
+//!
 //! The crates.io copy of `bno08x-rs` (v2.0.1) cannot enable any
 //! report whose ID is ≥ 16 (it indexes a `[bool; 16]` array with the
 //! raw ID, which would panic on 0x28). We therefore vendor and patch
@@ -36,18 +45,38 @@
 //! semantics, and the post-multiply with `mount_quat_sensor_body` are
 //! unchanged from the I²C era so the telemetry pump and operator-app
 //! widgets don't need to know we switched buses.
+//!
+//! The gyro vector follows the same convention: the BNO publishes
+//! `omega_sensor` in the chip's silkscreen frame and we rotate it
+//! into the body frame here with `R_sensor_body * omega_sensor`, so
+//! [`ImuSnapshot::angular_velocity_body`] is always FLU body-frame
+//! (+x forward, +y left, +z up) rad/s. The simulator's
+//! `mdp.imu_ang_vel` produces the same quantity for the trained
+//! policy (see `sim/bebop_training/envs/bebop_v2_base_cfg.py`), so
+//! the policy can be deployed without a frame remap.
+//!
+//! ## Quaternion order
+//!
+//! `ImuSnapshot.quaternion` is **XYZW** (scalar last). This matches
+//! Isaac Lab **3.0**'s new default (the 2.x → 3.0 migration moved
+//! every quaternion in the framework from WXYZ to XYZW so that
+//! Warp / PhysX / Newton can share buffers without conversions). The
+//! firmware was already XYZW for ROS / `geometry_msgs` parity, so no
+//! reorder is needed in either direction when the policy that was
+//! trained against Isaac Lab 3.0 is loaded here.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use bno08x_rs::{BNO08x, SENSOR_REPORTID_ARVR_STABILIZED_RV};
+use bno08x_rs::{BNO08x, SENSOR_REPORTID_ARVR_STABILIZED_RV, SENSOR_REPORTID_GYROSCOPE};
+use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 use tracing::{error, info, warn};
 
 use crate::config::ImuConfig;
 
-/// Latest decoded BNO080/BNO085 rotation vector reading.
+/// Latest decoded BNO080/BNO085 rotation vector + gyroscope reading.
 ///
 /// # Frame & normalization contract
 ///
@@ -56,9 +85,9 @@ use crate::config::ImuConfig;
 ///
 /// 1. Frame: any constant sensor→body mount rotation declared in the
 ///    YAML `imu.mount:` block is applied here, in
-///    [`run_imu_loop`], **before** the value reaches `ImuSnapshot`.
-///    Downstream consumers (telemetry pump, future `PolicyRunner` IMU
-///    feed, ROS bridge) can therefore treat this as a calibrated
+///    [`spawn_imu_thread`], **before** the value reaches `ImuSnapshot`.
+///    Downstream consumers (telemetry pump, [`crate::policy_runner`]
+///    IMU feed, ROS bridge) can therefore treat this as a calibrated
 ///    body-frame (REP-103 / FLU: `+x forward`, `+y left`, `+z up`)
 ///    attitude with no further rotation needed.
 /// 2. Normalization: when `Some`, the producer guarantees
@@ -67,9 +96,20 @@ use crate::config::ImuConfig;
 ///    in the BNO output or numerical noise from the composition).
 /// 3. Identity is `(0.0, 0.0, 0.0, 1.0)`. `None` (= `last_update` is
 ///    `None`) means no rotation-vector frame has been decoded yet.
+///
+/// `angular_velocity_body` is the BNO's **calibrated** gyroscope
+/// reading (SH-2 report 0x02, rad/s) rotated into the same FLU body
+/// frame as `quaternion`. The producer also clamps to `Some(...)` only
+/// after the first gyro report arrives so consumers can distinguish
+/// "no gyro yet" from "zero motion".
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ImuSnapshot {
     pub quaternion: Option<[f32; 4]>,
+    /// Body-frame angular velocity in rad/s, or `None` if no gyro
+    /// report has been decoded since startup. FLU axis convention,
+    /// identical to what `mdp.imu_ang_vel` produces in the sim
+    /// observation pipeline.
+    pub angular_velocity_body: Option<[f32; 3]>,
     pub heading_accuracy_rad: f32,
     pub last_update: Option<Instant>,
     pub report_period_ms: u16,
@@ -153,6 +193,46 @@ fn quat_normalize_xyzw(q: [f32; 4]) -> [f32; 4] {
     [x * s, y * s, z * s, w * s]
 }
 
+/// Rotate a sensor-frame vector into the body frame using the
+/// `q_sensor_body` mount quaternion stored on `ImuConfig`.
+///
+/// The BNO gyroscope publishes `omega_sensor` in the chip's silkscreen
+/// axes. The policy observation builder (sim and real) expects FLU
+/// body-frame angular velocity, so we apply
+/// `omega_body = R_sensor_to_body * omega_sensor`.
+///
+/// **Convention note** — `mount_quat_sensor_body` (as built by
+/// [`crate::config::build_mount_quat_sensor_body`]) is the *inverse*
+/// of `R_body_sensor`, i.e. it actively rotates body-frame vectors
+/// into sensor coordinates: `q_sensor_body * v_body = v_sensor`. To
+/// go the other way we therefore apply its inverse, mirroring exactly
+/// what the unit test `bebop_v2_mount_maps_sensor_axes_to_body_axes`
+/// in `config.rs` does. This is consistent with the quaternion
+/// composition `q_world_body = q_world_sensor * q_sensor_body` used
+/// for the rotation vector: under the same convention, applying
+/// `q_world_body` to a body vector gives the world vector, exactly as
+/// the projected-gravity code in
+/// [`crate::observation::ImuState::projected_gravity`] assumes.
+///
+/// Returns the input unchanged when the mount is identity so the
+/// no-op path stays free of nalgebra construction cost — gyro reads
+/// fire at 20–50 Hz, well below the threshold where this would matter
+/// on the Jetson, but the explicit branch keeps the intent obvious
+/// in flame graphs.
+#[inline]
+fn rotate_vec_by_quat_xyzw(v: [f32; 3], q_sensor_body_xyzw: [f32; 4]) -> [f32; 3] {
+    if q_sensor_body_xyzw == ImuConfig::IDENTITY_QUAT {
+        return v;
+    }
+    let [qx, qy, qz, qw] = q_sensor_body_xyzw;
+    // nalgebra's `Quaternion::new` takes `(w, i, j, k)`; we store XYZW
+    // (scalar last). `inverse()` on a unit quaternion is just the
+    // conjugate, so this is cheap.
+    let q = UnitQuaternion::from_quaternion(Quaternion::new(qw, qx, qy, qz));
+    let out = q.inverse() * Vector3::new(v[0], v[1], v[2]);
+    [out.x, out.y, out.z]
+}
+
 /// Spawn a background thread that initializes the IMU and publishes
 /// AR/VR-stabilized rotation-vector quaternions into `shared` for the
 /// WS server to ship.
@@ -233,14 +313,39 @@ pub fn spawn_imu_thread(
         }
     }
 
+    // Subscribe to 0x02 (Calibrated Gyroscope). The chip applies its
+    // own bias-tracking calibration to this report, which is what we
+    // want for closed-loop control — the uncalibrated stream (0x07)
+    // takes several seconds to converge after a power cycle.
+    //
+    // Unlike the rotation vector, we keep going if the gyro
+    // subscription outright fails: the policy can still build a
+    // partial observation (synthetic angular velocity = 0) and the
+    // operator can manually fall back to Idle/DialIn. The error log
+    // is loud enough that a missing gyro stream will not silently
+    // ship to production.
+    match imu.enable_report(SENSOR_REPORTID_GYROSCOPE, period_ms) {
+        Ok(true) => info!(period_ms, "IMU: enabled report 0x02 (Calibrated Gyroscope)"),
+        Ok(false) => warn!(
+            period_ms,
+            "IMU: no GET_FEATURE_RESP for 0x02 within 2 s; \
+             continuing on the assumption the chip is streaming anyway"
+        ),
+        Err(e) => warn!(
+            ?e,
+            "IMU: SET_FEATURE for 0x02 failed; angular_velocity_body \
+             will stay None and PolicyRunner will use a zero gyro"
+        ),
+    }
+
     let mount_is_identity = mount_quat == ImuConfig::IDENTITY_QUAT;
     info!(
         period_ms,
         spi = %cfg.spi_device,
         mount_quat_sensor_body = ?mount_quat,
         mount_is_identity,
-        "IMU: streaming AR/VR-stabilized rotation vector into shared state \
-         (policy still uses synthetic IMU)"
+        "IMU: streaming AR/VR-stabilized rotation vector + calibrated gyro \
+         into shared state (consumed by PolicyRunner and telemetry pump)"
     );
 
     Some(std::thread::spawn(move || {
@@ -272,6 +377,8 @@ pub fn spawn_imu_thread(
             // downstream Euler decompositions in confusing ways (see
             // the operator-app orientation card's Roll/Pitch/Yaw
             // readout).
+            let now = Instant::now();
+
             match imu.arvr_stabilized_rotation_quaternion() {
                 Ok([qx, qy, qz, qw]) => {
                     let q_world_sensor = [qx, qy, qz, qw];
@@ -284,7 +391,7 @@ pub fn spawn_imu_thread(
                     if let Ok(mut g) = shared.lock() {
                         g.quaternion = Some(q_world_body);
                         g.heading_accuracy_rad = acc;
-                        g.last_update = Some(Instant::now());
+                        g.last_update = Some(now);
                         g.report_period_ms = period_ms;
                     }
                 }
@@ -292,6 +399,53 @@ pub fn spawn_imu_thread(
                     target: "bebop_linux::imu",
                     ?e,
                     "arvr_stabilized_rotation_quaternion read"
+                ),
+            }
+
+            // Read the calibrated gyroscope cache and rotate into body
+            // frame. Note this reads the *cached* values held by the
+            // driver — both the rotation-vector and gyroscope reports
+            // arrive on the same data channel and the driver updates
+            // its caches as new reports come in, so there's no risk of
+            // racing with the SHTP pump (we already drained it with
+            // `handle_all_messages` above).
+            //
+            // The gyro cache is seeded to all-zeros before the first
+            // report. The driver doesn't expose a "have we ever
+            // received a 0x02?" flag, but the chip starts streaming
+            // 0x02 almost immediately after `enable_report` returns,
+            // so the first real sample lands within a couple of loop
+            // iterations. We initially publish `None` and switch to
+            // `Some(...)` on the first non-zero read so the policy
+            // can distinguish "no gyro yet" from "perfectly still".
+            //
+            // A perfectly-still robot does in principle read exactly
+            // [0, 0, 0], so this distinguishes by sample magnitude
+            // rather than by a separate "received" flag. The BNO's
+            // own noise floor is ~3e-3 rad/s even on a tripod, well
+            // above the 1e-9 threshold below; in practice we publish
+            // `Some(...)` on the *very* first report.
+            match imu.gyro() {
+                Ok([wx, wy, wz]) => {
+                    let omega_sensor = [wx, wy, wz];
+                    let mag_sq = wx * wx + wy * wy + wz * wz;
+                    if mag_sq > 1e-9 {
+                        let omega_body = rotate_vec_by_quat_xyzw(omega_sensor, mount_quat);
+                        if let Ok(mut g) = shared.lock() {
+                            g.angular_velocity_body = Some(omega_body);
+                            // `last_update` already covers both
+                            // reports — they arrive on the same data
+                            // channel at the same cadence, so a single
+                            // staleness clock is sufficient.
+                            g.last_update = Some(now);
+                            g.report_period_ms = period_ms;
+                        }
+                    }
+                }
+                Err(e) => warn!(
+                    target: "bebop_linux::imu",
+                    ?e,
+                    "calibrated gyroscope read"
                 ),
             }
             std::thread::sleep(Duration::from_millis(2));
@@ -373,6 +527,67 @@ mod tests {
         // (0, 0, 0, 0) downstream.
         let out = quat_normalize_xyzw([0.0; 4]);
         assert_eq!(out, [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    fn approx_eq3(a: [f32; 3], b: [f32; 3]) -> bool {
+        a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    #[test]
+    fn rotate_vec_identity_is_a_noop() {
+        let v = [0.7_f32, -0.2, 0.5];
+        let out = rotate_vec_by_quat_xyzw(v, ImuConfig::IDENTITY_QUAT);
+        assert!(approx_eq3(out, v), "identity should not change the input");
+    }
+
+    #[test]
+    fn rotate_vec_v2_mount_remaps_axes() {
+        // Bebop V2 mount: sensor +X = body -Y, sensor +Y = body +X,
+        // sensor +Z = body +Z. The mount quaternion encodes a +90°
+        // rotation about +Z (yaw). Apply it to the three unit-vector
+        // sensor axes and check we land on the documented body axes
+        // — same axis mapping the YAML comment promises and the
+        // `ninety_deg_yaw_mount_maps_sensor_x_to_body_minus_y` test
+        // verifies for the orientation quaternion path.
+        let s = (std::f32::consts::FRAC_PI_4).sin();
+        let c = (std::f32::consts::FRAC_PI_4).cos();
+        let q_sb = [0.0, 0.0, s, c]; // axis-angle (z, +90°) in XYZW
+
+        // sensor +X -> body -Y
+        let out_x = rotate_vec_by_quat_xyzw([1.0, 0.0, 0.0], q_sb);
+        assert!(
+            approx_eq3(out_x, [0.0, -1.0, 0.0]),
+            "expected sensor +X -> body -Y but got {out_x:?}"
+        );
+
+        // sensor +Y -> body +X
+        let out_y = rotate_vec_by_quat_xyzw([0.0, 1.0, 0.0], q_sb);
+        assert!(
+            approx_eq3(out_y, [1.0, 0.0, 0.0]),
+            "expected sensor +Y -> body +X but got {out_y:?}"
+        );
+
+        // sensor +Z -> body +Z
+        let out_z = rotate_vec_by_quat_xyzw([0.0, 0.0, 1.0], q_sb);
+        assert!(
+            approx_eq3(out_z, [0.0, 0.0, 1.0]),
+            "expected sensor +Z -> body +Z but got {out_z:?}"
+        );
+    }
+
+    #[test]
+    fn rotate_vec_preserves_magnitude() {
+        // Round-trip a random-looking gyro reading through an
+        // arbitrary mount and confirm we don't accidentally scale it
+        // (a classic sign of treating XYZW as WXYZ or vice versa).
+        let s = (std::f32::consts::FRAC_PI_4).sin();
+        let c = (std::f32::consts::FRAC_PI_4).cos();
+        let q_sb = [0.0, 0.0, s, c];
+        let v = [0.31_f32, -1.27, 0.86];
+        let mag_in = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        let out = rotate_vec_by_quat_xyzw(v, q_sb);
+        let mag_out = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2]).sqrt();
+        assert!((mag_in - mag_out).abs() < 1e-5);
     }
 
     #[test]

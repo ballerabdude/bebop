@@ -132,11 +132,53 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
+    """Policy observation vector. Layout MUST match the firmware-side
+    builder in ``firmware/bebop-linux/src/observation.rs``.
+
+    ``base_ang_vel`` and ``projected_gravity`` are sourced from the
+    explicit :class:`isaaclab.sensors.ImuCfg` sensor (mounted on
+    ``base_link`` with identity offset, see :class:`BebopV2BaseEnvCfg`)
+    rather than from ground-truth articulation-root data. This keeps
+    the sim observation pipeline byte-compatible with the real-robot
+    pipeline, which reads the BNO085's body-frame angular velocity and
+    derives projected gravity from the body-frame fused quaternion
+    (see ``firmware/bebop-linux/src/imu.rs`` for the orientation /
+    mount-rotation contract).
+
+    **Isaac Lab 3.0 note** — the 3.0 migration guide describes a
+    forthcoming split where ``Imu`` becomes a lightweight
+    accelerometer + gyro sensor and a new ``Pva`` sensor inherits the
+    full-state pipe (``projected_gravity_b`` etc.). That split has not
+    landed in our installed Isaac Lab build yet: ``isaaclab.sensors``
+    still only exports ``Imu`` / ``ImuCfg`` / ``ImuData`` and
+    ``isaaclab.envs.mdp`` still exposes ``imu_ang_vel`` /
+    ``imu_projected_gravity`` (verified at runtime). When we upgrade
+    to a release where ``Pva`` is the full-state sensor, the symbols
+    below need to flip to ``PvaCfg`` / ``mdp.pva_*`` and
+    ``SceneEntityCfg("pva")``. Quaternion order is already XYZW in
+    3.0 (see the OffsetCfg comment in :class:`BebopV2BaseEnvCfg`).
+
+    ``base_lin_vel`` has no IMU equivalent on the real robot — the
+    firmware sends zeros until an external velocity estimator is wired
+    in (see ``policy_runner.rs::SYNTHETIC_BASE_LIN_VEL``). For the
+    standing task it is naturally near zero, so we keep the
+    ground-truth feed during training with wide uniform noise as a
+    light proxy for "we don't fully trust this number".
+    """
+
     @configclass
     class PolicyCfg(ObsGroup):
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel, noise=UniformNoiseCfg(n_min=-0.2, n_max=0.2))
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=UniformNoiseCfg(n_min=-0.3, n_max=0.3))
-        projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=UniformNoiseCfg(n_min=-0.05, n_max=0.05))
+        base_ang_vel = ObsTerm(
+            func=mdp.imu_ang_vel,
+            params={"asset_cfg": SceneEntityCfg("imu")},
+            noise=UniformNoiseCfg(n_min=-0.3, n_max=0.3),
+        )
+        projected_gravity = ObsTerm(
+            func=mdp.imu_projected_gravity,
+            params={"asset_cfg": SceneEntityCfg("imu")},
+            noise=UniformNoiseCfg(n_min=-0.05, n_max=0.05),
+        )
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=UniformNoiseCfg(n_min=-0.02, n_max=0.02))
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=UniformNoiseCfg(n_min=-0.5, n_max=0.5))
         actions = ObsTerm(func=mdp.last_action)
@@ -370,10 +412,34 @@ class BebopV2BaseEnvCfg(ManagerBasedRLEnvCfg):
             spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)),
         )
 
-        # Explicit IMU sensor mounted on base_link for orientation/angular velocity sensing.
+        # Body-frame IMU sensor. Mounted on ``base_link`` with an
+        # identity offset so the sensor frame coincides with the body
+        # frame — the simulated equivalent of the real-robot firmware
+        # applying ``mount_quat_sensor_body`` to bring every BNO085
+        # reading into the body frame before publishing (see
+        # ``firmware/bebop-linux/src/imu.rs`` and the ``imu.mount:``
+        # block in ``firmware/bebop-linux/config/bebop_v2.yaml``).
+        #
+        # Both pipelines therefore expose:
+        #   * ``ang_vel_b`` — body-frame angular velocity (rad/s).
+        #   * ``projected_gravity_b`` — world (0, 0, -1) projected into
+        #     the body frame; ``z ≈ -1`` when upright.
+        # ``update_period=0.0`` means refresh every physics tick so the
+        # policy sees fresh IMU data on every control step.
+        #
+        # The OffsetCfg's ``rot`` field is **XYZW** in Isaac Lab 3.0
+        # (migration from the old WXYZ convention) — identity is
+        # ``(0, 0, 0, 1)`` and matches the firmware-side XYZW order
+        # used by :struct:`crate::observation::ImuState`. See the
+        # 3.0 migration note on the ObservationsCfg docstring for the
+        # caveat about an upcoming Imu→Pva rename.
         self.scene.imu = ImuCfg(
             prim_path="{ENV_REGEX_NS}/Robot/Geometry/base_link",
             update_period=0.0,
             debug_vis=False,
+            offset=ImuCfg.OffsetCfg(
+                pos=(0.0, 0.0, 0.0),
+                rot=(0.0, 0.0, 0.0, 1.0),  # XYZW identity (Isaac Lab 3.0)
+            ),
         )
 

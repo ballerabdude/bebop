@@ -10,44 +10,51 @@
 //! - An `Arc<Supervisor>` it consults for joint feedback (read) and pushes
 //!   PD commands through (`safe_send_ctrl`, which already enforces the
 //!   per-joint hard-limit clamp + slew limit).
+//! - An [`ImuShared`] handle that the [`crate::imu`] thread fills with the
+//!   latest body-frame BNO085 quaternion + calibrated gyroscope reading.
 //!
 //! Threading: the tick is synchronous and intended to be called from the
 //! same 100 Hz tokio task that runs the watchdog and the DialIn hold cycle.
 //! ONNX inference is sub-millisecond on CPU for our `[512, 256, 128]` MLP,
 //! so blocking the executor briefly is fine.
 //!
-//! ## "No IMU yet" mode
+//! ## IMU sourcing
 //!
-//! Bebop V2 ships without an IMU wired in (yet). We feed the policy
-//! synthetic upright-at-rest observations — exactly what the simulator
-//! presents at the start of every standing episode (modulo training
-//! noise):
+//! Each tick we lock [`ImuShared`] and try to copy the latest body-frame
+//! `quaternion` + `angular_velocity_body` into the
+//! [`crate::observation::ImuState`] that feeds the observation builder. The
+//! values are body-frame FLU (`+x forward`, `+y left`, `+z up`) — the
+//! [`crate::imu`] loop already post-multiplies by `mount_quat_sensor_body`
+//! and rotates the gyro by the same rotation, so we never apply a frame
+//! transform here. That matches what `mdp.imu_ang_vel` and
+//! `mdp.imu_projected_gravity` produce in
+//! `sim/bebop_training/envs/bebop_v2_base_cfg.py`, so the trained policy
+//! sees the same observation pipeline at deploy time as during training.
+//!
+//! When the IMU is **stale** (no fresh report for `3 × report_period_ms`)
+//! or **never received** (no `imu:` block in the YAML, dead BNO, failed
+//! SHTP boot), we fall back to synthetic upright-at-rest observations —
+//! the same values the simulator presents at the start of every standing
+//! episode:
 //!
 //! - `quaternion = [0, 0, 0, 1]` (XYZW identity) ⇒ `projected_gravity = (0, 0, -1)`,
-//! - `angular_velocity = (0, 0, 0)`,
-//! - `base_lin_vel = (0, 0, 0)`,
-//! - `velocity_commands = (0, 0, 0)` — matches `BebopV2FlatBalanceCfg`'s
-//!   forced-zero command range.
+//! - `angular_velocity = (0, 0, 0)`.
 //!
-//! Joint positions and velocities still come from the *real* motor
-//! feedback, so the policy does see the real robot's state on the eight
-//! joint slots. With the standing-task policy this should produce
-//! near-zero actions (the policy was rewarded for staying still while
-//! upright), so the practical effect is "hold current pose".
-//!
-//! When an IMU lands, replace the synthetic block in [`PolicyRunner::tick`]
-//! with the live readout. Convention is XYZW per [`crate::observation::ImuState`].
-//! Until then, optional `imu:` in the robot YAML enables [`crate::imu`]
-//! (publishes the rotation vector to the WS server so the operator UI can
-//! visualize orientation; does not change policy observations).
+//! That fallback only ever fires when the sensor isn't actually present,
+//! which we surface as a `warn!` once per state transition to avoid log
+//! spam. Joint positions and velocities still come from real motor
+//! feedback, and `base_lin_vel` stays at zero until an estimator is wired
+//! in (see [`SYNTHETIC_BASE_LIN_VEL`]).
 
 use anyhow::{anyhow, Context, Result};
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::config::dims;
+use crate::imu::ImuShared;
 use crate::mode::Mode;
 use crate::observation::{
     scale_actions_to_targets, ImuState, ObservationBuilder, VelocityCommand, JOINT_NAMES,
@@ -56,8 +63,9 @@ use crate::observation::{
 use crate::policy::PolicyController;
 use crate::safety::{BreachReason, Supervisor};
 
-/// Sentinel observation values for "no IMU attached". Mirrors what training
-/// presents at episode start in the standing task — see module docs.
+/// Sentinel observation values for "IMU not present / stale". Mirrors what
+/// training presents at episode start in the standing task — see module
+/// docs.
 const SYNTHETIC_IMU_QUATERNION_XYZW: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 const SYNTHETIC_BASE_LIN_VEL: [f32; 3] = [0.0, 0.0, 0.0];
 
@@ -65,6 +73,12 @@ pub struct PolicyRunner {
     controller: PolicyController,
     obs_builder: ObservationBuilder,
     supervisor: Arc<Supervisor>,
+    /// Shared handle on the latest BNO085 reading. Filled by the
+    /// [`crate::imu`] thread; consumed here on every tick. Always
+    /// present even when no IMU is configured (`imu:` block omitted
+    /// from the YAML) — in that case the snapshot stays at its
+    /// default and we use synthetic observations.
+    imu_shared: ImuShared,
     /// `joint_indices[slot]` = index into `Supervisor::cfg().joints` of
     /// the joint occupying policy slot `slot` (0..8 in [`JOINT_NAMES`] order).
     joint_indices: [usize; NUM_JOINTS],
@@ -75,6 +89,9 @@ pub struct PolicyRunner {
     /// Edge-detect entering RunPolicy so we can clear the policy's history
     /// buffer + last_action cache.
     was_running: bool,
+    /// Edge-detect on the IMU live/synthetic boundary so we log
+    /// transitions once instead of every tick.
+    imu_was_live: bool,
 }
 
 impl PolicyRunner {
@@ -85,7 +102,11 @@ impl PolicyRunner {
     /// loaded `RobotConfig`. We refuse to silently swap or drop joints —
     /// a misconfigured YAML there would silently break the policy I/O
     /// contract.
-    pub fn new<P: AsRef<Path>>(supervisor: Arc<Supervisor>, model_path: P) -> Result<Self> {
+    pub fn new<P: AsRef<Path>>(
+        supervisor: Arc<Supervisor>,
+        imu_shared: ImuShared,
+        model_path: P,
+    ) -> Result<Self> {
         let model_path = model_path.as_ref();
         let cfg = supervisor.cfg();
 
@@ -146,9 +167,11 @@ impl PolicyRunner {
             controller,
             obs_builder,
             supervisor,
+            imu_shared,
             joint_indices,
             default_positions,
             was_running: false,
+            imu_was_live: false,
         })
     }
 
@@ -194,15 +217,58 @@ impl PolicyRunner {
             armed[slot] = s.armed;
         }
 
-        // 2) Synthetic "no IMU" observation block. Replace with live IMU
-        //    when the sensor is wired in (XYZW quaternion convention,
-        //    body-frame angular velocity, body-frame linear velocity from
-        //    an external estimator).
-        self.obs_builder.update_imu(ImuState {
-            quaternion: SYNTHETIC_IMU_QUATERNION_XYZW,
-            angular_velocity: [0.0; 3],
-            linear_acceleration: [0.0; 3],
-        });
+        // 2) IMU. Pull from the shared snapshot if it's fresh, else
+        //    fall back to synthetic upright-at-rest. The mount
+        //    rotation has already been applied by `imu::spawn_imu_thread`
+        //    (both to the quaternion and to the gyro vector), so the
+        //    values are body-frame FLU and ready to drop straight into
+        //    `ImuState`. See the module docs and
+        //    `bebop_v2_base_cfg.py::ObservationsCfg` for the matching
+        //    sim-side pipeline.
+        let now = Instant::now();
+        let imu_state = match self.imu_shared.lock() {
+            Ok(g) if !g.is_stale(now) => {
+                let quaternion = g.quaternion.unwrap_or(SYNTHETIC_IMU_QUATERNION_XYZW);
+                let angular_velocity = g.angular_velocity_body.unwrap_or([0.0; 3]);
+                if !self.imu_was_live {
+                    info!(
+                        ?quaternion,
+                        ?angular_velocity,
+                        "IMU live: switching PolicyRunner from synthetic to BNO085 observations"
+                    );
+                    self.imu_was_live = true;
+                }
+                ImuState {
+                    quaternion,
+                    angular_velocity,
+                    linear_acceleration: [0.0; 3],
+                }
+            }
+            _ => {
+                if self.imu_was_live {
+                    warn!(
+                        "IMU stale / unavailable: PolicyRunner falling back to synthetic \
+                         upright observations (was using live BNO085)"
+                    );
+                    self.imu_was_live = false;
+                }
+                ImuState {
+                    quaternion: SYNTHETIC_IMU_QUATERNION_XYZW,
+                    angular_velocity: [0.0; 3],
+                    linear_acceleration: [0.0; 3],
+                }
+            }
+        };
+        self.obs_builder.update_imu(imu_state);
+
+        // Body-frame linear velocity. Bebop V2 has no wheel odometry
+        // and no visual-inertial estimator wired in yet, so we still
+        // feed zeros here. The trained policy was exposed to wide
+        // uniform noise on this channel (see
+        // `BebopV2BaseEnvCfg.ObservationsCfg.base_lin_vel`), so a
+        // constant zero is well within distribution for the standing
+        // task. Wire in an estimator before relying on it for
+        // locomotion.
         self.obs_builder
             .update_base_velocity(SYNTHETIC_BASE_LIN_VEL);
 

@@ -154,22 +154,30 @@ async fn main() -> Result<()> {
     // Try to load the trained policy. Soft-fail: if the file is missing
     // or doesn't match the expected I/O contract, log a warning and
     // continue — DialIn / Idle still work without a policy on disk.
+    //
+    // The runner takes a clone of `imu_shared` so it can read the
+    // latest body-frame quaternion + calibrated gyro on every tick.
+    // The IMU thread is the sole writer; the runner and the telemetry
+    // builder both clone independent reader handles.
     let policy_path = resolve_policy_path(&args);
-    let policy_runner: Arc<Mutex<Option<PolicyRunner>>> =
-        match PolicyRunner::new(supervisor.clone(), &policy_path) {
-            Ok(pr) => {
-                info!(model = %policy_path.display(), "policy loaded; RunPolicy mode is available");
-                Arc::new(Mutex::new(Some(pr)))
-            }
-            Err(e) => {
-                warn!(
-                    model = %policy_path.display(),
-                    error = %e,
-                    "policy not loaded; RunPolicy mode will be a no-op"
-                );
-                Arc::new(Mutex::new(None))
-            }
-        };
+    let policy_runner: Arc<Mutex<Option<PolicyRunner>>> = match PolicyRunner::new(
+        supervisor.clone(),
+        imu_shared.clone(),
+        &policy_path,
+    ) {
+        Ok(pr) => {
+            info!(model = %policy_path.display(), "policy loaded; RunPolicy mode is available");
+            Arc::new(Mutex::new(Some(pr)))
+        }
+        Err(e) => {
+            warn!(
+                model = %policy_path.display(),
+                error = %e,
+                "policy not loaded; RunPolicy mode will be a no-op"
+            );
+            Arc::new(Mutex::new(None))
+        }
+    };
 
     // Periodic supervisor tick: hold-cycle TX in DialIn mode, RunPolicy
     // inference + TX in RunPolicy mode, watchdog every cycle.

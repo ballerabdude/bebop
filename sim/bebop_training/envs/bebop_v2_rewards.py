@@ -7,10 +7,14 @@ yaw suppression while standing).
 Keep the *definitions* here and the *weights* in experiment configs so
 each experiment is just a thin set of dial overrides.
 
-Isaac Lab 3.0 note: asset ``.data.*`` properties now return ``wp.array``
-instead of ``torch.Tensor`` (see "Warp Backend for Asset and Sensor Data"
-in the 3.0 migration guide). We coerce them with ``wp.to_torch`` (zero
-copy) before doing any torch math.
+**Isaac Lab 3.0 note** — asset and sensor ``.data.*`` properties now
+return :class:`ProxyArray` (a thin wrapper over the underlying
+``wp.array``), not :class:`torch.Tensor`. We coerce them with
+:func:`_ensure_tensor` below, which prefers the ``.torch`` zero-copy
+accessor when present (Isaac Lab 3.0) and falls back to
+:func:`wp.to_torch` for raw ``wp.array`` inputs (the temporary
+2.x-style API). See "ProxyArray Backend for Asset and Sensor Data" in
+the 3.0 migration guide.
 """
 
 from __future__ import annotations
@@ -26,13 +30,30 @@ def _ensure_tensor(
     ref_tensor: torch.Tensor | None = None,
     env_device: str | None = None,
 ) -> torch.Tensor:
-    """Coerce ``value`` (torch.Tensor, wp.array, or array-like) to a torch tensor.
+    """Coerce ``value`` to a torch tensor regardless of Isaac Lab version.
 
-    Recognises Isaac Lab 3.0's ``wp.array`` data buffers and converts them via
-    the warp interop helper so we get a torch view without copying.
+    Accepts:
+
+    * :class:`torch.Tensor` (Isaac Lab 2.x style, also returned by
+      some 3.0 manager properties such as ``env.action_manager.action``);
+    * Isaac Lab 3.0 ``ProxyArray`` objects (detected by the presence of
+      a ``torch`` attribute) — uses the zero-copy ``.torch`` view rather
+      than ``__torch_function__`` to avoid the one-time
+      ``DeprecationWarning`` the proxy emits when wrapped in a
+      ``torch.as_tensor`` call;
+    * Raw :class:`warp.array` buffers — converted with
+      :func:`wp.to_torch` (zero copy);
+    * Anything else that :func:`torch.as_tensor` can handle (last
+      resort, mostly for tests).
     """
     if isinstance(value, torch.Tensor):
         return value
+    # Isaac Lab 3.0: asset / sensor data properties return ProxyArray.
+    # Duck-typed so this file doesn't have to import the symbol (it
+    # would otherwise need a guarded import for backward compat).
+    torch_view = getattr(value, "torch", None)
+    if isinstance(torch_view, torch.Tensor):
+        return torch_view
     if isinstance(value, wp.array):
         # wp.to_torch returns a view sharing memory with the warp array.
         return wp.to_torch(value)
