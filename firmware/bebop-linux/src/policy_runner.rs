@@ -50,7 +50,7 @@ use anyhow::{anyhow, Context, Result};
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::config::dims;
@@ -92,7 +92,14 @@ pub struct PolicyRunner {
     /// Edge-detect on the IMU live/synthetic boundary so we log
     /// transitions once instead of every tick.
     imu_was_live: bool,
+    /// Last time we emitted the human-readable I/O summary at `info!`.
+    /// Per-tick logs would be 100 lines/s; we rate-limit to ~1 Hz.
+    last_io_log_at: Option<Instant>,
 }
+
+/// How often to emit the human-readable observation/action summary at
+/// `info!`. Every tick is still available at `debug!`.
+const IO_LOG_INTERVAL: Duration = Duration::from_secs(1);
 
 impl PolicyRunner {
     /// Load the ONNX policy and resolve the policy-slot ↔ supervisor-joint
@@ -172,6 +179,7 @@ impl PolicyRunner {
             default_positions,
             was_running: false,
             imu_was_live: false,
+            last_io_log_at: None,
         })
     }
 
@@ -319,12 +327,41 @@ impl PolicyRunner {
         //    per-joint pos_min..pos_max and slew-limit per tick.
         let targets = scale_actions_to_targets(&action, &self.default_positions);
 
-        // debug!(
-        //     observation = ?obs.as_slice(),
-        //     raw_action = ?action.as_slice(),
-        //     position_targets_rad = ?targets.as_slice(),
-        //     "policy tick: 36-dim obs → raw action → scaled joint targets (rad)"
-        // );
+        // Per-tick raw dump for offline replay / debugging. Enable with
+        // `RUST_LOG=bebop_linux::policy_runner=debug` (or the binary's
+        // equivalent prefix).
+        debug!(
+            observation = ?obs.as_slice(),
+            raw_action = ?action.as_slice(),
+            position_targets_rad = ?targets.as_slice(),
+            "policy tick: 36-dim obs → raw action → scaled joint targets (rad)"
+        );
+
+        // Rate-limited human-readable summary at info!. We break the
+        // 36-element observation into the same named slices as
+        // `ObservationBuilder::build` so it's actually parseable in a
+        // running terminal. `imu_live` makes it obvious whether the
+        // policy is currently consuming the BNO085 or the synthetic
+        // upright fallback.
+        let should_log_info = self
+            .last_io_log_at
+            .is_none_or(|t| now.duration_since(t) >= IO_LOG_INTERVAL);
+        if should_log_info {
+            self.last_io_log_at = Some(now);
+            info!(
+                imu_live = self.imu_was_live,
+                base_lin_vel = ?&obs[0..3],
+                base_ang_vel = ?&obs[3..6],
+                projected_gravity = ?&obs[6..9],
+                joint_pos_rel = ?&obs[9..17],
+                joint_vel = ?&obs[17..25],
+                last_action = ?&obs[25..33],
+                cmd_vel = ?&obs[33..36],
+                raw_action = ?action.as_slice(),
+                position_targets_rad = ?targets.as_slice(),
+                "policy I/O"
+            );
+        }
 
         // 8) Push to motors. Skip joints the operator hasn't armed: a
         //    disabled motor ignores PD commands at the bus level, and
