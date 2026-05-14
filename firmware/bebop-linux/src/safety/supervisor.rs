@@ -558,6 +558,29 @@ impl Supervisor {
 
     // ---------------------------------------------------------------- safe TX
 
+    /// Snap every armed motor's slew tracker to its current measured
+    /// position. Use this on transitions where we want the *first*
+    /// outgoing command to be slew-limited relative to where the joint
+    /// actually is, not relative to whatever target the previous mode
+    /// (DialIn hold, hold-current pose, etc.) last latched.
+    ///
+    /// Safety rationale (bipedal robot): without this, a stale
+    /// ``last_target_pos`` left over from DialIn could allow the first
+    /// RunPolicy tick to commit a target one slew step *past* the
+    /// real joint pose. With a 0.05 rad slew at 100 Hz on a 17 kg
+    /// inverted pendulum that's not enough to fault, but it's a free
+    /// jolt the policy didn't ask for and that the trained
+    /// distribution didn't see in sim — so we eliminate it.
+    pub fn resync_slew_tracker(&self) {
+        for entry in &self.motors {
+            let Ok(mut g) = entry.lock() else { continue };
+            if !g.armed {
+                continue;
+            }
+            g.last_target_pos = g.motor.state.position;
+        }
+    }
+
     /// Send a clamp+slew-limited control command to a single motor.
     ///
     /// All TX traffic must go through here. `target_pos`, `velocity_ff`,

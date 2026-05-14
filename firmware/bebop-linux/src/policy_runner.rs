@@ -203,11 +203,21 @@ impl PolicyRunner {
 
         if !self.was_running {
             // Entering RunPolicy: clear any stale history / last_action so
-            // the first observation matches a fresh-episode condition.
+            // the first observation matches a fresh-episode condition,
+            // and snap the supervisor's per-motor slew tracker to the
+            // current measured joint position so the first outgoing
+            // target step is slew-limited against "where the joint
+            // actually is", not against whatever DialIn last latched.
+            // The latter matters for bipedal safety: DialIn can leave
+            // `last_target_pos` anywhere within hard_limits, and the
+            // policy's first action would otherwise commit one slew
+            // step past *that* point rather than past the joint pose
+            // the policy was trained on at episode-reset.
             self.controller.reset();
             self.obs_builder
                 .update_last_action(&[0.0_f32; dims::ACTION_DIM]);
-            info!("RunPolicy entered; policy controller reset");
+            sup.resync_slew_tracker();
+            info!("RunPolicy entered; policy controller and slew tracker reset");
             self.was_running = true;
         }
 
@@ -372,11 +382,11 @@ impl PolicyRunner {
         //    every re-arm in RunPolicy mode trips the feedback watchdog
         //    on whichever joint was armed first).
         //
-        //    Use per-joint hold_gains for kp/kd; these should ideally
-        //    match the gains baked into the training-time actuator
-        //    config (see `BEBOP_V2_CFG.actuators` in
-        //    `bebop_v2_base_cfg.py`). They currently differ — known
-        //    sim-to-real gap.
+        //    Use per-joint hold_gains for kp/kd; these MUST match the
+        //    `FW_*_KP` / `FW_*_KD` constants in `bebop_v2_base_cfg.py`
+        //    that the sim trained against. If you tune one side,
+        //    retrain — the policy bakes in the closed-loop dynamics
+        //    induced by these gains.
         for (slot, &idx) in self.joint_indices.iter().enumerate() {
             if !armed[slot] {
                 continue;

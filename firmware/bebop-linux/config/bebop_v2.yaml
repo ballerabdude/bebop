@@ -35,8 +35,24 @@ defaults:
 
   # Setpoint slew limits. Independent of motor-side PD gains, these cap
   # the achievable jerk in the host-side TX path.
+  #
+  # `max_pos_step_per_tick` MUST stay in sync with `FW_MAX_POS_STEP_PER_TICK_RAD`
+  # in `sim/bebop_training/envs/bebop_v2_base_cfg.py` — the trained policy
+  # bakes in this slew rate as part of its achievable control bandwidth.
+  # If you tune this value, retrain.
+  #
+  # Trail of empirical numbers we tried (bipedal balance task):
+  #   * 0.005 rad/tick (0.5 rad/s) — too tight, sim ground_contact = 1.0
+  #     forever; PD can only ramp ~0.2 Nm/tick at the hip.
+  #   * 0.01 rad/tick (1.0 rad/s) — better on the *real* robot with the
+  #     old broken sim, but still strangled the new properly-matched sim.
+  #   * 0.05 rad/tick (5.0 rad/s) — current. Fast enough to develop
+  #     ~10 Nm at the hip in 50 ms (kp_hip = 40), which is the regime
+  #     needed to brake an inverted-pendulum fall (~150 ms timescale).
+  #     Still ~2.5× below the per-joint vel_max (12 rad/s for legs),
+  #     so the PD loop never has to fight the velocity cap.
   slew:
-    max_pos_step_per_tick: 0.005   # rad — at 100 Hz tick = 0.5 rad/s slew cap
+    max_pos_step_per_tick: 0.05    # rad — at 100 Hz tick = 5.0 rad/s slew cap
     arm_ramp_s:            0.5     # gain ramp 0 → hold over arm
     abort_ramp_s:          0.3     # gain ramp hold → 0 over abort
 
@@ -54,18 +70,27 @@ joints:
   # each joint with ~0.02 rad of steady-state tracking error, while staying
   # an order of magnitude below each motor model's `kp_max`. Tune in place
   # one joint at a time per the procedure at the top of this file.
+  # IMPORTANT (sim-to-real): the `vel_max` / `tau_max` numbers below are the
+  # safety-trip envelope the supervisor enforces. They MUST be greater than
+  # or equal to the matching `FW_*_VEL_MAX` / `FW_*_TAU_MAX` constants in
+  # `sim/bebop_training/envs/bebop_v2_base_cfg.py`, otherwise the trained
+  # policy will routinely command motions the real robot E-STOPs on. Bipedal
+  # balance needs the motors' full mechanical envelope — do not "soften" these
+  # for bench testing; if you need a safer test, harness the robot from a
+  # gantry instead of clipping its actuators.
+
   hip_abduction_left_joint:
     can_interface: can0
     motor_id: 31
     model: RS04
-    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 3.5, tau_max: 55.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 40.0,  kd: 3.0 }
 
   hip_abduction_right_joint:
     can_interface: can1
     motor_id: 41
     model: RS04
-    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 3.5, tau_max: 55.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 40.0,  kd: 3.0 }
 
   # ----- Femur / hip pitch (RS03) -------------------------------------------
@@ -73,14 +98,14 @@ joints:
     can_interface: can0
     motor_id: 32
     model: RS03
-    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 3.5, tau_max: 55.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
 
   femur_right_joint:
     can_interface: can1
     motor_id: 42
     model: RS03
-    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 3.5, tau_max: 55.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
 
   # ----- Shin / knee (RS04) -------------------------------------------------
@@ -88,8 +113,10 @@ joints:
     can_interface: can0
     motor_id: 34
     model: RS04
-    # Knee mostly flexes one way; tighter than hip on the +ve side.
-    hard_limits: { pos_min: -1.570796, pos_max: 1.570796, vel_max: 4.0, tau_max: 30.0, temp_max: 70.0 }
+    # Knee mostly flexes one way; tighter pos_max on the +ve side.
+    # tau_max raised to RS04 mechanical peak (84 Nm) to give the policy
+    # enough knee authority for squat-recovery during balance.
+    hard_limits: { pos_min: -1.570796, pos_max: 1.570796, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     # Knee carries the full shin+foot moment, so a touch stiffer than hip.
     hold_gains:  { kp: 120.0, kd: 4.0 }
 
@@ -97,7 +124,7 @@ joints:
     can_interface: can1
     motor_id: 44
     model: RS04
-    hard_limits: { pos_min: -1.570796, pos_max: 1.570796, vel_max: 4.0, tau_max: 30.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -1.570796, pos_max: 1.570796, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 120.0, kd: 4.0 }
 
   # ----- Foot / ankle (RS02) ------------------------------------------------
@@ -106,8 +133,9 @@ joints:
     motor_id: 35
     model: RS02
     # RS02 datasheet: rated 6 Nm @ 100 rpm, peak 17 Nm (stall, T-N curve at 36 V).
-    # Cap at the manufacturer's peak — anything above is outside the stall point.
-    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 4.0, tau_max: 417.0, temp_max: 65.0 }
+    # tau_max set at the motor's actual peak — the old 417 Nm cap was a
+    # "disabled" sentinel and made E-STOP useless on this joint.
+    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 17.0, temp_max: 65.0 }
     # Hold gains at the firmware's RS02 kp_max / kd_max ceiling (500 / 5) for max ankle stiffness.
     hold_gains:  { kp: 150.0, kd: 2.50 }
 
@@ -115,7 +143,7 @@ joints:
     can_interface: can1
     motor_id: 45
     model: RS02
-    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 4.0, tau_max: 417.0, temp_max: 65.0 }
+    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 17.0, temp_max: 65.0 }
     hold_gains:  { kp: 150.0, kd: 2.50 }
 
 # ============================================================================
