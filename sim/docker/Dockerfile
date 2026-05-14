@@ -53,6 +53,21 @@ RUN mkdir -p /home/${USER_NAME}/.cache/ov \
     /home/${USER_NAME}/.local/share/ov/data \
     && chown -R ${UID}:${GID} /home/${USER_NAME}
 
+# 4. Patch missing `packaging` module in Isaac's pip_prebundle.
+# Isaac Sim 5.x ships an incomplete `omni.services.pip_archive` prebundle:
+# the `packaging-*.dist-info` is present but the actual `packaging/` source
+# folder is missing. matplotlib (and thus isaacsim.sensors.experimental.camera)
+# crashes at import with FileNotFoundError on packaging/__init__.py.
+# Fix: pip-install `packaging` directly into the exact prebundle path that
+# Isaac's import finder is already pointing at.
+RUN PREBUNDLE_DIR=$(find /isaac-sim/extscache -maxdepth 2 -type d -name pip_prebundle -path '*omni.services.pip_archive*' 2>/dev/null | head -n1) && \
+    if [ -n "${PREBUNDLE_DIR}" ] && [ -f "/isaac-sim/python.sh" ]; then \
+        echo "[patch] Installing packaging into ${PREBUNDLE_DIR}"; \
+        /isaac-sim/python.sh -m pip install --quiet --target "${PREBUNDLE_DIR}" --upgrade packaging || true; \
+    else \
+        echo "[patch] Skipping packaging patch (no omni.services.pip_archive prebundle found)"; \
+    fi
+
 # Copy entrypoint script and make it executable.
 # Build context is sim/docker/ — see docker-compose.yml.
 COPY entrypoint.sh /usr/local/bin/isaac_entrypoint.sh

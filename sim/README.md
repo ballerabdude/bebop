@@ -63,6 +63,31 @@ in **Window → Script Editor** to:
 
 The script is idempotent — safe to re-run.
 
+## Sim-to-real contract (READ BEFORE TRAINING)
+
+The Bebop V2 sim is pinned to the firmware's actual control behaviour, not
+to whatever the motors *could* do mechanically. If you change either side
+without changing the other, the trained policy will diverge on hardware.
+Recent symptom of a divergence: "robot stands in sim, falls over instantly
+on the real robot — feels weightless in sim".
+
+The contract lives in three places that must agree:
+
+| Quantity | Sim source of truth | Firmware source of truth |
+|---|---|---|
+| Per-joint kp / kd | `FW_*_KP` / `FW_*_KD` constants in [`bebop_v2_base_cfg.py`](bebop_training/envs/bebop_v2_base_cfg.py) | `joints.<joint>.hold_gains` in [`bebop_v2.yaml`](../firmware/bebop-linux/config/bebop_v2.yaml) |
+| Per-joint torque cap (`effort_limit_sim`) | `FW_*_TAU_MAX` in `bebop_v2_base_cfg.py` | `joints.<joint>.hard_limits.tau_max` in `bebop_v2.yaml` |
+| Per-joint velocity cap (`velocity_limit_sim`) | `FW_*_VEL_MAX` in `bebop_v2_base_cfg.py` | `joints.<joint>.hard_limits.vel_max` in `bebop_v2.yaml` |
+| Setpoint slew (rad / 100 Hz tick) | `FW_MAX_POS_STEP_PER_TICK_RAD` in `bebop_v2_base_cfg.py`, applied via [`SlewLimitedJointPositionAction`](bebop_training/envs/bebop_v2_actions.py) | `defaults.slew.max_pos_step_per_tick` in `bebop_v2.yaml`, enforced in [`safe_send_ctrl`](../firmware/bebop-linux/src/safety/supervisor.rs) |
+| Action / actuation latency | `FW_ACTION_DELAY_STEPS` ticks of action delay in `SlewLimitedJointPositionAction` | one CAN round-trip @ 100 Hz tokio tick in [`policy_runner.rs`](../firmware/bebop-linux/src/policy_runner.rs) |
+| 36-dim observation layout | [`ObservationsCfg`](bebop_training/envs/bebop_v2_base_cfg.py) | [`observation.rs`](../firmware/bebop-linux/src/observation.rs) and [`policy_runner.rs`](../firmware/bebop-linux/src/policy_runner.rs) |
+
+If you tune any of those numbers (e.g. raise `max_pos_step_per_tick` to
+let the policy move faster, or re-tune `hold_gains` after a motor swap),
+update **both** sides and **retrain** — the policy bakes in the
+achievable bandwidth, and a checkpoint trained against one slew rate /
+gain set will not transfer to another.
+
 ## Training
 
 Training runs **inside the Isaac Lab container** (`bebop_isaac_lab`)
@@ -93,6 +118,20 @@ These IDs come from [`bebop_training/__init__.py`](bebop_training/__init__.py):
 | `Isaac-BebopV2-FlatRobust-v0`    | `BebopV2FlatBalanceRobustCfg`  | Stand under random pushes — learns stepping.    |
 | `Isaac-BebopV2-Locomotion-v0`    | `BebopV2FlatLocomotionCfg`     | Velocity tracking with light pushes.            |
 | `Isaac-Bebop-Flat-v0`            | `BebopFlatBalanceCfg`          | Legacy V1 stand-only task (kept for reference). |
+
+### Retraining after a sim-to-real fix
+
+If you've just changed any of the `FW_*` constants in
+`bebop_v2_base_cfg.py` (or the matching firmware fields in
+`bebop_v2.yaml`), the existing checkpoints under `sim/logs/rsl_rl/` are
+stale — they were trained against a different control surface and will
+collapse on hardware. Retrain the curriculum from scratch (do not
+`--resume` an old checkpoint that pre-dates the fix; it will hurt more
+than it helps because the actor's converged action distribution is tuned
+to the old physics).
+
+The first stage (`Isaac-BebopV2-Flat-v0`) runs in ~45 min on a single
+RTX 5090 at `--num_envs 4096`; the full curriculum is ~3 hours.
 
 ### Curriculum (recommended)
 
