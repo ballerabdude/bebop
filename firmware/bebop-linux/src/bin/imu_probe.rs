@@ -5,9 +5,20 @@
 //! without touching anything else in the runtime. The bin pulls in the
 //! vendored [`bno08x_rs`] (`firmware/bebop-linux/vendor/bno08x-rs`) and
 //! prints quaternions until a deadline; the exit code tells you which
-//! physical layer was wrong if anything fails. Once this passes with
-//! `--report-id 0x28`, the production `imu.rs` path will succeed too —
-//! they go through the same crate, bus, and GPIOs.
+//! physical layer was wrong if anything fails.
+//!
+//! Note: this probe deliberately runs the SHTP boot handshake (`init`)
+//! and the `SET_FEATURE` for the requested report **once**, with no
+//! retry. The production `imu.rs::spawn_imu_thread` path retries the
+//! same sequence up to four times with a 250 ms backoff, because in
+//! production we'd rather absorb a transient handshake glitch than
+//! refuse to start the IMU thread for the rest of the run. The
+//! diagnostic value of this probe depends on it failing loudly and
+//! immediately on real wiring/jumper problems instead of papering
+//! over them with retries — so once `imu-probe` passes the production
+//! path is *at least as likely* to come up cleanly, but a single
+//! `imu-probe` failure does not on its own prove the production path
+//! is broken (re-run it a couple of times before suspecting hardware).
 //!
 //! # Example (Bebop V2 reference wiring; see `config/bebop_v2.yaml`)
 //!
@@ -285,6 +296,25 @@ fn main() -> ExitCode {
         "\nstage 4 — captured {} samples in {} s ({:.1} Hz)",
         samples, args.duration_s, hz
     );
+
+    // ---------------------------------------------------------------------
+    // Graceful disable.
+    //
+    // Critical for the production runtime's startup reliability: if we
+    // exit here with a live subscription, the chip keeps streaming on
+    // the data channel into nobody. The next time `bebop-linux`
+    // (or this probe) opens the bus it sees those stale reports collide
+    // with the SHTP control channel during `verify_product_id`, and
+    // burns through the bring-up retry loop in `imu.rs` before settling.
+    //
+    // Period = 0 µs is the SH-2 spec way of disabling a report. We do
+    // NOT also `soft_reset()` here — see the equivalent comment in
+    // `imu.rs::spawn_imu_thread`'s graceful-disable epilogue for the
+    // detailed rationale; short version is "redundant with the next
+    // bring-up's RST GPIO pulse, and the chip's advert reply was
+    // tripping an upstream `bno08x-rs` parser bug (now fixed by
+    // BEBOP-PATCH [5/5])".
+    let _ = imu.enable_report(args.report_id, 0);
 
     if samples == 0 {
         eprintln!(

@@ -237,17 +237,115 @@ fn rotate_vec_by_quat_xyzw(v: [f32; 3], q_sensor_body_xyzw: [f32; 4]) -> [f32; 3
 /// AR/VR-stabilized rotation-vector quaternions into `shared` for the
 /// WS server to ship.
 ///
-/// Returns `None` if the SPI device or either GPIO line can't be
-/// opened, or if the SHTP boot handshake fails. The caller logs the
-/// error and continues — the rest of the runtime operates fine
-/// without a live IMU (synthetic IMU is used in the policy path).
+/// The returned [`JoinHandle`] is wired up in `main.rs` so that
+/// shutdown waits for the thread to drain — that wait is what gives
+/// the graceful-disable epilogue (see end of the spawned closure) a
+/// chance to run before the process exits, which is the linchpin of
+/// the "clean restart" property described in §"Restart hygiene" below.
+///
+/// # Bring-up retries
+///
+/// All hardware bring-up — opening `/dev/spidev*` + GPIOs, the SHTP
+/// boot handshake, and the `SET_FEATURE` for report 0x28 — happens
+/// **inside** the spawned thread, in an infinite retry loop with
+/// exponential backoff capped at [`BRINGUP_BACKOFF_MAX_MS`]. The
+/// runtime therefore starts immediately even if the chip is wedged,
+/// the operator app stays responsive, and the IMU just becomes
+/// "live" (snapshot un-stales) the moment the chip cooperates. We
+/// chose this over a bounded "give up after N tries" loop because
+/// the most common failure mode in the field is a stale subscription
+/// from the previous run (see "Restart hygiene" below) which clears
+/// itself after a single successful re-init — there's no scenario
+/// where giving up actually helps the operator.
+///
+/// The SHTP handshake is one of the more failure-prone parts of
+/// bringing up the BNO over SPI:
+///
+///   * `bno08x-rs::SpiInterface::setup` toggles RST low for only
+///     2 ms, then waits up to 200 ms for HINTN to fall. A
+///     cold-booted Jetson where the 3.3 V rail just stabilized, or
+///     an SPI clock momentarily perturbed by motor harness noise,
+///     can miss that window and return `SensorUnresponsive`.
+///   * If a previous run of `bebop-linux` exited *without* the
+///     graceful-disable epilogue (panic in another thread,
+///     OOM-kill, `kill -9`, hard power cut, …), the chip is still
+///     streaming reports on the data channel from the stale
+///     subscription, which collides with the SHTP control channel
+///     during the new `verify_product_id` exchange.
+///   * `enable_report(0x28, …)` itself can return an `Err` (not
+///     just `Ok(false)`) when the chip is mid-recovery.
+///
+/// Each retry drops the previous `BNO08x` (which releases the GPIO
+/// lines) and constructs a fresh one — that goes through
+/// `SpiInterface::setup` again, performing another RST pulse and
+/// giving the chip a clean second chance.
+///
+/// To keep the log readable, the per-attempt log severity demotes
+/// after [`BRINGUP_LOUD_ATTEMPTS`] failures: the first few are
+/// `warn`, then a single `error` summary, then a periodic `info`
+/// every [`BRINGUP_PERIODIC_INFO_EVERY`] attempts so the "still
+/// trying" signal stays visible without flooding the log.
+///
+/// `enable_report` returning `Ok(false)` is *not* treated as a
+/// failure: it just means the chip didn't surface a
+/// `GET_FEATURE_RESP` within the crate's 2 s window, which some
+/// BNO085 firmware revs do even when the report is being streamed
+/// correctly. The stream loop below is the source of truth on
+/// whether reports actually arrive.
+///
+/// # Restart hygiene (graceful disable)
+///
+/// On shutdown — the `shutdown_flag` set by `main.rs` after Ctrl-C
+/// or a server-task exit — the streaming loop falls out and the
+/// epilogue at the bottom of the closure runs:
+///
+///   1. `enable_report(0x28, 0)` — period=0 µs is the SH-2 spec way
+///      of saying "stop sending this report".
+///   2. `enable_report(0x02, 0)` — same for the calibrated gyro.
+///   3. `soft_reset()` — sends `EXECUTABLE_DEVICE_CMD_RESET` on the
+///      executable channel, equivalent to a power-on reboot of the
+///      sensor hub.
+///
+/// Together these put the chip in the same state it would be in
+/// after a cold boot, so the next `bebop-linux` start finds a
+/// quiet bus and a clean control channel. Skipping this step (e.g.
+/// `kill -9`) is what causes the "fails 4× in a row on every
+/// restart" symptom we used to see — the bring-up retry loop
+/// recovers from that, but only after burning a couple of seconds.
+/// Each call is `let _`'d on purpose: the chip may already be wedged
+/// at this point, and a failed disable just means the next start
+/// will lean on the retry loop again instead of getting the fast
+/// path.
+///
+/// Returns `None` only if the IMU thread itself fails to spawn,
+/// which in practice only happens under extreme resource exhaustion.
 pub fn spawn_imu_thread(
     cfg: ImuConfig,
     shutdown: Arc<AtomicBool>,
     shared: ImuShared,
 ) -> Option<JoinHandle<()>> {
+    /// Initial sleep between bring-up retries. Doubles each failure
+    /// up to [`BRINGUP_BACKOFF_MAX_MS`].
+    const BRINGUP_BACKOFF_MIN_MS: u64 = 250;
+    /// Cap on the bring-up retry backoff. 5 s keeps us responsive to
+    /// the operator power-cycling the IMU board mid-runtime, while
+    /// being long enough that we're not eating SPI bandwidth on a
+    /// chip that's permanently dead.
+    const BRINGUP_BACKOFF_MAX_MS: u64 = 5_000;
+    /// Per-attempt failures get a full `warn!` for the first N
+    /// attempts; after that the log demotes to one `error!` summary
+    /// followed by periodic `info!`s, so a chronically wedged IMU
+    /// doesn't drown out the rest of the runtime's output.
+    const BRINGUP_LOUD_ATTEMPTS: u32 = 5;
+    /// Once we've gone quiet, still print a heartbeat every Nth
+    /// attempt so the operator can tell from `journalctl` that the
+    /// thread is alive and trying. With the 5 s backoff cap this
+    /// works out to roughly one line per minute.
+    const BRINGUP_PERIODIC_INFO_EVERY: u32 = 12;
+
     let period_ms = cfg.rotation_vector_period_ms;
     let mount_quat = cfg.mount_quat_sensor_body;
+    let mount_is_identity = mount_quat == ImuConfig::IDENTITY_QUAT;
 
     // Seed the period so the telemetry builder's stale check has a
     // sane budget even before the first successful read.
@@ -255,106 +353,156 @@ pub fn spawn_imu_thread(
         g.report_period_ms = period_ms;
     }
 
-    // Note we bring up the chip on the *caller's* thread so any
-    // hardware failure (missing /dev/spidev*, wrong GPIO line, dead
-    // chip) surfaces synchronously and gets logged at startup
-    // instead of vanishing into a spawned thread that exits silently.
-    let mut imu = match BNO08x::new_spi(
-        &cfg.spi_device,
-        &cfg.int_chip,
-        cfg.int_line,
-        &cfg.rst_chip,
-        cfg.rst_line,
-    ) {
-        Ok(imu) => imu,
-        Err(e) => {
-            error!(
-                ?e,
-                spi = %cfg.spi_device,
-                int = format!("{}:{}", cfg.int_chip, cfg.int_line),
-                rst = format!("{}:{}", cfg.rst_chip, cfg.rst_line),
-                "IMU: failed to open SPI / GPIO lines; thread not started"
-            );
-            return None;
-        }
-    };
-
-    if let Err(e) = imu.init() {
-        error!(
-            ?e,
-            "IMU: SHTP boot handshake failed; thread not started \
-             (hint: check the BNO SPI-mode jumpers, INT/RST wiring, \
-             or that no previous run left a feature subscription \
-             active without a power-cycle)"
-        );
-        return None;
-    }
-
-    // Subscribe to 0x28 (AR/VR-Stabilized Rotation Vector). Some
-    // BNO085 firmware revisions don't auto-emit the GET_FEATURE_RESP
-    // bno08x-rs polls for, so `enable_report` may return `Ok(false)`
-    // even when the chip is happily streaming the report on the data
-    // channel. We treat that case as a soft warning (the stream loop
-    // below is the source of truth on whether reports actually
-    // arrive). See `src/bin/imu_probe.rs` for the same logic.
-    match imu.enable_report(SENSOR_REPORTID_ARVR_STABILIZED_RV, period_ms) {
-        Ok(true) => info!(
-            period_ms,
-            "IMU: enabled report 0x28 (AR/VR-Stabilized Rotation Vector)"
-        ),
-        Ok(false) => warn!(
-            period_ms,
-            "IMU: no GET_FEATURE_RESP for 0x28 within 2 s; \
-             continuing on the assumption the chip is streaming anyway"
-        ),
-        Err(e) => {
-            error!(?e, "IMU: SET_FEATURE for 0x28 failed; thread not started");
-            return None;
-        }
-    }
-
-    // Subscribe to 0x02 (Calibrated Gyroscope). The chip applies its
-    // own bias-tracking calibration to this report, which is what we
-    // want for closed-loop control — the uncalibrated stream (0x07)
-    // takes several seconds to converge after a power cycle.
-    //
-    // Unlike the rotation vector, we keep going if the gyro
-    // subscription outright fails: the policy can still build a
-    // partial observation (synthetic angular velocity = 0) and the
-    // operator can manually fall back to Idle/DialIn. The error log
-    // is loud enough that a missing gyro stream will not silently
-    // ship to production.
-    match imu.enable_report(SENSOR_REPORTID_GYROSCOPE, period_ms) {
-        Ok(true) => info!(period_ms, "IMU: enabled report 0x02 (Calibrated Gyroscope)"),
-        Ok(false) => warn!(
-            period_ms,
-            "IMU: no GET_FEATURE_RESP for 0x02 within 2 s; \
-             continuing on the assumption the chip is streaming anyway"
-        ),
-        Err(e) => warn!(
-            ?e,
-            "IMU: SET_FEATURE for 0x02 failed; angular_velocity_body \
-             will stay None and PolicyRunner will use a zero gyro"
-        ),
-    }
-
-    let mount_is_identity = mount_quat == ImuConfig::IDENTITY_QUAT;
     info!(
         period_ms,
         spi = %cfg.spi_device,
         mount_quat_sensor_body = ?mount_quat,
         mount_is_identity,
-        "IMU: streaming AR/VR-stabilized rotation vector + calibrated gyro \
-         into shared state (consumed by PolicyRunner and telemetry pump)"
+        "IMU: thread spawning; will retry SHTP bring-up forever in background \
+         (runtime continues without a live IMU until the chip responds)"
     );
 
+    // Helper: sleep up to `dur`, returning early if the shutdown
+    // flag is set. Polls the flag every 50 ms so even a 5 s backoff
+    // can't delay shutdown by more than that. Returns `true` if the
+    // sleep was interrupted by shutdown.
+    fn sleep_or_shutdown(dur: Duration, shutdown: &Arc<AtomicBool>) -> bool {
+        let wake = Instant::now() + dur;
+        while let Some(remaining) = wake.checked_duration_since(Instant::now()) {
+            if shutdown.load(Ordering::SeqCst) {
+                return true;
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(50)));
+        }
+        false
+    }
+
     Some(std::thread::spawn(move || {
-        // Loop body inlined here (rather than a `run_imu_loop` helper)
-        // so we don't have to name `BNO08x`'s sensor-interface generic
-        // parameter — `new_spi` returns a concrete but unwieldy type
-        // that's easier to capture-by-move into a closure than to
-        // declare in a function signature.
-        let mut imu = imu; // re-bind as `mut` so the closure can call &mut self methods
+        // ---------- Bring-up: retry forever until success or shutdown ----------
+        //
+        // Both this loop body and the streaming loop below are inlined
+        // (rather than factored into helpers) so we don't have to name
+        // `BNO08x`'s sensor-interface generic parameter — `new_spi`
+        // returns a concrete but unwieldy
+        // `BNO08x<'_, SpiInterface<SpiDevice, GpiodIn, GpiodOut>>` that
+        // isn't re-exported from `bno08x-rs`'s crate root. Closure /
+        // `loop { break value }` type inference sidesteps the problem
+        // and keeps us free of `bno08x_rs::interface::spi::*` private-ish
+        // submodule paths that the upstream may rearrange between
+        // releases.
+        let mut backoff = Duration::from_millis(BRINGUP_BACKOFF_MIN_MS);
+        let mut attempt: u32 = 0;
+        let mut imu = loop {
+            if shutdown.load(Ordering::SeqCst) {
+                info!(target: "bebop_linux::imu", "IMU thread exiting before bring-up succeeded");
+                return;
+            }
+            attempt += 1;
+            let bringup_result: Result<_, String> = (|| {
+                let mut imu = BNO08x::new_spi(
+                    &cfg.spi_device,
+                    &cfg.int_chip,
+                    cfg.int_line,
+                    &cfg.rst_chip,
+                    cfg.rst_line,
+                )
+                .map_err(|e| {
+                    format!(
+                        "open SPI={} INT={}:{} RST={}:{}: {e:?}",
+                        cfg.spi_device, cfg.int_chip, cfg.int_line, cfg.rst_chip, cfg.rst_line
+                    )
+                })?;
+                imu.init()
+                    .map_err(|e| format!("SHTP boot handshake (init): {e:?}"))?;
+                imu.enable_report(SENSOR_REPORTID_ARVR_STABILIZED_RV, period_ms)
+                    .map_err(|e| format!("SET_FEATURE for 0x28: {e:?}"))?;
+                Ok(imu)
+            })();
+
+            match bringup_result {
+                Ok(imu) => {
+                    info!(
+                        attempt,
+                        period_ms,
+                        "IMU: bring-up succeeded; AR/VR-stabilized RV (0x28) subscribed"
+                    );
+                    break imu;
+                }
+                Err(msg) => {
+                    if attempt <= BRINGUP_LOUD_ATTEMPTS {
+                        warn!(
+                            attempt,
+                            backoff_ms = backoff.as_millis() as u64,
+                            error = %msg,
+                            "IMU: bring-up attempt failed; retrying after backoff"
+                        );
+                    } else if attempt == BRINGUP_LOUD_ATTEMPTS + 1 {
+                        error!(
+                            attempt,
+                            error = %msg,
+                            "IMU: bring-up still failing after {} attempts; \
+                             will keep retrying every {} ms but suppressing \
+                             per-attempt warnings (heartbeat every {} attempts) \
+                             — hint: check the BNO SPI-mode jumpers, INT/RST \
+                             wiring, or power-cycle the IMU board to clear any \
+                             stale feature subscription from a previous run",
+                            BRINGUP_LOUD_ATTEMPTS,
+                            BRINGUP_BACKOFF_MAX_MS,
+                            BRINGUP_PERIODIC_INFO_EVERY
+                        );
+                    } else if attempt % BRINGUP_PERIODIC_INFO_EVERY == 0 {
+                        info!(
+                            attempt,
+                            error = %msg,
+                            "IMU: bring-up still failing (heartbeat)"
+                        );
+                    }
+                    if sleep_or_shutdown(backoff, &shutdown) {
+                        info!(
+                            target: "bebop_linux::imu",
+                            attempt,
+                            "IMU thread exiting before bring-up succeeded"
+                        );
+                        return;
+                    }
+                    backoff =
+                        (backoff * 2).min(Duration::from_millis(BRINGUP_BACKOFF_MAX_MS));
+                }
+            }
+        };
+
+        // Subscribe to 0x02 (Calibrated Gyroscope). The chip applies
+        // its own bias-tracking calibration to this report, which is
+        // what we want for closed-loop control — the uncalibrated
+        // stream (0x07) takes several seconds to converge after a
+        // power cycle.
+        //
+        // Unlike the rotation vector, we don't retry the gyro: a
+        // failed gyro subscription leaves the policy with synthetic
+        // angular velocity = 0, which is a safe (if degraded) state.
+        // The single warn is loud enough to surface in observability
+        // tools without spamming the log.
+        match imu.enable_report(SENSOR_REPORTID_GYROSCOPE, period_ms) {
+            Ok(true) => info!(period_ms, "IMU: enabled report 0x02 (Calibrated Gyroscope)"),
+            Ok(false) => warn!(
+                period_ms,
+                "IMU: no GET_FEATURE_RESP for 0x02 within 2 s; \
+                 continuing on the assumption the chip is streaming anyway"
+            ),
+            Err(e) => warn!(
+                ?e,
+                "IMU: SET_FEATURE for 0x02 failed; angular_velocity_body \
+                 will stay None and PolicyRunner will use a zero gyro"
+            ),
+        }
+
+        info!(
+            period_ms,
+            "IMU: streaming AR/VR-stabilized rotation vector + calibrated gyro \
+             into shared state (consumed by PolicyRunner and telemetry pump)"
+        );
+
+        // ---------- Streaming loop ----------
         while !shutdown.load(Ordering::SeqCst) {
             // Pump SHTP messages; 25 ms per-message timeout matches
             // the diagnostic probe so a quiet bus doesn't stall the
@@ -450,7 +598,49 @@ pub fn spawn_imu_thread(
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-        info!(target: "bebop_linux::imu", "IMU thread exiting");
+
+        // ---------- Graceful disable (restart hygiene) ----------
+        //
+        // The chip is currently streaming 0x28 + 0x02 on the data
+        // channel at `period_ms` cadence. If we just drop `imu` here
+        // (which releases the SPI/GPIO handles) the chip happily
+        // keeps streaming into the void — and the next `bebop-linux`
+        // start will then see those stale reports collide with the
+        // SHTP control channel during its own `verify_product_id`
+        // exchange, triggering the slow retry loop above.
+        //
+        // SH-2 SET_FEATURE with `interval_us = 0` is the spec way to
+        // tell the chip "stop sending this report"; we do that for
+        // both subscriptions to silence the data channel.
+        //
+        // We deliberately do NOT also call `soft_reset()` here:
+        //   1. It's redundant — the *next* bring-up's
+        //      `BNO08x::new_spi` runs `SpiInterface::setup`, which
+        //      RST-pulses the chip via the GPIO line and brings it
+        //      up cold-boot-clean regardless of whether we
+        //      soft-reset it on the way out.
+        //   2. The chip's reply to `soft_reset` is the full SHTP
+        //      advertisement (~1.2 KB on the BNO085 revs we ship),
+        //      which the upstream `handle_advertise_response` used
+        //      to walk off the end of (panic at `driver.rs:595`,
+        //      `index out of bounds: the len is 1276 but the index
+        //      is 1276`). We've patched that bug — see BEBOP-PATCH
+        //      [5/5] — but the soft-reset path is still ~500 ms of
+        //      pointless wait at shutdown, and the disable calls
+        //      below are sufficient for restart hygiene on their
+        //      own.
+        //
+        // Both calls are best-effort (`let _`): if they fail it's
+        // because the chip is wedged hard enough that the bring-up
+        // loop above will need to RST-pulse it on the next start
+        // anyway, and there's nothing useful we can do about it
+        // from a process that's already on its way out.
+        let _ = imu.enable_report(SENSOR_REPORTID_ARVR_STABILIZED_RV, 0);
+        let _ = imu.enable_report(SENSOR_REPORTID_GYROSCOPE, 0);
+        info!(
+            target: "bebop_linux::imu",
+            "IMU thread exiting (subscriptions disabled for clean restart)"
+        );
     }))
 }
 
