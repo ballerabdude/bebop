@@ -102,28 +102,140 @@ def undesired_yaw_penalty(env, command_name: str) -> torch.Tensor:
     return (yaw_vel**2) * is_standing
 
 
-def leg_action_when_stable_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+def leg_action_when_stable_penalty(
+    env,
+    asset_cfg: SceneEntityCfg,
+    upright_threshold: float = -0.7,
+    still_threshold: float = 1.0,
+) -> torch.Tensor:
     """Penalize action magnitude when the robot is upright AND nearly still.
 
     Discourages "twitching while balanced" — the policy is allowed to act
     freely whenever it's actually disturbed or trying to move.
+
+    Args:
+        upright_threshold: ``proj_grav[:, 2]`` must be **less than** this for
+            the env to count as upright. ``-1.0`` is perfectly upright,
+            ``0.0`` is sideways. Default ``-0.7`` ≈ within ~45° of vertical
+            (was ``-0.85``, ≈25°). The looser default makes the gate fire
+            during recovery, not only at perfect balance, so the policy
+            learns the smoothness lesson far more often per rollout.
+        still_threshold: env counts as "still" when ``|root_ang_vel_b| <``
+            this in rad/s. Default ``1.0`` (was ``0.5``) for the same
+            reason — the gate fires during gentle recovery, not just at
+            zero velocity.
     """
     robot = env.scene[asset_cfg.name]
     proj_grav = _ensure_tensor(robot.data.projected_gravity_b, env_device=getattr(env, "device", None))
-    is_upright = (proj_grav[:, 2] < -0.85).float()
+    is_upright = (proj_grav[:, 2] < upright_threshold).float()
     ang_vel = _ensure_tensor(robot.data.root_ang_vel_b, proj_grav)
-    is_still = (torch.norm(ang_vel, dim=1) < 0.5).float()
+    is_still = (torch.norm(ang_vel, dim=1) < still_threshold).float()
     is_stable = is_upright * is_still
     all_joint_actions = _ensure_tensor(env.action_manager.action, proj_grav)
     action_magnitude = torch.sum(torch.square(all_joint_actions), dim=1)
     return action_magnitude * is_stable
 
 
-def leg_position_hold_reward(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Reward low joint velocity when the robot is upright."""
+def leg_position_hold_reward(
+    env,
+    asset_cfg: SceneEntityCfg,
+    upright_threshold: float = -0.7,
+) -> torch.Tensor:
+    """Reward low joint velocity when the robot is upright.
+
+    Args:
+        upright_threshold: see :func:`leg_action_when_stable_penalty`.
+            Default ``-0.7`` (was ``-0.85``) so the policy is rewarded for
+            slowing its joints down during recovery, not only after
+            perfect balance has already been achieved.
+    """
     robot = env.scene[asset_cfg.name]
     proj_grav = _ensure_tensor(robot.data.projected_gravity_b, env_device=getattr(env, "device", None))
-    is_upright = (proj_grav[:, 2] < -0.85).float()
+    is_upright = (proj_grav[:, 2] < upright_threshold).float()
     joint_vel = _ensure_tensor(robot.data.joint_vel, proj_grav)
     joint_vel_magnitude = torch.sum(torch.square(joint_vel), dim=1)
     return torch.exp(-0.5 * joint_vel_magnitude) * is_upright
+
+
+def torso_upright_via_legs_reward(
+    env,
+    asset_cfg: SceneEntityCfg,
+    std: float = 0.2,
+    foot_compensation_gain: float = 1.0,
+    knee_compensation_gain: float = 1.0,
+    imu_name: str = "imu",
+) -> torch.Tensor:
+    """Reward an upright torso achieved through ankle + knee compensation.
+
+    Reads the body-frame projected gravity from the IMU sensor — the same
+    signal the policy observes via ``mdp.imu_projected_gravity`` and the
+    same signal the real-robot firmware derives from the BNO085 fused
+    quaternion (see ``firmware/bebop-linux/src/imu.rs``). When the robot
+    is upright this vector is approximately ``(0, 0, -1)`` in the body
+    frame; ``proj_grav[:, 0]`` grows positive as the torso pitches
+    forward, ``proj_grav[:, 1]`` as it rolls right.
+
+    The pitch component is **not** penalised directly. Instead, it is
+    folded together with the average ankle (foot) joint angle AND the
+    average knee (shin) joint angle into a *residual*: the slice of
+    torso pitch that neither the ankles nor the knees are compensating
+    for. The policy can therefore satisfy this reward by holding the
+    torso perfectly vertical, OR by deliberately bending the knees /
+    pitching the ankles to take up the slack — i.e., a full
+    leg-compensation balance strategy (ankle strategy + knee strategy)
+    where the lower limbs absorb the kinematic chain's tilt and keep
+    the torso plate level.
+
+    The roll component is penalised directly. Neither the foot pitch
+    nor the knee pitch joints have any roll authority on this
+    articulation (lateral balance is the hip-abduction group's job),
+    so there is nothing to "compensate" with on that axis.
+
+    Reward is ``exp(-(pitch_residual^2 + roll^2) / std^2)``, bounded in
+    ``[0, 1]``. Multiplicatively shaped so a non-flat torso AND
+    non-compensating legs is the only path to zero reward.
+
+    Args:
+        std: shaping width. Default ``0.2`` ≈ ~11° of effective tilt
+            (uncompensated by the legs) before the reward drops to
+            ``exp(-1) ≈ 0.37`` of its maximum. Tighten toward ``0.1``
+            for a stricter upright bias, loosen toward ``0.4`` if the
+            policy needs more freedom to recover from large initial
+            perturbations.
+        foot_compensation_gain: how strongly foot pitch is credited
+            for offsetting torso pitch. ``1.0`` treats one radian of
+            average foot pitch as offsetting one unit of projected-
+            gravity pitch (i.e. ``sin(theta) ≈ theta`` for small
+            angles). Drop to ``0.5`` if the policy starts pitching the
+            ankles to "fake" being upright while the torso remains
+            tilted.
+        knee_compensation_gain: same idea for the shin (knee) joints.
+            Default ``1.0``. The knee and ankle act in series in the
+            pitch plane, so the policy can split the compensation
+            between them however the reward landscape prefers; tune
+            this independently if you observe knee-dominant or
+            ankle-dominant gaming.
+        imu_name: scene key for the IMU sensor. Defaults to the
+            ``imu`` key wired up in ``BebopV2BaseEnvCfg``.
+    """
+    robot = env.scene[asset_cfg.name]
+    imu = env.scene[imu_name]
+    proj_grav = _ensure_tensor(
+        imu.data.projected_gravity_b, env_device=getattr(env, "device", None)
+    )
+    pitch = proj_grav[:, 0]
+    roll = proj_grav[:, 1]
+
+    joint_pos = _ensure_tensor(robot.data.joint_pos, proj_grav)
+    # JOINT_NAMES_ALL indices: 4/5 = shin_left/right (knee), 6/7 = foot_left/right
+    # (ankle). Same convention as shin_symmetry_penalty / foot_symmetry_penalty.
+    shin_avg = 0.5 * (joint_pos[:, 4] + joint_pos[:, 5])
+    foot_avg = 0.5 * (joint_pos[:, 6] + joint_pos[:, 7])
+
+    pitch_residual = (
+        pitch
+        - foot_compensation_gain * foot_avg
+        - knee_compensation_gain * shin_avg
+    )
+    err_sq = pitch_residual * pitch_residual + roll * roll
+    return torch.exp(-err_sq / (std * std))

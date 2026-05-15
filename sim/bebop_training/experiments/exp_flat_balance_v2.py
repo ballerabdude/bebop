@@ -30,7 +30,7 @@ class BebopV2FlatBalanceCfg(BebopV2BaseEnvCfg):
         # Strongly reward "hold still when balanced" while standing.
         self.rewards.leg_action_when_stable.weight = -3.0
         self.rewards.leg_hold_reward.weight = 1.0
-        self.rewards.undesired_yaw.weight = -2.0
+        # self.rewards.undesired_yaw.weight = -2.0
 
         # Disable push disturbances during the balance stage.
         if hasattr(self.events, "push_robot"):

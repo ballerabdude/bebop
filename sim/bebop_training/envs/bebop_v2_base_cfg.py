@@ -26,6 +26,7 @@ from .bebop_v2_rewards import (
     leg_action_when_stable_penalty,
     leg_position_hold_reward,
     shin_symmetry_penalty,
+    torso_upright_via_legs_reward,
     undesired_yaw_penalty,
 )
 from .bebop_v2_terminations import base_link_on_ground
@@ -52,10 +53,10 @@ FW_HIP_ABDUCTION_KP = 40.0
 FW_HIP_ABDUCTION_KD = 3.0
 FW_FEMUR_KP = 160.0
 FW_FEMUR_KD = 6.0
-FW_SHIN_KP = 120.0
-FW_SHIN_KD = 4.0
-FW_FOOT_KP = 150.0
-FW_FOOT_KD = 2.5
+FW_SHIN_KP = 85.0
+FW_SHIN_KD = 5.0
+FW_FOOT_KP = 30
+FW_FOOT_KD = 1.0
 
 # Per-group torque caps. Pinned to each Robstride model's mechanical
 # peak torque (T-N curve at 36 V — kscalelabs/kbot-v2 metadata + datasheet
@@ -89,15 +90,39 @@ FW_FOOT_VEL_MAX = 20.0           # RS02 working (datasheet rated 43 no-load)
 # one CAN round-trip (TX → RobStride PD → encoder → RX feedback) of
 # observation latency.
 #
-# 0.05 rad/tick @ 100 Hz = 5.0 rad/s setpoint slew rate. Found
-# empirically: 0.005 (0.5 rad/s) and 0.01 (1 rad/s) both starved the
-# policy of authority — the bipedal CoM falls in ~150 ms from a small
-# tilt, but at slew = 1 rad/s the hip can only ramp by ~0.4 Nm/tick
-# (kp_hip ≈ 40), so it takes >100 ms before the PD develops a useful
-# braking torque. 5 rad/s lets the policy build ~10 Nm of new torque
-# in 50 ms while still living comfortably below each joint's working
-# vel_max (12+ rad/s).
-FW_MAX_POS_STEP_PER_TICK_RAD = 0.05
+# Slew tuning history on the bipedal balance task:
+#   * 0.005 rad/tick (0.5 rad/s)  — too tight, sim ground_contact = 1.0
+#     forever; PD can only ramp ~0.2 Nm/tick at the hip.
+#   * 0.01 rad/tick (1.0 rad/s)   — better on the *real* robot with the
+#     old broken sim, but still strangled the new properly-matched sim.
+#   * 0.05 rad/tick (5.0 rad/s)   — converged a stable policy, but knees
+#     and ankles oscillated in deployment; metrics: leg_hold_reward ≈ 0.14,
+#     shin_symmetry ≈ -0.005.
+#   * 0.10 rad/tick (10.0 rad/s)  — better still; leg_hold_reward jumped
+#     to 0.27 and shin_symmetry to -0.003. Confirmed slew lag was
+#     contributing to commanded oscillation, but entropy collapsed to
+#     -14 and episode length plateaued at 880 — policy converged to a
+#     deterministic strategy that fails on ~50% of domain-randomized envs.
+#   * 1.0 rad/tick (100.0 rad/s)  — current. Effectively non-binding:
+#     ~5–10× above each joint's working vel_max (12 rad/s for legs,
+#     20 rad/s for foot), so the slew clamp is *never* the binding
+#     constraint on any physically-reachable trajectory. The wrapper
+#     code path stays in place (so any future slew tightening is a
+#     one-line change here + one in bebop_v2.yaml), but the per-tick
+#     clamp no longer shapes the policy's command stream.
+#
+# Safety implication: with the slew effectively disabled, the host can
+# inject setpoint discontinuities of arbitrary size. The motor's
+# internal torque limiter (mirrored in sim by ``effort_limit_sim`` =
+# tau_max) still clamps the resulting force, so commanded jumps don't
+# translate into mechanical shock loads — but smoothness now lives
+# entirely in the reward shaping (action_l2 / action_rate_l2 /
+# joint_acc_l2) rather than being implicitly enforced by the slew.
+# If smoothness rewards aren't enough by themselves, expect commanded
+# high-frequency twitch to reappear; the next mitigation in that case
+# is to bump action_rate_l2 (currently -0.15) before re-tightening
+# the slew.
+FW_MAX_POS_STEP_PER_TICK_RAD = .125
 FW_ACTION_DELAY_STEPS = 1
 
 
@@ -326,29 +351,26 @@ class EventCfg:
     #
     # We use ``reset_joints_by_offset`` rather than ``reset_joints_by_scale``
     # because every joint's default position is 0.0, and any scale factor
-    # times 0.0 is still 0.0 — the old (0.98, 1.02) scale produced *no*
-    # variation at all and the policy was always seeing the same canonical
-    # standing pose at every reset. Additive offsets give us actual
-    # configuration diversity (knees bent, hips turned, ankles tilted, etc.)
-    # so the policy learns to recover the upright pose from any
-    # mechanically-reachable initial configuration.
+    # times 0.0 is still 0.0 — the original (0.98, 1.02) scale produced
+    # *no* variation at all and the policy only ever saw the canonical
+    # standing pose at reset.
     #
-    # Each joint family's range is pinned to the firmware ground-truth
-    # ``hard_limits`` in ``firmware/bebop-linux/config/bebop_v2.yaml``,
-    # pulled in by the ``soft_joint_pos_limit_factor = 0.9`` margin set on
-    # ``BEBOP_V2_CFG`` above. Sampling exactly at the soft limit means we
-    # stay clear of the ``joint_pos_limits`` penalty on spawn while still
-    # covering the entire reachable joint state space the policy will face
-    # at deployment.
+    # Range philosophy: **modest** offsets, not full mechanical envelope.
+    # A previous iteration ran the resets out to the soft joint limits
+    # (±0.9 rad on hips/femur, ±1.4 on shins). The resulting policy spent
+    # almost every training episode recovering from a near-collapsed pose
+    # and never accumulated enough rollout time in the "near-upright,
+    # hold still" regime where the leg_action_when_stable / leg_hold
+    # rewards fire. The trained policy was twitchy in deployment because
+    # it had been optimised exclusively for emergency recovery.
     #
-    # Trade-off: with wide ranges, some episodes will spawn in poses the
-    # robot cannot actually balance from (e.g. both knees at ~80°). Those
-    # episodes terminate quickly via ``base_link_on_ground`` and contribute
-    # short failure trajectories. That is the intended signal — the policy
-    # learns the boundary of its recovery envelope rather than only the
-    # easy "stand still from neutral" case. The ``joint_deviation`` /
-    # ``base_height`` / symmetry rewards pull the pose back toward neutral
-    # once balance is recovered.
+    # The current ranges give the policy real configuration variety
+    # (so it doesn't overfit to the canonical pose) while keeping the
+    # vast majority of rollouts in a regime where the steady-state
+    # smoothness signal can shape the controller. If a downstream
+    # experiment specifically wants harder starts (e.g. a dedicated
+    # stand-up-from-crouch task), it should override these in
+    # ``__post_init__`` rather than widen them here.
     reset_hip_abduction = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
@@ -357,10 +379,9 @@ class EventCfg:
                 "robot",
                 joint_names=["hip_abduction_left_joint", "hip_abduction_right_joint"],
             ),
-            # YAML hard_limits: pos_min=-1.0, pos_max=1.0 (rad)
-            # 0.9 × hard = ±0.9 rad (~±51.6°) lateral lean.
-            "position_range": (-0.9, 0.9),
-            "velocity_range": (-0.5, 0.5),
+            # ±0.25 rad (~±14°) lateral lean.
+            "position_range": (-0.25, 0.25),
+            "velocity_range": (-0.1, 0.1),
         },
     )
     reset_femur = EventTerm(
@@ -371,10 +392,9 @@ class EventCfg:
                 "robot",
                 joint_names=["femur_left_joint", "femur_right_joint"],
             ),
-            # YAML hard_limits: pos_min=-1.0, pos_max=1.0 (rad)
-            # 0.9 × hard = ±0.9 rad (~±51.6°) hip pitch.
-            "position_range": (-0.9, 0.9),
-            "velocity_range": (-0.5, 0.5),
+            # ±0.30 rad (~±17°) hip pitch.
+            "position_range": (-0.30, 0.30),
+            "velocity_range": (-0.1, 0.1),
         },
     )
     reset_shin = EventTerm(
@@ -385,10 +405,9 @@ class EventCfg:
                 "robot",
                 joint_names=["shin_left_joint", "shin_right_joint"],
             ),
-            # YAML hard_limits: pos_min=-π/2, pos_max=π/2 (rad)
-            # 0.9 × hard ≈ ±1.413 rad (~±81°) knee bend.
-            "position_range": (-1.413, 1.413),
-            "velocity_range": (-0.5, 0.5),
+            # ±0.40 rad (~±23°) knee bend — visibly bent but recoverable.
+            "position_range": (-0.40, 0.40),
+            "velocity_range": (-0.1, 0.1),
         },
     )
     reset_foot = EventTerm(
@@ -399,10 +418,10 @@ class EventCfg:
                 "robot",
                 joint_names=["foot_left_joint", "foot_right_joint"],
             ),
-            # YAML hard_limits: pos_min=-0.8, pos_max=0.8 (rad)
-            # 0.9 × hard = ±0.72 rad (~±41.3°) ankle tilt.
-            "position_range": (-0.72, 0.72),
-            "velocity_range": (-0.5, 0.5),
+            # ±0.20 rad (~±11°) ankle tilt — soaks up bent-knee offsets
+            # so the foot tends to sit roughly flat on the ground.
+            "position_range": (-0.20, 0.20),
+            "velocity_range": (-0.1, 0.1),
         },
     )
 
@@ -411,16 +430,16 @@ class EventCfg:
         mode="reset",
         params={
             "pose_range": {
-                # USD origin is at ground level, so zero xy/yaw offset keeps
-                # feet on ground. Small roll/pitch variation pairs naturally
-                # with the bent-knee / hip-turn joint offsets above so the
-                # base isn't perfectly level just because the legs moved.
+                # USD origin is at ground level, so zero offset keeps feet
+                # on ground. Base tilt is left at zero in the base config
+                # and added by experiments that want a harder reset
+                # (see exp_flat_balance_robust_v2.py for ±0.08 roll/pitch).
                 "x": (0.0, 0.0),
                 "y": (0.0, 0.0),
                 "yaw": (0.0, 0.0),
                 "z": (0.0, 0.0),
-                "roll": (-0.05, 0.05),
-                "pitch": (-0.05, 0.05),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
             },
             "velocity_range": {
                 "x": (0.0, 0.0),
@@ -450,10 +469,43 @@ class RewardsCfg:
     )
     alive = RewTerm(func=mdp.is_alive, weight=2.0)
 
-    joint_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-0.0002)
-    action_l2 = RewTerm(func=mdp.action_l2, weight=-0.005)
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
-    joint_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-6)
+    # Smoothness penalties.
+    #
+    # These were bumped from a previous iteration after the trained policy
+    # came out audibly twitchy on real hardware. A first attempt jumped
+    # them by 4–10× (action_rate_l2 from -0.05 to -0.3) which collapsed
+    # PPO entropy to -15 by iter 650 and produced two reward/episode-
+    # length crashes — the reward landscape became dominated by penalties
+    # and the policy converged to "do almost nothing", which then couldn't
+    # survive even modest reset perturbations. The current weights are a
+    # ~3× bump instead, big enough to discourage micro-twitch but small
+    # enough that the alive + tracking + posture rewards still drive
+    # exploration toward useful behavior.
+    #
+    # Tuning order if these need to change: action_rate_l2 first (it
+    # dominates micro-twitch), then action_l2, then joint_acc_l2. Keep
+    # joint_torques_l2 small — it competes with the policy's authority to
+    # actually balance.
+    joint_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-0.0003)
+    action_l2 = RewTerm(func=mdp.action_l2, weight=-0.01)
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.15)
+    # joint_acc_l2 catches what action_rate_l2 cannot: symmetric high-frequency
+    # joint oscillation. action_rate_l2 only sees the commanded setpoint
+    # change between ticks; with the slew clamp + high foot kp, the policy
+    # can emit a smooth setpoint sequence that still drives the motor with
+    # bang-bang velocity. joint_acc penalises actual physical jerk on the
+    # joints regardless of what the action stream looks like.
+    #
+    # History: bumped -3e-6 -> -8e-6 to catch ~5 Hz knee/ankle oscillation,
+    # but that combined with the heavy symmetry penalties at reset
+    # (femur/shin at -5) made active balance recovery unprofitable vs
+    # "fall fast and accept the short episode" — episode_length crashed
+    # from 878 to 69 steps and entropy rebounded from -3 to +7.5 (the
+    # policy chose the entropy bonus over any deterministic strategy).
+    # -4e-6 is the bisection: still ~30% above the orange-run value that
+    # was working but tolerated visual oscillation, low enough that the
+    # policy can afford to actively recover from an asymmetric reset.
+    joint_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-4.0e-6)
 
     lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
     flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-0.5)
@@ -476,33 +528,43 @@ class RewardsCfg:
         },
     )
 
+    # Symmetry penalties.
+    #
+    # Bumped 2–3× from a previous iteration after a training run produced
+    # an asymmetric reward-hacked balance: the policy was eating the
+    # symmetry penalty to favour a one-leg-dominant stance because (a)
+    # the per-leg actuator gain randomization makes the legs effectively
+    # different at runtime, and (b) the asymmetric strategy survived
+    # longer than the symmetric one, paying back the penalty in alive
+    # bonus. Scaling these up makes it net-unprofitable to break
+    # symmetry on the standing task.
     hip_abduction_symmetry = RewTerm(
         func=hip_abduction_symmetry_penalty,
-        weight=-2.0,
+        weight=-4.0,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     femur_symmetry = RewTerm(
         func=femur_symmetry_penalty,
-        weight=-2.5,
+        weight=-5.0,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     shin_symmetry = RewTerm(
         func=shin_symmetry_penalty,
-        weight=-2.5,
+        weight=-5.0,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     foot_symmetry = RewTerm(
         func=foot_symmetry_penalty,
-        weight=-1.0,
+        weight=-3.0,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
     # Penalize yaw motion only when the policy is commanded to stand still.
-    undesired_yaw = RewTerm(
-        func=undesired_yaw_penalty,
-        weight=-1.0,
-        params={"command_name": "base_velocity"},
-    )
+    # undesired_yaw = RewTerm(
+    #     func=undesired_yaw_penalty,
+    #     weight=-1.0,
+    #     params={"command_name": "base_velocity"},
+    # )
     # Soft "hold still when stable" terms (only active when the robot is upright
     # AND not commanded to move), much smaller weights so they don't suppress
     # walking motion under non-zero commands.
@@ -514,6 +576,21 @@ class RewardsCfg:
     leg_hold_reward = RewTerm(
         func=leg_position_hold_reward,
         weight=0.25,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+
+    # Torso upright with ankle + knee compensation. Reads body-frame
+    # projected gravity from the IMU sensor (same signal the policy
+    # observes) and rewards the pitch component being offset by the
+    # average foot AND shin joint angles — full leg-compensation
+    # balance strategy (ankle + knee act in series in the pitch plane).
+    # Roll is penalised directly since neither joint has lateral
+    # authority. Weight chosen at half the alive bonus so this is a
+    # strong shaping signal without drowning the locomotion tracking
+    # terms when commands are non-zero.
+    torso_upright_via_legs = RewTerm(
+        func=torso_upright_via_legs_reward,
+        weight=1.0,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 

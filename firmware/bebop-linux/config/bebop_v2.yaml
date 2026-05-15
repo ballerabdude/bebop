@@ -42,17 +42,30 @@ defaults:
   # If you tune this value, retrain.
   #
   # Trail of empirical numbers we tried (bipedal balance task):
-  #   * 0.005 rad/tick (0.5 rad/s) — too tight, sim ground_contact = 1.0
+  #   * 0.005 rad/tick (0.5 rad/s)   — too tight, sim ground_contact = 1.0
   #     forever; PD can only ramp ~0.2 Nm/tick at the hip.
-  #   * 0.01 rad/tick (1.0 rad/s) — better on the *real* robot with the
+  #   * 0.01 rad/tick (1.0 rad/s)    — better on the *real* robot with the
   #     old broken sim, but still strangled the new properly-matched sim.
-  #   * 0.05 rad/tick (5.0 rad/s) — current. Fast enough to develop
-  #     ~10 Nm at the hip in 50 ms (kp_hip = 40), which is the regime
-  #     needed to brake an inverted-pendulum fall (~150 ms timescale).
-  #     Still ~2.5× below the per-joint vel_max (12 rad/s for legs),
-  #     so the PD loop never has to fight the velocity cap.
+  #   * 0.05 rad/tick (5.0 rad/s)    — converged a stable policy, but knees
+  #     and ankles oscillated in deployment.
+  #   * 0.10 rad/tick (10.0 rad/s)   — significantly less oscillation, but
+  #     entropy collapsed in training to -14 and episode length plateaued.
+  #   * 1.0 rad/tick (100.0 rad/s)   — current. Effectively non-binding:
+  #     ~5-10x above each joint's working vel_max (12 rad/s for legs,
+  #     20 rad/s for foot), so this no longer shapes the trajectory the
+  #     policy can issue. The wrapper code path stays so re-enabling
+  #     a tighter slew is a one-line change here + one in
+  #     bebop_v2_base_cfg.py.
+  #
+  # Safety: with slew effectively disabled, the host can inject setpoint
+  # discontinuities of arbitrary size. The motor's internal torque
+  # limiter still clamps the actual force at `hard_limits.tau_max`
+  # below, so commanded jumps don't translate into mechanical shock
+  # loads. Smoothness of the command stream now lives entirely in the
+  # sim-side reward shaping (action_rate_l2 / joint_acc_l2 in
+  # bebop_v2_base_cfg.py::RewardsCfg).
   slew:
-    max_pos_step_per_tick: 0.05    # rad — at 100 Hz tick = 5.0 rad/s slew cap
+    max_pos_step_per_tick: 12.5     # rad — at 100 Hz tick = 100 rad/s slew cap (effectively non-binding)
     arm_ramp_s:            0.5     # gain ramp 0 → hold over arm
     abort_ramp_s:          0.3     # gain ramp hold → 0 over abort
 

@@ -53,8 +53,18 @@ class BebopPPOBaseCfg(RslRlOnPolicyRunnerCfg):
         clip_param=0.2,
         
         # Entropy (Exploration)
-        # 0.01 is standard. If robot collapses immediately and never tries to stand, increase to 0.02.
-        entropy_coef=0.01, 
+        # Empirically tuned across three runs:
+        #   * 0.01 -> entropy crashed to -15 by iter 650 (cyan)
+        #   * 0.02 -> entropy held at ~-3 to -4 stable (magenta)
+        #   * 0.015 (with bumped symmetry penalties) -> on track to
+        #     crash again (orange, -11 by iter 1000)
+        # The right value scales with the weight of the rest of the
+        # reward landscape. With the current symmetry (-4 to -5) and
+        # joint_acc (-8e-6) penalties, 0.02 is what holds the entropy
+        # in the stable regime. If you add more penalty weight later,
+        # bump this up in step (e.g. 0.025 if you double symmetry weights
+        # again).
+        entropy_coef=0.02,
         
         # Training Updates
         num_learning_epochs=5,   # How many times to reuse the collected data
