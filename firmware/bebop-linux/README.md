@@ -127,6 +127,18 @@ sudo ./scripts/install-jetson.sh --linux-only --release firmware/v0.2.0
 sudo ./scripts/install-jetson.sh --linux-only --run-id N
 ```
 
+For installing straight from a local checkout (no GitHub round-trip —
+useful for on-device dev iteration):
+
+```bash
+# build first, then install the pre-built binary + working-tree configs
+cargo build --release            # in firmware/bebop-linux/
+sudo ./scripts/install-jetson.sh --linux-only --local
+
+# or do both in one shot (cargo runs as your invoking user)
+sudo ./scripts/install-jetson.sh --linux-only --local --build
+```
+
 It lays things down as:
 
 ```

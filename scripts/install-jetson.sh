@@ -17,6 +17,22 @@
 #   sudo ./install-jetson.sh --release firmware/v0.2.0   # pin bebop-linux to a tagged release
 #   sudo ./install-jetson.sh --run-id 1234    # pin both daemons to a CI run (pre-release path)
 #   sudo ./install-jetson.sh --branch dev     # latest green agent build on a branch
+#   sudo ./install-jetson.sh --local          # install from the local repo
+#                                             # checkout (no GitHub, no `gh`):
+#                                             # uses pre-built binaries from
+#                                             # each crate's target/release/
+#                                             # and config/deploy assets from
+#                                             # the working tree. Pair with
+#                                             # --build to also compile.
+#   sudo ./install-jetson.sh --local --build  # like --local, but also runs
+#                                             # `cargo build --release` for
+#                                             # whichever daemons are being
+#                                             # installed first (as SUDO_USER
+#                                             # so target/ ownership stays
+#                                             # sane).
+#   sudo ./install-jetson.sh --local --repo-root /path/to/bebop
+#                                             # use a different checkout than
+#                                             # the one containing this script
 #   sudo ./install-jetson.sh --skip-prereqs   # don't touch system packages
 #   sudo ./install-jetson.sh --agent-only     # skip bebop-linux
 #   sudo ./install-jetson.sh --linux-only     # skip bebop-agent
@@ -42,7 +58,8 @@
 # Requires:
 #   * `gh` CLI authenticated (`gh auth login`) — needed to list/download
 #     Releases, workflow artifacts, and (for the agent) the deploy/config
-#     files via the contents API (works for private repos).
+#     files via the contents API (works for private repos). Not needed
+#     when --local is used.
 #   * arm64 Linux — the artifacts are aarch64 only.
 #
 # Idempotency:
@@ -77,6 +94,16 @@ SETUP_CAN_ONLY=0
 BUILD_GS_USB=0
 SETUP_IMU=0
 SETUP_IMU_ONLY=0
+# --local: install from a local checkout instead of GitHub. Pre-built
+# release binaries are picked up from each crate's target/release/ and
+# configs/units come from the working tree. No `gh` required.
+LOCAL=0
+# Default repo root is the checkout containing this script.
+LOCAL_REPO_ROOT=""
+# When set with --local, run `cargo build --release` for each daemon
+# being installed before staging. Done as SUDO_USER so target/ stays
+# owned by the invoking user.
+BUILD=0
 # 1 Mbps is the Robstride bus rate; bebop-linux assumes the same.
 CAN_BITRATE="${CAN_BITRATE:-1000000}"
 # Group that owns /dev/spidev* and /dev/gpiochip* after `--setup-imu`.
@@ -106,6 +133,9 @@ while [[ $# -gt 0 ]]; do
         --branch)         BRANCH="$2"; shift 2 ;;
         --workflow)       WORKFLOW="$2"; shift 2 ;;
         --repo)           REPO="$2"; shift 2 ;;
+        --local)          LOCAL=1; shift ;;
+        --build)          BUILD=1; shift ;;
+        --repo-root)      LOCAL_REPO_ROOT="$2"; shift 2 ;;
         --skip-prereqs)   SKIP_PREREQS=1; shift ;;
         --agent-only)     INSTALL_LINUX=0; shift ;;
         --linux-only)     INSTALL_AGENT=0; shift ;;
@@ -120,6 +150,33 @@ done
 
 if [[ "${INSTALL_AGENT}" -eq 0 && "${INSTALL_LINUX}" -eq 0 ]]; then
     echo "--agent-only and --linux-only are mutually exclusive" >&2
+    exit 2
+fi
+
+# `--local` is mutually exclusive with the GitHub-source selectors —
+# they're meaningless when we're not talking to GitHub. Bail loudly so
+# operators don't think their pin took effect.
+if [[ "${LOCAL}" -eq 1 ]]; then
+    if [[ -n "${RUN_ID}" || -n "${RELEASE_TAG}" ]]; then
+        echo "--local cannot be combined with --run-id or --release" >&2
+        exit 2
+    fi
+fi
+if [[ "${LOCAL}" -eq 0 && "${BUILD}" -eq 1 ]]; then
+    echo "--build only makes sense together with --local" >&2
+    exit 2
+fi
+if [[ -n "${LOCAL_REPO_ROOT}" && "${LOCAL}" -eq 0 ]]; then
+    echo "--repo-root only makes sense together with --local" >&2
+    exit 2
+fi
+
+# Default --local checkout: the repo containing this script.
+if [[ "${LOCAL}" -eq 1 && -z "${LOCAL_REPO_ROOT}" ]]; then
+    LOCAL_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
+if [[ "${LOCAL}" -eq 1 && ! -d "${LOCAL_REPO_ROOT}" ]]; then
+    echo "--repo-root '${LOCAL_REPO_ROOT}' is not a directory" >&2
     exit 2
 fi
 
@@ -375,7 +432,11 @@ if [[ "${ARCH}" != "aarch64" && "${ARCH}" != "arm64" ]]; then
     echo "      Continuing anyway — this will almost certainly fail to run." >&2
 fi
 
-if ! command -v gh >/dev/null 2>&1; then
+if [[ "${LOCAL}" -eq 1 ]]; then
+    echo "==> --local: installing from ${LOCAL_REPO_ROOT}"
+fi
+
+if [[ "${LOCAL}" -eq 0 ]] && ! command -v gh >/dev/null 2>&1; then
     cat >&2 <<'EOF'
 gh CLI not found. Install it first, e.g.:
 
@@ -396,7 +457,7 @@ fi
 # authenticated, lift their token into GH_TOKEN; gh honours that env
 # var ahead of the on-disk credential store, and the rest of the
 # script then "just works" without us having to wrap every call.
-if ! gh auth status >/dev/null 2>&1; then
+if [[ "${LOCAL}" -eq 0 ]] && ! gh auth status >/dev/null 2>&1; then
     if [[ -n "${SUDO_USER:-}" ]] \
         && sudo -u "${SUDO_USER}" -H gh auth status >/dev/null 2>&1; then
         echo "==> reusing gh auth from invoking user '${SUDO_USER}'"
@@ -437,14 +498,16 @@ fi
 
 NEED_RUN_ID=0
 NEED_RELEASE=0
-if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
-    NEED_RUN_ID=1
-fi
-if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
-    if [[ -n "${RUN_ID}" ]]; then
+if [[ "${LOCAL}" -eq 0 ]]; then
+    if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
         NEED_RUN_ID=1
-    else
-        NEED_RELEASE=1
+    fi
+    if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
+        if [[ -n "${RUN_ID}" ]]; then
+            NEED_RUN_ID=1
+        else
+            NEED_RELEASE=1
+        fi
     fi
 fi
 
@@ -512,66 +575,170 @@ fetch_repo_file() {
         > "${dst}"
 }
 
-if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
-    echo "==> downloading bebop-agent-aarch64 artifact"
-    mkdir -p "${WORK_DIR}/agent-artifact"
-    gh run download "${RUN_ID}" \
-        --repo "${REPO}" \
-        --name bebop-agent-aarch64 \
-        --dir "${WORK_DIR}/agent-artifact"
-    AGENT_BIN="${WORK_DIR}/agent-artifact/bebop-agent"
-    if [[ ! -f "${AGENT_BIN}" ]]; then
-        echo "bebop-agent binary missing from artifact" >&2
-        exit 1
+# Run a command as the invoking user (SUDO_USER) when we're under sudo,
+# preserving the user's PATH so cargo/rustup shims resolve. Falls back
+# to running directly if there's no SUDO_USER (e.g. true root login).
+run_as_user() {
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        sudo -u "${SUDO_USER}" -H bash -lc "$*"
+    else
+        bash -lc "$*"
     fi
-    chmod +x "${AGENT_BIN}"
+}
 
-    echo "==> fetching bebop-agent deploy assets"
-    fetch_repo_file "jetson-agent/deploy/systemd/bebop-agent.service" \
-        "${WORK_DIR}/bebop-agent.service"
-    fetch_repo_file "jetson-agent/deploy/examples/agent.toml" \
-        "${WORK_DIR}/agent.toml"
+# --build (only valid with --local): compile each daemon being installed
+# before staging. Done as SUDO_USER so target/ keeps user-writable
+# permissions across re-runs without sudo.
+if [[ "${LOCAL}" -eq 1 && "${BUILD}" -eq 1 ]]; then
+    if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
+        echo "==> building bebop-agent (release) in ${LOCAL_REPO_ROOT}/jetson-agent"
+        run_as_user "cd '${LOCAL_REPO_ROOT}/jetson-agent' && cargo build --release -p bebop-agent"
+    fi
+    if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
+        echo "==> building bebop-linux (release) in ${LOCAL_REPO_ROOT}/firmware/bebop-linux"
+        run_as_user "cd '${LOCAL_REPO_ROOT}/firmware/bebop-linux' && cargo build --release"
+    fi
+fi
+
+if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
+    if [[ "${LOCAL}" -eq 1 ]]; then
+        echo "==> staging bebop-agent from local checkout"
+        AGENT_BIN_SRC="${LOCAL_REPO_ROOT}/jetson-agent/target/release/bebop-agent"
+        AGENT_UNIT_SRC="${LOCAL_REPO_ROOT}/jetson-agent/deploy/systemd/bebop-agent.service"
+        AGENT_TOML_SRC="${LOCAL_REPO_ROOT}/jetson-agent/deploy/examples/agent.toml"
+        if [[ ! -f "${AGENT_BIN_SRC}" ]]; then
+            cat >&2 <<EOF
+bebop-agent binary not found at:
+    ${AGENT_BIN_SRC}
+
+Build it first (or re-run with --build):
+    (cd ${LOCAL_REPO_ROOT}/jetson-agent && cargo build --release -p bebop-agent)
+EOF
+            exit 1
+        fi
+        for f in "${AGENT_UNIT_SRC}" "${AGENT_TOML_SRC}"; do
+            if [[ ! -f "${f}" ]]; then
+                echo "missing local deploy asset: ${f}" >&2
+                exit 1
+            fi
+        done
+        mkdir -p "${WORK_DIR}/agent-artifact"
+        install -m 0755 "${AGENT_BIN_SRC}"  "${WORK_DIR}/agent-artifact/bebop-agent"
+        install -m 0644 "${AGENT_UNIT_SRC}" "${WORK_DIR}/bebop-agent.service"
+        install -m 0644 "${AGENT_TOML_SRC}" "${WORK_DIR}/agent.toml"
+        AGENT_BIN="${WORK_DIR}/agent-artifact/bebop-agent"
+    else
+        echo "==> downloading bebop-agent-aarch64 artifact"
+        mkdir -p "${WORK_DIR}/agent-artifact"
+        gh run download "${RUN_ID}" \
+            --repo "${REPO}" \
+            --name bebop-agent-aarch64 \
+            --dir "${WORK_DIR}/agent-artifact"
+        AGENT_BIN="${WORK_DIR}/agent-artifact/bebop-agent"
+        if [[ ! -f "${AGENT_BIN}" ]]; then
+            echo "bebop-agent binary missing from artifact" >&2
+            exit 1
+        fi
+        chmod +x "${AGENT_BIN}"
+
+        echo "==> fetching bebop-agent deploy assets"
+        fetch_repo_file "jetson-agent/deploy/systemd/bebop-agent.service" \
+            "${WORK_DIR}/bebop-agent.service"
+        fetch_repo_file "jetson-agent/deploy/examples/agent.toml" \
+            "${WORK_DIR}/agent.toml"
+    fi
 fi
 
 if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
-    # Download the firmware bundle (binary + bebop_v2.yaml + policy.onnx +
-    # policy.onnx.data + bebop-linux.service + VERSION). The CI artifact
-    # and Release asset are byte-identical and use the same filename.
+    # Source layout (binary + bebop_v2.yaml + policy.onnx + policy.onnx.data +
+    # bebop-linux.service + VERSION) matches what the CI bundle ships, so
+    # everything downstream of "extract" is identical between modes.
     mkdir -p "${WORK_DIR}/linux-bundle" "${WORK_DIR}/linux-download"
-    if [[ -n "${RELEASE_TAG}" ]]; then
-        echo "==> downloading firmware bundle from release ${RELEASE_TAG}"
-        gh release download "${RELEASE_TAG}" \
-            --repo "${REPO}" \
-            --pattern "bebop-linux-aarch64.tar.gz" \
-            --pattern "bebop-linux-aarch64.tar.gz.sha256" \
-            --clobber \
-            --dir "${WORK_DIR}/linux-download"
+    if [[ "${LOCAL}" -eq 1 ]]; then
+        echo "==> staging bebop-linux bundle from local checkout"
+        LX_ROOT="${LOCAL_REPO_ROOT}/firmware/bebop-linux"
+        LX_BIN_SRC="${LX_ROOT}/target/release/bebop-linux"
+        LX_YAML_SRC="${LX_ROOT}/config/bebop_v2.yaml"
+        LX_ONNX_SRC="${LX_ROOT}/config/policy.onnx"
+        LX_ONNX_DATA_SRC="${LX_ROOT}/config/policy.onnx.data"
+        LX_UNIT_SRC="${LX_ROOT}/deploy/systemd/bebop-linux.service"
+        if [[ ! -f "${LX_BIN_SRC}" ]]; then
+            cat >&2 <<EOF
+bebop-linux binary not found at:
+    ${LX_BIN_SRC}
+
+Build it first (or re-run with --build):
+    (cd ${LX_ROOT} && cargo build --release)
+EOF
+            exit 1
+        fi
+        for f in "${LX_YAML_SRC}" "${LX_ONNX_SRC}" "${LX_ONNX_DATA_SRC}" "${LX_UNIT_SRC}"; do
+            if [[ ! -f "${f}" ]]; then
+                echo "missing local firmware asset: ${f}" >&2
+                exit 1
+            fi
+        done
+        install -d "${WORK_DIR}/linux-bundle/bin" \
+                    "${WORK_DIR}/linux-bundle/config" \
+                    "${WORK_DIR}/linux-bundle/systemd"
+        install -m 0755 "${LX_BIN_SRC}"        "${WORK_DIR}/linux-bundle/bin/bebop-linux"
+        install -m 0644 "${LX_YAML_SRC}"       "${WORK_DIR}/linux-bundle/config/bebop_v2.yaml"
+        install -m 0644 "${LX_ONNX_SRC}"       "${WORK_DIR}/linux-bundle/config/policy.onnx"
+        install -m 0644 "${LX_ONNX_DATA_SRC}"  "${WORK_DIR}/linux-bundle/config/policy.onnx.data"
+        install -m 0644 "${LX_UNIT_SRC}"       "${WORK_DIR}/linux-bundle/systemd/bebop-linux.service"
+        # Synthesize a VERSION file mirroring CI's, so the post-install
+        # echo gives operators something useful to grep in journals.
+        local_sha="$(run_as_user "git -C '${LOCAL_REPO_ROOT}' rev-parse HEAD 2>/dev/null" || true)"
+        local_dirty=""
+        if [[ -n "${local_sha}" ]] \
+            && ! run_as_user "git -C '${LOCAL_REPO_ROOT}' diff --quiet HEAD 2>/dev/null"; then
+            local_dirty="-dirty"
+        fi
+        {
+            echo "sha=${local_sha:-unknown}${local_dirty}"
+            echo "ref=local"
+            echo "repo_root=${LOCAL_REPO_ROOT}"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        } > "${WORK_DIR}/linux-bundle/VERSION"
     else
-        echo "==> downloading firmware bundle from CI run ${RUN_ID}"
-        gh run download "${RUN_ID}" \
-            --repo "${REPO}" \
-            --name bebop-linux-aarch64 \
-            --dir "${WORK_DIR}/linux-download"
-    fi
+        # Download the firmware bundle. The CI artifact and Release asset
+        # are byte-identical and use the same filename.
+        if [[ -n "${RELEASE_TAG}" ]]; then
+            echo "==> downloading firmware bundle from release ${RELEASE_TAG}"
+            gh release download "${RELEASE_TAG}" \
+                --repo "${REPO}" \
+                --pattern "bebop-linux-aarch64.tar.gz" \
+                --pattern "bebop-linux-aarch64.tar.gz.sha256" \
+                --clobber \
+                --dir "${WORK_DIR}/linux-download"
+        else
+            echo "==> downloading firmware bundle from CI run ${RUN_ID}"
+            gh run download "${RUN_ID}" \
+                --repo "${REPO}" \
+                --name bebop-linux-aarch64 \
+                --dir "${WORK_DIR}/linux-download"
+        fi
 
-    LINUX_TARBALL="${WORK_DIR}/linux-download/bebop-linux-aarch64.tar.gz"
-    if [[ ! -f "${LINUX_TARBALL}" ]]; then
-        echo "bebop-linux bundle missing from download (expected ${LINUX_TARBALL})" >&2
-        exit 1
-    fi
+        LINUX_TARBALL="${WORK_DIR}/linux-download/bebop-linux-aarch64.tar.gz"
+        if [[ ! -f "${LINUX_TARBALL}" ]]; then
+            echo "bebop-linux bundle missing from download (expected ${LINUX_TARBALL})" >&2
+            exit 1
+        fi
 
-    # Verify checksum when one was shipped. The CI step writes it next to
-    # the tarball; older artifacts won't have one — don't hard-fail in
-    # that case so emergency rollbacks to older Releases still work.
-    if [[ -f "${WORK_DIR}/linux-download/bebop-linux-aarch64.tar.gz.sha256" ]]; then
-        echo "==> verifying bundle checksum"
-        (cd "${WORK_DIR}/linux-download" && sha256sum -c bebop-linux-aarch64.tar.gz.sha256)
-    else
-        echo "    (no .sha256 alongside the tarball — skipping checksum verify)"
-    fi
+        # Verify checksum when one was shipped. The CI step writes it
+        # next to the tarball; older artifacts won't have one — don't
+        # hard-fail in that case so emergency rollbacks to older
+        # Releases still work.
+        if [[ -f "${WORK_DIR}/linux-download/bebop-linux-aarch64.tar.gz.sha256" ]]; then
+            echo "==> verifying bundle checksum"
+            (cd "${WORK_DIR}/linux-download" && sha256sum -c bebop-linux-aarch64.tar.gz.sha256)
+        else
+            echo "    (no .sha256 alongside the tarball — skipping checksum verify)"
+        fi
 
-    echo "==> extracting firmware bundle"
-    tar -C "${WORK_DIR}/linux-bundle" -xzf "${LINUX_TARBALL}"
+        echo "==> extracting firmware bundle"
+        tar -C "${WORK_DIR}/linux-bundle" -xzf "${LINUX_TARBALL}"
+    fi
 
     LINUX_BIN="${WORK_DIR}/linux-bundle/bin/bebop-linux"
     LINUX_YAML="${WORK_DIR}/linux-bundle/config/bebop_v2.yaml"
