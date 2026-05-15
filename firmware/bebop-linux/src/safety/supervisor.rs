@@ -646,12 +646,26 @@ impl Supervisor {
 
     // ---------------------------------------------------------------- RX path
 
-    /// Called by the bus RX thread for each parsed feedback frame.
-    /// Updates the motor's cached state and runs limit checks.
+    /// Look up the local motor index for a `(can_interface, motor_id)`
+    /// pair. Returns `None` when no joint matches — e.g. the frame came
+    /// from a different bus user (power board, foreign controller). The
+    /// RX thread uses this to decide whether to dispatch a Robstride
+    /// frame to the supervisor or fall through to the power-board
+    /// parser.
+    pub fn motor_index(&self, can_iface: &str, motor_id: u8) -> Option<usize> {
+        self.by_can_id
+            .get(&(can_iface.to_string(), motor_id))
+            .copied()
+    }
+
+    /// Called by the bus RX thread for each parsed feedback frame
+    /// (`cmd_type == 0x02`) or active-report frame (`cmd_type == 0x18`).
+    /// The two share an identical wire format — fault bits + mode status
+    /// in the ID, position/velocity/torque/temperature in the 8-byte
+    /// payload — so they're routed through the same path.
     pub fn on_feedback(&self, can_iface: &str, fb: &crate::can_interface::RobstrideFeedback) {
-        let idx = match self.by_can_id.get(&(can_iface.to_string(), fb.motor_id)) {
-            Some(i) => *i,
-            None => return, // unknown motor — could be a different bus user
+        let Some(idx) = self.motor_index(can_iface, fb.motor_id) else {
+            return;
         };
         let now = Instant::now();
         {
@@ -666,9 +680,61 @@ impl Supervisor {
         self.check_feedback(idx, fb);
     }
 
+    /// Called by the bus RX thread for each Robstride fault-feedback
+    /// frame (`cmd_type == 0x15`) from a known motor. Used to be
+    /// silently dropped, which let the motor scream "I'm faulted" for
+    /// seconds before the feedback watchdog finally tripped with no
+    /// indication of the actual reason.
+    ///
+    /// We latch E-STOP immediately and surface the raw payload + the
+    /// status bits visible in the CAN ID so the operator sees the
+    /// actual fault rather than a generic watchdog timeout. The wire
+    /// format of 0x15 frames isn't fully documented (the locomotion-
+    /// firmware reference driver doesn't decode them either), so we
+    /// deliberately keep the raw bytes for post-mortem instead of
+    /// guessing a structured field layout.
+    pub fn on_fault_report(
+        &self,
+        can_iface: &str,
+        fb: &crate::can_interface::RobstrideFeedback,
+        raw_id: u32,
+        raw_data: &[u8],
+    ) {
+        let Some(idx) = self.motor_index(can_iface, fb.motor_id) else {
+            return;
+        };
+        let cfg = &self.cfg.joints[idx];
+        let mut raw_payload = [0u8; 8];
+        for (i, b) in raw_data.iter().take(8).enumerate() {
+            raw_payload[i] = *b;
+        }
+        let description = describe_fault(fb.fault_bits);
+        let raw_id_str = format!("0x{:08X}", raw_id);
+        warn!(
+            joint = %cfg.name,
+            can_interface = %can_iface,
+            raw_id = %raw_id_str,
+            status_bits = format!("0x{:02X}", fb.fault_bits),
+            description = %description,
+            raw_payload = ?raw_payload,
+            "Robstride fault feedback frame (cmd_type=0x15) received; latching E-STOP",
+        );
+        self.trigger_estop(BreachReason::MotorFaultReport {
+            joint: cfg.name.clone(),
+            status_bits: fb.fault_bits,
+            description,
+            raw_payload,
+        });
+    }
+
     fn check_feedback(&self, idx: usize, fb: &crate::can_interface::RobstrideFeedback) {
         let cfg = &self.cfg.joints[idx];
         let h = cfg.hard_limits;
+        // Velocity and torque are model-scaled; resolve the per-model
+        // full-scale here (the parser only sees `motor_id`, not the
+        // model). Position and temperature use universal MIT-mode
+        // ranges and are pre-decoded by `parse_robstride`.
+        let specs = cfg.model.specs();
         if fb.fault_bits != 0 {
             self.trigger_estop(BreachReason::MotorFault {
                 joint: cfg.name.clone(),
@@ -681,11 +747,11 @@ impl Supervisor {
             self.trigger_estop(reason);
             return;
         }
-        if let Some(reason) = check_vel(&cfg.name, fb.velocity, h) {
+        if let Some(reason) = check_vel(&cfg.name, fb.velocity(&specs), h) {
             self.trigger_estop(reason);
             return;
         }
-        if let Some(reason) = check_tau(&cfg.name, fb.torque, h) {
+        if let Some(reason) = check_tau(&cfg.name, fb.torque(&specs), h) {
             self.trigger_estop(reason);
             return;
         }
@@ -900,21 +966,65 @@ pub fn spawn_rx_threads(
                     match can.try_receive() {
                         Ok(Some(frame)) => {
                             // Try to parse the frame as a Robstride motor
-                            // feedback first (most common case on motor
-                            // buses); if that doesn't fit, see if it's a
-                            // power-board status response on the bus we
-                            // configured for one.
+                            // frame first (most common case on motor
+                            // buses). The Robstride protocol multiplexes
+                            // several frame types on the same 29-bit ID
+                            // layout; we dispatch on `cmd_type`:
+                            //
+                            //   - 0x02 FEEDBACK and 0x18 ACTIVE_REPORT
+                            //     share an identical payload layout —
+                            //     both go through `on_feedback` so
+                            //     active-report streams (when the motor
+                            //     firmware pushes them on its own)
+                            //     refresh the watchdog the same way.
+                            //   - 0x15 FAULT_FEEDBACK is an unsolicited
+                            //     fault report. Previously dropped on
+                            //     the floor; now latches E-STOP with
+                            //     the raw payload + decoded status bits.
+                            //   - Anything else from a known motor is
+                            //     debug-logged so the operator can opt
+                            //     into investigating without paying a
+                            //     log cost in steady state.
+                            //
+                            // Only frames whose `motor_id` matches a
+                            // configured joint are treated as motor
+                            // traffic; everything else falls through to
+                            // the power-board parser on the bus that's
+                            // wired to one.
+                            let mut consumed = false;
                             if let Some(fb) = frame.parse_robstride() {
-                                if fb.cmd_type == 0x02 {
-                                    sup.on_feedback(&iface, &fb);
-                                    continue;
+                                if sup.motor_index(&iface, fb.motor_id).is_some() {
+                                    match fb.cmd_type {
+                                        0x02 | 0x18 => {
+                                            sup.on_feedback(&iface, &fb);
+                                            consumed = true;
+                                        }
+                                        0x15 => {
+                                            sup.on_fault_report(
+                                                &iface, &fb, frame.id, &frame.data,
+                                            );
+                                            consumed = true;
+                                        }
+                                        other => {
+                                            debug!(
+                                                can_interface = %iface,
+                                                motor_id = fb.motor_id,
+                                                cmd_type = format!("0x{:02X}", other),
+                                                host_id = fb.host_id,
+                                                "unexpected Robstride frame from known motor; ignoring"
+                                            );
+                                            consumed = true;
+                                        }
+                                    }
                                 }
                             }
-                            if let Some(monitor) = power_for_this_bus.as_ref() {
-                                if let Some(pf) =
-                                    powerboard::parse_frame(&frame, monitor.board.power_id)
-                                {
-                                    monitor.on_frame(pf);
+                            if !consumed {
+                                if let Some(monitor) = power_for_this_bus.as_ref() {
+                                    if let Some(pf) =
+                                        powerboard::parse_frame(&frame, monitor.board.power_id)
+                                    {
+                                        monitor.on_frame(pf);
+                                    }
                                 }
                             }
                         }

@@ -35,6 +35,24 @@ pub enum BreachReason {
         bits: u8,
         description: String,
     },
+    /// Unsolicited Robstride fault feedback frame (`cmd_type == 0x15`) from
+    /// a known motor. The motor is asynchronously reporting a fault state
+    /// outside the normal feedback frame's bit-packed status field. The
+    /// frame layout for type 0x15 isn't fully documented; we capture the
+    /// raw payload + the status bits visible in the CAN ID so the operator
+    /// has the ground truth instead of a silent drop.
+    MotorFaultReport {
+        joint: String,
+        /// Bits 16..21 of the CAN ID (same position as feedback fault bits;
+        /// best-effort interpretation — may or may not be meaningful for a
+        /// fault report frame, but matches the only documented layout).
+        status_bits: u8,
+        /// Human description of `status_bits` using the feedback-frame
+        /// fault-bit table. May be `"0x??"` if no bit names matched.
+        description: String,
+        /// Raw 8-byte payload exactly as received from the bus.
+        raw_payload: [u8; 8],
+    },
     FeedbackWatchdog {
         joint: String,
         elapsed_ms: f32,
@@ -73,6 +91,16 @@ impl BreachReason {
                 bits,
                 description,
             } => format!("{joint}: motor fault 0x{bits:02X} ({description})"),
+            BreachReason::MotorFaultReport {
+                joint,
+                status_bits,
+                description,
+                raw_payload,
+            } => format!(
+                "{joint}: Robstride fault feedback frame (cmd 0x15, \
+                 status bits 0x{status_bits:02X} ({description}), \
+                 raw payload {raw_payload:02X?})"
+            ),
             BreachReason::FeedbackWatchdog {
                 joint,
                 elapsed_ms,
