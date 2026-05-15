@@ -589,12 +589,29 @@ where
         let payload = &self.packet_recv_buf[PACKET_HEADER_LENGTH..received_len];
         let mut cursor: usize = 1; // skip response type
 
-        while cursor < payload_len {
+        // BEBOP-PATCH [5/5]: upstream's `while cursor < payload_len` is
+        // off-by-one for the 2-byte TLV header. On the final record,
+        // after reading `_tag` at `payload[payload_len - 1]`, cursor is
+        // bumped to `payload_len` and the next `payload[cursor]` read
+        // (for `len`) panics with `index out of bounds`. This fires in
+        // practice when `soft_reset()` makes the chip re-emit its full
+        // SHTP advertisement (~1.2 KB on the BNO085 revisions Bebop
+        // ships with), which `init()`'s `handle_one_message(20)` never
+        // does because it only consumes the first advert message.
+        // We tighten the loop bound to require both tag+len bytes
+        // present, and bail out on a length field that would walk
+        // past the end of the payload (corrupted/truncated TLV).
+        while cursor + 1 < payload_len {
             let _tag: u8 = payload[cursor];
             cursor += 1;
             let len: u8 = payload[cursor];
             cursor += 1;
-            cursor += len as usize;
+            let next = cursor.saturating_add(len as usize);
+            if next > payload_len {
+                // truncated TLV — stop rather than read past the slice
+                break;
+            }
+            cursor = next;
         }
 
         self.advert_received = true;

@@ -22,10 +22,10 @@ for the AR/VR-Stabilized reports anywhere in the upstream code.
 
 ## The patches
 
-Each patch carries a `BEBOP-PATCH [N/4]` marker in the source; the
+Each patch carries a `BEBOP-PATCH [N/5]` marker in the source; the
 table below maps them back to the underlying issue.
 
-### `[1/4]`  Bump report tracking arrays from `[_; 16]` → `[_; 256]`
+### `[1/5]`  Bump report tracking arrays from `[_; 16]` → `[_; 256]`
 
 * `src/driver.rs`, the `BNO08x` struct (around the `report_enabled` /
   `report_update_time` / `report_update_callbacks` fields), and the
@@ -44,7 +44,7 @@ negligible for a userspace driver. No public API change.
 any user enabling, say, the GyroRV (0x2A) or Step Counter (0x11)
 report from the SH-2 spec hits the same panic.
 
-### `[2/4]`  Add SH-2 reports 0x28 / 0x29 (AR/VR-Stabilized RV / Game RV)
+### `[2/5]`  Add SH-2 reports 0x28 / 0x29 (AR/VR-Stabilized RV / Game RV)
 
 Spread across:
 
@@ -76,10 +76,10 @@ respectively.
 **Upstream-as-a-PR plausibility:** high. These are first-class SH-2
 reports defined in the public spec, and the wire format is a near
 copy of two reports the crate already supports. Bundling this with
-patch `[1/4]` in the same PR makes sense — they're both prerequisites
+patch `[1/5]` in the same PR makes sense — they're both prerequisites
 for `enable_report(0x28, …)` to actually work end to end.
 
-### `[3/4]`  Add `+ Send` to the report-callback trait object
+### `[3/5]`  Add `+ Send` to the report-callback trait object
 
 * `src/driver.rs` — `type ReportCallbackMap<'a, SI> = HashMap<…, Box<dyn Fn(…) + Send + 'a>>;`
 * `src/driver.rs` — `add_sensor_report_callback`'s `func: impl Fn(&Self) + Send + 'a` parameter bound.
@@ -107,20 +107,51 @@ would split the trait alias into `ReportCallback` (Send) and
 `LocalReportCallback` (no Send) — but that's a bigger refactor than
 just bolting on `+ Send`. We took the simplest path for the fork.
 
-### `[4/4]`  Test fallout from patch `[3/4]`
+### `[4/5]`  Test fallout from patch `[3/5]`
 
 * `src/driver.rs::tests::test_add_sensor_report_callback`
 * `src/reports.rs::tests::test_report_state_callback_management`
 
 Both upstream tests captured an `Rc<Cell<bool>>` to assert "the
 callback fired". `Rc<Cell<_>>` is not `Send`, so they no longer
-satisfy the tightened trait bound from patch `[3/4]`. Swapped both
+satisfy the tightened trait bound from patch `[3/5]`. Swapped both
 for `Arc<AtomicBool>`, which preserves the intent (race-free
 "callback fired" flag) under the new bound.
 
 This patch is purely a test-suite repair and would land in the same
-upstream PR as `[3/4]` — different rationale for a reviewer, same
+upstream PR as `[3/5]` — different rationale for a reviewer, same
 file change.
+
+### `[5/5]`  Bounds-check the SHTP advertisement TLV parser
+
+* `src/driver.rs::handle_advertise_response`
+
+The upstream loop walks the SHTP advertisement payload as a series
+of TLV records but only checks `cursor < payload_len` before reading
+the 2-byte (tag, len) header — so on the final record, after reading
+`tag` at `payload[payload_len - 1]`, cursor is bumped to
+`payload_len` and the next `payload[cursor]` (for `len`) panics with
+`index out of bounds: the len is N but the index is N`.
+
+This used to be theoretical: `init()` only consumes the *first*
+message of the advert via `handle_one_message(20)`, which is short
+enough that the buggy loop never reaches the tail. We tripped it for
+real once we started calling `soft_reset()` in the IMU thread's
+graceful-disable epilogue: the chip's reply to `soft_reset` is its
+full SHTP advertisement (~1.2 KB on the BNO085 revs Bebop ships
+with), the loop walks to the boundary, and the IMU thread panics
+mid-shutdown. We've since removed the `soft_reset()` call (the disable
++ next-boot RST GPIO pulse give the same restart hygiene), but the
+parser bug itself is now hardened so a large unsolicited advert
+(e.g. an EOS-induced chip reset on the bus) can't crash the IMU
+thread either.
+
+The fix is a tightened bound (`cursor + 1 < payload_len`) plus a
+defensive guard on the post-skip cursor in case a corrupted `len`
+field would walk past the slice end.
+
+**Upstream-as-a-PR plausibility:** high. Pure bug fix, no API change,
+small diff. Any downstream that ever sees a large advert hits this.
 
 ## Re-vendoring procedure
 
@@ -139,7 +170,7 @@ rm firmware/bebop-linux/vendor/bno08x-rs/.cargo-ok \
 mv firmware/bebop-linux/vendor/bno08x-rs/Cargo.toml.orig \
    firmware/bebop-linux/vendor/bno08x-rs/Cargo.toml
 
-# 3. Re-apply the four hunks above (grep history for `BEBOP-PATCH` in
+# 3. Re-apply the five hunks above (grep history for `BEBOP-PATCH` in
 #    the previous tree to see the exact edits).
 
 # 4. Rerun the smoke tests:
@@ -165,9 +196,10 @@ matching order.
 
 | Patch | Status            | Upstream issue / PR |
 |-------|-------------------|---------------------|
-| `[1/4]` array-size bump | Not filed yet     | — |
-| `[2/4]` 0x28 / 0x29 add | Not filed yet     | — |
-| `[3/4]` `+ Send` bound  | Not filed yet     | — |
-| `[4/4]` test repair     | Not filed yet     | (bundled with [3/4]) |
+| `[1/5]` array-size bump            | Not filed yet | — |
+| `[2/5]` 0x28 / 0x29 add            | Not filed yet | — |
+| `[3/5]` `+ Send` bound             | Not filed yet | — |
+| `[4/5]` test repair                | Not filed yet | (bundled with [3/5]) |
+| `[5/5]` advert TLV bounds check    | Not filed yet | — |
 
 [bno08x-rs 2.0.1]: https://crates.io/crates/bno08x-rs/2.0.1

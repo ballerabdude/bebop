@@ -14,7 +14,7 @@
 #   2. The upstream crate has no parser or accessor for 0x28 / 0x29.
 #      We add them, mirroring the existing 0x05 / 0x08 paths.
 #
-# Each Bebop-side hunk is annotated with a `BEBOP-PATCH [N/4]` comment
+# Each Bebop-side hunk is annotated with a `BEBOP-PATCH [N/5]` comment
 # in the source. See `PATCHES.md` next to this file for the full
 # rationale per patch, the re-vendoring procedure, and the
 # upstream-tracking table to fill in as we get PRs accepted.
