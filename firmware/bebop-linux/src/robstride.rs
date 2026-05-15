@@ -197,15 +197,21 @@ impl RobstrideMotor {
         self.send_command(can, &cmd)
     }
 
-    /// Process feedback frame
+    /// Process feedback frame.
+    ///
+    /// Velocity and torque arrive as raw `u16` (the parser doesn't know
+    /// the motor model); we decode them here using `self.specs`, which
+    /// is populated from `RobstrideModel::specs()` at construction.
+    /// Position and temperature use universal MIT-mode scalings and are
+    /// pre-decoded by `parse_robstride`.
     pub fn process_feedback(&mut self, feedback: &RobstrideFeedback) {
         if feedback.motor_id != self.can_id {
             return;
         }
 
         self.state.position = feedback.position;
-        self.state.velocity = feedback.velocity;
-        self.state.torque = feedback.torque;
+        self.state.velocity = feedback.velocity(&self.specs);
+        self.state.torque = feedback.torque(&self.specs);
         self.state.temperature = feedback.temperature;
         self.state.has_error = feedback.fault_bits != 0;
         self.state.error_code = feedback.fault_bits as u32;

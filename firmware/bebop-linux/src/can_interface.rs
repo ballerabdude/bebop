@@ -3,6 +3,7 @@
 //! This module provides low-level CAN communication using the socketcan crate.
 //! Supports both standard (11-bit) and extended (29-bit) CAN frames.
 
+use crate::config::RobstrideSpecs;
 use anyhow::{Context, Result};
 use socketcan::{CanFrame, CanSocket, EmbeddedFrame, ExtendedId, Socket, StandardId};
 use std::time::Duration;
@@ -154,7 +155,17 @@ impl ReceivedFrame {
         }
     }
 
-    /// Parse as Robstride feedback frame
+    /// Parse as Robstride feedback frame.
+    ///
+    /// Note on scaling: position and temperature use universal MIT-mode
+    /// ranges (`±4π rad`, `raw / 10.0` °C) and so are pre-decoded into
+    /// physical units here. Velocity and torque, on the other hand, are
+    /// encoded against per-model full-scale ranges
+    /// (`RobstrideSpecs::RSxx.velocity_min/max` / `torque_min/max`); we
+    /// can't decode them at this layer because the parser only sees the
+    /// motor_id, not the model. They are returned as raw `u16` and must
+    /// be decoded by the consumer via [`RobstrideFeedback::velocity`] /
+    /// [`RobstrideFeedback::torque`] using the matching spec.
     pub fn parse_robstride(&self) -> Option<RobstrideFeedback> {
         if !self.is_extended || self.data.len() < 8 {
             return None;
@@ -177,14 +188,13 @@ impl ReceivedFrame {
         let torque_raw = u16::from_be_bytes([self.data[4], self.data[5]]);
         let temperature_raw = u16::from_be_bytes([self.data[6], self.data[7]]);
 
-        // Convert to physical units (Robstride RS04 ranges)
-        let position = Self::uint16_to_float(
+        // Universal-range fields decoded inline; per-model fields are
+        // forwarded as raw u16 (see struct doc comment).
+        let position = uint16_to_float(
             position_raw,
             -4.0 * std::f32::consts::PI,
             4.0 * std::f32::consts::PI,
         );
-        let velocity = Self::uint16_to_float(velocity_raw, -15.0, 15.0);
-        let torque = Self::uint16_to_float(torque_raw, -120.0, 120.0);
         let temperature = temperature_raw as f32 / 10.0;
 
         Some(RobstrideFeedback {
@@ -194,8 +204,8 @@ impl ReceivedFrame {
             fault_bits,
             mode_status,
             position,
-            velocity,
-            torque,
+            velocity_raw,
+            torque_raw,
             temperature,
         })
     }
@@ -260,14 +270,28 @@ impl ReceivedFrame {
         })
     }
 
-    /// Convert uint16 to float with given range
-    fn uint16_to_float(value: u16, min: f32, max: f32) -> f32 {
-        let proportion = value as f32 / 65535.0;
-        min + proportion * (max - min)
-    }
 }
 
-/// Parsed Robstride feedback
+/// MIT-mode style uint16 → float decode.
+///
+/// Maps `value` linearly from `[0, 65535]` onto `[min, max]`. This is
+/// the inverse of the Robstride MIT-mode payload encoding used by
+/// [`crate::robstride::RobstrideMotor::send_command`] (see
+/// `float_to_uint16` there).
+pub(crate) fn uint16_to_float(value: u16, min: f32, max: f32) -> f32 {
+    let proportion = value as f32 / 65535.0;
+    min + proportion * (max - min)
+}
+
+/// Parsed Robstride feedback frame.
+///
+/// `position` and `temperature` are pre-decoded into physical units
+/// because their scaling is universal across all RS0x models. By
+/// contrast, `velocity_raw` and `torque_raw` are the **raw** little-
+/// fingers off the wire — their full-scale range is per-model
+/// (`RobstrideSpecs::RSxx`), and the parser doesn't know the model.
+/// Callers must decode them via [`Self::velocity`] / [`Self::torque`]
+/// using the matching [`RobstrideSpecs`].
 #[derive(Debug, Clone)]
 pub struct RobstrideFeedback {
     pub motor_id: u8,
@@ -276,9 +300,25 @@ pub struct RobstrideFeedback {
     pub fault_bits: u8,
     pub mode_status: u8,
     pub position: f32,
-    pub velocity: f32,
-    pub torque: f32,
+    /// Raw 16-bit velocity from the MIT-mode feedback frame. Decode
+    /// via [`Self::velocity`] with the motor's [`RobstrideSpecs`].
+    pub velocity_raw: u16,
+    /// Raw 16-bit torque from the MIT-mode feedback frame. Decode via
+    /// [`Self::torque`] with the motor's [`RobstrideSpecs`].
+    pub torque_raw: u16,
     pub temperature: f32,
+}
+
+impl RobstrideFeedback {
+    /// Decode `velocity_raw` (rad/s) using the motor model's full-scale.
+    pub fn velocity(&self, specs: &RobstrideSpecs) -> f32 {
+        uint16_to_float(self.velocity_raw, specs.velocity_min, specs.velocity_max)
+    }
+
+    /// Decode `torque_raw` (Nm) using the motor model's full-scale.
+    pub fn torque(&self, specs: &RobstrideSpecs) -> f32 {
+        uint16_to_float(self.torque_raw, specs.torque_min, specs.torque_max)
+    }
 }
 
 /// Parsed ODrive encoder feedback
@@ -350,5 +390,107 @@ impl CanBusManager {
             frames.extend(bus.drain());
         }
         frames
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RobstrideModel;
+
+    /// Mirror of `RobstrideMotor::float_to_uint16` (private there). We
+    /// duplicate it here intentionally so the test asserts encode/decode
+    /// reciprocity *across* implementations — if the two ever drift, a
+    /// round-trip assertion will fail loudly.
+    fn float_to_uint16(value: f32, min: f32, max: f32) -> u16 {
+        let clamped = value.clamp(min, max);
+        let proportion = (clamped - min) / (max - min);
+        (proportion * 65535.0) as u16
+    }
+
+    fn make_feedback(velocity_raw: u16, torque_raw: u16) -> RobstrideFeedback {
+        RobstrideFeedback {
+            motor_id: 1,
+            cmd_type: 0x02,
+            host_id: 0xFD,
+            fault_bits: 0,
+            mode_status: 0x02,
+            position: 0.0,
+            velocity_raw,
+            torque_raw,
+            temperature: 25.0,
+        }
+    }
+
+    /// Encoding a torque with model M's full-scale and decoding with
+    /// the same model's full-scale must recover the original value to
+    /// within one LSB of quantization.
+    #[test]
+    fn torque_round_trip_per_model() {
+        let one_lsb = |range: f32| range / 65535.0;
+        for (model, sample_nm) in [
+            (RobstrideModel::RS01, 5.0_f32),
+            (RobstrideModel::RS02, 5.0),
+            (RobstrideModel::RS03, 30.0),
+            (RobstrideModel::RS04, 50.0),
+        ] {
+            let specs = model.specs();
+            let raw = float_to_uint16(sample_nm, specs.torque_min, specs.torque_max);
+            let fb = make_feedback(0, raw);
+            let decoded = fb.torque(&specs);
+            let tol = one_lsb(specs.torque_max - specs.torque_min);
+            assert!(
+                (decoded - sample_nm).abs() <= tol,
+                "{model:?}: encoded {sample_nm} Nm -> raw {raw} -> decoded {decoded} Nm (tol {tol})",
+            );
+        }
+    }
+
+    #[test]
+    fn velocity_round_trip_per_model() {
+        let one_lsb = |range: f32| range / 65535.0;
+        for (model, sample_rad_s) in [
+            (RobstrideModel::RS01, 10.0_f32),
+            (RobstrideModel::RS02, 10.0),
+            (RobstrideModel::RS03, 8.0),
+            (RobstrideModel::RS04, 5.0),
+        ] {
+            let specs = model.specs();
+            let raw = float_to_uint16(sample_rad_s, specs.velocity_min, specs.velocity_max);
+            let fb = make_feedback(raw, 0);
+            let decoded = fb.velocity(&specs);
+            let tol = one_lsb(specs.velocity_max - specs.velocity_min);
+            assert!(
+                (decoded - sample_rad_s).abs() <= tol,
+                "{model:?}: encoded {sample_rad_s} rad/s -> raw {raw} -> decoded {decoded} rad/s (tol {tol})",
+            );
+        }
+    }
+
+    /// Cross-model decode must NOT silently look "close enough": a
+    /// torque frame encoded against one model's full-scale and decoded
+    /// against another's produces a predictable multiplicative error
+    /// (the ratio of the two full-scales). Asserting that ratio
+    /// explicitly here means any future "let's just hardcode one
+    /// range" regression in the parser fails this test loudly instead
+    /// of silently inflating telemetry on the smaller motors.
+    #[test]
+    fn torque_decode_with_wrong_model_scales_by_full_scale_ratio() {
+        let true_nm = 5.0_f32;
+        let rs02 = RobstrideModel::RS02.specs();
+        let rs04 = RobstrideModel::RS04.specs();
+        let raw = float_to_uint16(true_nm, rs02.torque_min, rs02.torque_max);
+        let fb = make_feedback(0, raw);
+        let correct = fb.torque(&rs02);
+        let buggy = fb.torque(&rs04);
+        // Correct decode lands within 1 LSB of truth.
+        assert!((correct - true_nm).abs() <= (rs02.torque_max - rs02.torque_min) / 65535.0);
+        // Wrong decode is inflated by the ratio of the full-scales (~7.06×).
+        let expected_inflation = (rs04.torque_max - rs04.torque_min) / (rs02.torque_max - rs02.torque_min);
+        let observed_inflation = buggy / true_nm;
+        assert!(
+            (observed_inflation - expected_inflation).abs() < 0.05,
+            "buggy decode inflation: expected ~{expected_inflation:.2}×, observed {observed_inflation:.2}× (true={true_nm}, buggy={buggy})",
+        );
     }
 }
