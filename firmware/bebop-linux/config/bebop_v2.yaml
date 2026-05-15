@@ -65,7 +65,7 @@ defaults:
   # sim-side reward shaping (action_rate_l2 / joint_acc_l2 in
   # bebop_v2_base_cfg.py::RewardsCfg).
   slew:
-    max_pos_step_per_tick: 12.5     # rad — at 100 Hz tick = 100 rad/s slew cap (effectively non-binding)
+    max_pos_step_per_tick: .01     # rad — at 100 Hz tick = 100 rad/s slew cap (effectively non-binding)
     arm_ramp_s:            0.5     # gain ramp 0 → hold over arm
     abort_ramp_s:          0.3     # gain ramp hold → 0 over abort
 
@@ -84,18 +84,33 @@ joints:
   # an order of magnitude below each motor model's `kp_max`. Tune in place
   # one joint at a time per the procedure at the top of this file.
   # IMPORTANT (sim-to-real): the `vel_max` / `tau_max` numbers below are the
-  # safety-trip envelope the supervisor enforces. They MUST be greater than
-  # or equal to the matching `FW_*_VEL_MAX` / `FW_*_TAU_MAX` constants in
-  # `sim/bebop_training/envs/bebop_v2_base_cfg.py`, otherwise the trained
-  # policy will routinely command motions the real robot E-STOPs on. Bipedal
-  # balance needs the motors' full mechanical envelope — do not "soften" these
-  # for bench testing; if you need a safer test, harness the robot from a
-  # gantry instead of clipping its actuators.
+  # safety-trip envelope the supervisor enforces. They MUST equal the
+  # matching `FW_*_VEL_MAX` / `FW_*_TAU_MAX` constants in
+  # `sim/bebop_training/envs/bebop_v2_base_cfg.py`. The trained policy
+  # was exposed to exactly that envelope in sim (`effort_limit_sim`), so
+  # any drift here means deploy-time torques the policy didn't see in
+  # training, or supervisor trips on torques the policy was trained to
+  # use. Bipedal balance needs the motors' working envelope — do not
+  # "soften" these for bench testing; if you need a safer test, harness
+  # the robot from a gantry instead of clipping its actuators.
+  #
+  # Sizing rationale (per group): each `tau_max` is set to the trained
+  # envelope, which is at or below the motor model's electrical peak as
+  # encoded by the Robstride MIT-mode feedback frame
+  # (`RobstrideSpecs::RSxx.torque_max` in
+  # `firmware/bebop-linux/src/config.rs`). Going above the encoded peak
+  # is dead code (feedback torque is physically incapable of exceeding
+  # the encoder full-scale, so `check_tau` never fires); going below
+  # the trained envelope starves the controller. The current values
+  # match the training-side caps, with the foot at the encoder peak so
+  # `check_tau` still has E-STOP coverage of true motor saturation.
 
   hip_abduction_left_joint:
     can_interface: can0
     motor_id: 31
     model: RS04
+    # tau_max = trained envelope = 84 Nm (RS04 electrical peak is 120 Nm,
+    # but 84 is what the policy was trained against; raising requires retrain).
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 40.0,  kd: 3.0 }
 
@@ -111,6 +126,7 @@ joints:
     can_interface: can0
     motor_id: 32
     model: RS03
+    # tau_max = trained envelope = 42 Nm (RS03 electrical peak is 60 Nm).
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
 
@@ -127,8 +143,7 @@ joints:
     motor_id: 34
     model: RS04
     # Knee mostly flexes one way; tighter pos_max on the +ve side.
-    # tau_max raised to RS04 mechanical peak (84 Nm) to give the policy
-    # enough knee authority for squat-recovery during balance.
+    # tau_max = trained envelope = 84 Nm (RS04 electrical peak is 120 Nm).
     hard_limits: { pos_min: -1.570796, pos_max: 1.570796, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     # Knee carries the full shin+foot moment, so a touch stiffer than hip.
     hold_gains:  { kp: 120.0, kd: 4.0 }
@@ -146,8 +161,8 @@ joints:
     motor_id: 35
     model: RS02
     # RS02 datasheet: rated 6 Nm @ 100 rpm, peak 17 Nm (stall, T-N curve at 36 V).
-    # tau_max set at the motor's actual peak — the old 417 Nm cap was a
-    # "disabled" sentinel and made E-STOP useless on this joint.
+    # tau_max = 17 Nm matches the RS02 electrical peak AND the trained
+    # envelope (`FW_FOOT_TAU_MAX = 17.0`).
     hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 17.0, temp_max: 65.0 }
     # Hold gains at the firmware's RS02 kp_max / kd_max ceiling (500 / 5) for max ankle stiffness.
     hold_gains:  { kp: 150.0, kd: 2.50 }

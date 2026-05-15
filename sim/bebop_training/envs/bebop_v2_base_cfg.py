@@ -58,21 +58,31 @@ FW_SHIN_KD = 5.0
 FW_FOOT_KP = 30
 FW_FOOT_KD = 1.0
 
-# Per-group torque caps. Pinned to each Robstride model's mechanical
-# peak torque (T-N curve at 36 V — kscalelabs/kbot-v2 metadata + datasheet
-# verification). The firmware's ``hard_limits.tau_max`` must be set
-# *at or above* these numbers, otherwise the real motor will trip E-STOP
-# on a torque the sim trained the policy to deliver.
+# Per-group torque caps. These are mirrored *exactly* in
+# ``firmware/bebop-linux/config/bebop_v2.yaml`` as ``hard_limits.tau_max``
+# on each joint — the supervisor enforces them as E-STOP trip thresholds
+# at deploy time, and the sim uses them as ``effort_limit_sim`` here so
+# the policy is trained against the same torque envelope it will be held
+# to on the real robot.
 #
-# Reasoning for going to motor peaks instead of conservative safety
-# caps: at slew = 0.05 rad/tick and kp ≈ 40–150, the policy needs to
-# develop ~10–20 Nm of corrective torque within 100 ms to balance the
-# bipedal CoM (m ≈ 17 kg, CoM height ≈ 0.4 m -> falling timescale ≈ 150 ms).
-# Capping effort below mechanical peak just starves the controller.
-FW_HIP_ABDUCTION_TAU_MAX = 84.0  # RS04 peak
-FW_FEMUR_TAU_MAX = 42.0          # RS03 peak
-FW_SHIN_TAU_MAX = 84.0           # RS04 peak (knee shares hip motor model)
-FW_FOOT_TAU_MAX = 17.0           # RS02 peak
+# Sizing: at or below each motor model's electrical peak (encoded in
+# the Robstride MIT-mode feedback frame, mirrored in firmware as
+# ``RobstrideSpecs::RSxx.torque_max``: RS02 = 17 Nm, RS03 = 60 Nm,
+# RS04 = 120 Nm). The hip / femur / shin caps sit comfortably below
+# the electrical peak — they're the values that produced a stable
+# bipedal-balance policy without needing the motors' full saturated
+# envelope. The foot is at the encoder peak so the supervisor's
+# ``check_tau`` retains E-STOP coverage of true motor saturation.
+#
+# Reasoning for not capping further below: at slew = 0.05 rad/tick and
+# kp ≈ 40–150, the policy needs to develop ~10–20 Nm of corrective
+# torque within 100 ms to balance the bipedal CoM (m ≈ 17 kg, CoM
+# height ≈ 0.4 m -> falling timescale ≈ 150 ms). Capping effort below
+# the working envelope starves the controller.
+FW_HIP_ABDUCTION_TAU_MAX = 84.0  # RS04, trained envelope (electrical peak 120 Nm)
+FW_FEMUR_TAU_MAX = 42.0          # RS03, trained envelope (electrical peak 60 Nm)
+FW_SHIN_TAU_MAX = 84.0           # RS04, trained envelope (knee shares hip motor model)
+FW_FOOT_TAU_MAX = 17.0           # RS02, trained envelope == electrical peak
 
 # Per-group velocity caps. Picked at the motors' *working* top speed
 # rather than the no-load peak: no-load RS04 = 26 rad/s, RS03 = 24
