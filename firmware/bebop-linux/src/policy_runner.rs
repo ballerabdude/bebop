@@ -203,21 +203,11 @@ impl PolicyRunner {
 
         if !self.was_running {
             // Entering RunPolicy: clear any stale history / last_action so
-            // the first observation matches a fresh-episode condition,
-            // and snap the supervisor's per-motor slew tracker to the
-            // current measured joint position so the first outgoing
-            // target step is slew-limited against "where the joint
-            // actually is", not against whatever DialIn last latched.
-            // The latter matters for bipedal safety: DialIn can leave
-            // `last_target_pos` anywhere within hard_limits, and the
-            // policy's first action would otherwise commit one slew
-            // step past *that* point rather than past the joint pose
-            // the policy was trained on at episode-reset.
+            // the first observation matches a fresh-episode condition.
             self.controller.reset();
             self.obs_builder
                 .update_last_action(&[0.0_f32; dims::ACTION_DIM]);
-            sup.resync_slew_tracker();
-            info!("RunPolicy entered; policy controller and slew tracker reset");
+            info!("RunPolicy entered; policy controller reset");
             self.was_running = true;
         }
 
@@ -339,13 +329,17 @@ impl PolicyRunner {
 
         // Per-tick raw dump for offline replay / debugging. Enable with
         // `RUST_LOG=bebop_linux::policy_runner=debug` (or the binary's
-        // equivalent prefix).
-        debug!(
-            observation = ?obs.as_slice(),
-            raw_action = ?action.as_slice(),
-            position_targets_rad = ?targets.as_slice(),
-            "policy tick: 36-dim obs → raw action → scaled joint targets (rad)"
-        );
+        // equivalent prefix). Commented out by default: this fires at the
+        // policy tick rate (~50 Hz) and the 36-element observation vector
+        // makes terminal scrollback unreadable when anything else (IMU
+        // bring-up, motor faults, etc.) is what we're actually chasing.
+        // Re-enable temporarily when you need to capture an offline replay.
+        // debug!(
+        //     observation = ?obs.as_slice(),
+        //     raw_action = ?action.as_slice(),
+        //     position_targets_rad = ?targets.as_slice(),
+        //     "policy tick: 36-dim obs → raw action → scaled joint targets (rad)"
+        // );
 
         // Rate-limited human-readable summary at info!. We break the
         // 36-element observation into the same named slices as
@@ -382,11 +376,11 @@ impl PolicyRunner {
         //    every re-arm in RunPolicy mode trips the feedback watchdog
         //    on whichever joint was armed first).
         //
-        //    Use per-joint hold_gains for kp/kd; these MUST match the
-        //    `FW_*_KP` / `FW_*_KD` constants in `bebop_v2_base_cfg.py`
-        //    that the sim trained against. If you tune one side,
-        //    retrain — the policy bakes in the closed-loop dynamics
-        //    induced by these gains.
+        //    Use per-joint hold_gains for kp/kd; these should ideally
+        //    match the gains baked into the training-time actuator
+        //    config (see `BEBOP_V2_CFG.actuators` in
+        //    `bebop_v2_base_cfg.py`). They currently differ — known
+        //    sim-to-real gap.
         for (slot, &idx) in self.joint_indices.iter().enumerate() {
             if !armed[slot] {
                 continue;
