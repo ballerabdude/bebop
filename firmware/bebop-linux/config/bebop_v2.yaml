@@ -65,7 +65,7 @@ defaults:
   # sim-side reward shaping (action_rate_l2 / joint_acc_l2 in
   # bebop_v2_base_cfg.py::RewardsCfg).
   slew:
-    max_pos_step_per_tick: .01     # rad — at 100 Hz tick = 100 rad/s slew cap (effectively non-binding)
+    max_pos_step_per_tick: .015625 # rad — at 100 Hz tick = 100 rad/s slew cap (effectively non-binding)
     arm_ramp_s:            0.5     # gain ramp 0 → hold over arm
     abort_ramp_s:          0.3     # gain ramp hold → 0 over abort
 

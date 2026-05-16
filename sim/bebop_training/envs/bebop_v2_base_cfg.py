@@ -132,7 +132,7 @@ FW_FOOT_VEL_MAX = 20.0           # RS02 working (datasheet rated 43 no-load)
 # high-frequency twitch to reappear; the next mitigation in that case
 # is to bump action_rate_l2 (currently -0.15) before re-tightening
 # the slew.
-FW_MAX_POS_STEP_PER_TICK_RAD = .125
+FW_MAX_POS_STEP_PER_TICK_RAD = .015625
 FW_ACTION_DELAY_STEPS = 1
 
 
@@ -548,26 +548,26 @@ class RewardsCfg:
     # longer than the symmetric one, paying back the penalty in alive
     # bonus. Scaling these up makes it net-unprofitable to break
     # symmetry on the standing task.
-    hip_abduction_symmetry = RewTerm(
-        func=hip_abduction_symmetry_penalty,
-        weight=-4.0,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
-    femur_symmetry = RewTerm(
-        func=femur_symmetry_penalty,
-        weight=-5.0,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
-    shin_symmetry = RewTerm(
-        func=shin_symmetry_penalty,
-        weight=-5.0,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
-    foot_symmetry = RewTerm(
-        func=foot_symmetry_penalty,
-        weight=-3.0,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
+    # hip_abduction_symmetry = RewTerm(
+    #     func=hip_abduction_symmetry_penalty,
+    #     weight=-4.0,
+    #     params={"asset_cfg": SceneEntityCfg("robot")},
+    # )
+    # femur_symmetry = RewTerm(
+    #     func=femur_symmetry_penalty,
+    #     weight=-5.0,
+    #     params={"asset_cfg": SceneEntityCfg("robot")},
+    # )
+    # shin_symmetry = RewTerm(
+    #     func=shin_symmetry_penalty,
+    #     weight=-5.0,
+    #     params={"asset_cfg": SceneEntityCfg("robot")},
+    # )
+    # foot_symmetry = RewTerm(
+    #     func=foot_symmetry_penalty,
+    #     weight=-3.0,
+    #     params={"asset_cfg": SceneEntityCfg("robot")},
+    # )
 
     # Penalize yaw motion only when the policy is commanded to stand still.
     # undesired_yaw = RewTerm(
@@ -578,11 +578,11 @@ class RewardsCfg:
     # Soft "hold still when stable" terms (only active when the robot is upright
     # AND not commanded to move), much smaller weights so they don't suppress
     # walking motion under non-zero commands.
-    leg_action_when_stable = RewTerm(
-        func=leg_action_when_stable_penalty,
-        weight=-0.5,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
+    # leg_action_when_stable = RewTerm(
+    #     func=leg_action_when_stable_penalty,
+    #     weight=-0.5,
+    #     params={"asset_cfg": SceneEntityCfg("robot")},
+    # )
     leg_hold_reward = RewTerm(
         func=leg_position_hold_reward,
         weight=0.25,
