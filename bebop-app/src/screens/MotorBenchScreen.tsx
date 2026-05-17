@@ -46,6 +46,16 @@ export function MotorBenchScreen({
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // In-app confirmation modal state. Replaces window.confirm() because
+  // Chromium (and a couple others) start showing a "Prevent this page
+  // from creating additional dialogs" checkbox after a few prompts; once
+  // an operator ticks that, every subsequent confirm() returns false
+  // silently and destructive buttons like "Set zero" look broken until
+  // the page is reloaded. A page-owned modal can't be muted by the
+  // browser, so the operator's intent is always honored.
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmRequest | null>(
+    null,
+  );
 
   // -------------------------------------------------------------- lifecycle
   //
@@ -227,25 +237,69 @@ export function MotorBenchScreen({
     }
   }, []);
 
+  // Resolve any pending confirm before opening a new one so we never
+  // orphan an unresolved promise (e.g. operator clicks "Set zero" on
+  // joint A, then on joint B without dismissing A's modal).
+  const requestConfirm = useCallback(
+    (req: Omit<ConfirmRequest, "resolve">) =>
+      new Promise<boolean>((resolve) => {
+        setConfirmDialog((prev) => {
+          if (prev) prev.resolve(false);
+          return { ...req, resolve };
+        });
+      }),
+    [],
+  );
+
+  const closeConfirm = useCallback((ok: boolean) => {
+    setConfirmDialog((prev) => {
+      if (prev) prev.resolve(ok);
+      return null;
+    });
+  }, []);
+
   // Re-zero the joint's mechanical origin at its current physical
   // position. This is a *destructive*, persistent flash write on the
   // Robstride motor: it overwrites the motor's stored origin and the
   // only way back is to re-zero somewhere else. Always confirm.
+  //
+  // We prompt FIRST (before refreshAfter) so the row's "Re-zeroing…"
+  // busy state only appears once the operator commits — keeping the
+  // affordance unambiguous if they cancel.
   const reZero = useCallback(
-    (joint: string, currentPos: number) =>
-      refreshAfter(`zero:${joint}`, async () => {
-        const ok = window.confirm(
-          `Set mechanical zero for ${joint}?\n\n` +
-            `The motor's current physical position (${currentPos.toFixed(3)} rad) ` +
-            `will become the new 0 rad reference, persisted to motor flash. ` +
-            `Use this only after reassembly when the reported position no ` +
-            `longer matches mechanical neutral.\n\n` +
-            `This cannot be undone except by re-zeroing again somewhere else.`,
-        );
-        if (!ok) return;
-        await transportRef.current!.setMechanicalZero(joint);
-      }),
-    [refreshAfter],
+    async (joint: string, currentPos: number) => {
+      const ok = await requestConfirm({
+        title: `Set mechanical zero for ${joint}?`,
+        confirmLabel: "Set zero",
+        tone: "danger",
+        body: (
+          <>
+            <p>
+              The motor&rsquo;s current physical position (
+              <span className="font-mono text-text">
+                {currentPos.toFixed(3)} rad
+              </span>
+              ) will become the new{" "}
+              <span className="font-mono text-text">0 rad</span> reference,
+              persisted to motor flash.
+            </p>
+            <p>
+              Use this only after reassembly when the reported position
+              no longer matches mechanical neutral.
+            </p>
+            <p className="font-semibold text-text">
+              This cannot be undone except by re-zeroing again somewhere
+              else.
+            </p>
+          </>
+        ),
+      });
+      if (!ok) return;
+      await refreshAfter(`zero:${joint}`, () =>
+        transportRef.current!.setMechanicalZero(joint),
+      );
+    },
+    [refreshAfter, requestConfirm],
   );
 
   const eStop = useCallback(
@@ -547,6 +601,139 @@ export function MotorBenchScreen({
         <Button variant="ghost" onClick={onBack}>
           Back to dashboard
         </Button>
+      </div>
+
+      <ConfirmDialog request={confirmDialog} onClose={closeConfirm} />
+    </div>
+  );
+}
+
+/// In-app confirmation request payload. The screen owns this state and
+/// passes the active request (if any) to <ConfirmDialog>; resolving the
+/// promise is what unblocks whichever caller awaited requestConfirm().
+type ConfirmRequest = {
+  title: string;
+  body: ReactNode;
+  confirmLabel: string;
+  cancelLabel?: string;
+  /// "danger" paints the confirm button red — use for destructive ops
+  /// (re-zero, anything that writes flash).
+  tone?: "danger" | "default";
+  resolve: (ok: boolean) => void;
+};
+
+/// Simple page-owned confirm dialog. Used instead of window.confirm()
+/// so the browser's "Prevent this page from creating additional dialogs"
+/// muzzle (which makes confirm() return false silently after a few
+/// prompts) can never disable a destructive action.
+///
+/// Behavior:
+///   - Backdrop click and Esc cancel the request.
+///   - Cancel is autofocused so accidental Enter doesn't commit.
+///   - Tab is trapped between the two action buttons so focus can't
+///     escape into the page behind the modal.
+function ConfirmDialog({
+  request,
+  onClose,
+}: {
+  request: ConfirmRequest | null;
+  onClose: (ok: boolean) => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const confirmRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!request) return;
+    // Autofocus cancel for destructive prompts (and as a safe default
+    // anywhere) so Enter doesn't immediately commit.
+    cancelRef.current?.focus();
+  }, [request]);
+
+  useEffect(() => {
+    if (!request) return;
+    // DOM KeyboardEvent (not the React synthetic type imported above) —
+    // we let TS infer from addEventListener so we don't need the global
+    // type by name.
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose(false);
+      } else if (e.key === "Tab") {
+        // Two-button focus trap: Cancel ↔ Confirm.
+        const cancel = cancelRef.current;
+        const confirm = confirmRef.current;
+        if (!cancel || !confirm) return;
+        const active = document.activeElement;
+        if (e.shiftKey) {
+          if (active === cancel) {
+            e.preventDefault();
+            confirm.focus();
+          }
+        } else {
+          if (active === confirm) {
+            e.preventDefault();
+            cancel.focus();
+          }
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [request, onClose]);
+
+  if (!request) return null;
+
+  // Mirror the shared Button look without going through the Button
+  // component so we don't have to widen its prop type to accept refs.
+  const buttonBase =
+    "inline-flex items-center justify-center gap-2 rounded-[var(--radius-card)] border border-transparent px-4 py-2.5 text-sm font-semibold transition-all duration-120 cursor-pointer active:scale-[0.98]";
+  const cancelClass =
+    "bg-bg-elev border-border text-text hover:bg-bg-elev-2";
+  const confirmClass =
+    request.tone === "danger"
+      ? "bg-danger text-white hover:bg-[#e94a50]"
+      : "bg-accent text-white hover:bg-accent-press";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="confirm-dialog-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose(false);
+      }}
+    >
+      <div className="w-full max-w-md rounded-[var(--radius-card)] border border-border bg-bg-elev shadow-2xl">
+        <div className="px-5 pt-4 pb-2">
+          <h2
+            id="confirm-dialog-title"
+            className="text-text font-semibold text-base"
+          >
+            {request.title}
+          </h2>
+        </div>
+        <div className="px-5 pb-4 text-sm text-text-dim leading-relaxed space-y-2">
+          {request.body}
+        </div>
+        <div className="px-5 py-3 border-t border-border flex justify-end gap-2 bg-bg-elev-2/40 rounded-b-[var(--radius-card)]">
+          <button
+            ref={cancelRef}
+            type="button"
+            onClick={() => onClose(false)}
+            className={`${buttonBase} ${cancelClass}`}
+          >
+            {request.cancelLabel ?? "Cancel"}
+          </button>
+          <button
+            ref={confirmRef}
+            type="button"
+            onClick={() => onClose(true)}
+            className={`${buttonBase} ${confirmClass}`}
+          >
+            {request.confirmLabel}
+          </button>
+        </div>
       </div>
     </div>
   );
