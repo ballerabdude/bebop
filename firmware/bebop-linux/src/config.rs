@@ -25,9 +25,9 @@ pub mod timing {
 
 /// Observation and action dimensions (must match training!).
 ///
-/// Bebop V2 (humanoid, 8 leg joints, no wheels). Observation layout matches
-/// `sim/bebop_training/envs/bebop_v2_base_cfg.py::PolicyCfg` declaration
-/// order:
+/// Bebop V2 (humanoid, 8 leg joints, no wheels). Observation layout
+/// matches `sim/bebop_training/envs/bebop_v2_base_cfg.py::PolicyCfg`
+/// declaration order:
 ///
 /// ```text
 ///   [ 0.. 3)  base_lin_vel       (m/s, body frame)
@@ -35,17 +35,24 @@ pub mod timing {
 ///   [ 6.. 9)  projected_gravity  (unit vector in body frame)
 ///   [ 9..17)  joint_pos_rel      (rad, JOINT_NAMES order)
 ///   [17..25)  joint_vel_rel      (rad/s, JOINT_NAMES order)
-///   [25..33)  last_action        (raw NN output, JOINT_NAMES order)
-///   [33..36)  velocity_commands  (vx, vy, wz)
+///   [25..49)  last_action        (raw NN output, 24 dims: pos | kp | kd)
+///   [49..52)  velocity_commands  (vx, vy, wz)
 /// ```
 ///
-/// Action layout: 8 floats, JOINT_NAMES order, raw NN output. Each output
-/// is mapped to a position target via
-/// `target = default_pos + ACTION_SCALE * action` (default_pos = 0 for all
-/// 8 joints in this robot).
+/// Action layout: 24 floats. MIT-mode variable impedance, 3 channels
+/// per joint in JOINT_NAMES order:
+///
+/// - `[ 0.. 8)` raw position commands -> `target = default + SCALE_ACTION * clamp(raw, -1, 1)`
+/// - `[ 8..16)` raw kp commands       -> affine [-1, 1] to each joint's `(kp_min, kp_max)`
+/// - `[16..24)` raw kd commands       -> affine [-1, 1] to each joint's `(kd_min, kd_max)`
+///
+/// Per-joint kp/kd clamps are loaded from the YAML
+/// `policy_gain_clamps` block — see [`PolicyGainClamps`]. They MUST
+/// mirror `POLICY_KP_MIN/MAX` and `POLICY_KD_MIN/MAX` in the sim
+/// config.
 pub mod dims {
-    pub const OBS_DIM: usize = 36;
-    pub const ACTION_DIM: usize = 8;
+    pub const OBS_DIM: usize = 52;
+    pub const ACTION_DIM: usize = 24;
     pub const HISTORY_STEPS: usize = 1;
     pub const TOTAL_OBS_DIM: usize = OBS_DIM * HISTORY_STEPS;
 }
@@ -208,6 +215,31 @@ impl SlewParams {
     };
 }
 
+/// Per-joint bounds on the policy-emitted kp / kd values for the
+/// MIT-mode variable-impedance action. The decode path affine-maps each
+/// raw `[-1, 1]` channel into `(min, max)` for its joint. Values MUST
+/// mirror `POLICY_KP_MIN/MAX` and `POLICY_KD_MIN/MAX` in
+/// `sim/bebop_training/envs/bebop_v2_base_cfg.py`.
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyGainClamps {
+    pub kp_min: f32,
+    pub kp_max: f32,
+    pub kd_min: f32,
+    pub kd_max: f32,
+}
+
+impl PolicyGainClamps {
+    /// Conservative fallback if YAML omits both defaults and per-joint
+    /// overrides. Matches the most-conservative joint in the Bebop V2
+    /// envelope (foot kd_min).
+    pub const FALLBACK: Self = Self {
+        kp_min: 5.0,
+        kp_max: 100.0,
+        kd_min: 0.5,
+        kd_max: 5.0,
+    };
+}
+
 #[derive(Debug, Clone)]
 pub struct JointConfig {
     pub name: String,
@@ -220,6 +252,10 @@ pub struct JointConfig {
     pub test_gains: Gains,
     pub slew: SlewParams,
     pub default_position: f32,
+    /// Per-joint policy gain clamps (kp / kd ranges). The MIT-mode
+    /// policy emits raw kp / kd in [-1, 1]; the decode path maps each
+    /// to this joint's range before TX.
+    pub policy_gain_clamps: PolicyGainClamps,
 }
 
 #[derive(Debug, Clone)]
@@ -449,6 +485,12 @@ impl RobotConfig {
             );
             let slew = merge_slew(defaults.slew.as_ref(), raw_joint.slew.as_ref());
 
+            let policy_gain_clamps = merge_policy_gain_clamps(
+                defaults.policy_gain_clamps.as_ref(),
+                raw_joint.policy_gain_clamps.as_ref(),
+            );
+            validate_policy_gain_clamps(&name, &model, &policy_gain_clamps)?;
+
             let index = joints.len();
             joints.push(JointConfig {
                 name,
@@ -461,6 +503,7 @@ impl RobotConfig {
                 test_gains,
                 slew,
                 default_position: 0.0,
+                policy_gain_clamps,
             });
         }
 
@@ -669,6 +712,7 @@ struct RawDefaults {
     hold_gains: Option<RawGains>,
     test_gains: Option<RawGains>,
     slew: Option<RawSlew>,
+    policy_gain_clamps: Option<RawPolicyGainClamps>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -680,6 +724,15 @@ struct RawJoint {
     hold_gains: Option<RawGains>,
     test_gains: Option<RawGains>,
     slew: Option<RawSlew>,
+    policy_gain_clamps: Option<RawPolicyGainClamps>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawPolicyGainClamps {
+    kp_min: Option<f32>,
+    kp_max: Option<f32>,
+    kd_min: Option<f32>,
+    kd_max: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -858,6 +911,88 @@ fn merge_slew(defaults: Option<&RawSlew>, joint: Option<&RawSlew>) -> SlewParams
         arm_ramp_s: pick(|s| s.arm_ramp_s, SlewParams::DEFAULT.arm_ramp_s),
         abort_ramp_s: pick(|s| s.abort_ramp_s, SlewParams::DEFAULT.abort_ramp_s),
     }
+}
+
+fn merge_policy_gain_clamps(
+    defaults: Option<&RawPolicyGainClamps>,
+    joint: Option<&RawPolicyGainClamps>,
+) -> PolicyGainClamps {
+    let pick = |get: fn(&RawPolicyGainClamps) -> Option<f32>, fallback: f32| {
+        joint
+            .and_then(get)
+            .or_else(|| defaults.and_then(get))
+            .unwrap_or(fallback)
+    };
+    PolicyGainClamps {
+        kp_min: pick(|c| c.kp_min, PolicyGainClamps::FALLBACK.kp_min),
+        kp_max: pick(|c| c.kp_max, PolicyGainClamps::FALLBACK.kp_max),
+        kd_min: pick(|c| c.kd_min, PolicyGainClamps::FALLBACK.kd_min),
+        kd_max: pick(|c| c.kd_max, PolicyGainClamps::FALLBACK.kd_max),
+    }
+}
+
+/// Reject clamps that don't form a valid range or that exceed the
+/// motor model's electrical envelope. The supervisor uses the wire
+/// scaler's full encoder range when packing the CAN frame, so writing
+/// kp > `RobstrideSpecs::kp_max` would saturate at the encoder peak
+/// silently; we'd rather fail-fast at boot.
+fn validate_policy_gain_clamps(
+    joint_name: &str,
+    model: &RobstrideModel,
+    clamps: &PolicyGainClamps,
+) -> Result<()> {
+    if !(clamps.kp_min.is_finite() && clamps.kp_max.is_finite()) {
+        return Err(anyhow!(
+            "joint {joint_name:?}: policy_gain_clamps kp_min/kp_max must be finite"
+        ));
+    }
+    if !(clamps.kd_min.is_finite() && clamps.kd_max.is_finite()) {
+        return Err(anyhow!(
+            "joint {joint_name:?}: policy_gain_clamps kd_min/kd_max must be finite"
+        ));
+    }
+    if clamps.kp_min < 0.0 || clamps.kd_min < 0.0 {
+        return Err(anyhow!(
+            "joint {joint_name:?}: policy_gain_clamps kp_min/kd_min must be >= 0 \
+             (got kp_min={}, kd_min={})",
+            clamps.kp_min,
+            clamps.kd_min
+        ));
+    }
+    if clamps.kp_min >= clamps.kp_max {
+        return Err(anyhow!(
+            "joint {joint_name:?}: policy_gain_clamps kp_min ({}) must be < kp_max ({})",
+            clamps.kp_min,
+            clamps.kp_max
+        ));
+    }
+    if clamps.kd_min >= clamps.kd_max {
+        return Err(anyhow!(
+            "joint {joint_name:?}: policy_gain_clamps kd_min ({}) must be < kd_max ({})",
+            clamps.kd_min,
+            clamps.kd_max
+        ));
+    }
+    let specs = model.specs();
+    if clamps.kp_max > specs.kp_max {
+        return Err(anyhow!(
+            "joint {joint_name:?}: policy_gain_clamps kp_max ({}) exceeds {} encoder \
+             ceiling ({}). Lower kp_max or move to a higher-spec motor model.",
+            clamps.kp_max,
+            model.as_str(),
+            specs.kp_max
+        ));
+    }
+    if clamps.kd_max > specs.kd_max {
+        return Err(anyhow!(
+            "joint {joint_name:?}: policy_gain_clamps kd_max ({}) exceeds {} encoder \
+             ceiling ({}). Lower kd_max or move to a higher-spec motor model.",
+            clamps.kd_max,
+            model.as_str(),
+            specs.kd_max
+        ));
+    }
+    Ok(())
 }
 
 // ===========================================================================

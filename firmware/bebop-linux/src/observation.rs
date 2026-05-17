@@ -1,17 +1,19 @@
 //! Observation building and action scaling for Bebop V2 policy inference.
 //!
-//! The 36-element observation vector and 8-element action vector layouts
-//! are owned by [`crate::config::dims`] (see the docstring there for the
-//! authoritative spec). Anything in this file is a Rust mirror of what
-//! `sim/bebop_training/envs/bebop_v2_base_cfg.py` is doing during training.
+//! The 52-element observation vector and 24-element MIT-mode action
+//! vector layouts are owned by [`crate::config::dims`] (see the docstring
+//! there for the authoritative spec). Anything in this file is a Rust
+//! mirror of what `sim/bebop_training/envs/bebop_v2_base_cfg.py` is
+//! doing during training.
 //!
 //! ## Joint order
 //!
-//! All 8-element joint slots in both observations and actions use this
+//! All 8-slot joint groups in both observations and actions use this
 //! order, matching `JOINT_NAMES_ALL` in
-//! `sim/bebop_training/envs/bebop_v2_base_cfg.py:34-43`. It is the
+//! `sim/bebop_training/envs/bebop_v2_base_cfg.py`. It is the
 //! left/right-interleaved BFS-from-root order Newton physics produces from
-//! the URDF.
+//! the URDF. The 24-dim MIT-mode action stacks three of these 8-slot
+//! groups in the order: positions, kp, kd.
 //!
 //! | idx | joint                         |
 //! |-----|-------------------------------|
@@ -24,7 +26,7 @@
 //! |  6  | `foot_left_joint`             |
 //! |  7  | `foot_right_joint`            |
 
-use crate::config::{dims, scales, JointState};
+use crate::config::{dims, scales, JointState, PolicyGainClamps};
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
 /// Number of revolute joints driven by the policy on Bebop V2.
@@ -115,7 +117,7 @@ pub struct BaseVelocity {
 // Observation builder
 // ---------------------------------------------------------------------------
 
-/// Stateful builder that assembles the 36-element observation vector once
+/// Stateful builder that assembles the 52-element observation vector once
 /// per control tick. Update the individual fields whenever fresh data
 /// arrives (IMU 200 Hz, joint feedback ~100 Hz, cmd_vel async); call
 /// [`ObservationBuilder::build`] at the policy rate.
@@ -188,7 +190,7 @@ impl ObservationBuilder {
         }
     }
 
-    /// Assemble the 36-element observation vector. Layout matches
+    /// Assemble the 52-element observation vector. Layout matches
     /// `bebop_v2_base_cfg.py::PolicyCfg`:
     ///
     /// ```text
@@ -197,8 +199,8 @@ impl ObservationBuilder {
     ///   [ 6.. 9)  projected_gravity
     ///   [ 9..17)  joint_pos_rel       (q - q_default)
     ///   [17..25)  joint_vel_rel       (q_dot - q_dot_default; q_dot_default = 0)
-    ///   [25..33)  last_action
-    ///   [33..36)  velocity_commands   (vx, vy, wz)
+    ///   [25..49)  last_action         (24-dim raw NN output: pos | kp | kd)
+    ///   [49..52)  velocity_commands   (vx, vy, wz)
     /// ```
     pub fn build(&self) -> Vec<f32> {
         let mut obs = vec![0.0_f32; dims::OBS_DIM];
@@ -255,33 +257,70 @@ impl ObservationBuilder {
 }
 
 // ---------------------------------------------------------------------------
-// Action scaling
+// Action decoding (MIT-mode variable impedance)
 // ---------------------------------------------------------------------------
 
-/// Convert a raw 8-element policy action into 8 joint-position targets in
+/// Decoded MIT-mode action: 8 position targets + 8 kp + 8 kd, in
 /// [`JOINT_NAMES`] order.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DecodedAction {
+    pub targets: [f32; NUM_JOINTS],
+    pub kp: [f32; NUM_JOINTS],
+    pub kd: [f32; NUM_JOINTS],
+}
+
+/// Decode the raw 24-element policy action into per-joint position
+/// targets, kp, and kd values.
 ///
-/// Mirrors training's `JointPositionActionCfg(scale=0.8, use_default_offset=True)`:
+/// Layout (mirrors `bebop_v2_actions.py::VariableImpedanceJointAction`):
+///
+/// - `action[ 0.. 8)` raw position commands
+/// - `action[ 8..16)` raw kp commands
+/// - `action[16..24)` raw kd commands
+///
+/// Per-channel transform with `a = clamp(raw, -1, 1)`:
 ///
 /// ```text
-///   target[i] = default_pos[i] + SCALE_ACTION * clip(action[i], -1, 1)
+///   target[i] = default_pos[i] + SCALE_ACTION * a_pos
+///   kp[i]     = kp_min[i] + (a_kp + 1) / 2 * (kp_max[i] - kp_min[i])
+///   kd[i]     = kd_min[i] + (a_kd + 1) / 2 * (kd_max[i] - kd_min[i])
 /// ```
 ///
-/// The `[-1, 1]` clip is a defense-in-depth: rsl_rl's Gaussian head can
-/// occasionally emit outliers above 1, and we'd rather pull those back to
-/// the trained envelope than have the supervisor clamp them silently.
-/// The supervisor will *additionally* clamp to per-joint `pos_min`/`pos_max`
-/// before the wire — both clamps are intentional.
-pub fn scale_actions_to_targets(
+/// The `[-1, 1]` clip is defense-in-depth — rsl_rl's Gaussian head can
+/// emit outliers above 1, and we'd rather pull those back to the trained
+/// envelope than let the per-joint clamps absorb the difference silently.
+/// The supervisor additionally clamps the position to `pos_min`/`pos_max`
+/// before TX; all clamps are intentional.
+///
+/// `clamps[i]` MUST come from `JointConfig::policy_gain_clamps` for the
+/// joint at policy slot `i` (which is the joint whose name is
+/// `JOINT_NAMES[i]`).
+pub fn decode_policy_action(
     action: &[f32],
     default_positions: &[f32; NUM_JOINTS],
-) -> [f32; NUM_JOINTS] {
-    let mut targets = [0.0_f32; NUM_JOINTS];
+    clamps: &[PolicyGainClamps; NUM_JOINTS],
+) -> DecodedAction {
+    let mut out = DecodedAction::default();
     for i in 0..NUM_JOINTS {
-        let a = action.get(i).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
-        targets[i] = default_positions[i] + scales::SCALE_ACTION * a;
+        let a_pos = action.get(i).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+        let a_kp = action
+            .get(NUM_JOINTS + i)
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(-1.0, 1.0);
+        let a_kd = action
+            .get(2 * NUM_JOINTS + i)
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(-1.0, 1.0);
+
+        out.targets[i] = default_positions[i] + scales::SCALE_ACTION * a_pos;
+
+        let c = clamps[i];
+        out.kp[i] = c.kp_min + 0.5 * (a_kp + 1.0) * (c.kp_max - c.kp_min);
+        out.kd[i] = c.kd_min + 0.5 * (a_kd + 1.0) * (c.kd_max - c.kd_min);
     }
-    targets
+    out
 }
 
 #[cfg(test)]
@@ -323,7 +362,7 @@ mod tests {
         let builder = ObservationBuilder::new();
         let obs = builder.build();
         assert_eq!(obs.len(), dims::OBS_DIM);
-        assert_eq!(obs.len(), 36);
+        assert_eq!(obs.len(), 52);
     }
 
     #[test]
@@ -338,7 +377,9 @@ mod tests {
         });
         builder.joint_positions = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         builder.joint_velocities = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
-        builder.update_last_action(&[0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18]);
+        // 24-dim last_action: 8 positions, 8 kp, 8 kd.
+        let last_action: Vec<f32> = (0..dims::ACTION_DIM).map(|i| 0.01 * i as f32).collect();
+        builder.update_last_action(&last_action);
         builder.update_cmd_vel(VelocityCommand {
             linear_x: 0.7,
             linear_y: 0.8,
@@ -355,35 +396,84 @@ mod tests {
                                                                             // joint_vel: 80.0 exceeds CLIP_DOF_VEL=15.0, so it should clamp.
         assert!((obs[17] - 10.0).abs() < 1e-5);
         assert!((obs[24] - scales::CLIP_DOF_VEL).abs() < 1e-5);
-        assert_eq!(
-            &obs[25..33],
-            &[0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18]
-        ); // last_action
-        assert_eq!(&obs[33..36], &[0.7, 0.8, 0.9]); // velocity_commands
+        assert_eq!(&obs[25..49], last_action.as_slice()); // last_action (24 dims)
+        assert_eq!(&obs[49..52], &[0.7, 0.8, 0.9]); // velocity_commands
+    }
+
+    fn default_clamps() -> [PolicyGainClamps; NUM_JOINTS] {
+        let c = PolicyGainClamps {
+            kp_min: 10.0,
+            kp_max: 110.0,
+            kd_min: 1.0,
+            kd_max: 5.0,
+        };
+        [c; NUM_JOINTS]
     }
 
     #[test]
-    fn scale_actions_clips_and_offsets() {
+    fn decode_action_clips_and_offsets_position_channel() {
         let defaults = [0.0_f32; NUM_JOINTS];
-        let raw = [0.5, -0.5, 1.5, -1.5, 0.0, 0.25, -0.25, 1.0];
-        let targets = scale_actions_to_targets(&raw, &defaults);
+        let clamps = default_clamps();
+        // 24-dim raw action: first 8 = position, next 16 = gains at midpoint (0).
+        let mut raw = [0.0_f32; dims::ACTION_DIM];
+        raw[0..NUM_JOINTS].copy_from_slice(&[0.5, -0.5, 1.5, -1.5, 0.0, 0.25, -0.25, 1.0]);
 
-        assert!((targets[0] - 0.4).abs() < 1e-5); //  0.5 * 0.8
-        assert!((targets[1] - (-0.4)).abs() < 1e-5); // -0.5 * 0.8
-        assert!((targets[2] - 0.8).abs() < 1e-5); // clipped to 1.0 -> 0.8
-        assert!((targets[3] - (-0.8)).abs() < 1e-5); // clipped to -1.0 -> -0.8
-        assert!(targets[4].abs() < 1e-5);
-        assert!((targets[5] - 0.2).abs() < 1e-5);
-        assert!((targets[6] - (-0.2)).abs() < 1e-5);
-        assert!((targets[7] - 0.8).abs() < 1e-5);
+        let decoded = decode_policy_action(&raw, &defaults, &clamps);
+
+        assert!((decoded.targets[0] - 0.4).abs() < 1e-5); //  0.5 * 0.8
+        assert!((decoded.targets[1] - (-0.4)).abs() < 1e-5); // -0.5 * 0.8
+        assert!((decoded.targets[2] - 0.8).abs() < 1e-5); // clipped to  1.0 -> 0.8
+        assert!((decoded.targets[3] - (-0.8)).abs() < 1e-5); // clipped to -1.0 -> -0.8
+        assert!(decoded.targets[4].abs() < 1e-5);
+        assert!((decoded.targets[5] - 0.2).abs() < 1e-5);
+        assert!((decoded.targets[6] - (-0.2)).abs() < 1e-5);
+        assert!((decoded.targets[7] - 0.8).abs() < 1e-5);
     }
 
     #[test]
-    fn scale_actions_respects_default_positions() {
+    fn decode_action_maps_gains_with_midpoint_at_raw_zero() {
+        let defaults = [0.0_f32; NUM_JOINTS];
+        let clamps = default_clamps();
+        let raw = [0.0_f32; dims::ACTION_DIM];
+
+        let decoded = decode_policy_action(&raw, &defaults, &clamps);
+
+        let kp_mid = 0.5 * (clamps[0].kp_min + clamps[0].kp_max);
+        let kd_mid = 0.5 * (clamps[0].kd_min + clamps[0].kd_max);
+        for i in 0..NUM_JOINTS {
+            assert!((decoded.kp[i] - kp_mid).abs() < 1e-5);
+            assert!((decoded.kd[i] - kd_mid).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn decode_action_maps_gains_at_extremes() {
+        let defaults = [0.0_f32; NUM_JOINTS];
+        let clamps = default_clamps();
+        let mut raw = [0.0_f32; dims::ACTION_DIM];
+        // raw_kp = +1 for all -> kp = kp_max; raw_kd = -1 for all -> kd = kd_min.
+        for i in 0..NUM_JOINTS {
+            raw[NUM_JOINTS + i] = 1.0;
+            raw[2 * NUM_JOINTS + i] = -1.0;
+        }
+        // Also test clipping: send raw_kp = 2.5 on slot 0 and raw_kd = -3.0 on slot 1.
+        raw[NUM_JOINTS] = 2.5;
+        raw[2 * NUM_JOINTS + 1] = -3.0;
+
+        let decoded = decode_policy_action(&raw, &defaults, &clamps);
+        for i in 0..NUM_JOINTS {
+            assert!((decoded.kp[i] - clamps[i].kp_max).abs() < 1e-5);
+            assert!((decoded.kd[i] - clamps[i].kd_min).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn decode_action_respects_default_positions() {
         let defaults = [0.1_f32, -0.1, 0.2, -0.2, 0.3, -0.3, 0.4, -0.4];
-        let raw = [0.0_f32; NUM_JOINTS];
-        let targets = scale_actions_to_targets(&raw, &defaults);
-        assert_eq!(targets, defaults);
+        let clamps = default_clamps();
+        let raw = [0.0_f32; dims::ACTION_DIM];
+        let decoded = decode_policy_action(&raw, &defaults, &clamps);
+        assert_eq!(decoded.targets, defaults);
     }
 
     #[test]
@@ -392,7 +482,8 @@ mod tests {
         // the policy <-> firmware contract. If you legitimately rename a
         // joint, update both this table and `bebop_v2.yaml` keys.
         assert_eq!(JOINT_NAMES.len(), NUM_JOINTS);
-        assert_eq!(JOINT_NAMES.len(), dims::ACTION_DIM);
+        // The MIT-mode action has 3 channels per joint (position, kp, kd).
+        assert_eq!(3 * JOINT_NAMES.len(), dims::ACTION_DIM);
         assert!(JOINT_NAMES.iter().all(|n| n.ends_with("_joint")));
     }
 }

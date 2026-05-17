@@ -26,6 +26,12 @@ class BebopPPOBaseCfg(RslRlOnPolicyRunnerCfg):
     obs_groups = {"actor": ["policy"], "critic": ["policy"]}
 
     # Isaac Lab 3.x runner expects explicit actor/critic model blocks.
+    #
+    # `std_type` must be ``"scalar"`` or ``"log"`` for the Gaussian head in
+    # this repo's bundled rsl_rl (``"per_dim"`` is not supported and crashes
+    # at runner init). MIT-mode 24-dim actions still train fine with a
+    # shared scalar std; tune ``entropy_coef`` / ``init_std`` if gain
+    # channels need more exploration.
     actor = {
         "class_name": "MLPModel",
         "hidden_dims": [512, 256, 128],
@@ -111,7 +117,8 @@ class BebopPPOLocomotionCfg(BebopPPOBaseCfg):
     experiment_name = "bebop_locomotion"
 
     # Re-initialize the action distribution with more noise so resumed
-    # checkpoints can rediscover exploration.
+    # checkpoints can rediscover exploration. Same ``std_type`` contract as
+    # the base cfg (scalar only in this rsl_rl build).
     actor = {
         "class_name": "MLPModel",
         "hidden_dims": [512, 256, 128],

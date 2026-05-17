@@ -22,7 +22,7 @@ pub enum Mode {
     DialIn = 2,
     /// ONNX policy drives the joints. The runtime loads `policy.onnx`
     /// (sibling of the joint YAML by default; override with `--policy`)
-    /// and runs the 36-dim observation -> 8-dim action MLP at 100 Hz via
+    /// and runs the 52-dim observation -> 24-dim MIT-mode action MLP at 100 Hz via
     /// [`crate::policy_runner::PolicyRunner`].
     RunPolicy = 3,
 }

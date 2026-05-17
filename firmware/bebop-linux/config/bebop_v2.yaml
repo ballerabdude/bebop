@@ -33,41 +33,36 @@ defaults:
   # Default gains for active tests (currently unused; phase 2).
   test_gains: { kp: 30.0, kd: 2.0 }
 
-  # Setpoint slew limits. Independent of motor-side PD gains, these cap
-  # the achievable jerk in the host-side TX path.
-  #
-  # `max_pos_step_per_tick` MUST stay in sync with `FW_MAX_POS_STEP_PER_TICK_RAD`
-  # in `sim/bebop_training/envs/bebop_v2_base_cfg.py` — the trained policy
-  # bakes in this slew rate as part of its achievable control bandwidth.
-  # If you tune this value, retrain.
-  #
-  # Trail of empirical numbers we tried (bipedal balance task):
-  #   * 0.005 rad/tick (0.5 rad/s)   — too tight, sim ground_contact = 1.0
-  #     forever; PD can only ramp ~0.2 Nm/tick at the hip.
-  #   * 0.01 rad/tick (1.0 rad/s)    — better on the *real* robot with the
-  #     old broken sim, but still strangled the new properly-matched sim.
-  #   * 0.05 rad/tick (5.0 rad/s)    — converged a stable policy, but knees
-  #     and ankles oscillated in deployment.
-  #   * 0.10 rad/tick (10.0 rad/s)   — significantly less oscillation, but
-  #     entropy collapsed in training to -14 and episode length plateaued.
-  #   * 1.0 rad/tick (100.0 rad/s)   — current. Effectively non-binding:
-  #     ~5-10x above each joint's working vel_max (12 rad/s for legs,
-  #     20 rad/s for foot), so this no longer shapes the trajectory the
-  #     policy can issue. The wrapper code path stays so re-enabling
-  #     a tighter slew is a one-line change here + one in
-  #     bebop_v2_base_cfg.py.
-  #
-  # Safety: with slew effectively disabled, the host can inject setpoint
-  # discontinuities of arbitrary size. The motor's internal torque
-  # limiter still clamps the actual force at `hard_limits.tau_max`
-  # below, so commanded jumps don't translate into mechanical shock
-  # loads. Smoothness of the command stream now lives entirely in the
-  # sim-side reward shaping (action_rate_l2 / joint_acc_l2 in
-  # bebop_v2_base_cfg.py::RewardsCfg).
+  # Setpoint slew limits applied to the *position channel* of the
+  # variable-impedance MIT-mode policy output. Mirrors
+  # `FW_MAX_POS_STEP_PER_TICK_RAD` in `sim/bebop_training/envs/bebop_v2_base_cfg.py`.
+  # 0.015 rad/tick @ 100 Hz tick = 1.5 rad/s setpoint slew. Gain
+  # channels (kp/kd) are NOT slew-clamped — variable impedance demands
+  # instantaneous between-tick gain changes. If you retune this value,
+  # retrain.
   slew:
-    max_pos_step_per_tick: .015625 # rad — at 100 Hz tick = 100 rad/s slew cap (effectively non-binding)
+    max_pos_step_per_tick: 0.015   # rad/tick — must match sim FW_MAX_POS_STEP_PER_TICK_RAD
     arm_ramp_s:            0.5     # gain ramp 0 → hold over arm
     abort_ramp_s:          0.3     # gain ramp hold → 0 over abort
+
+  # Per-joint policy-emitted kp/kd clamps. The 24-dim MIT-mode action
+  # vector carries (8 positions, 8 kp, 8 kd) per tick; the loader
+  # affine-maps each raw kp / kd channel from [-1, 1] into the
+  # `(kp_min, kp_max)` / `(kd_min, kd_max)` range for its joint. These
+  # MUST mirror `POLICY_KP_MIN/MAX` and `POLICY_KD_MIN/MAX` in
+  # `sim/bebop_training/envs/bebop_v2_base_cfg.py` — the trained policy
+  # baked in this gain envelope. Per-joint overrides (below in the
+  # `joints:` block) win over the defaults here.
+  #
+  # Conservative defaults (overridden per joint group). The loader
+  # additionally rejects any clamp that exceeds the motor model's
+  # encoder ceiling (`RobstrideSpecs::RSxx.{kp_max, kd_max}` in
+  # `firmware/bebop-linux/src/config.rs`).
+  policy_gain_clamps:
+    kp_min: 5.0
+    kp_max: 100.0
+    kd_min: 0.5
+    kd_max: 5.0
 
 # ============================================================================
 # Joints. Index order matters for the ONNX policy: it MUST match
@@ -76,43 +71,31 @@ defaults:
 # ones digit = joint level. Left leg lives on can0, right leg on can1.
 # ============================================================================
 joints:
-  # ----- Hip abduction (RS04) -----------------------------------------------
-  # Per-joint `hold_gains` override the soft built-in fallback (kp=5, kd=1)
-  # which is too weak to move the leg under its own static load. The values
-  # below are sized to overcome the measured gravity / preload torque at
-  # each joint with ~0.02 rad of steady-state tracking error, while staying
-  # an order of magnitude below each motor model's `kp_max`. Tune in place
-  # one joint at a time per the procedure at the top of this file.
-  # IMPORTANT (sim-to-real): the `vel_max` / `tau_max` numbers below are the
-  # safety-trip envelope the supervisor enforces. They MUST equal the
-  # matching `FW_*_VEL_MAX` / `FW_*_TAU_MAX` constants in
-  # `sim/bebop_training/envs/bebop_v2_base_cfg.py`. The trained policy
-  # was exposed to exactly that envelope in sim (`effort_limit_sim`), so
-  # any drift here means deploy-time torques the policy didn't see in
-  # training, or supervisor trips on torques the policy was trained to
-  # use. Bipedal balance needs the motors' working envelope — do not
-  # "soften" these for bench testing; if you need a safer test, harness
-  # the robot from a gantry instead of clipping its actuators.
+  # `hold_gains` are the per-joint armed-but-idle gains (used in DialIn,
+  # during the arm/abort ramps, and any time the robot is armed without
+  # RunPolicy active). Once RunPolicy is engaged the policy supplies
+  # kp/kd on every tick from its MIT-mode action and these are not used
+  # for control — they only define the soft "armed" pose.
   #
-  # Sizing rationale (per group): each `tau_max` is set to the trained
-  # envelope, which is at or below the motor model's electrical peak as
-  # encoded by the Robstride MIT-mode feedback frame
-  # (`RobstrideSpecs::RSxx.torque_max` in
-  # `firmware/bebop-linux/src/config.rs`). Going above the encoded peak
-  # is dead code (feedback torque is physically incapable of exceeding
-  # the encoder full-scale, so `check_tau` never fires); going below
-  # the trained envelope starves the controller. The current values
-  # match the training-side caps, with the foot at the encoder peak so
-  # `check_tau` still has E-STOP coverage of true motor saturation.
+  # `hard_limits.vel_max` / `hard_limits.tau_max` are the supervisor's
+  # E-STOP envelope. They MUST equal the matching `FW_*_VEL_MAX` /
+  # `FW_*_TAU_MAX` constants in `sim/bebop_training/envs/bebop_v2_base_cfg.py`
+  # so the trained policy sees the same torque / velocity ceiling at
+  # deploy time as during training.
+  #
+  # `policy_gain_clamps` (per-joint, optional — inherits the
+  # `defaults.policy_gain_clamps` block when omitted) bounds the
+  # decoded kp / kd emitted by the policy. MUST mirror `POLICY_KP_MIN/MAX`
+  # and `POLICY_KD_MIN/MAX` in the sim config.
 
+  # ----- Hip abduction (RS04) -----------------------------------------------
   hip_abduction_left_joint:
     can_interface: can0
     motor_id: 31
     model: RS04
-    # tau_max = trained envelope = 84 Nm (RS04 electrical peak is 120 Nm,
-    # but 84 is what the policy was trained against; raising requires retrain).
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 40.0,  kd: 3.0 }
+    policy_gain_clamps: { kp_min: 5.0, kp_max: 100.0, kd_min: 0.5, kd_max: 5.0 }
 
   hip_abduction_right_joint:
     can_interface: can1
@@ -120,15 +103,16 @@ joints:
     model: RS04
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 40.0,  kd: 3.0 }
+    policy_gain_clamps: { kp_min: 5.0, kp_max: 100.0, kd_min: 0.5, kd_max: 5.0 }
 
   # ----- Femur / hip pitch (RS03) -------------------------------------------
   femur_left_joint:
     can_interface: can0
     motor_id: 32
     model: RS03
-    # tau_max = trained envelope = 42 Nm (RS03 electrical peak is 60 Nm).
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
+    policy_gain_clamps: { kp_min: 20.0, kp_max: 300.0, kd_min: 1.0, kd_max: 8.0 }
 
   femur_right_joint:
     can_interface: can1
@@ -136,17 +120,16 @@ joints:
     model: RS03
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
+    policy_gain_clamps: { kp_min: 20.0, kp_max: 300.0, kd_min: 1.0, kd_max: 8.0 }
 
   # ----- Shin / knee (RS04) -------------------------------------------------
   shin_left_joint:
     can_interface: can0
     motor_id: 34
     model: RS04
-    # Knee mostly flexes one way; tighter pos_max on the +ve side.
-    # tau_max = trained envelope = 84 Nm (RS04 electrical peak is 120 Nm).
     hard_limits: { pos_min: -1.570796, pos_max: 1.570796, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
-    # Knee carries the full shin+foot moment, so a touch stiffer than hip.
     hold_gains:  { kp: 120.0, kd: 4.0 }
+    policy_gain_clamps: { kp_min: 10.0, kp_max: 250.0, kd_min: 1.0, kd_max: 8.0 }
 
   shin_right_joint:
     can_interface: can1
@@ -154,6 +137,7 @@ joints:
     model: RS04
     hard_limits: { pos_min: -1.570796, pos_max: 1.570796, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 120.0, kd: 4.0 }
+    policy_gain_clamps: { kp_min: 10.0, kp_max: 250.0, kd_min: 1.0, kd_max: 8.0 }
 
   # ----- Foot / ankle (RS02) ------------------------------------------------
   foot_left_joint:
@@ -161,11 +145,9 @@ joints:
     motor_id: 35
     model: RS02
     # RS02 datasheet: rated 6 Nm @ 100 rpm, peak 17 Nm (stall, T-N curve at 36 V).
-    # tau_max = 17 Nm matches the RS02 electrical peak AND the trained
-    # envelope (`FW_FOOT_TAU_MAX = 17.0`).
     hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 17.0, temp_max: 65.0 }
-    # Hold gains at the firmware's RS02 kp_max / kd_max ceiling (500 / 5) for max ankle stiffness.
     hold_gains:  { kp: 150.0, kd: 2.50 }
+    policy_gain_clamps: { kp_min: 5.0, kp_max: 250.0, kd_min: 0.2, kd_max: 4.5 }
 
   foot_right_joint:
     can_interface: can1
@@ -173,6 +155,7 @@ joints:
     model: RS02
     hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 17.0, temp_max: 65.0 }
     hold_gains:  { kp: 150.0, kd: 2.50 }
+    policy_gain_clamps: { kp_min: 5.0, kp_max: 250.0, kd_min: 0.2, kd_max: 4.5 }
 
 # ============================================================================
 # IMU (Adafruit BNO085 breakout on SPI) — optional

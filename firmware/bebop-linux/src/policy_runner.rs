@@ -5,7 +5,7 @@
 //! - A [`PolicyController`] (ONNX session + last-action cache + history
 //!   buffer; with `HISTORY_STEPS = 1` the buffer is just the latest frame).
 //! - An [`ObservationBuilder`] that holds IMU / cmd_vel / joint state and
-//!   emits the 36-element observation in the layout fixed by
+//!   emits the 52-element observation in the layout fixed by
 //!   `bebop_v2_base_cfg.py::PolicyCfg`.
 //! - An `Arc<Supervisor>` it consults for joint feedback (read) and pushes
 //!   PD commands through (`safe_send_ctrl`, which already enforces the
@@ -53,12 +53,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::config::dims;
+use crate::config::{dims, PolicyGainClamps};
 use crate::imu::ImuShared;
 use crate::mode::Mode;
 use crate::observation::{
-    scale_actions_to_targets, ImuState, ObservationBuilder, VelocityCommand, JOINT_NAMES,
-    NUM_JOINTS,
+    decode_policy_action, ImuState, ObservationBuilder, VelocityCommand, JOINT_NAMES, NUM_JOINTS,
 };
 use crate::policy::PolicyController;
 use crate::safety::{BreachReason, Supervisor};
@@ -86,6 +85,10 @@ pub struct PolicyRunner {
     /// `obs_builder.default_positions` (for `joint_pos_rel`) and as the
     /// offset in `target = default + scale * action`.
     default_positions: [f32; NUM_JOINTS],
+    /// Per-joint policy kp/kd clamps in policy slot order. Cached at
+    /// startup from `JointConfig::policy_gain_clamps` so we don't have
+    /// to re-resolve the joint mapping on every tick.
+    policy_gain_clamps: [PolicyGainClamps; NUM_JOINTS],
     /// Edge-detect entering RunPolicy so we can clear the policy's history
     /// buffer + last_action cache.
     was_running: bool,
@@ -119,6 +122,7 @@ impl PolicyRunner {
 
         let mut joint_indices = [0usize; NUM_JOINTS];
         let mut default_positions = [0.0_f32; NUM_JOINTS];
+        let mut policy_gain_clamps = [PolicyGainClamps::FALLBACK; NUM_JOINTS];
         for (slot, name) in JOINT_NAMES.iter().enumerate() {
             let joint = cfg.get_joint(name).ok_or_else(|| {
                 anyhow!(
@@ -129,6 +133,7 @@ impl PolicyRunner {
             })?;
             joint_indices[slot] = joint.index;
             default_positions[slot] = joint.default_position;
+            policy_gain_clamps[slot] = joint.policy_gain_clamps;
         }
 
         // `PolicyController::new` -> `Session::builder()` triggers `ort`'s
@@ -177,6 +182,7 @@ impl PolicyRunner {
             imu_shared,
             joint_indices,
             default_positions,
+            policy_gain_clamps,
             was_running: false,
             imu_was_live: false,
             last_io_log_at: None,
@@ -289,7 +295,7 @@ impl PolicyRunner {
         self.obs_builder.joint_positions = joint_pos;
         self.obs_builder.joint_velocities = joint_vel;
 
-        // 5) Build the 36-dim observation, run inference.
+        // 5) Build the 52-dim observation, run inference.
         let obs = self.obs_builder.build();
         let action = match self.controller.step(&obs) {
             Ok(a) => a,
@@ -321,28 +327,21 @@ impl PolicyRunner {
         //    its own copy too, but the obs is built externally here.)
         self.obs_builder.update_last_action(&action);
 
-        // 7) Convert raw action into 8 joint-position targets:
-        //       target[i] = default[i] + 0.8 * clip(action[i], -1, 1)
-        //    The supervisor's `safe_send_ctrl` will clamp again to
-        //    per-joint pos_min..pos_max and slew-limit per tick.
-        let targets = scale_actions_to_targets(&action, &self.default_positions);
-
-        // Per-tick raw dump for offline replay / debugging. Enable with
-        // `RUST_LOG=bebop_linux::policy_runner=debug` (or the binary's
-        // equivalent prefix). Commented out by default: this fires at the
-        // policy tick rate (~50 Hz) and the 36-element observation vector
-        // makes terminal scrollback unreadable when anything else (IMU
-        // bring-up, motor faults, etc.) is what we're actually chasing.
-        // Re-enable temporarily when you need to capture an offline replay.
-        // debug!(
-        //     observation = ?obs.as_slice(),
-        //     raw_action = ?action.as_slice(),
-        //     position_targets_rad = ?targets.as_slice(),
-        //     "policy tick: 36-dim obs → raw action → scaled joint targets (rad)"
-        // );
+        // 7) Decode the 24-dim MIT-mode action into (8 position targets,
+        //    8 kp, 8 kd). The decoder clips raw channels to [-1, 1],
+        //    applies the position scale + default offset, and affine-maps
+        //    each per-joint kp/kd to its `policy_gain_clamps` range. The
+        //    supervisor's `safe_send_ctrl` then additionally clamps
+        //    position to per-joint `pos_min..pos_max` and slew-limits
+        //    per tick before pushing the MIT-mode CAN frame.
+        let decoded = decode_policy_action(
+            &action,
+            &self.default_positions,
+            &self.policy_gain_clamps,
+        );
 
         // Rate-limited human-readable summary at info!. We break the
-        // 36-element observation into the same named slices as
+        // 52-element observation into the same named slices as
         // `ObservationBuilder::build` so it's actually parseable in a
         // running terminal. `imu_live` makes it obvious whether the
         // policy is currently consuming the BNO085 or the synthetic
@@ -359,10 +358,12 @@ impl PolicyRunner {
                 projected_gravity = ?&obs[6..9],
                 joint_pos_rel = ?&obs[9..17],
                 joint_vel = ?&obs[17..25],
-                last_action = ?&obs[25..33],
-                cmd_vel = ?&obs[33..36],
+                last_action = ?&obs[25..49],
+                cmd_vel = ?&obs[49..52],
                 raw_action = ?action.as_slice(),
-                position_targets_rad = ?targets.as_slice(),
+                position_targets_rad = ?&decoded.targets,
+                kp = ?&decoded.kp,
+                kd = ?&decoded.kd,
                 "policy I/O"
             );
         }
@@ -376,19 +377,19 @@ impl PolicyRunner {
         //    every re-arm in RunPolicy mode trips the feedback watchdog
         //    on whichever joint was armed first).
         //
-        //    Use per-joint hold_gains for kp/kd; these should ideally
-        //    match the gains baked into the training-time actuator
-        //    config (see `BEBOP_V2_CFG.actuators` in
-        //    `bebop_v2_base_cfg.py`). They currently differ — known
-        //    sim-to-real gap.
+        //    kp/kd come from the policy on every tick (MIT-mode variable
+        //    impedance). The decode path has already clamped them to the
+        //    per-joint `policy_gain_clamps` envelope, so no further
+        //    clipping is needed here. `hold_gains` in the YAML is now
+        //    used only for pre-RunPolicy idle holding.
         for (slot, &idx) in self.joint_indices.iter().enumerate() {
             if !armed[slot] {
                 continue;
             }
             let cfg = &sup.cfg().joints[idx];
-            let kp = cfg.hold_gains.kp;
-            let kd = cfg.hold_gains.kd;
-            if let Err(e) = sup.safe_send_ctrl(idx, targets[slot], kp, kd, 0.0, 0.0) {
+            let kp = decoded.kp[slot];
+            let kd = decoded.kd[slot];
+            if let Err(e) = sup.safe_send_ctrl(idx, decoded.targets[slot], kp, kd, 0.0, 0.0) {
                 debug!(joint = %cfg.name, error = %e, "policy TX failed");
             }
         }
@@ -417,6 +418,7 @@ mod tests {
     #[test]
     fn joint_names_count_matches_action_dim() {
         assert_eq!(JOINT_NAMES.len(), NUM_JOINTS);
-        assert_eq!(JOINT_NAMES.len(), dims::ACTION_DIM);
+        // MIT-mode action: 3 channels (pos, kp, kd) per joint.
+        assert_eq!(3 * JOINT_NAMES.len(), dims::ACTION_DIM);
     }
 }
