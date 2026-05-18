@@ -20,6 +20,7 @@ from isaaclab.utils.noise import UniformNoiseCfg
 
 from .bebop_v2_actions import VariableImpedanceJointActionCfg
 from .bebop_v2_rewards import (
+    foot_flat_reward,
     leg_position_hold_reward,
     torso_upright_via_legs_reward,
 )
@@ -97,7 +98,7 @@ FW_FOOT_VEL_MAX = 20.0
 # changes between ticks. Delay = 1 tick approximates one CAN round-trip
 # (TX -> Robstride PD -> encoder -> RX feedback).
 FW_MAX_POS_STEP_PER_TICK_RAD = 0.015
-FW_ACTION_DELAY_STEPS = 1
+FW_ACTION_DELAY_STEPS = 2
 
 
 BEBOP_V2_CFG = ArticulationCfg(
@@ -290,6 +291,11 @@ class EventCfg:
             "velocity_range": (-0.1, 0.1),
         },
     )
+    # Femur is the lateral hip-abduction axis on this articulation
+    # (despite the name — the joint called ``hip_abduction_*_joint`` is
+    # actually fore/aft). Keep the reset perturbation small so the
+    # ``femur_deviation`` penalty below is not constantly being asked
+    # to "undo" a splayed spawn pose.
     reset_femur = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
@@ -298,7 +304,7 @@ class EventCfg:
                 "robot",
                 joint_names=["femur_left_joint", "femur_right_joint"],
             ),
-            "position_range": (-0.30, 0.30),
+            "position_range": (-0.12, 0.12),
             "velocity_range": (-0.1, 0.1),
         },
     )
@@ -386,6 +392,28 @@ class RewardsCfg:
         weight=-0.05,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=JOINT_NAMES_ALL)},
     )
+
+    # Targeted anti-splay penalty on the femur joints. Femur is the
+    # lateral hip-abduction axis on this articulation (yes, the joint
+    # named ``hip_abduction_*_joint`` is actually fore/aft pitch; the
+    # naming is historical). Without this term the policy reward-hacks
+    # the standing task by spreading both femurs out for a wider base
+    # of support — it earns more ``alive``/``torso_upright`` reward
+    # than the global ``joint_deviation`` term can offset, and the
+    # resulting pose is brittle on the real robot (low-friction floor
+    # → feet slip outward → fall). Experiments override the weight:
+    # the balance stage cranks it; locomotion may want it relaxed if
+    # the gait needs more lateral authority.
+    femur_deviation = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-0.5,
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=["femur_left_joint", "femur_right_joint"],
+            ),
+        },
+    )
     base_height = RewTerm(
         func=mdp.base_height_l2,
         weight=-2.0,
@@ -409,6 +437,18 @@ class RewardsCfg:
         func=torso_upright_via_legs_reward,
         weight=1.0,
         params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+
+    # Soles parallel to the ground. Composes with ``torso_upright_via_legs``:
+    # the torso term pins one end of the pitch chain (torso vertical),
+    # this term pins the other end (foot horizontal). For locomotion
+    # experiments this should be relaxed (foot legitimately tilts during
+    # swing / heel-toe contact) — override ``std`` upward or drop the
+    # weight there.
+    foot_flat = RewTerm(
+        func=foot_flat_reward,
+        weight=0.5,
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.15},
     )
 
 

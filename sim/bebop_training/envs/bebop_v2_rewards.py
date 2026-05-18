@@ -23,6 +23,7 @@ import torch
 import warp as wp
 
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils.math import quat_apply_inverse
 
 
 def _ensure_tensor(
@@ -155,6 +156,69 @@ def leg_position_hold_reward(
     joint_vel = _ensure_tensor(robot.data.joint_vel, proj_grav)
     joint_vel_magnitude = torch.sum(torch.square(joint_vel), dim=1)
     return torch.exp(-0.5 * joint_vel_magnitude) * is_upright
+
+
+def foot_flat_reward(
+    env,
+    asset_cfg: SceneEntityCfg,
+    std: float = 0.15,
+    foot_body_names: tuple[str, str] = ("foot_left_1", "foot_right_1"),
+) -> torch.Tensor:
+    """Reward keeping the soles of both feet parallel to the ground.
+
+    Reads each foot link's world-frame quaternion from the articulation
+    and projects world gravity ``(0, 0, -1)`` into the foot's local
+    frame. When the foot is flat (sole horizontal, link +z pointing
+    up) the projected vector is approximately ``(0, 0, -1)`` and the
+    ``x`` / ``y`` components are zero; as the foot tilts forward
+    (toe-down/heel-down) or laterally, those components grow with
+    ``sin(theta)``.
+
+    The error per foot is ``g_x^2 + g_y^2``; we sum over both feet and
+    pass through ``exp(-err / std^2)`` so the reward is in ``[0, 1]``
+    and concentrates strongly around the flat-foot pose.
+
+    Composes cleanly with :func:`torso_upright_via_legs_reward`: the
+    torso term selects shin/ankle angles that keep the torso vertical;
+    this term selects shin/ankle angles that keep the foot horizontal.
+    Together they pin both ends of the pitch chain, which for a
+    standing pose corresponds to a straight leg / flat foot / upright
+    torso. During locomotion the foot legitimately tilts during swing
+    and heel/toe contact, so locomotion experiments should either
+    drop this term's weight, widen ``std`` (e.g. to ``0.4``), or
+    gate it on stance contact.
+
+    Args:
+        std: shaping width. Default ``0.15`` ≈ a foot tilt of ~8.6°
+            drops the reward to ``exp(-1) ≈ 0.37``. Loosen toward
+            ``0.3`` if the policy needs more tolerance during recovery
+            from a perturbation; tighten toward ``0.10`` for a
+            stricter "feet must be visibly flat" bias.
+        foot_body_names: rigid-body names for the left/right foot
+            links in the articulation. Default matches the Bebop V2
+            USD (``foot_left_1`` / ``foot_right_1``).
+    """
+    robot = env.scene[asset_cfg.name]
+    device = getattr(env, "device", None)
+
+    body_quat_w = _ensure_tensor(robot.data.body_quat_w, env_device=device)
+    # body_quat_w shape: (num_envs, num_bodies, 4) in (w, x, y, z).
+    body_names = robot.body_names
+    foot_indices = [body_names.index(name) for name in foot_body_names]
+
+    num_envs = body_quat_w.shape[0]
+    gravity_w = torch.tensor(
+        [0.0, 0.0, -1.0], device=body_quat_w.device, dtype=body_quat_w.dtype
+    ).unsqueeze(0).expand(num_envs, -1)
+
+    err = torch.zeros(num_envs, device=body_quat_w.device, dtype=body_quat_w.dtype)
+    for idx in foot_indices:
+        foot_quat = body_quat_w[:, idx, :]  # (num_envs, 4)
+        foot_grav_b = quat_apply_inverse(foot_quat, gravity_w)
+        err = err + foot_grav_b[:, 0] * foot_grav_b[:, 0]
+        err = err + foot_grav_b[:, 1] * foot_grav_b[:, 1]
+
+    return torch.exp(-err / (std * std))
 
 
 def torso_upright_via_legs_reward(
