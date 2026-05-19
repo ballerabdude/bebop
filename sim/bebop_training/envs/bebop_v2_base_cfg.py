@@ -255,6 +255,24 @@ class ObservationsCfg:
 
 @configclass
 class EventCfg:
+    # Scale the ``base_link`` mass at sim startup. This is the cheap
+    # "what if the top half of the robot were heavier?" knob — it
+    # mutates the rigid-body inertial properties in PhysX directly, so
+    # we don't have to round-trip through the URDF / USD to change the
+    # carried payload. Set to (2.0, 2.0) to deterministically double
+    # the base mass; widen the range (e.g. (1.5, 2.5)) to randomize
+    # payload across envs. Runs before ``add_base_mass`` so the ±kg
+    # jitter below stacks on top of the scaled value.
+    scale_base_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+            "mass_distribution_params": (2.0, 2.0),
+            "operation": "scale",
+        },
+    )
+
     add_base_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
         mode="startup",

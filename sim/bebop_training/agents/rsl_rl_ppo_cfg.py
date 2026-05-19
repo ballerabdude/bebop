@@ -15,7 +15,7 @@ class BebopPPOBaseCfg(RslRlOnPolicyRunnerCfg):
 
     # General Runner Settings
     num_steps_per_env = 32       # Number of steps to collect per env before updating policy
-    max_iterations = 100000        # Total training iterations
+    max_iterations = 10000        # Total training iterations
     save_interval = 100           # Save checkpoint every 100 iterations
     experiment_name = "bebop_base"
 
