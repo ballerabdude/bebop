@@ -35,7 +35,9 @@ class BebopV2FlatLocomotionCfg(BebopV2BaseEnvCfg):
         # standing alive bonus.
         self.rewards.track_lin_vel_xy.weight = 4.0
         self.rewards.track_ang_vel_z.weight = 2.0
-        self.rewards.alive.weight = 0.25  # was 2.0 -> standing becomes much less attractive
+        # Drop the alive bonus so standing-in-place stops being a
+        # comfortable local optimum that out-earns attempting motion.
+        self.rewards.alive.weight = 0.25
 
         # Disable the "hold still" rewards entirely during locomotion so they
         # don't punish stepping motions.
@@ -45,10 +47,10 @@ class BebopV2FlatLocomotionCfg(BebopV2BaseEnvCfg):
 
         # Posture: keep torso upright and pull joints back to neutral so the
         # policy walks tall instead of crouching against joint limits.
-        self.rewards.flat_orientation_l2.weight = -2.0   # was -0.5
-        self.rewards.joint_deviation.weight = -0.1       # was -0.05 (base default)
-        self.rewards.base_height.weight = -3.0           # was -2.0 (base default)
-        self.rewards.joint_pos_limits.weight = -2.0      # was -1.0; punish hitting limits harder
+        self.rewards.flat_orientation_l2.weight = -2.0
+        self.rewards.joint_deviation.weight = -0.1
+        self.rewards.base_height.weight = -3.0
+        self.rewards.joint_pos_limits.weight = -2.0
 
         # Light random pushes during locomotion for sim-to-real robustness.
         self.events.push_robot = EventTerm(

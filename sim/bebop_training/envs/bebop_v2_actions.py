@@ -153,9 +153,31 @@ class VariableImpedanceJointAction(JointPositionAction):
             d = wp.to_torch(d)
         return d[env_ids][:, self._joint_ids].clone()
 
+    def _current_joint_pos_for_action(self, env_ids: Sequence[int] | slice) -> torch.Tensor:
+        """Current joint positions for the joints this action term controls.
+
+        Used to seed the slew tracker / delay buffer at reset, so the action
+        term starts from where the joints actually are (i.e. the random
+        spawn pose written by ``mdp.reset_joints_by_offset``) instead of
+        snapping the target back to the default pose on tick 1. Without
+        this, the high-stiffness actuator yanks every joint back to zero
+        within ~50 ms after reset and the policy never experiences the
+        randomized initial conditions.
+        """
+        p = self._asset.data.joint_pos
+        if not isinstance(p, torch.Tensor):
+            p = wp.to_torch(p)
+        return p[env_ids][:, self._joint_ids].clone()
+
     def _ensure_state(self, num_envs: int, device: torch.device) -> None:
         if self._last_pos_target is None:
-            seed_pos = self._default_joint_pos_for_action(slice(None))
+            # Match the per-reset seeding logic: start the slew tracker
+            # and delay buffer at the *current* joint pose. By the first
+            # process_actions call Isaac Lab has already fired the
+            # bootstrap reset (including our random-offset reset events),
+            # so reading default_joint_pos would silently snap targets
+            # back to 0 on tick 1.
+            seed_pos = self._current_joint_pos_for_action(slice(None))
             self._last_pos_target = seed_pos
 
             kp_mid = 0.5 * (self._kp_min_t + self._kp_max_t)
@@ -239,8 +261,18 @@ class VariableImpedanceJointAction(JointPositionAction):
         kp_mid = 0.5 * (self._kp_min_t + self._kp_max_t)
         kd_mid = 0.5 * (self._kd_min_t + self._kd_max_t)
 
+        # Seed the slew tracker and delay buffer from the *current* joint
+        # positions, not the defaults. By the time the action manager
+        # calls our reset(), Isaac Lab has already fired the reset events
+        # (mode="reset") and the random offsets from
+        # ``mdp.reset_joints_by_offset`` are visible in
+        # ``self._asset.data.joint_pos``. Seeding from defaults instead
+        # would put ``_last_pos_target`` at 0 while the joints are at
+        # e.g. shin=+0.5 rad, so the very first tick would yank everything
+        # back to 0 with full stiffness and erase the spawn pose before
+        # render frame 2.
         if env_ids is None:
-            seed_pos = self._default_joint_pos_for_action(slice(None))
+            seed_pos = self._current_joint_pos_for_action(slice(None))
             seed_kp = kp_mid.unsqueeze(0).expand(seed_pos.shape[0], -1)
             seed_kd = kd_mid.unsqueeze(0).expand(seed_pos.shape[0], -1)
             self._last_pos_target.copy_(seed_pos)
@@ -249,7 +281,7 @@ class VariableImpedanceJointAction(JointPositionAction):
                 buf[:, n : 2 * n] = seed_kp
                 buf[:, 2 * n : 3 * n] = seed_kd
         else:
-            seed_pos = self._default_joint_pos_for_action(env_ids)
+            seed_pos = self._current_joint_pos_for_action(env_ids)
             seed_kp = kp_mid.unsqueeze(0).expand(seed_pos.shape[0], -1)
             seed_kd = kd_mid.unsqueeze(0).expand(seed_pos.shape[0], -1)
             self._last_pos_target[env_ids] = seed_pos

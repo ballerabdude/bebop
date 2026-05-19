@@ -22,6 +22,7 @@ from .bebop_v2_actions import VariableImpedanceJointActionCfg
 from .bebop_v2_rewards import (
     foot_flat_reward,
     leg_position_hold_reward,
+    shin_symmetry_penalty,
     torso_upright_via_legs_reward,
 )
 from .bebop_v2_terminations import base_link_on_ground
@@ -97,7 +98,7 @@ FW_FOOT_VEL_MAX = 20.0
 # are NOT slew-clamped — variable impedance demands instantaneous gain
 # changes between ticks. Delay = 1 tick approximates one CAN round-trip
 # (TX -> Robstride PD -> encoder -> RX feedback).
-FW_MAX_POS_STEP_PER_TICK_RAD = 0.015
+FW_MAX_POS_STEP_PER_TICK_RAD = 0.020
 FW_ACTION_DELAY_STEPS = 2
 
 
@@ -276,9 +277,16 @@ class EventCfg:
         },
     )
 
-    # Per-joint-group pose randomization at reset. Modest offsets so the
-    # vast majority of rollouts sit in a near-upright "hold still" regime
-    # where the leg_hold / torso_upright shaping signals can fire.
+    # Per-joint-group pose randomization at reset. Ranges are
+    # deliberately wide — about 50–75% of the USD physics envelope per
+    # joint — so the policy never sees the same starting configuration
+    # twice and cannot memorize a single "default rest pose" output.
+    # Initial joint velocities are also non-trivial (±0.5 rad/s) so the
+    # policy must read joint_vel from the observation, not assume zero.
+    # The ``femur_deviation`` term and the ``shin_symmetry`` knee
+    # penalty pull the policy toward a symmetric near-zero pose in
+    # steady state; spawn diversity only changes *which corner* of the
+    # recovery basin the episode starts in.
     reset_hip_abduction = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
@@ -287,15 +295,16 @@ class EventCfg:
                 "robot",
                 joint_names=["hip_abduction_left_joint", "hip_abduction_right_joint"],
             ),
-            "position_range": (-0.25, 0.25),
-            "velocity_range": (-0.1, 0.1),
+            "position_range": (-0.40, 0.40),    # ~23°  (USD limit ±45°)
+            "velocity_range": (-0.5, 0.5),
         },
     )
     # Femur is the lateral hip-abduction axis on this articulation
     # (despite the name — the joint called ``hip_abduction_*_joint`` is
-    # actually fore/aft). Keep the reset perturbation small so the
-    # ``femur_deviation`` penalty below is not constantly being asked
-    # to "undo" a splayed spawn pose.
+    # actually fore/aft). Reset range is wide so the policy sees splayed
+    # spawn poses and must learn to recover from them; the strong
+    # ``femur_deviation`` reward (overridden hard in the balance
+    # experiment) still pulls the steady state back to zero.
     reset_femur = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
@@ -304,8 +313,8 @@ class EventCfg:
                 "robot",
                 joint_names=["femur_left_joint", "femur_right_joint"],
             ),
-            "position_range": (-0.12, 0.12),
-            "velocity_range": (-0.1, 0.1),
+            "position_range": (-0.30, 0.30),    # ~17°
+            "velocity_range": (-0.5, 0.5),
         },
     )
     reset_shin = EventTerm(
@@ -316,8 +325,8 @@ class EventCfg:
                 "robot",
                 joint_names=["shin_left_joint", "shin_right_joint"],
             ),
-            "position_range": (-0.40, 0.40),
-            "velocity_range": (-0.1, 0.1),
+            "position_range": (-0.60, 0.60),    # ~34°
+            "velocity_range": (-0.5, 0.5),
         },
     )
     reset_foot = EventTerm(
@@ -328,35 +337,66 @@ class EventCfg:
                 "robot",
                 joint_names=["foot_left_joint", "foot_right_joint"],
             ),
-            "position_range": (-0.20, 0.20),
-            "velocity_range": (-0.1, 0.1),
+            "position_range": (-0.35, 0.35),    # ~20°
+            "velocity_range": (-0.5, 0.5),
         },
     )
 
+    # Initial base randomization. **Critical for sim-to-real.** Without
+    # this the policy converges to an open-loop "emit the default-pose
+    # action every tick" solution, because the env always presents the
+    # same upright, motionless start state — observations carry no
+    # information and gradient descent zeros out their influence. With
+    # randomized tilt + initial momentum the policy is forced to read
+    # the IMU and joint state to figure out *which* way to recover.
+    #
+    # Magnitudes are modest for the balance task (rolling pitch < 5°,
+    # angular velocity < 0.5 rad/s) so the policy doesn't have to
+    # learn full fall-recovery — just "I'm slightly off, lean it back".
+    # Locomotion experiments can widen these further.
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
             "pose_range": {
-                "x": (0.0, 0.0),
-                "y": (0.0, 0.0),
-                "yaw": (0.0, 0.0),
-                "z": (0.0, 0.0),
-                "roll": (0.0, 0.0),
-                "pitch": (0.0, 0.0),
+                "x":     (-0.05, 0.05),
+                "y":     (-0.05, 0.05),
+                "z":     (0.0,   0.02),
+                "roll":  (-0.08, 0.08),   # ~4.6°
+                "pitch": (-0.08, 0.08),   # ~4.6°
+                "yaw":   (-0.3,  0.3),    # ~17°
             },
             "velocity_range": {
-                "x": (0.0, 0.0),
-                "y": (0.0, 0.0),
-                "z": (0.0, 0.0),
-                "roll": (0.0, 0.0),
-                "pitch": (0.0, 0.0),
-                "yaw": (0.0, 0.0),
+                "x":     (-0.15, 0.15),
+                "y":     (-0.15, 0.15),
+                "z":     (-0.05, 0.05),
+                "roll":  (-0.4,  0.4),
+                "pitch": (-0.4,  0.4),
+                "yaw":   (-0.4,  0.4),
             },
         },
     )
 
-    # Pushes are opt-in per experiment.
+    # Periodic mid-episode pushes. With the merged balance + robust
+    # task the policy must handle disturbances *during* an episode, not
+    # just initial-condition variety. Magnitudes here are sized so a
+    # well-balanced robot can absorb the push with an ankle/hip strategy
+    # in most ticks but occasionally has to take a recovery step — the
+    # lateral kick (y) is the binding case because the biped support
+    # polygon is narrower in y. 4–8 s interval means a 20 s episode
+    # sees 3–5 pushes, enough that the policy can't memorize a
+    # post-push settling sequence.
+    push_robot = EventTerm(
+        func=mdp.push_by_setting_velocity,
+        mode="interval",
+        interval_range_s=(4.0, 8.0),
+        params={
+            "velocity_range": {
+                "x": (-0.4, 0.4),
+                "y": (-0.3, 0.3),
+            },
+        },
+    )
 
 
 @configclass
@@ -387,11 +427,11 @@ class RewardsCfg:
     joint_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
 
     # Posture: encourage joints near default and torso at standing height.
-    joint_deviation = RewTerm(
-        func=mdp.joint_deviation_l1,
-        weight=-0.05,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=JOINT_NAMES_ALL)},
-    )
+    # joint_deviation = RewTerm(
+    #     func=mdp.joint_deviation_l1,
+    #     weight=-0.05,
+    #     params={"asset_cfg": SceneEntityCfg("robot", joint_names=JOINT_NAMES_ALL)},
+    # )
 
     # Targeted anti-splay penalty on the femur joints. Femur is the
     # lateral hip-abduction axis on this articulation (yes, the joint
@@ -416,7 +456,7 @@ class RewardsCfg:
     )
     base_height = RewTerm(
         func=mdp.base_height_l2,
-        weight=-2.0,
+        weight=-1.0,
         params={
             "target_height": 0.6539092050794861,
             "asset_cfg": SceneEntityCfg("robot"),
@@ -449,6 +489,35 @@ class RewardsCfg:
         func=foot_flat_reward,
         weight=0.5,
         params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.15},
+    )
+
+    # Knee (shin) left/right symmetry penalty. The right shin's joint
+    # frame is mirrored about the sagittal plane in the USD
+    # (``localRot0 = (0,-1,0,0)`` vs identity on the left, limits
+    # flipped from -45..+90 to -90..+45), so a physically symmetric
+    # crouch is ``shin_left ≈ -shin_right``. The reward function
+    # squares ``(shin_left + shin_right)`` — read its docstring before
+    # changing the sign here. This stops the policy from "balancing"
+    # via an asymmetric crouch (one knee bent forward, one bent
+    # backward) that looks fine in sim but collapses on the real robot
+    # where the two shins don't track identical PD commands the same
+    # way.
+    #
+    # We deliberately do NOT mirror the other joint pairs:
+    #   - hip_abduction / femur: ``femur_deviation`` already pulls
+    #     both toward zero, which is the same value in both mirrored
+    #     frames and so encodes the symmetric standing pose for free.
+    #   - foot: foot pitch is dominated by ``foot_flat``, which biases
+    #     both feet to the same (horizontal) orientation using
+    #     world-frame foot orientation, not joint angles, and so is
+    #     also mirror-invariant.
+    #
+    # Locomotion experiments MUST override this to zero — walking
+    # requires the legs to alternate, which is asymmetry by definition.
+    shin_symmetry = RewTerm(
+        func=shin_symmetry_penalty,
+        weight=-1.5,
+        params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
 

@@ -10,7 +10,7 @@ stage or exporting for deployment.
 Example::
 
     /workspace/isaaclab/isaaclab.sh -p play_bebop.py \\
-        --task Isaac-BebopV2-FlatRobust-v0 \\
+        --task Isaac-BebopV2-Flat-v0 \\
         --resume logs/rsl_rl/Isaac-BebopV2-Flat-v0/<run>/model_14000.pt
 
     # Pin the velocity command (e.g. test "walk forward at 0.3 m/s"):
@@ -32,7 +32,7 @@ parser.add_argument(
     "--task",
     type=str,
     required=True,
-    help="Registered task name (e.g. Isaac-BebopV2-FlatRobust-v0).",
+    help="Registered task name (e.g. Isaac-BebopV2-Flat-v0).",
 )
 parser.add_argument(
     "--resume",

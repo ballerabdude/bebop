@@ -5,7 +5,6 @@ import gymnasium as gym
 # Import the specific Experiment Config
 from .experiments.exp_flat_balance import BebopFlatBalanceCfg
 from .experiments.exp_flat_balance_v2 import BebopV2FlatBalanceCfg
-from .experiments.exp_flat_balance_robust_v2 import BebopV2FlatBalanceRobustCfg
 from .experiments.exp_flat_locomotion_v2 import BebopV2FlatLocomotionCfg
 
 # Import the Agent/PPO Config
@@ -22,26 +21,17 @@ gym.register(
     },
 )
 
-# Register the Flat Balance (stand-only) Task for Bebop V2 articulation.
+# Register the Flat Balance Task for Bebop V2 articulation. This task
+# now subsumes the old stand-under-push (FlatRobust) experiment: the
+# base EventCfg includes both initial-condition randomisation and
+# periodic mid-episode pushes, so a single training stage produces a
+# policy that holds still AND recovers from disturbances.
 gym.register(
     id="Isaac-BebopV2-Flat-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": BebopV2FlatBalanceCfg,
-        "rsl_rl_cfg_entry_point": BebopPPOBaseCfg,
-    },
-)
-
-# Register the Robust-Balance (stand-under-push) Task for Bebop V2.
-# Warm-start this from a converged Isaac-BebopV2-Flat-v0 checkpoint so the
-# policy only has to learn push recovery, not standing.
-gym.register(
-    id="Isaac-BebopV2-FlatRobust-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": BebopV2FlatBalanceRobustCfg,
         "rsl_rl_cfg_entry_point": BebopPPOBaseCfg,
     },
 )

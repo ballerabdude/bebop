@@ -67,29 +67,46 @@ def _ensure_tensor(
     )
 
 
-def _pair_symmetry_penalty(
-    env, asset_cfg: SceneEntityCfg, left_index: int, right_index: int
-) -> torch.Tensor:
+def shin_symmetry_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Squared left-right knee mismatch, accounting for the mirrored
+    joint convention.
+
+    The shin joints (index 4 = left, 5 = right in ``JOINT_NAMES_ALL``)
+    are the knees on this articulation. The USD mirrors the right leg's
+    joint frame about the sagittal plane:
+
+    - ``shin_left_joint``  ``localRot0 = (1, 0, 0, 0)``  limits  ``-45°..+90°``
+    - ``shin_right_joint`` ``localRot0 = (0,-1, 0, 0)``  limits  ``-90°..+45°``
+
+    The right joint's local frame is rotated 180° about X relative to the
+    left's, so a positive angle on the right rotates the knee the
+    *opposite* world direction from a positive angle on the left. A
+    physically symmetric crouch is therefore
+    ``shin_left ≈ -shin_right`` (both knees bent forward), and the
+    invariant we want to drive toward zero is the *sum*, not the
+    difference. Using ``(L - R)²`` would actively reward an
+    anti-symmetric "one knee bent forward, one bent backward" pose,
+    which is the opposite of what we want.
+
+    The firmware does no sign-flipping in either the observation or
+    action pipeline (see ``firmware/bebop-linux/src/observation.rs`` —
+    raw encoder reads in, raw targets out), so the policy sees this same
+    mirrored convention on the real robot. Fixing it sim-side does not
+    double-correct anything.
+
+    We don't apply an analogous penalty to hip abduction, femur, or foot
+    pairs because (a) ``femur_deviation`` already pulls both hips toward
+    zero (which is the same value in both mirrored frames), and (b)
+    ``foot_flat`` already biases both feet to the same horizontal
+    orientation using world-frame foot orientation, not joint angles.
+    Knees are the one DoF pair with no other term constraining their
+    relative angle, and the asymmetric "one straight, one bent" crouch
+    is the most common reward-hacking mode PPO falls into here.
+    """
     robot = env.scene[asset_cfg.name]
     joint_pos = _ensure_tensor(robot.data.joint_pos, env_device=getattr(env, "device", None))
-    diff = joint_pos[:, left_index] - joint_pos[:, right_index]
-    return torch.square(diff)
-
-
-def hip_abduction_symmetry_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    return _pair_symmetry_penalty(env, asset_cfg, 0, 1)
-
-
-def femur_symmetry_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    return _pair_symmetry_penalty(env, asset_cfg, 2, 3)
-
-
-def shin_symmetry_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    return _pair_symmetry_penalty(env, asset_cfg, 4, 5)
-
-
-def foot_symmetry_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    return _pair_symmetry_penalty(env, asset_cfg, 6, 7)
+    mirrored_diff = joint_pos[:, 4] + joint_pos[:, 5]
+    return torch.square(mirrored_diff)
 
 
 def undesired_yaw_penalty(env, command_name: str) -> torch.Tensor:
@@ -118,13 +135,12 @@ def leg_action_when_stable_penalty(
         upright_threshold: ``proj_grav[:, 2]`` must be **less than** this for
             the env to count as upright. ``-1.0`` is perfectly upright,
             ``0.0`` is sideways. Default ``-0.7`` ≈ within ~45° of vertical
-            (was ``-0.85``, ≈25°). The looser default makes the gate fire
-            during recovery, not only at perfect balance, so the policy
-            learns the smoothness lesson far more often per rollout.
+            — loose enough that the gate fires during recovery, not only
+            at perfect balance, so the policy learns the smoothness
+            lesson on every rollout that touches an upright pose.
         still_threshold: env counts as "still" when ``|root_ang_vel_b| <``
-            this in rad/s. Default ``1.0`` (was ``0.5``) for the same
-            reason — the gate fires during gentle recovery, not just at
-            zero velocity.
+            this in rad/s. Default ``1.0`` — same idea, the gate fires
+            during gentle recovery, not just at zero velocity.
     """
     robot = env.scene[asset_cfg.name]
     proj_grav = _ensure_tensor(robot.data.projected_gravity_b, env_device=getattr(env, "device", None))
@@ -146,9 +162,9 @@ def leg_position_hold_reward(
 
     Args:
         upright_threshold: see :func:`leg_action_when_stable_penalty`.
-            Default ``-0.7`` (was ``-0.85``) so the policy is rewarded for
-            slowing its joints down during recovery, not only after
-            perfect balance has already been achieved.
+            Default ``-0.7`` so the policy is rewarded for slowing its
+            joints down during recovery, not only after perfect balance
+            has already been achieved.
     """
     robot = env.scene[asset_cfg.name]
     proj_grav = _ensure_tensor(robot.data.projected_gravity_b, env_device=getattr(env, "device", None))
@@ -218,6 +234,55 @@ def foot_flat_reward(
         err = err + foot_grav_b[:, 0] * foot_grav_b[:, 0]
         err = err + foot_grav_b[:, 1] * foot_grav_b[:, 1]
 
+    return torch.exp(-err / (std * std))
+
+
+def knee_bend_reward(
+    env,
+    asset_cfg: SceneEntityCfg,
+    target_angle: float = 0.4,
+    std: float = 0.2,
+) -> torch.Tensor:
+    """Reward keeping the knees flexed to a target angle.
+
+    Drives the policy toward a crouched "ready stance" instead of
+    locked-out legs. For a heavy-torso platform like Bebop V2 (10.5 kg
+    base, ~60% upper-body mass fraction) a moderate knee bend has three
+    benefits:
+
+    * Lowers the CoM — shortens the inverted-pendulum length, which
+      decreases ``omega = sqrt(g/h_com)`` and increases the time-to-fall
+      from any given tilt.
+    * Pre-loads the knee actuator mid-travel, where its torque response
+      is fastest (Robstride RS04 is sluggish at zero-current standstill).
+    * Engages the leg as a spring against perturbations rather than as
+      a rigid strut, which the real-robot non-idealities (joint friction,
+      gear backlash) can excite into chatter.
+
+    Operates on the AVERAGE of the left + right shin joints (indices 4
+    and 5 in ``JOINT_NAMES_ALL``), so symmetric bending is rewarded.
+    Asymmetric solutions land at the same shin_avg as a no-bend pose
+    and so earn no credit; if the policy starts gaming this with a
+    one-leg bend, wire in ``shin_symmetry_penalty`` alongside.
+
+    Args:
+        target_angle: target shin joint angle in radians, positive ⇒
+            knees flexed forward (sign follows the same convention as
+            ``torso_upright_via_legs_reward``'s ``shin_avg``). Default
+            ``0.4`` (~23°) drops the hip by ~2 cm — modest, but plenty
+            for stability gain without compromising the foot/CoM
+            stability polygon.
+        std: shaping width. Default ``0.2`` ⇒ reward drops to
+            ``exp(-1) ≈ 0.37`` when the shin is off-target by ~11°.
+            Tighten to ``0.1`` to pin a precise pose; loosen to
+            ``0.3+`` for more freedom during recovery.
+    """
+    robot = env.scene[asset_cfg.name]
+    joint_pos = _ensure_tensor(
+        robot.data.joint_pos, env_device=getattr(env, "device", None)
+    )
+    shin_avg = 0.5 * (joint_pos[:, 4] + joint_pos[:, 5])
+    err = (shin_avg - target_angle) * (shin_avg - target_angle)
     return torch.exp(-err / (std * std))
 
 

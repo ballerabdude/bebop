@@ -112,12 +112,11 @@ cd /workspace/bebop_bot/sim   # where train_bebop.py + bebop_training/ live
 
 These IDs come from [`bebop_training/__init__.py`](bebop_training/__init__.py):
 
-| Task ID                          | Cfg                            | What it trains                                  |
-|----------------------------------|--------------------------------|-------------------------------------------------|
-| `Isaac-BebopV2-Flat-v0`          | `BebopV2FlatBalanceCfg`        | Stand in place, no commands, no pushes.         |
-| `Isaac-BebopV2-FlatRobust-v0`    | `BebopV2FlatBalanceRobustCfg`  | Stand under random pushes — learns stepping.    |
-| `Isaac-BebopV2-Locomotion-v0`    | `BebopV2FlatLocomotionCfg`     | Velocity tracking with light pushes.            |
-| `Isaac-Bebop-Flat-v0`            | `BebopFlatBalanceCfg`          | Legacy V1 stand-only task (kept for reference). |
+| Task ID                          | Cfg                            | What it trains                                                       |
+|----------------------------------|--------------------------------|----------------------------------------------------------------------|
+| `Isaac-BebopV2-Flat-v0`          | `BebopV2FlatBalanceCfg`        | Stand in place AND recover from random pushes (merged task).         |
+| `Isaac-BebopV2-Locomotion-v0`    | `BebopV2FlatLocomotionCfg`     | Velocity tracking with light pushes.                                 |
+| `Isaac-Bebop-Flat-v0`            | `BebopFlatBalanceCfg`          | Legacy V1 stand-only task (kept for reference).                      |
 
 ### Retraining after a sim-to-real fix
 
@@ -135,33 +134,26 @@ RTX 5090 at `--num_envs 4096`; the full curriculum is ~3 hours.
 
 ### Curriculum (recommended)
 
-Train in sequence, warm-starting each stage from the previous stage's
-checkpoint. The locomotion stage **must** be warm-started from
-`Isaac-BebopV2-FlatRobust-v0` (not `Isaac-BebopV2-Flat-v0`) so the
-policy already knows how to step before being asked to track velocity
-— see the long-form discussion in
-[`experiments/exp_flat_balance_robust_v2.py`](bebop_training/experiments/exp_flat_balance_robust_v2.py)
+Train in sequence, warm-starting locomotion from the balance checkpoint.
+The balance task is now a single merged stage that trains both standing
+*and* push recovery (initial-condition randomisation + periodic lateral
+pushes are wired into `BebopV2BaseEnvCfg.EventCfg`), so a separate
+"robust" stage is no longer needed. See the long-form discussion in
+[`experiments/exp_flat_balance_v2.py`](bebop_training/experiments/exp_flat_balance_v2.py)
 and
 [`experiments/exp_flat_locomotion_v2.py`](bebop_training/experiments/exp_flat_locomotion_v2.py).
 
 ```sh
-# Stage 1 — stand only
+# Stage 1 — stand + push recovery (single merged task)
 /workspace/isaaclab/isaaclab.sh -p train_bebop.py \
     --task Isaac-BebopV2-Flat-v0 \
     --num_envs 512 --seed 42 --visualizer newton
 
-# Stage 2 — stand under push (warm-start from stage 1)
-/workspace/isaaclab/isaaclab.sh -p train_bebop.py \
-    --task Isaac-BebopV2-FlatRobust-v0 \
-    --num_envs 512 --seed 42 --visualizer newton \
-    --resume logs/rsl_rl/Isaac-BebopV2-Flat-v0/<run>/model_4000.pt \
-    --reset_action_std 0.5
-
-# Stage 3 — locomotion (warm-start from stage 2)
+# Stage 2 — locomotion (warm-start from stage 1)
 /workspace/isaaclab/isaaclab.sh -p train_bebop.py \
     --task Isaac-BebopV2-Locomotion-v0 \
     --num_envs 512 --seed 42 --visualizer newton \
-    --resume logs/rsl_rl/Isaac-BebopV2-FlatRobust-v0/<run>/model_4000.pt \
+    --resume logs/rsl_rl/Isaac-BebopV2-Flat-v0/<run>/model_4000.pt \
     --reset_action_std 0.5
 ```
 
