@@ -22,10 +22,10 @@ for the AR/VR-Stabilized reports anywhere in the upstream code.
 
 ## The patches
 
-Each patch carries a `BEBOP-PATCH [N/5]` marker in the source; the
+Each patch carries a `BEBOP-PATCH [N/6]` marker in the source; the
 table below maps them back to the underlying issue.
 
-### `[1/5]`  Bump report tracking arrays from `[_; 16]` → `[_; 256]`
+### `[1/6]`  Bump report tracking arrays from `[_; 16]` → `[_; 256]`
 
 * `src/driver.rs`, the `BNO08x` struct (around the `report_enabled` /
   `report_update_time` / `report_update_callbacks` fields), and the
@@ -44,7 +44,7 @@ negligible for a userspace driver. No public API change.
 any user enabling, say, the GyroRV (0x2A) or Step Counter (0x11)
 report from the SH-2 spec hits the same panic.
 
-### `[2/5]`  Add SH-2 reports 0x28 / 0x29 (AR/VR-Stabilized RV / Game RV)
+### `[2/6]`  Add SH-2 reports 0x28 / 0x29 (AR/VR-Stabilized RV / Game RV)
 
 Spread across:
 
@@ -76,10 +76,10 @@ respectively.
 **Upstream-as-a-PR plausibility:** high. These are first-class SH-2
 reports defined in the public spec, and the wire format is a near
 copy of two reports the crate already supports. Bundling this with
-patch `[1/5]` in the same PR makes sense — they're both prerequisites
+patch `[1/6]` in the same PR makes sense — they're both prerequisites
 for `enable_report(0x28, …)` to actually work end to end.
 
-### `[3/5]`  Add `+ Send` to the report-callback trait object
+### `[3/6]`  Add `+ Send` to the report-callback trait object
 
 * `src/driver.rs` — `type ReportCallbackMap<'a, SI> = HashMap<…, Box<dyn Fn(…) + Send + 'a>>;`
 * `src/driver.rs` — `add_sensor_report_callback`'s `func: impl Fn(&Self) + Send + 'a` parameter bound.
@@ -107,22 +107,22 @@ would split the trait alias into `ReportCallback` (Send) and
 `LocalReportCallback` (no Send) — but that's a bigger refactor than
 just bolting on `+ Send`. We took the simplest path for the fork.
 
-### `[4/5]`  Test fallout from patch `[3/5]`
+### `[4/6]`  Test fallout from patch `[3/6]`
 
 * `src/driver.rs::tests::test_add_sensor_report_callback`
 * `src/reports.rs::tests::test_report_state_callback_management`
 
 Both upstream tests captured an `Rc<Cell<bool>>` to assert "the
 callback fired". `Rc<Cell<_>>` is not `Send`, so they no longer
-satisfy the tightened trait bound from patch `[3/5]`. Swapped both
+satisfy the tightened trait bound from patch `[3/6]`. Swapped both
 for `Arc<AtomicBool>`, which preserves the intent (race-free
 "callback fired" flag) under the new bound.
 
 This patch is purely a test-suite repair and would land in the same
-upstream PR as `[3/5]` — different rationale for a reviewer, same
+upstream PR as `[3/6]` — different rationale for a reviewer, same
 file change.
 
-### `[5/5]`  Bounds-check the SHTP advertisement TLV parser
+### `[5/6]`  Bounds-check the SHTP advertisement TLV parser
 
 * `src/driver.rs::handle_advertise_response`
 
@@ -153,6 +153,51 @@ field would walk past the slice end.
 **Upstream-as-a-PR plausibility:** high. Pure bug fix, no API change,
 small diff. Any downstream that ever sees a large advert hits this.
 
+### `[6/6]`  Harden SPI bring-up: longer RST hold, longer wake timeout, explicit INT pull-up
+
+* `src/interface/spi.rs::<SpiInterface as SensorInterface>::setup`
+* `src/interface/gpio.rs::GpiodIn::new`
+
+Three changes that together mirror the more conservative reset
+sequence in Adafruit's CircuitPython BNO08x driver
+(<https://github.com/adafruit/Adafruit_CircuitPython_BNO08x/blob/main/adafruit_bno08x/spi.py>):
+
+1. **10 ms settle with RST high before pulling low.** Cold-boot
+   scenarios where the 3.3 V rail just stabilized used to fail because
+   the rail was still slewing when the first RST low edge landed.
+2. **10 ms RST low hold (was 2 ms).** The BNO085 datasheet's minimum is
+   only 10 µs, but a longer pulse flushes states the brief pulse
+   cannot. Adafruit holds for 10 ms; we match.
+3. **3000 ms HINTN wake timeout (was 200 ms).** After RST releases, the
+   chip can take well over 500 ms to bring HINTN low for the first
+   time — particularly the first power-on of the day or after a
+   motor-induced rail dip. The upstream 200 ms window was inside that
+   tail, producing spurious `CommError(SensorUnresponsive)` errors that
+   triggered the bring-up retry loop in `bebop-linux/src/imu.rs`.
+4. **Explicit `Bias::PullUp` on the INT GPIO line.** The BNO drives
+   HINTN open-drain, so without an active host-side pull-up the line
+   floats whenever the chip is unpowered or mid-reset. The Adafruit
+   driver explicitly sets `Pull.UP`; the upstream Rust crate left bias
+   at `AsIs`, inheriting whatever the kernel device tree provided
+   (which on a Jetson Orin Nano dev kit is "disabled" for
+   general-purpose pins, leaving INT susceptible to EMI glitches on
+   long unshielded jumper wires).
+
+This patch does NOT recover the rare "hard-wedged" state where the BNO
+ignores RST entirely — we've observed that on a humanoid bring-up with
+high motor-induced EMI, and only a physical 3.3 V power cycle clears
+it. The fix for that case is to put the BNO supply behind a load
+switch the firmware can toggle (a future PCB revision); the patches
+here address the common failure modes that brief pulses *should* have
+recovered.
+
+**Upstream-as-a-PR plausibility:** high. Strict tightening of the
+existing reset sequence with no API change and no negative impact on
+correctly-wired installs — the longer timeouts only fire on the
+slow-boot / wedged paths that previously returned an error. The pull-up
+addition is a sensible default for the only input line the driver
+requests.
+
 ## Re-vendoring procedure
 
 When `bno08x-rs` ships a 2.0.2 / 2.1.0 / etc. that we want to pull in:
@@ -170,7 +215,7 @@ rm firmware/bebop-linux/vendor/bno08x-rs/.cargo-ok \
 mv firmware/bebop-linux/vendor/bno08x-rs/Cargo.toml.orig \
    firmware/bebop-linux/vendor/bno08x-rs/Cargo.toml
 
-# 3. Re-apply the five hunks above (grep history for `BEBOP-PATCH` in
+# 3. Re-apply the six hunks above (grep history for `BEBOP-PATCH` in
 #    the previous tree to see the exact edits).
 
 # 4. Rerun the smoke tests:
@@ -196,10 +241,11 @@ matching order.
 
 | Patch | Status            | Upstream issue / PR |
 |-------|-------------------|---------------------|
-| `[1/5]` array-size bump            | Not filed yet | — |
-| `[2/5]` 0x28 / 0x29 add            | Not filed yet | — |
-| `[3/5]` `+ Send` bound             | Not filed yet | — |
-| `[4/5]` test repair                | Not filed yet | (bundled with [3/5]) |
-| `[5/5]` advert TLV bounds check    | Not filed yet | — |
+| `[1/6]` array-size bump            | Not filed yet | — |
+| `[2/6]` 0x28 / 0x29 add            | Not filed yet | — |
+| `[3/6]` `+ Send` bound             | Not filed yet | — |
+| `[4/6]` test repair                | Not filed yet | (bundled with [3/6]) |
+| `[5/6]` advert TLV bounds check    | Not filed yet | — |
+| `[6/6]` SPI reset / INT pull-up    | Not filed yet | — |
 
 [bno08x-rs 2.0.1]: https://crates.io/crates/bno08x-rs/2.0.1

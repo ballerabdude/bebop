@@ -3,7 +3,9 @@
 
 // extern crate gpiod;
 use ::std::ops::Not;
-use gpiod::{Chip, Input, Lines, Options, Output};
+// BEBOP-PATCH [6/6 cont.]: import `Bias` so the INT line can be requested
+// with an explicit pull-up — see GpiodIn::new below.
+use gpiod::{Bias, Chip, Input, Lines, Options, Output};
 use std::io;
 pub enum PinState {
     /// Low pin state
@@ -105,8 +107,21 @@ pub struct GpiodIn {
 }
 impl GpiodIn {
     pub fn new(chip: &Chip, pin: u32) -> io::Result<GpiodIn> {
-        let opts = Options::input([pin]) // configure lines offsets
-            .consumer("imu-driver"); // optionally set consumer string
+        // BEBOP-PATCH [6/6 cont.]: explicit `Bias::PullUp` on the input
+        // line. The BNO08x INT (HINTN) signal is the only input the
+        // driver requests, and the chip drives it open-drain — so without
+        // an active pull-up the line floats whenever the chip is
+        // unpowered, mid-reset, or its INT wire is broken. The Adafruit
+        // CircuitPython reference driver explicitly sets `Pull.UP` on the
+        // same pin (https://github.com/adafruit/Adafruit_CircuitPython_BNO08x/
+        // blob/main/adafruit_bno08x/spi.py#L42). The upstream Rust crate
+        // left the bias as `AsIs`, inheriting whatever the kernel device
+        // tree provided — which on a Jetson Orin Nano dev kit is
+        // "disabled" for general-purpose pins, making INT vulnerable to
+        // EMI glitches on long unshielded jumper wires.
+        let opts = Options::input([pin])
+            .bias(Bias::PullUp)
+            .consumer("imu-driver");
 
         Ok(GpiodIn {
             input: chip.request_lines(opts)?,

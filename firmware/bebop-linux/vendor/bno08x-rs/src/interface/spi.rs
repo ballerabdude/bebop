@@ -123,12 +123,33 @@ where
         trace!("reset cycle... ");
         // reset cycle
 
+        // BEBOP-PATCH [6/6]: extended RST sequence to match Adafruit's
+        // CircuitPython driver (https://github.com/adafruit/
+        // Adafruit_CircuitPython_BNO08x/blob/main/adafruit_bno08x/spi.py
+        // -- `hard_reset`). The upstream 2 ms RST hold + 200 ms wake
+        // window does not reliably recover a BNO that crashed mid-SHTP
+        // (we hit `CommError(SensorUnresponsive)` on a humanoid bring-up
+        // that required a physical 3 V power cycle to unwedge — see
+        // `firmware/bebop-linux/src/imu.rs` "Bring-up retries" §). The
+        // new values mirror Adafruit:
+        //   * 10 ms settle with RST high before pulling low (helps cold
+        //     boots where the rail just stabilized)
+        //   * 10 ms RST low hold (was 2 ms — well above the BNO085
+        //     datasheet's 10 µs minimum but enough to flush most wedged
+        //     states the brief pulse couldn't)
+        //   * 3000 ms HINTN wake timeout (was 200 ms — the chip can
+        //     take >500 ms to bring HINTN low on first power-up,
+        //     particularly when EMI from nearby motors perturbed the
+        //     previous reset)
+        // We have no `delay_ms` import drama because the upstream
+        // already uses it both above and below this hunk.
+        delay_ms(10);
         self.reset.set_low().map_err(Error::Pin)?;
-        delay_ms(2);
+        delay_ms(10);
         self.reset.set_high().map_err(Error::Pin)?;
 
         // wait for sensor to set hintn pin after reset
-        let ready = self.wait_for_sensor_awake(200);
+        let ready = self.wait_for_sensor_awake(3000);
         if !ready {
             return Err(SensorUnresponsive);
         }
