@@ -18,6 +18,7 @@ export default defineConfig(async () => ({
     port: 1420,
     strictPort: true,
     host: host || "0.0.0.0",
+    allowedHosts: ["bebop.local"],
     hmr: host
       ? {
           protocol: "ws",
