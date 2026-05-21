@@ -158,6 +158,105 @@ at a time rather than forking into v1, v2, ... files):
     initial-pose issue separately (either pose the robot to near-zero
     before engaging RunPolicy, or widen sim init randomization to
     cover the real spawn distribution).
+  * v0.7 — recovery / robustness pass. The deployed v0.6 policy
+    showed the same failure mode every test: it sits "calm" in a
+    slight forward lean (its trained equilibrium), but the slightest
+    backward tilt sends raw outputs to the ±1.0 envelope and the
+    robot falls. Four reasons, all addressed here together:
+       1. Init pose pitch was ±2°. The policy never saw more than
+          that during training, so anything past it is OOD. Widened
+          to ±0.10 rad (~5.7°) on both pitch AND roll; added a
+          modest initial root angular velocity envelope so the policy
+          also sees "already-falling" start states. The geometric
+          asymmetry (foot center is forward of torso CoM, so
+          backward lean is the unstable direction — see v0.1 note)
+          means backward starts were the gap; symmetric pitch
+          range fills it.
+       2. No mid-episode disturbances. The policy converged to "do
+          nothing, geometry holds me up", which is brittle. Added a
+          ``push_robot`` interval event (4–8 s, ±0.4 m/s linear x,
+          ±0.3 m/s linear y, ±0.3 rad/s pitch / roll) so each 20 s
+          episode sees 3–5 pushes and the policy must learn an active
+          recovery, not just stay-in-place.
+       3. ``foot_flat`` std was 0.15 — strict enough that an 8.6°
+          foot tilt drops the reward to 0.37. That suppresses the
+          natural ankle-strategy recovery from a backward lean
+          (lift the heel, pivot on the toes), which IS a foot tilt.
+          Widened to 0.25 so a foot tilt up to ~14° still scores
+          ~0.37 — loose enough to allow real ankle work during
+          recovery, tight enough to still cost more than the
+          v0.1 heel-balance trick (which was a much larger toe-up
+          rotation).
+       4. Reset joint distribution was narrow (±0.05 rad on every
+          joint) AND centred on default = 0, so the policy only
+          ever saw locked-out legs at reset. The bench-deploy
+          spawn pose is closer to a slight crouch (operator stands
+          the robot up with hands on the torso, knees a bit bent),
+          so the policy needs to recover from there too. Replaced
+          the single ``reset_joints`` term with three:
+            * ``reset_joints`` — ±0.05 jitter on every joint (as before)
+            * ``reset_shin_left_crouch`` — additionally biases the
+              left shin into ``(-0.05, +0.45)``, covering both
+              straight-knee AND moderately-bent-forward states. The
+              joint's mirror convention (see ``shin_symmetry_penalty``
+              docstring in ``bebop_v2_rewards.py``) is that +shin_left
+              and -shin_right are the same physical motion — knees
+              bent forward.
+            * ``reset_shin_right_crouch`` — mirror, ``(-0.45, +0.05)``.
+          Femur and foot are deliberately NOT biased. The crouch
+          requires hip / ankle compensation to keep the CoM over the
+          foot and the foot flat; forcing the policy to find that
+          compensation from a randomized knee bend is exactly the
+          lesson we want it to internalize.
+    The widened observation distribution from (1)+(2)+(4) means the
+    actor will need more training steps to converge than v0.6, and
+    the converged reward will be lower (the policy is now solving a
+    harder task: stand AND recover, not just stand). Expect
+    mean_reward to drop from v0.6's ~36 to roughly 25–30 at
+    convergence — that's the cost of robustness.
+    Observation and action layouts are UNCHANGED from v0.6 (52-dim
+    obs, 24-dim action). The ONNX export drops into the same firmware
+    loader. No firmware changes required for this version.
+  * v0.8 — added ``shin_symmetry_penalty`` (weight -0.5). The v0.7
+    checkpoint converged to the exact reward-hacking mode the comment
+    on ``shin_symmetry_penalty`` in ``bebop_v2_rewards.py`` warned
+    about: one knee deeply bent, the other near-straight, with the
+    near-straight knee oscillating to micro-balance. All other reward
+    terms are pose-symmetry-blind (``foot_flat`` is world-frame,
+    ``base_height`` is torso-z, ``flat_orientation`` is torso tilt,
+    none of them care which leg is doing the supporting), so PPO
+    found the asymmetric attractor and parked there with
+    ``action_rate_l2`` symptom ≈ -0.25 (very high jitter) and a
+    slowly *rising* entropy curve at 10k iterations (a sign the
+    policy hadn't committed because both asymmetric and symmetric
+    crouches scored about the same).
+    The v0.7 crouch reset bias (independent shin_left / shin_right
+    randomization) compounded this — half the time the episode
+    started already-asymmetric, so the policy got steady gradient
+    signal that asymmetric crouches were valid. With the new
+    symmetry penalty (which scores ``(shin_left + shin_right)^2``,
+    accounting for the mirrored joint frames so a physically
+    symmetric crouch sums to zero), the asymmetric attractor now
+    costs reward proportional to how unbalanced the bend is, and
+    the policy should commit to a symmetric stance.
+    Weight -0.5 is the value used by the original kitchen-sink
+    config (``bebop_v2_base_cfg.py``) and is the minimum that
+    reliably breaks the asymmetric attractor without dominating the
+    other terms. If the converged knees come out STIFFLY symmetric
+    (both fully straight, no crouch — i.e. the penalty pushed too
+    hard and the policy gave up on bending at all), drop the weight
+    to -0.2. If the asymmetric pose persists past ~5k iterations,
+    bump to -1.0.
+    Expect secondary improvements:
+       * ``action_rate_l2`` magnitude should decrease (no more
+         one-knee oscillation to micro-balance).
+       * Entropy curve should plateau or start descending — once the
+         policy commits to a symmetric stance the asymmetric escape
+         is no longer free.
+       * ``mean_reward`` may drop transiently as the policy gives up
+         the asymmetric solution before finding the symmetric one;
+         expect a recovery within ~3k iterations.
+    Observation and action layouts UNCHANGED. No firmware changes.
 
 Deployment note: as of v0.4 the policy emits the same 24-dim MIT-mode
 action vector the firmware ``PolicyRunner`` already expects (8 raw
@@ -167,9 +266,10 @@ export from this experiment should drop into the existing firmware
 loader without code changes — barring observation-layout drift
 between sim and firmware. The observation builder on the firmware
 side ``firmware/bebop-linux/src/observation.rs`` must emit exactly
-the 46-dim vector this file consumes (3 base_ang_vel + 3
-projected_gravity + 8 joint_pos + 8 joint_vel + 24 last_action). If
-those terms or their order ever drift, retrain.
+the 52-dim vector this file consumes (3 base_lin_vel + 3 base_ang_vel
++ 3 projected_gravity + 8 joint_pos + 8 joint_vel + 24 last_action +
+3 velocity_commands). If those terms or their order ever drift,
+retrain.
 """
 
 import math
@@ -193,7 +293,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.noise import UniformNoiseCfg
 
 from ..envs.bebop_v2_actions import VariableImpedanceJointActionCfg
-from ..envs.bebop_v2_rewards import foot_flat_reward
+from ..envs.bebop_v2_rewards import foot_flat_reward, shin_symmetry_penalty
 from ..envs.bebop_v2_terminations import base_link_on_ground
 
 
@@ -478,13 +578,40 @@ class ObservationsCfg:
 
 
 # ---------------------------------------------------------------------------
-# Events: only what's needed to break determinism, nothing else.
+# Events: reset randomization + mid-episode pushes.
 #
-# Mass / friction / CoM are NOT randomized. The whole experiment is a
-# clean baseline where sim runs on the bench-measured real values.
-# Without any reset noise the policy can learn a trivial "emit zeros
-# forever" open-loop solution, so we add a very small joint + base
-# init perturbation just to force the policy to read observations.
+# Mass / friction / CoM are still NOT randomized — the whole experiment
+# is a clean baseline where sim runs on the bench-measured real values.
+# But what IS randomized matters: the policy is exposed to a wider
+# initial-state distribution than v0.6 AND to mid-episode disturbances
+# (added in v0.7) so the converged behaviour is "stand AND recover from
+# a perturbation", not just "stand from near-zero".
+#
+# Reset bias toward a crouch
+# --------------------------
+# ``reset_joints`` puts a tight ±0.05 rad jitter on every joint — the
+# same small perturbation v0.6 used, just enough to break determinism
+# and force the policy to read its observations. On top of that:
+#
+# ``reset_shin_{left,right}_crouch`` overrides the shin (knee) joints
+# with a wider, asymmetric-by-mirror-convention bias so each reset
+# samples something between "straight knees" and "moderately bent
+# forward". The shin convention on this articulation is that
+# ``+shin_left`` and ``-shin_right`` are the same physical knee-forward
+# motion (see ``shin_symmetry_penalty`` docstring); the two terms
+# below therefore use opposite-signed ranges of equal magnitude.
+#
+# These run AFTER ``reset_joints`` (IsaacLab event order = config-class
+# declaration order) and overwrite the shin values, so the ±0.05 jitter
+# on the shins is replaced by the wider crouch range. The other six
+# joints retain their ±0.05 jitter.
+#
+# The femur and foot joints are NOT biased here. A knee bend without
+# the matching hip/ankle compensation puts the CoM forward of the
+# foot, which the policy has to correct itself — that compensation
+# chain (femur, knee, ankle acting together) is the actual balance
+# strategy we want the policy to learn, so we don't want to short-
+# circuit it by pre-arranging the start pose.
 # ---------------------------------------------------------------------------
 @configclass
 class EventCfg:
@@ -497,6 +624,34 @@ class EventCfg:
             "velocity_range": (-0.1, 0.1),
         },
     )
+    reset_shin_left_crouch = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["shin_left_joint"]),
+            # (-0.05, +0.45) covers straight knee (~0 rad) up to a
+            # moderately-bent-forward stance (~26°). The wider end is
+            # close to the v0.2 converged knee-bend angle so the policy
+            # can keep its trained pose from this start, while the
+            # narrow end keeps backward-compatibility with the v0.6
+            # near-zero start.
+            "position_range": (-0.05, 0.45),
+            "velocity_range": (-0.1, 0.1),
+        },
+    )
+    reset_shin_right_crouch = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["shin_right_joint"]),
+            # Mirror of shin_left (see ``shin_symmetry_penalty`` for
+            # the sign convention — the right joint's local frame is
+            # rotated 180° about X, so +shin_left and -shin_right are
+            # the same physical motion).
+            "position_range": (-0.45, 0.05),
+            "velocity_range": (-0.1, 0.1),
+        },
+    )
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
@@ -505,24 +660,56 @@ class EventCfg:
                 "x":     (0.0, 0.0),
                 "y":     (0.0, 0.0),
                 "z":     (0.0, 0.0),
-                "roll":  (-0.035, 0.035),   # ~2°
-                "pitch": (-0.035, 0.035),   # ~2°
+                # ±0.10 rad (~5.7°) on both axes. v0.6 was ±0.035
+                # (~2°), which the deployed policy showed it couldn't
+                # generalise beyond — backward tilts past 2° were OOD
+                # and the policy panicked. Symmetric pitch range fills
+                # the gap in both directions; this is the single most
+                # important v0.7 change for backward-recovery.
+                "roll":  (-0.10, 0.10),
+                "pitch": (-0.10, 0.10),
                 "yaw":   (0.0, 0.0),
             },
             "velocity_range": {
                 "x":     (0.0, 0.0),
                 "y":     (0.0, 0.0),
                 "z":     (0.0, 0.0),
-                "roll":  (-0.1, 0.1),
-                "pitch": (-0.1, 0.1),
+                # Modest initial angular velocity so some episodes
+                # start "already falling" — forces the policy to
+                # learn dynamic recovery, not just static balance
+                # from rest.
+                "roll":  (-0.3, 0.3),
+                "pitch": (-0.3, 0.3),
                 "yaw":   (0.0, 0.0),
+            },
+        },
+    )
+    # Mid-episode pushes. The 4–8 s interval means a 20 s episode sees
+    # ~3–5 pushes — enough that the policy can't memorize a post-push
+    # settling sequence, must learn a generic recovery instead.
+    # Magnitudes are tuned for a 7 kg torso: ±0.4 m/s longitudinal is
+    # roughly the impulse from a firm shove to the chest, ±0.3 m/s
+    # lateral is the binding case because the biped support polygon
+    # is narrower in y. The angular components nudge the torso a few
+    # degrees per push — enough to require active reaction without
+    # straight-up tipping the robot over.
+    push_robot = EventTerm(
+        func=mdp.push_by_setting_velocity,
+        mode="interval",
+        interval_range_s=(4.0, 8.0),
+        params={
+            "velocity_range": {
+                "x":     (-0.4, 0.4),
+                "y":     (-0.3, 0.3),
+                "roll":  (-0.3, 0.3),
+                "pitch": (-0.3, 0.3),
             },
         },
     )
 
 
 # ---------------------------------------------------------------------------
-# Rewards: six terms. Every additional shaping term is a knob we have
+# Rewards: seven terms. Every additional shaping term is a knob we have
 # to defend later. If standing can't be learned with just these, the
 # issue is the dynamics, not the reward landscape.
 #
@@ -532,6 +719,7 @@ class EventCfg:
 #   joint_pos_limits  — penalise crashing into a joint's hard stop
 #   action_rate_l2    — penalise rapid action changes between ticks
 #   foot_flat         — reward feet's local +z aligned with world +z
+#   shin_symmetry     — penalise asymmetric knee bend (v0.8)
 #
 # ``action_rate_l2`` (added in v0.1) is the soft analogue of a hard
 # slew clamp: it makes large per-tick action deltas expensive, which
@@ -552,13 +740,37 @@ class EventCfg:
 # AND the CoM over the support polygon (which requires a small
 # forward torso lean given this robot's geometry).
 #
+# ``shin_symmetry`` (added in v0.8) closes a different loophole: the
+# v0.7 policy converged to an asymmetric crouch — one knee deeply
+# bent, the other near-straight and oscillating — because all the
+# other terms are pose-symmetry-blind. ``foot_flat`` only cares
+# about world-frame foot orientation, ``base_height`` only about
+# torso z, ``flat_orientation`` only about torso tilt; none of them
+# distinguish "both knees bent 0.3 rad" from "one knee bent 0.6 rad,
+# other straight". The new penalty scores
+# ``(shin_left + shin_right)^2`` (the sum, not the difference,
+# because the right joint's local frame is rotated 180° about X —
+# see the docstring on ``shin_symmetry_penalty`` in
+# ``bebop_v2_rewards.py``), which is zero exactly when both knees
+# bend forward by the same magnitude. The asymmetric attractor now
+# pays a cost proportional to its imbalance, breaking the tie that
+# kept PPO sitting there.
+#
 # Weight tuning notes:
 #   * If ``foot_flat`` is too dominant the policy may sacrifice
 #     ``flat_orientation`` (let the torso lean significantly) to
 #     keep the feet flat. If the torso tilt at convergence exceeds
-#     ~10°, drop foot_flat to 0.5 and/or widen its ``std`` to 0.2.
-#   * If the policy still uses heel-balance, ``foot_flat`` is too
-#     weak — bump to 1.5–2.0.
+#     ~10°, drop foot_flat to 0.5 and/or widen its ``std`` (current
+#     default 0.25; loosen toward 0.35 to give recovery more room).
+#   * If the policy starts using heel-balance again (toes lifted,
+#     foot dorsiflexed past ~25°) the v0.7 0.25 std is too loose —
+#     drop back to 0.20 or bump foot_flat weight to 1.5–2.0.
+#   * If ``shin_symmetry`` is too dominant the policy may collapse
+#     to fully-straight knees (the only symmetric pose that
+#     completely zeros the penalty), giving up the crouch that
+#     ``foot_flat`` + ``base_height`` jointly prefer. Drop weight to
+#     -0.2. If asymmetric crouch persists past ~5k iterations,
+#     bump to -1.0.
 #   * If training entropy collapses early (action std crashes toward
 #     zero too fast, policy can't explore, learning stalls), reduce
 #     ``action_rate_l2`` magnitude (e.g. -0.05 -> -0.02) or lower the
@@ -582,7 +794,30 @@ class RewardsCfg:
     foot_flat = RewTerm(
         func=foot_flat_reward,
         weight=1.0,
-        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.15},
+        # std bumped from 0.15 (v0.2) to 0.25 (v0.7). The original 0.15
+        # made any foot tilt above ~8.6° expensive, which suppressed the
+        # ankle-strategy recovery from a backward lean (the natural
+        # response is to lift the heel and pivot on the toes — that's a
+        # foot tilt). At 0.25 the reward drops to 0.37 at ~14° tilt
+        # instead, which is loose enough for real recovery motion but
+        # still tight enough to crowd out the v0.1 heel-balance trick
+        # (toes-up at ~30°+).
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.25},
+    )
+    # v0.8: breaks the asymmetric-knee attractor the v0.7 policy
+    # parked in. Scores ``(shin_left + shin_right)^2`` (sum, not
+    # difference — see ``shin_symmetry_penalty`` docstring for the
+    # mirrored-frame convention), which is zero when both knees bend
+    # forward equally and grows quadratically with imbalance. Weight
+    # -0.5 matches the original kitchen-sink config value. A 0.3 rad
+    # mismatch (e.g. one knee 0.4, one knee 0.1) costs 0.5 * 0.09 =
+    # 0.045/tick — small per-tick but compounded over a 2000-tick
+    # episode it's a ~90-point reward gap vs. the symmetric solution,
+    # enough to make PPO commit.
+    shin_symmetry = RewTerm(
+        func=shin_symmetry_penalty,
+        weight=-0.5,
+        params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
 
