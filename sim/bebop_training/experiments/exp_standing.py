@@ -1,0 +1,620 @@
+"""Minimal "just stand" experiment for the Bebop V2 articulation.
+
+This file is the deliberate anti-thesis of ``exp_flat_balance_v2.py``: it
+takes the kitchen-sink training config (variable-impedance MIT-mode
+action, wide initial-state randomization, mid-episode pushes, friction
+randomization, observation noise, eight reward shaping terms) and
+strips every one of them away. The point is to establish a baseline
+where every knob is at its boring default, train a policy on it, and
+then **add one feature at a time** so each addition's effect on the
+final policy is attributable.
+
+What's intentionally kept (because the real robot can't run without them):
+  * The IMU sensor (BNO085) is the only thing telling the policy which
+    way is up. Without it there is no balance task to learn.
+  * Joint encoders feed ``joint_pos`` / ``joint_vel``. Same reason.
+  * Fixed PD on each actuator — the policy emits position targets only,
+    the underlying Robstride PD loop closes the inner control. Gains
+    here mirror the firmware's ``hold_gains`` (the tested "armed but no
+    policy active" values from ``bebop_v2.yaml``) so sim and real run
+    the same closed-loop dynamics.
+
+What's intentionally OFF in this baseline:
+  * Mass / friction / CoM randomization. With the CAD mass now corrected
+    to the bench-measured 7 kg torso, "no randomization" means sim
+    trains on the *real* mass.
+  * Mid-episode pushes (``push_robot`` event).
+  * Wide initial-state randomization. Init pose is tight (±3°) so the
+    policy never has to learn fall-recovery here.
+  * Action delay (``action_delay_steps=0`` on the action term),
+    torque penalties, most reward shaping.
+  * IMU sample-rate staleness. The real BNO085 emits the AR/VR fused
+    rotation vector at 20 Hz, but the sim ``ImuCfg`` runs at the
+    physics tick (200 Hz). The observation noise added in v0.3 covers
+    Gaussian sensor noise but NOT the staleness — that's a separate
+    knob (``update_period=0.05`` on the ImuCfg) we will add when the
+    rest of sim-to-real is closer to dialled in.
+
+Change log (this file is being mutated in place to add features one
+at a time rather than forking into v1, v2, ... files):
+  * v0 — initial four-reward minimum (alive, flat_orientation,
+    base_height, joint_pos_limits). Result: policy stands but feet
+    micro-oscillate, causing torso to drift horizontally because no
+    term penalizes either action-rate jitter OR lateral velocity.
+  * v0.1 — added ``action_rate_l2`` (weight -0.05). Directly punishes
+    the policy emitting commands that change rapidly between ticks,
+    which suppresses the foot oscillation at its source rather than
+    via its drift-velocity symptom. Also implicitly caps how large
+    the action-distribution std can grow, because wider std produces
+    more action-rate variance per step. Result: clean, deterministic
+    standing pose — but the policy converged to a heel-balance trick
+    (toes lifted, support entirely on the heel) because the foot's
+    geometric centre sits forward of the torso CoM. Rotating the
+    foot toes-up was the cheapest single-joint way to put the
+    support point under the CoM without leaning the torso forward.
+  * v0.2 — added ``foot_flat`` reward (weight 1.0, std=0.15). Closes
+    the heel-balance loophole by giving up to +1.0/tick when both
+    feet's local +z axes align with world up, falling off as
+    exp(-(g_x^2 + g_y^2) / std^2). At ~8.6° foot tilt the reward
+    drops to 0.37/tick — small enough to crowd out the heel trick
+    but tolerant enough to allow the small foot tilt a real ankle
+    strategy needs. The policy now has to find option 1 (lean torso
+    forward via hip / knee / ankle coordination) to keep both feet
+    flat AND the CoM over the support polygon. Result: clean
+    feet-flat / slight-forward-lean / bent-knee standing pose,
+    mean_reward ≈ 40, foot_flat ≈ 0.985, flat_orientation ≈ -0.0005.
+  * v0.3 — added Gaussian observation noise on the four
+    sensor-derived observation terms (IMU gyro, projected gravity,
+    joint position, joint velocity). The previous-action obs gets
+    no noise — that's the policy's own output, not a sensor. Noise
+    magnitudes mirror the original kitchen-sink config's tuned
+    values for the BNO085 + Robstride encoder hardware:
+       * imu_ang_vel:        ±0.3 rad/s   (gyro bias drift envelope)
+       * projected_gravity:  ±0.05        (~3° rotation-vector error)
+       * joint_pos_rel:      ±0.02 rad    (encoder + backlash)
+       * joint_vel_rel:      ±0.5 rad/s   (finite-diff velocity jitter)
+    Result: clean stand under noise, but a small left/right rocking
+    appears — the policy reacts to spurious projected-gravity-y
+    noise through the soft hip-abduction joints (kp=40), and the
+    fixed PD can't raise stiffness during steady stance. The fix
+    is variable impedance (next).
+  * v0.4 — restored variable impedance on the action channel.
+    ``JointPositionActionCfg`` (8-dim raw → 8 joint positions)
+    becomes ``VariableImpedanceJointActionCfg`` (24-dim raw →
+    8 positions + 8 kp + 8 kd per tick). Per-joint kp/kd clamps
+    mirror ``POLICY_KP_MIN/MAX`` and ``POLICY_KD_MIN/MAX`` in the
+    original kitchen-sink config and the firmware YAML's
+    ``policy_gain_clamps``. The slew clamp on the position channel
+    is set permissively (``max_pos_step_per_tick=1.0``, equivalent
+    to 100 rad/s @ 100 Hz, effectively unbounded) so the soft
+    ``action_rate_l2`` penalty stays the only thing shaping the
+    per-tick position deltas — that knob will tighten in v0.5.
+    Action delay is also off (``action_delay_steps=0``); that's a
+    v0.6+ knob.
+    Two consequences worth flagging:
+       1. Observation dim 30 -> 46 (last_action grows 8 -> 24).
+       2. Action dim 8 -> 24. The previous v0.3 checkpoint can't
+          warm-start this — the actor's input + output layers have
+          different shape. Train from scratch.
+    Result: clean stand under noise, lateral rocking eliminated.
+    foot_flat ≈ 0.965, alive ≈ 0.999, mean_reward ≈ 36. Confirmed
+    that variable impedance lets the policy raise hip-abduction
+    stiffness during quiet standing, which was the v0.3 problem.
+  * v0.5 — tightened the position-channel slew clamp from 1.0
+    rad/tick (effectively unbounded) to 0.020 rad/tick = 2 rad/s
+    at the 100 Hz policy tick. This matches the firmware safety
+    envelope target. With the clamp this tight the action term
+    will sometimes bind — i.e., the policy commands a per-tick
+    position delta larger than 0.020 and the clamp truncates it.
+    The policy must learn to compensate (either by emitting
+    smaller per-tick deltas via a forward-looking action, or by
+    relying more on kp/kd modulation when fast position changes
+    aren't available). The kp/kd channels are NOT slew-clamped —
+    gain modulation can still be instantaneous between ticks.
+    Important sim-to-real coupling: the firmware currently
+    enforces 0.015 rad/tick (1.5 rad/s). For this policy to
+    deploy cleanly, ``defaults.slew.max_pos_step_per_tick`` in
+    ``firmware/bebop-linux/config/bebop_v2.yaml`` MUST be raised
+    to 0.020 in lockstep with this training run; otherwise the
+    firmware will clip more aggressively than the policy expects
+    and tracking will lag. Don't deploy this checkpoint to a
+    firmware still at 0.015.
+
+Deployment note: as of v0.4 the policy emits the same 24-dim MIT-mode
+action vector the firmware ``PolicyRunner`` already expects (8 raw
+positions + 8 raw kp + 8 raw kd, decoded with the same affine clamps
+as in ``firmware/bebop-linux/config/bebop_v2.yaml``). So an ONNX
+export from this experiment should drop into the existing firmware
+loader without code changes — barring observation-layout drift
+between sim and firmware. The observation builder on the firmware
+side ``firmware/bebop-linux/src/observation.rs`` must emit exactly
+the 46-dim vector this file consumes (3 base_ang_vel + 3
+projected_gravity + 8 joint_pos + 8 joint_vel + 24 last_action). If
+those terms or their order ever drift, retrain.
+"""
+
+import math
+
+import isaaclab.sim as sim_utils
+import isaaclab.terrains as terrain_gen
+import isaaclab.envs.mdp as mdp
+
+from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import TerminationTermCfg as TermTerm
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import ImuCfg
+from isaaclab.utils import configclass
+from isaaclab.utils.noise import UniformNoiseCfg
+
+from ..envs.bebop_v2_actions import VariableImpedanceJointActionCfg
+from ..envs.bebop_v2_rewards import foot_flat_reward
+from ..envs.bebop_v2_terminations import base_link_on_ground
+
+
+# ---------------------------------------------------------------------------
+# Joint order MUST match firmware/bebop-linux/src/observation.rs::JOINT_NAMES
+# so an exported ONNX policy from this experiment lines up with the on-robot
+# observation builder. Same list as ``bebop_v2_base_cfg.JOINT_NAMES_ALL`` —
+# duplicated here on purpose so the file is self-contained.
+# ---------------------------------------------------------------------------
+JOINT_NAMES_ALL = [
+    "hip_abduction_left_joint",
+    "hip_abduction_right_joint",
+    "femur_left_joint",
+    "femur_right_joint",
+    "shin_left_joint",
+    "shin_right_joint",
+    "foot_left_joint",
+    "foot_right_joint",
+]
+
+
+# ---------------------------------------------------------------------------
+# Per-joint kp / kd clamps for the variable-impedance action term (v0.4).
+#
+# The policy emits a 24-dim raw action per tick: 8 raw positions, 8 raw kp,
+# 8 raw kd. The kp / kd channels go through ``tanh``-style clamping into
+# ``[-1, 1]`` then an affine map into the per-joint range below. The 8-tuple
+# layout matches ``JOINT_NAMES_ALL`` exactly:
+#
+#     idx 0,1 = hip_abduction_{left,right}   (Robstride RS04)
+#     idx 2,3 = femur_{left,right}           (RS03)
+#     idx 4,5 = shin_{left,right}            (RS04)
+#     idx 6,7 = foot_{left,right}            (RS02)
+#
+# These values MUST mirror ``POLICY_KP_MIN/MAX`` and ``POLICY_KD_MIN/MAX`` in
+# ``bebop_v2_base_cfg.py`` and ``policy_gain_clamps`` in
+# ``firmware/bebop-linux/config/bebop_v2.yaml``. If you change one side,
+# change the other two — the policy bakes in this gain envelope and the
+# firmware loader will reject any clamp exceeding the motor model's
+# encoder ceiling.
+#
+# The minima are non-zero on purpose: the policy can't fully unload a joint
+# (kp -> 0 would mean "the leg goes limp"), only soften it.
+# ---------------------------------------------------------------------------
+POLICY_KP_MIN = [5.0, 5.0, 20.0, 20.0, 10.0, 10.0, 5.0, 5.0]
+POLICY_KP_MAX = [100.0, 100.0, 300.0, 300.0, 250.0, 250.0, 250.0, 250.0]
+POLICY_KD_MIN = [0.5, 0.5, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2]
+POLICY_KD_MAX = [5.0, 5.0, 8.0, 8.0, 8.0, 8.0, 4.5, 4.5]
+
+
+def _midpoint(lo: list[float], hi: list[float]) -> list[float]:
+    return [0.5 * (a + b) for a, b in zip(lo, hi)]
+
+
+# Midpoints are used as the seeded ImplicitActuator stiffness / damping
+# values. The variable-impedance action term overwrites them every tick
+# (via write_joint_stiffness_to_sim / write_joint_damping_to_sim), so
+# these only matter for the first physics sub-step at episode reset
+# before the policy emits its first action.
+_KP_MID = _midpoint(POLICY_KP_MIN, POLICY_KP_MAX)
+_KD_MID = _midpoint(POLICY_KD_MIN, POLICY_KD_MAX)
+
+
+# ---------------------------------------------------------------------------
+# Articulation: USD asset + per-joint Robstride PD seeded at the midpoint
+# of each joint's policy kp / kd clamp range.
+#
+# Under variable impedance (v0.4) the action term overwrites these gains
+# every tick — they only define the actuator state for the first physics
+# sub-step after an episode reset, before the policy has emitted its
+# first action. Using the midpoint here means a zero-raw-output policy
+# would produce the same gains the action term seeds with, so reset
+# transients are minimised.
+#
+# Effort / velocity ceilings mirror the firmware's ``hard_limits`` so
+# sim and real share the same saturation behaviour.
+# ---------------------------------------------------------------------------
+BEBOP_V2_STANDING_CFG = ArticulationCfg(
+    spawn=sim_utils.UsdFileCfg(
+        usd_path="/workspace/bebop_bot/sim/usd/bebopv2/bebopv2.usda",
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            retain_accelerations=False,
+            linear_damping=0.0,
+            angular_damping=0.0,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=1.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False,
+            solver_position_iteration_count=8,
+            solver_velocity_iteration_count=4,
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        # The USD root carries a built-in +Z translation so feet touch the
+        # ground when joint angles are zero. Must match that or the legs
+        # spawn below the floor.
+        pos=(0.0, 0.0, 0.6539092050794861),
+        joint_pos={joint_name: 0.0 for joint_name in JOINT_NAMES_ALL},
+        joint_vel={joint_name: 0.0 for joint_name in JOINT_NAMES_ALL},
+    ),
+    soft_joint_pos_limit_factor=0.9,
+    actuators={
+        # Hip abduction (RS04). Policy kp / kd clamps: [5..100] / [0.5..5].
+        "hip_abduction": ImplicitActuatorCfg(
+            joint_names_expr=[
+                "hip_abduction_left_joint",
+                "hip_abduction_right_joint",
+            ],
+            effort_limit_sim=84.0,
+            velocity_limit_sim=12.0,
+            stiffness=_KP_MID[0],
+            damping=_KD_MID[0],
+            armature=0.01,
+            friction=0.0,
+        ),
+        # Femur / hip pitch (RS03). Policy clamps: [20..300] / [1..8].
+        "femur": ImplicitActuatorCfg(
+            joint_names_expr=["femur_left_joint", "femur_right_joint"],
+            effort_limit_sim=42.0,
+            velocity_limit_sim=12.0,
+            stiffness=_KP_MID[2],
+            damping=_KD_MID[2],
+            armature=0.005,
+            friction=0.0,
+        ),
+        # Shin / knee (RS04). Policy clamps: [10..250] / [1..8].
+        "shin": ImplicitActuatorCfg(
+            joint_names_expr=["shin_left_joint", "shin_right_joint"],
+            effort_limit_sim=84.0,
+            velocity_limit_sim=12.0,
+            stiffness=_KP_MID[4],
+            damping=_KD_MID[4],
+            armature=0.01,
+            friction=0.0,
+        ),
+        # Foot / ankle (RS02). Policy clamps: [5..250] / [0.2..4.5].
+        "foot": ImplicitActuatorCfg(
+            joint_names_expr=["foot_left_joint", "foot_right_joint"],
+            effort_limit_sim=17.0,
+            velocity_limit_sim=20.0,
+            stiffness=_KP_MID[6],
+            damping=_KD_MID[6],
+            armature=0.003,
+            friction=0.0,
+        ),
+    },
+)
+
+
+# ---------------------------------------------------------------------------
+# Actions: MIT-mode variable impedance. 24-dim raw policy output.
+#
+# Layout (raw):
+#   raw[ 0: 8] -> position commands, scaled to ``default + pos_scale * raw``
+#   raw[ 8:16] -> kp commands, affine-mapped to per-joint ``[kp_min, kp_max]``
+#   raw[16:24] -> kd commands, affine-mapped to per-joint ``[kd_min, kd_max]``
+#
+# Position-channel hard slew clamp (v0.5):
+#   ``max_pos_step_per_tick=0.020`` rad/tick = 2 rad/s @ 100 Hz. This
+#   is the safety envelope target. The clamp truncates the absolute
+#   per-tick change of the decoded position target, NOT the policy's
+#   raw output — so the policy is free to emit any raw value, but the
+#   sim only ever advances each joint target by at most 0.020 rad per
+#   tick. The kp / kd channels are NOT slew-clamped (variable
+#   impedance demands instantaneous between-tick gain changes).
+#
+#   This MUST mirror ``defaults.slew.max_pos_step_per_tick`` in
+#   ``firmware/bebop-linux/config/bebop_v2.yaml`` for any deployed
+#   policy. If the firmware is still at 0.015 when you deploy this,
+#   the firmware will clip more tightly than sim and the policy will
+#   lag behind its own commanded targets. Raise the firmware YAML to
+#   0.020 in lockstep, or retrain with the lower value.
+#
+# Action delay is still off (``action_delay_steps=0``). That's the
+# v0.6 knob — adds 2-tick CAN + motor lag to mirror real-robot
+# latency.
+#
+# The kp / kd clamps mirror the firmware YAML's ``policy_gain_clamps``
+# block (see POLICY_*_MIN / POLICY_*_MAX constants at the top of this
+# file). They are not optional — the firmware loader rejects any clamp
+# that exceeds the motor's safe envelope.
+# ---------------------------------------------------------------------------
+@configclass
+class ActionsCfg:
+    joint_pos = VariableImpedanceJointActionCfg(
+        asset_name="robot",
+        joint_names=JOINT_NAMES_ALL,
+        pos_scale=0.5,
+        use_default_offset=True,
+        max_pos_step_per_tick=0.020,
+        action_delay_steps=0,
+        kp_min=POLICY_KP_MIN,
+        kp_max=POLICY_KP_MAX,
+        kd_min=POLICY_KD_MIN,
+        kd_max=POLICY_KD_MAX,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Observations: the absolute minimum a standing biped policy needs.
+#
+# Layout (46-dim, post-v0.4):
+#   [ 0: 3] base_ang_vel        — IMU gyro (BNO085 → body-frame rad/s)
+#   [ 3: 6] projected_gravity   — IMU rotation vector → body-frame gravity
+#   [ 6:14] joint_pos_rel       — encoder positions, relative to default
+#   [14:22] joint_vel_rel       — encoder velocities, relative to default
+#   [22:46] actions             — previous tick's raw policy output (24-dim:
+#                                 8 positions + 8 kp + 8 kd channels)
+#
+# Deliberately removed vs the kitchen-sink experiment:
+#   - base_lin_vel: firmware feeds zeros, useless on real
+#   - velocity_commands: always zero for a stand task, dead weight
+#
+# Per-tick Gaussian noise (v0.3) is injected on the four sensor-derived
+# observations so the policy learns to be robust to the real BNO085 +
+# Robstride encoder noise envelope. ``actions`` is unnoised because
+# that's the policy's own previous output, not a sensor reading.
+#
+# The firmware-side ``observation.rs`` builder already emits a 24-dim
+# previous-action block, so this 46-dim layout lines up with the
+# existing on-robot observation builder out of the box (no firmware
+# change required for deployment).
+# ---------------------------------------------------------------------------
+@configclass
+class ObservationsCfg:
+    @configclass
+    class PolicyCfg(ObsGroup):
+        base_ang_vel = ObsTerm(
+            func=mdp.imu_ang_vel,
+            params={"asset_cfg": SceneEntityCfg("imu")},
+            noise=UniformNoiseCfg(n_min=-0.3, n_max=0.3),
+        )
+        projected_gravity = ObsTerm(
+            func=mdp.imu_projected_gravity,
+            params={"asset_cfg": SceneEntityCfg("imu")},
+            noise=UniformNoiseCfg(n_min=-0.05, n_max=0.05),
+        )
+        joint_pos = ObsTerm(
+            func=mdp.joint_pos_rel,
+            noise=UniformNoiseCfg(n_min=-0.02, n_max=0.02),
+        )
+        joint_vel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            noise=UniformNoiseCfg(n_min=-0.5, n_max=0.5),
+        )
+        actions = ObsTerm(func=mdp.last_action)
+
+    def __post_init__(self):
+        self.policy = self.PolicyCfg()
+
+
+# ---------------------------------------------------------------------------
+# Events: only what's needed to break determinism, nothing else.
+#
+# Mass / friction / CoM are NOT randomized. The whole experiment is a
+# clean baseline where sim runs on the bench-measured real values.
+# Without any reset noise the policy can learn a trivial "emit zeros
+# forever" open-loop solution, so we add a very small joint + base
+# init perturbation just to force the policy to read observations.
+# ---------------------------------------------------------------------------
+@configclass
+class EventCfg:
+    reset_joints = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=JOINT_NAMES_ALL),
+            "position_range": (-0.05, 0.05),  # ~3° on every joint
+            "velocity_range": (-0.1, 0.1),
+        },
+    )
+    reset_base = EventTerm(
+        func=mdp.reset_root_state_uniform,
+        mode="reset",
+        params={
+            "pose_range": {
+                "x":     (0.0, 0.0),
+                "y":     (0.0, 0.0),
+                "z":     (0.0, 0.0),
+                "roll":  (-0.035, 0.035),   # ~2°
+                "pitch": (-0.035, 0.035),   # ~2°
+                "yaw":   (0.0, 0.0),
+            },
+            "velocity_range": {
+                "x":     (0.0, 0.0),
+                "y":     (0.0, 0.0),
+                "z":     (0.0, 0.0),
+                "roll":  (-0.1, 0.1),
+                "pitch": (-0.1, 0.1),
+                "yaw":   (0.0, 0.0),
+            },
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rewards: six terms. Every additional shaping term is a knob we have
+# to defend later. If standing can't be learned with just these, the
+# issue is the dynamics, not the reward landscape.
+#
+#   alive             — +1 every tick the robot is still upright
+#   flat_orientation  — penalise non-vertical torso (gravity off body-z)
+#   base_height       — penalise torso CoM far from the standing height
+#   joint_pos_limits  — penalise crashing into a joint's hard stop
+#   action_rate_l2    — penalise rapid action changes between ticks
+#   foot_flat         — reward feet's local +z aligned with world +z
+#
+# ``action_rate_l2`` (added in v0.1) is the soft analogue of a hard
+# slew clamp: it makes large per-tick action deltas expensive, which
+# both suppresses foot micro-oscillation and indirectly limits how
+# large the action distribution std can grow (a wider std produces
+# larger expected ``(a_t - a_{t-1})^2``, which costs reward). At the
+# converged smooth-stand pose this term contributes essentially zero
+# to the reward — its only job is to penalise the path away from that
+# pose.
+#
+# ``foot_flat`` (added in v0.2) closes the heel-balance loophole the
+# policy found in v0.1. Without it the cheapest static equilibrium
+# is "rotate the foot toes-up so the heel becomes the contact patch
+# directly under the torso CoM" — a single-joint trick that doesn't
+# need any active balancing. With it, that trick costs the policy
+# the full +1.0/tick foot-flat bonus per foot, forcing it to use a
+# coordinated hip + knee + ankle strategy that keeps both feet flat
+# AND the CoM over the support polygon (which requires a small
+# forward torso lean given this robot's geometry).
+#
+# Weight tuning notes:
+#   * If ``foot_flat`` is too dominant the policy may sacrifice
+#     ``flat_orientation`` (let the torso lean significantly) to
+#     keep the feet flat. If the torso tilt at convergence exceeds
+#     ~10°, drop foot_flat to 0.5 and/or widen its ``std`` to 0.2.
+#   * If the policy still uses heel-balance, ``foot_flat`` is too
+#     weak — bump to 1.5–2.0.
+#   * If training entropy collapses early (action std crashes toward
+#     zero too fast, policy can't explore, learning stalls), reduce
+#     ``action_rate_l2`` magnitude (e.g. -0.05 -> -0.02) or lower the
+#     PPO ``entropy_coef`` in tandem so the optimizer keeps pushing
+#     on exploration.
+# ---------------------------------------------------------------------------
+@configclass
+class RewardsCfg:
+    alive = RewTerm(func=mdp.is_alive, weight=1.0)
+    flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)
+    base_height = RewTerm(
+        func=mdp.base_height_l2,
+        weight=-1.0,
+        params={
+            "target_height": 0.6539092050794861,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    joint_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
+    foot_flat = RewTerm(
+        func=foot_flat_reward,
+        weight=1.0,
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.15},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Terminations: episode ends on timeout (success) or on the torso
+# touching the ground (fall). No other termination conditions.
+# ---------------------------------------------------------------------------
+@configclass
+class TerminationsCfg:
+    time_out = TermTerm(func=mdp.time_out, time_out=True)
+    base_link_ground_contact = TermTerm(
+        func=base_link_on_ground,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+            "ground_height_threshold": 0.30,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Commands: required by the rsl_rl runner, but standing means "do
+# nothing forever". We keep the term present and pinned to zero so the
+# observation layout stays compatible with downstream variants that
+# DO take a velocity command (locomotion experiments) — but no
+# velocity_commands term appears in ``ObservationsCfg`` here, so the
+# command is unused for policy input.
+# ---------------------------------------------------------------------------
+@configclass
+class CommandsCfg:
+    base_velocity = mdp.UniformVelocityCommandCfg(
+        asset_name="robot",
+        resampling_time_range=(8.0, 12.0),
+        debug_vis=False,
+        rel_standing_envs=1.0,
+        ranges=mdp.UniformVelocityCommandCfg.Ranges(
+            lin_vel_x=(0.0, 0.0),
+            lin_vel_y=(0.0, 0.0),
+            ang_vel_z=(0.0, 0.0),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Top-level env cfg.
+# ---------------------------------------------------------------------------
+@configclass
+class BebopV2StandingCfg(ManagerBasedRLEnvCfg):
+    decimation = 2          # 200 Hz physics, 100 Hz policy
+    episode_length_s = 20.0
+
+    scene = InteractiveSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
+    observations = ObservationsCfg()
+    actions = ActionsCfg()
+    commands = CommandsCfg()
+    rewards = RewardsCfg()
+    terminations = TerminationsCfg()
+    events = EventCfg()
+
+    def __post_init__(self):
+        self.viewer.eye = [2.5, 2.5, 2.5]
+        self.viewer.lookat = [0.0, 0.0, 0.0]
+
+        self.sim.dt = 0.005
+        self.sim.render_interval = self.decimation
+        self.sim.disable_contact_processing = True
+
+        self.scene.robot = BEBOP_V2_STANDING_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+        # Fixed ground friction. The base config randomizes friction in
+        # (0.4, 1.2) — we deliberately don't here. Slippery-floor
+        # robustness is a feature to be added in a later experiment.
+        self.scene.terrain = terrain_gen.TerrainImporterCfg(
+            prim_path="/World/ground",
+            terrain_type="plane",
+            collision_group=-1,
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                friction_combine_mode="average",
+                restitution_combine_mode="average",
+                static_friction=1.0,
+                dynamic_friction=1.0,
+            ),
+        )
+
+        self.scene.light = AssetBaseCfg(
+            prim_path="/World/light",
+            spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)),
+        )
+
+        # Body-frame IMU sensor mounted on base_link. Identity offset
+        # because the orientation transform between the BNO085 sensor
+        # frame and the body frame is handled in firmware (see the
+        # ``imu.mount`` block in bebop_v2.yaml) — sim treats the IMU as
+        # already-rotated body-frame readings.
+        self.scene.imu = ImuCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/Geometry/base_link",
+            update_period=0.0,
+            debug_vis=False,
+            offset=ImuCfg.OffsetCfg(
+                pos=(0.0, 0.0, 0.0),
+                rot=(0.0, 0.0, 0.0, 1.0),
+            ),
+        )

@@ -29,9 +29,23 @@ over "bebopv2"
         )
         {
             bool newton:selfCollisionEnabled = 0
+            # Mass + inertia adjusted from CAD-derived values (10.498536 kg)
+            # to the bench-measured real torso mass (7.0 kg). The CoM is
+            # CAD-derived and almost certainly wrong on the real robot
+            # (battery + electronics not in CAD); needs a swing-test
+            # measurement before we trust it.
+            # principalAxes (orientation of the inertia ellipsoid) is
+            # geometry-only and unchanged. The three diagonalInertia
+            # entries are scaled by mass_new / mass_old = 7.0 / 10.498536
+            # = 0.66676, which assumes the *distribution* of mass inside
+            # the torso shell is unchanged and only the total density
+            # dropped (i.e. CAD overstated material thickness / counted
+            # solid where the real part is hollow). If a future measurement
+            # shows the inertia distribution itself is off, redo this with
+            # an explicit per-axis measurement.
             point3f physics:centerOfMass = (-0.00008495725, 0.0020602047, 0.060420483)
-            float3 physics:diagonalInertia = (0.07651771, 0.08427773, 0.13560356)
-            float physics:mass = 10.498536
+            float3 physics:diagonalInertia = (0.051018, 0.056194, 0.090411)
+            float physics:mass = 7.0
             quatf physics:principalAxes = (-0.44208926, 0.55374706, 0.46740323, 0.5286355)
 
             over "hip_abduction_right_1" (

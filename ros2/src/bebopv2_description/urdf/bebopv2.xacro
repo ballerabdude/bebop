@@ -6,9 +6,16 @@
 <xacro:include filename="$(find bebopv2_description)/urdf/bebopv2.gazebo" />
 <link name="base_link">
   <inertial>
+    <!-- Mass + inertia adjusted from CAD value (10.4985 kg) to bench-measured
+         real torso (7.0 kg). Inertia tensor scaled by 7.0/10.4985 = 0.66676;
+         this assumes the geometric *distribution* of mass is unchanged and
+         only the total density dropped. The CoM is still CAD-derived and
+         needs a swing-test measurement before being trusted on the real
+         robot (battery + cables + electronics are not in the CAD model).
+         Keep this in sync with sim/usd/bebopv2/payloads/Physics/physics.usda. -->
     <origin xyz="-8.495725208879161e-05 0.002060204806872657 0.06042048201634313" rpy="0 0 0"/>
-    <mass value="10.498536136255769"/>
-    <inertia ixx="0.135473" iyy="0.076749" izz="0.084177" ixy="0.000202" iyz="-0.001328" ixz="-0.002579"/>
+    <mass value="7.0"/>
+    <inertia ixx="0.090323" iyy="0.051177" izz="0.056127" ixy="0.000135" iyz="-0.000885" ixz="-0.001719"/>
   </inertial>
   <visual>
     <origin xyz="0 0 0" rpy="0 0 0"/>
