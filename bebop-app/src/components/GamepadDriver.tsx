@@ -43,7 +43,7 @@ import type { MotorView, RuntimeMode } from "../runtime";
 /// above that intentionally so the rate is responsive on a robot
 /// running a relaxed slew cap, and harmlessly clamps on a stock one.
 /// See the README's "Tuning the dial-in rate" section.
-const FULL_RATE_RAD_S = 1.5;
+const FULL_RATE_RAD_S = 2.0;
 
 interface GamepadDriverProps {
   motors: MotorView[];
