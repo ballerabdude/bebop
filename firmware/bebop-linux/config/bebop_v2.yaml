@@ -34,14 +34,16 @@ defaults:
   test_gains: { kp: 30.0, kd: 2.0 }
 
   # Setpoint slew limits applied to the *position channel* of the
-  # variable-impedance MIT-mode policy output. Mirrors
-  # `FW_MAX_POS_STEP_PER_TICK_RAD` in `sim/bebop_training/envs/bebop_v2_base_cfg.py`.
-  # 0.015 rad/tick @ 100 Hz tick = 1.5 rad/s setpoint slew. Gain
+  # variable-impedance MIT-mode policy output. MUST match
+  # `max_pos_step_per_tick` on the sim ActionsCfg in
+  # `sim/bebop_training/experiments/exp_standing.py` (currently 0.020).
+  # 0.020 rad/tick @ 100 Hz tick = 2 rad/s setpoint slew — the
+  # mechanical safety envelope agreed with the operator. Gain
   # channels (kp/kd) are NOT slew-clamped — variable impedance demands
   # instantaneous between-tick gain changes. If you retune this value,
   # retrain.
   slew:
-    max_pos_step_per_tick: 0.015   # rad/tick — must match sim FW_MAX_POS_STEP_PER_TICK_RAD
+    max_pos_step_per_tick: 0.020   # rad/tick — must match sim exp_standing.py max_pos_step_per_tick
     arm_ramp_s:            0.5     # gain ramp 0 → hold over arm
     abort_ramp_s:          0.3     # gain ramp hold → 0 over abort
 

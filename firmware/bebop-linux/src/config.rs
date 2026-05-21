@@ -63,9 +63,21 @@ pub mod scales {
     pub const SCALE_ANG_VEL: f32 = 1.0;
     pub const SCALE_DOF_POS: f32 = 1.0;
     pub const SCALE_DOF_VEL: f32 = 1.0;
-    /// Action -> position-target gain. Matches
-    /// `bebop_v2_base_cfg.py::ActionsCfg.joints_pos.scale = 0.8`.
-    pub const SCALE_ACTION: f32 = 0.8;
+    /// Action -> position-target gain. MUST match the ``pos_scale``
+    /// field on the sim's ``VariableImpedanceJointActionCfg`` in
+    /// ``sim/bebop_training/experiments/exp_standing.py``. The policy
+    /// learns the mapping ``target = default + SCALE_ACTION * raw``
+    /// during training; if this constant differs from the sim value
+    /// the deployed commands silently mis-scale (a too-large value
+    /// here pushes the joints past their safe envelope on every
+    /// command; a too-small value makes the policy weak / unable to
+    /// reach its trained pose).
+    ///
+    /// 0.5 means raw=±1.0 maps to ±0.5 rad per joint -- enough range
+    /// for standing and slow walking, well inside every joint's
+    /// hard safety limit. Raise this (and retrain) when transitioning
+    /// to highly dynamic motions that need more per-tick reach.
+    pub const SCALE_ACTION: f32 = 0.5;
 
     pub const CLIP_LIN_VEL: f32 = 3.0;
     pub const CLIP_ANG_VEL: f32 = 10.0;

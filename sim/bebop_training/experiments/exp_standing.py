@@ -134,6 +134,30 @@ at a time rather than forking into v1, v2, ... files):
     aligned without firmware changes. Observation dim 46 -> 52;
     actor input layer reshapes; previous v0.5 checkpoint cannot
     warm-start, retrain from scratch.
+  * v0.6.1 — identified and resolved a sim/firmware mismatch on the
+    position scale. v0 through v0.6 trained with sim ``pos_scale=0.5``
+    while the firmware decoder used ``SCALE_ACTION=0.8``. Every
+    deployed command therefore moved the real joint 1.6x farther
+    than the policy expected; combined with an OOD initial pose at
+    deployment (hip_abduction at -0.61 rad vs. the +/-0.40 sim
+    init envelope), the policy panicked, commanded raw values close
+    to +/-1.0, foot joints hit the +/-0.8 rad hard safety limit, and
+    the supervisor latched E-STOP.
+    Rather than retrain at the firmware's 0.8 value, we aligned the
+    firmware to sim's 0.5 (the more task-appropriate value for
+    standing -- the policy never needs ±45° of authority per joint,
+    ±28° is plenty). Changes elsewhere in the tree:
+       * firmware/bebop-linux/src/config.rs::SCALE_ACTION : 0.8 -> 0.5
+       * firmware/bebop-linux/config/bebop_v2.yaml ::
+         defaults.slew.max_pos_step_per_tick : 0.015 -> 0.020
+         (this also brings the firmware slew clamp into alignment
+         with the v0.5 sim training, which was the deferred lockstep
+         from v0.5)
+    With both sides at 0.5 the v0.6 trained ONNX should now decode
+    correctly on the real robot. Still need to address the OOD
+    initial-pose issue separately (either pose the robot to near-zero
+    before engaging RunPolicy, or widen sim init randomization to
+    cover the real spawn distribution).
 
 Deployment note: as of v0.4 the policy emits the same 24-dim MIT-mode
 action vector the firmware ``PolicyRunner`` already expects (8 raw
@@ -361,6 +385,17 @@ class ActionsCfg:
     joint_pos = VariableImpedanceJointActionCfg(
         asset_name="robot",
         joint_names=JOINT_NAMES_ALL,
+        # MUST match ``scales::SCALE_ACTION`` in
+        # ``firmware/bebop-linux/src/config.rs`` (currently 0.5). The
+        # firmware decodes the policy's raw position output as
+        # ``target = default + SCALE_ACTION * clamp(raw, -1, 1)``. If
+        # this constant ever differs from the firmware value, deployed
+        # commands silently mis-scale. 0.5 means raw=±1.0 maps to
+        # ±0.5 rad per joint -- enough for standing and slow walking,
+        # well inside the hard safety envelope (foot joints cap at
+        # ±0.8 rad in firmware). Raise this (sim and firmware
+        # together, then retrain) when transitioning to highly dynamic
+        # motions that need more per-tick reach.
         pos_scale=0.5,
         use_default_offset=True,
         max_pos_step_per_tick=0.020,
