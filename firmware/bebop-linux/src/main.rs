@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use bebop_linux::config::RobotConfig;
 use bebop_linux::imu;
 use bebop_linux::mode::Mode;
+use bebop_linux::policy_io;
 use bebop_linux::policy_runner::PolicyRunner;
 use bebop_linux::safety::power_monitor::spawn_power_monitor;
 use bebop_linux::safety::supervisor::spawn_rx_threads;
@@ -139,6 +140,7 @@ async fn main() -> Result<()> {
     // operator UI hides the orientation card).
     let imu_shared = imu::new_shared();
     let imu_present = cfg.imu.is_some();
+    let policy_io_shared = policy_io::new_shared();
     let imu_handle = cfg.imu.as_ref().and_then(|imu_cfg| {
         imu::spawn_imu_thread(imu_cfg.clone(), shutdown_flag.clone(), imu_shared.clone())
     });
@@ -160,13 +162,25 @@ async fn main() -> Result<()> {
     // The IMU thread is the sole writer; the runner and the telemetry
     // builder both clone independent reader handles.
     let policy_path = resolve_policy_path(&args);
+    let policy_io_for_runner = policy_io_shared.clone();
     let policy_runner: Arc<Mutex<Option<PolicyRunner>>> =
-        match PolicyRunner::new(supervisor.clone(), imu_shared.clone(), &policy_path) {
+        match PolicyRunner::new(
+            supervisor.clone(),
+            imu_shared.clone(),
+            policy_io_for_runner,
+            &policy_path,
+        ) {
             Ok(pr) => {
+                if let Ok(mut g) = policy_io_shared.lock() {
+                    g.set_present(true);
+                }
                 info!(model = %policy_path.display(), "policy loaded; RunPolicy mode is available");
                 Arc::new(Mutex::new(Some(pr)))
             }
             Err(e) => {
+                if let Ok(mut g) = policy_io_shared.lock() {
+                    g.set_present(false);
+                }
                 warn!(
                     model = %policy_path.display(),
                     error = %e,
@@ -190,16 +204,21 @@ async fn main() -> Result<()> {
                 break;
             }
             sup_tick.run_watchdog();
-            match sup_tick.mode() {
-                Mode::DialIn => sup_tick.tick_dial_in_hold(),
-                Mode::RunPolicy => {
-                    if let Ok(mut g) = pr_tick.lock() {
-                        if let Some(pr) = g.as_mut() {
-                            pr.tick();
-                        }
-                    }
+            if sup_tick.mode() == Mode::DialIn {
+                sup_tick.tick_dial_in_hold();
+            }
+            // Always pump the policy runner: it has internal mode + estop
+            // gates, runs inference only in RunPolicy, and on mode exit it
+            // resets the controller + publishes `active=false` to the
+            // shared `PolicyIoSnapshot`. Skipping the call in non-RunPolicy
+            // modes meant the snapshot stayed at `active=true` with the
+            // last observation/action forever, so the operator app's
+            // history sparklines kept appending duplicate "live" samples
+            // and the real history was overwritten in the ring buffer.
+            if let Ok(mut g) = pr_tick.lock() {
+                if let Some(pr) = g.as_mut() {
+                    pr.tick();
                 }
-                Mode::Idle => {}
             }
         }
     });
@@ -207,9 +226,13 @@ async fn main() -> Result<()> {
     // Run the WS server in its own task so we can also wait for ctrl-c.
     let server_sup = supervisor.clone();
     let server_imu = imu_shared.clone();
+    let server_policy_io = policy_io_shared.clone();
     let bind_addr = cfg.server.bind_addr.clone();
     let server_handle = tokio::spawn(async move {
-        if let Err(e) = server::run_server(server_sup, server_imu, imu_present, &bind_addr).await {
+        if let Err(e) =
+            server::run_server(server_sup, server_imu, imu_present, server_policy_io, &bind_addr)
+                .await
+        {
             error!(error = %e, "server task exited with error");
         }
     });

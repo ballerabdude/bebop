@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 
 import { GamepadDriver } from "../components/GamepadDriver";
+import { PolicyIoCard } from "../components/PolicyIoCard";
 import { Banner, Button, Spinner } from "../components/ui";
 import { getOrCreateRuntimeTransport } from "../runtime";
 import type {
@@ -343,6 +344,7 @@ export function MotorBenchScreen({
   const buses = snapshot?.buses ?? [];
   const power = snapshot?.power;
   const imu = snapshot?.imu;
+  const policyIo = snapshot?.policyIo;
   const mode = snapshot?.mode ?? "UNSPECIFIED";
   const estopLatched = snapshot?.estopLatched ?? false;
   const estopReason = snapshot?.estopReason ?? "";
@@ -540,6 +542,11 @@ export function MotorBenchScreen({
           onStop={() => setMode("IDLE")}
         />
       ) : null}
+
+      {/* Policy I/O visualization. Render whenever a policy is loaded so
+          the operator can screenshot a frozen history after stopping
+          RunPolicy — the card itself handles the inactive state. */}
+      {policyIo?.present ? <PolicyIoCard policyIo={policyIo} /> : null}
 
       {/* Bluetooth-gamepad bridge. Renders nothing when no pad is
           connected, so it doesn't take up space in the layout for

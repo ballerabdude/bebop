@@ -39,11 +39,13 @@ import {
   type BusEntry as ProtoBusEntry,
   type PowerStats as ProtoPowerStats,
   type ImuStats as ProtoImuStats,
+  type PolicyIoStats as ProtoPolicyIoStats,
 } from "../proto/bebop_runtime_pb";
 import type {
   BusView,
   ImuView,
   MotorView,
+  PolicyIoView,
   PowerView,
   RuntimeMode,
   RuntimeSnapshot,
@@ -364,6 +366,7 @@ function snapshotFromProto(s: Snapshot | TelemetryFrame): RuntimeSnapshot {
     buses: s.buses.map(busFromProto),
     power: powerFromProto(s.power),
     imu: imuFromProto(s.imu),
+    policyIo: policyIoFromProto(s.policyIo),
   };
 }
 
@@ -391,6 +394,35 @@ const EMPTY_IMU_VIEW: ImuView = {
   lastUpdateAgeMs: 0,
   quaternion: [0, 0, 0, 1],
   headingAccuracyRad: 0,
+};
+
+function policyIoFromProto(p: ProtoPolicyIoStats | undefined): PolicyIoView {
+  if (!p) {
+    return EMPTY_POLICY_IO_VIEW;
+  }
+  return {
+    present: p.present,
+    active: p.active,
+    imuLive: p.imuLive,
+    observation: [...p.observation],
+    rawAction: [...p.rawAction],
+    positionTargetsRad: [...p.positionTargetsRad],
+    kp: [...p.kp],
+    kd: [...p.kd],
+    jointNames: [...p.jointNames],
+  };
+}
+
+const EMPTY_POLICY_IO_VIEW: PolicyIoView = {
+  present: false,
+  active: false,
+  imuLive: false,
+  observation: [],
+  rawAction: [],
+  positionTargetsRad: [],
+  kp: [],
+  kd: [],
+  jointNames: [],
 };
 
 function powerFromProto(p: ProtoPowerStats | undefined): PowerView {

@@ -5,6 +5,7 @@
 //! write back to the WS sink.
 
 use crate::imu::ImuShared;
+use crate::policy_io::PolicyIoShared;
 use crate::mode::Mode;
 use crate::safety::limits::BreachReason;
 use crate::safety::Supervisor;
@@ -30,6 +31,7 @@ pub fn handle_client_message(
     sup: &Arc<Supervisor>,
     imu: &ImuShared,
     imu_present: bool,
+    policy_io: &PolicyIoShared,
     bytes: &[u8],
 ) -> proto::ServerRuntimeMessage {
     let req = match proto::ClientRuntimeMessage::decode(bytes) {
@@ -56,7 +58,7 @@ pub fn handle_client_message(
             )
         }
         P::UnsubscribeTelemetry(_) => ack(request_id, "telemetry unsubscribed".into()),
-        P::GetSnapshot(_) => snapshot_response(request_id, sup, imu, imu_present),
+        P::GetSnapshot(_) => snapshot_response(request_id, sup, imu, imu_present, policy_io),
         P::SetMotorEnabled(req) => {
             let result = if req.enabled {
                 sup.arm(&req.joint_name)
@@ -169,11 +171,12 @@ pub fn snapshot_response(
     sup: &Arc<Supervisor>,
     imu: &ImuShared,
     imu_present: bool,
+    policy_io: &PolicyIoShared,
 ) -> proto::ServerRuntimeMessage {
     proto::ServerRuntimeMessage {
         request_id,
         payload: Some(proto::server_runtime_message::Payload::Snapshot(
-            crate::server::telemetry::build_snapshot(sup, imu, imu_present),
+            crate::server::telemetry::build_snapshot(sup, imu, imu_present, policy_io),
         )),
     }
 }

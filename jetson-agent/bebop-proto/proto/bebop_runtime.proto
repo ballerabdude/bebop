@@ -220,6 +220,10 @@ message TelemetryFrame {
   // built without the optional BNO080/BNO085. Optional so old clients
   // can still decode the frame.
   ImuStats imu          = 13;
+  // Latest policy observation/action I/O from the 100 Hz ONNX loop.
+  // `policy_io.present = false` when no policy was loaded at boot.
+  // Optional so old clients can still decode the frame.
+  PolicyIoStats policy_io = 14;
 }
 
 // One-shot reply to GetSnapshot — same content as TelemetryFrame.
@@ -232,6 +236,7 @@ message Snapshot {
   repeated BusEntry   buses  = 11;
   PowerStats power      = 12;
   ImuStats imu          = 13;
+  PolicyIoStats policy_io = 14;
 }
 
 message BusStatusUpdate {
@@ -374,4 +379,54 @@ message ImuStats {
   // BNO08x-reported heading-accuracy estimate (radians, 1σ). 0 until
   // the sensor has converged.
   float  heading_accuracy_rad   = 24;
+}
+
+// ---------------------------------------------------------------------------
+// Policy I/O telemetry (ONNX observation + action vectors)
+// ---------------------------------------------------------------------------
+
+// Latest observation/action snapshot from [`PolicyRunner`]. Published at
+// the telemetry rate (~30 Hz) but sourced from the 100 Hz inference loop
+// (always the most recent tick). `present = false` when the firmware
+// failed to load `policy.onnx` at boot; `active = false` outside
+// `MODE_RUN_POLICY` or while E-STOP is latched.
+//
+// Vector layouts mirror `bebop_linux::observation::ObservationBuilder` and
+// the rate-limited `policy I/O` log line:
+//
+//   observation[ 0.. 3)  base_lin_vel
+//   observation[ 3.. 6)  base_ang_vel
+//   observation[ 6.. 9)  projected_gravity
+//   observation[ 9..17)  joint_pos_rel
+//   observation[17..25)  joint_vel
+//   observation[25..49)  last_action (24-dim raw NN output)
+//   observation[49..52)  cmd_vel (vx, vy, wz)
+//
+//   raw_action[ 0.. 8)  position commands (pre-decode, [-1, 1])
+//   raw_action[ 8..16)  kp commands
+//   raw_action[16..24)  kd commands
+//
+// Joint-ordered slices use the policy slot order documented in
+// `bebop_linux::observation::JOINT_NAMES`.
+message PolicyIoStats {
+  // True iff `policy.onnx` loaded successfully at boot.
+  bool   present                = 1;
+  // True while the 100 Hz loop is actively inferring (RunPolicy + !E-STOP).
+  bool   active                 = 2;
+  // Whether the observation builder is consuming live BNO085 readings
+  // (`true`) or the synthetic upright fallback (`false`).
+  bool   imu_live               = 3;
+
+  // Full 52-element observation fed to ONNX on the most recent tick.
+  repeated float observation    = 10;
+  // Full 24-element raw NN output from the most recent tick.
+  repeated float raw_action     = 11;
+
+  // Decoded MIT-mode commands (8 joints, policy slot order).
+  repeated float position_targets_rad = 20;
+  repeated float kp             = 21;
+  repeated float kd             = 22;
+
+  // Policy slot joint names (same order as the 8-element slices above).
+  repeated string joint_names   = 30;
 }

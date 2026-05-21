@@ -17,6 +17,7 @@
 //! All three feed a shared mpsc to the WS sink writer.
 
 use crate::imu::ImuShared;
+use crate::policy_io::PolicyIoShared;
 use crate::safety::{Supervisor, SupervisorEvent};
 use crate::server::handlers::{encode, handle_client_message};
 use crate::server::telemetry::{build_telemetry, telemetry_envelope};
@@ -43,18 +44,22 @@ pub struct AppState {
     /// True when the firmware was configured with an `imu:` block (drives
     /// the `ImuStats.present` proto flag).
     pub imu_present: bool,
+    /// Latest policy observation/action snapshot from the inference loop.
+    pub policy_io: PolicyIoShared,
 }
 
 pub async fn run_server(
     sup: Arc<Supervisor>,
     imu: ImuShared,
     imu_present: bool,
+    policy_io: PolicyIoShared,
     bind_addr: &str,
 ) -> Result<()> {
     let state = AppState {
         sup,
         imu,
         imu_present,
+        policy_io,
     };
     // Permissive CORS: the operator app is served from a different origin
     // (e.g. tauri://localhost or a dev http://localhost:1420), and we're
@@ -86,6 +91,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         sup,
         imu,
         imu_present,
+        policy_io,
     } = state;
     info!("ws client connected");
     let (mut sink, mut stream) = socket.split();
@@ -103,6 +109,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let tx_tele = tx.clone();
     let sup_tele = sup.clone();
     let imu_tele = imu.clone();
+    let policy_io_tele = policy_io.clone();
     let tele_state_tele = telemetry_state.clone();
     let telemetry_task = tokio::spawn(async move {
         loop {
@@ -115,7 +122,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
             if !subscribed {
                 continue;
             }
-            let frame = build_telemetry(&sup_tele, &imu_tele, imu_present);
+            let frame = build_telemetry(&sup_tele, &imu_tele, imu_present, &policy_io_tele);
             let env = telemetry_envelope(frame);
             if tx_tele.send(env).await.is_err() {
                 break;
@@ -172,7 +179,8 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     while let Some(frame) = stream.next().await {
         match frame {
             Ok(Message::Binary(bytes)) => {
-                let response = handle_client_message(&sup, &imu, imu_present, &bytes);
+                let response =
+                    handle_client_message(&sup, &imu, imu_present, &policy_io, &bytes);
 
                 // Side effects for messages that affect telemetry state: do this
                 // after dispatch so the response is consistent with the new state.

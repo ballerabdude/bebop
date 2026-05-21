@@ -1,6 +1,7 @@
 //! Build telemetry / snapshot frames from the supervisor's current state.
 
 use crate::imu::ImuShared;
+use crate::policy_io::{self, PolicyIoShared};
 use crate::mode::Mode;
 use crate::powerboard::describe_faults;
 use crate::safety::limits::MotorSnapshot;
@@ -189,10 +190,35 @@ fn build_imu_stats(imu: &ImuShared, present: bool) -> proto::ImuStats {
     }
 }
 
+fn build_policy_io_stats(policy_io: &PolicyIoShared) -> proto::PolicyIoStats {
+    let snapshot = match policy_io.lock() {
+        Ok(g) => g.clone(),
+        Err(_) => return proto::PolicyIoStats::default(),
+    };
+    if !snapshot.present {
+        return proto::PolicyIoStats {
+            present: false,
+            ..Default::default()
+        };
+    }
+    proto::PolicyIoStats {
+        present: true,
+        active: snapshot.active,
+        imu_live: snapshot.imu_live,
+        observation: snapshot.observation,
+        raw_action: snapshot.raw_action,
+        position_targets_rad: snapshot.position_targets_rad.to_vec(),
+        kp: snapshot.kp.to_vec(),
+        kd: snapshot.kd.to_vec(),
+        joint_names: policy_io::joint_names().iter().map(|s| s.to_string()).collect(),
+    }
+}
+
 pub fn build_snapshot(
     sup: &Arc<Supervisor>,
     imu: &ImuShared,
     imu_present: bool,
+    policy_io: &PolicyIoShared,
 ) -> proto::Snapshot {
     let motors = sup.snapshot_motors();
     let mode_proto = sup.mode().as_proto() as i32;
@@ -207,6 +233,7 @@ pub fn build_snapshot(
         buses: collect_buses(sup),
         power: Some(build_power_stats(sup)),
         imu: Some(build_imu_stats(imu, imu_present)),
+        policy_io: Some(build_policy_io_stats(policy_io)),
     }
 }
 
@@ -214,6 +241,7 @@ pub fn build_telemetry(
     sup: &Arc<Supervisor>,
     imu: &ImuShared,
     imu_present: bool,
+    policy_io: &PolicyIoShared,
 ) -> proto::TelemetryFrame {
     let motors = sup.snapshot_motors();
     let mode_proto = sup.mode().as_proto() as i32;
@@ -228,6 +256,7 @@ pub fn build_telemetry(
         buses: collect_buses(sup),
         power: Some(build_power_stats(sup)),
         imu: Some(build_imu_stats(imu, imu_present)),
+        policy_io: Some(build_policy_io_stats(policy_io)),
     }
 }
 

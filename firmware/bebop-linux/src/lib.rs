@@ -22,6 +22,7 @@ pub mod imu;
 pub mod mode;
 pub mod observation;
 pub mod policy;
+pub mod policy_io;
 pub mod policy_runner;
 pub mod powerboard;
 pub mod robstride;

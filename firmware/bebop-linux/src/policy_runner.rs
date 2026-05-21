@@ -60,6 +60,7 @@ use crate::observation::{
     decode_policy_action, ImuState, ObservationBuilder, VelocityCommand, JOINT_NAMES, NUM_JOINTS,
 };
 use crate::policy::PolicyController;
+use crate::policy_io::PolicyIoShared;
 use crate::safety::{BreachReason, Supervisor};
 
 /// Sentinel observation values for "IMU not present / stale". Mirrors what
@@ -78,6 +79,8 @@ pub struct PolicyRunner {
     /// from the YAML) — in that case the snapshot stays at its
     /// default and we use synthetic observations.
     imu_shared: ImuShared,
+    /// Latest observation/action vectors for the WS telemetry pump.
+    policy_io: PolicyIoShared,
     /// `joint_indices[slot]` = index into `Supervisor::cfg().joints` of
     /// the joint occupying policy slot `slot` (0..8 in [`JOINT_NAMES`] order).
     joint_indices: [usize; NUM_JOINTS],
@@ -115,6 +118,7 @@ impl PolicyRunner {
     pub fn new<P: AsRef<Path>>(
         supervisor: Arc<Supervisor>,
         imu_shared: ImuShared,
+        policy_io: PolicyIoShared,
         model_path: P,
     ) -> Result<Self> {
         let model_path = model_path.as_ref();
@@ -180,6 +184,7 @@ impl PolicyRunner {
             obs_builder,
             supervisor,
             imu_shared,
+            policy_io,
             joint_indices,
             default_positions,
             policy_gain_clamps,
@@ -201,6 +206,9 @@ impl PolicyRunner {
                 self.controller.reset();
                 self.obs_builder
                     .update_last_action(&[0.0_f32; dims::ACTION_DIM]);
+                if let Ok(mut g) = self.policy_io.lock() {
+                    g.clear_tick();
+                }
                 debug!("policy controller reset on RunPolicy exit");
             }
             self.was_running = false;
@@ -365,6 +373,17 @@ impl PolicyRunner {
                 kp = ?&decoded.kp,
                 kd = ?&decoded.kd,
                 "policy I/O"
+            );
+        }
+
+        if let Ok(mut g) = self.policy_io.lock() {
+            g.publish_tick(
+                self.imu_was_live,
+                &obs,
+                &action,
+                &decoded.targets,
+                &decoded.kp,
+                &decoded.kd,
             );
         }
 

@@ -106,4 +106,22 @@ export interface RuntimeSnapshot {
   /// Always present in the view layer; `imu.present === false` when
   /// the firmware has no `imu:` block configured.
   imu: ImuView;
+  /// Policy observation/action I/O. `policyIo.present === false` when
+  /// `policy.onnx` failed to load at boot.
+  policyIo: PolicyIoView;
+}
+
+/// Policy I/O view. Mirrors the firmware's `PolicyIoStats` proto.
+export interface PolicyIoView {
+  present: boolean;
+  active: boolean;
+  imuLive: boolean;
+  /** Full 52-dim observation vector (see layout in proto docs). */
+  observation: number[];
+  /** Full 24-dim raw NN output. */
+  rawAction: number[];
+  positionTargetsRad: number[];
+  kp: number[];
+  kd: number[];
+  jointNames: string[];
 }

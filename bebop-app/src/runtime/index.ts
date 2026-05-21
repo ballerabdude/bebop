@@ -4,6 +4,7 @@ export type {
   BusView,
   ImuView,
   MotorView,
+  PolicyIoView,
   PowerView,
   RuntimeMode,
   RuntimeSnapshot,
