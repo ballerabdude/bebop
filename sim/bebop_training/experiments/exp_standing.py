@@ -119,6 +119,21 @@ at a time rather than forking into v1, v2, ... files):
     firmware will clip more aggressively than the policy expects
     and tracking will lag. Don't deploy this checkpoint to a
     firmware still at 0.015.
+  * v0.6 — restored ``base_lin_vel`` (first) and ``velocity_commands``
+    (last) in the policy observation vector to match the firmware's
+    52-dim contract. v0.0 stripped both terms on the reasoning that
+    they were "useless for standing" — base_lin_vel is firmware-zero
+    on the real robot (no velocity estimator wired in) and the
+    velocity command is hard-coded to (0,0,0) for the stand task —
+    but the firmware ``observation.rs`` builder still emits all 52
+    dims regardless of task. Deploying the v0.5 policy (obs_dim=46)
+    against the firmware (obs_dim=52) latches E-STOP with
+    "Inference failed" because the ONNX input layer can't take the
+    larger tensor. Adding the two terms back with the same noise
+    levels as the kitchen-sink config keeps sim and firmware
+    aligned without firmware changes. Observation dim 46 -> 52;
+    actor input layer reshapes; previous v0.5 checkpoint cannot
+    warm-start, retrain from scratch.
 
 Deployment note: as of v0.4 the policy emits the same 24-dim MIT-mode
 action vector the firmware ``PolicyRunner`` already expects (8 raw
@@ -358,34 +373,47 @@ class ActionsCfg:
 
 
 # ---------------------------------------------------------------------------
-# Observations: the absolute minimum a standing biped policy needs.
+# Observations: 52-dim policy input matching the firmware's
+# ``observation.rs`` builder contract.
 #
-# Layout (46-dim, post-v0.4):
-#   [ 0: 3] base_ang_vel        — IMU gyro (BNO085 → body-frame rad/s)
-#   [ 3: 6] projected_gravity   — IMU rotation vector → body-frame gravity
-#   [ 6:14] joint_pos_rel       — encoder positions, relative to default
-#   [14:22] joint_vel_rel       — encoder velocities, relative to default
-#   [22:46] actions             — previous tick's raw policy output (24-dim:
+# Layout (52-dim, post-v0.6):
+#   [ 0: 3] base_lin_vel        — torso linear velocity in body frame
+#                                 (firmware-zero on the real robot; sim
+#                                 ground-truth with wide noise here as a
+#                                 light proxy for "we can't trust this")
+#   [ 3: 6] base_ang_vel        — IMU gyro (BNO085 → body-frame rad/s)
+#   [ 6: 9] projected_gravity   — IMU rotation vector → body-frame gravity
+#   [ 9:17] joint_pos_rel       — encoder positions, relative to default
+#   [17:25] joint_vel_rel       — encoder velocities, relative to default
+#   [25:49] actions             — previous tick's raw policy output (24-dim:
 #                                 8 positions + 8 kp + 8 kd channels)
+#   [49:52] velocity_commands   — base velocity command from the command
+#                                 manager. Pinned to (0,0,0) for the
+#                                 stand task — three constant-zero
+#                                 inputs that the firmware still emits.
 #
-# Deliberately removed vs the kitchen-sink experiment:
-#   - base_lin_vel: firmware feeds zeros, useless on real
-#   - velocity_commands: always zero for a stand task, dead weight
+# Per-tick Gaussian noise (v0.3) is injected on the five sensor-derived
+# observation terms so the policy learns to be robust to the real
+# BNO085 + Robstride encoder noise envelope. ``actions`` and
+# ``velocity_commands`` are unnoised — both come from controllable
+# upstream sources (the policy itself, and the command manager) rather
+# than physical sensors.
 #
-# Per-tick Gaussian noise (v0.3) is injected on the four sensor-derived
-# observations so the policy learns to be robust to the real BNO085 +
-# Robstride encoder noise envelope. ``actions`` is unnoised because
-# that's the policy's own previous output, not a sensor reading.
-#
-# The firmware-side ``observation.rs`` builder already emits a 24-dim
-# previous-action block, so this 46-dim layout lines up with the
-# existing on-robot observation builder out of the box (no firmware
-# change required for deployment).
+# The 52-dim layout MUST stay byte-identical to the firmware-side
+# observation builder. If the firmware's
+# ``firmware/bebop-linux/src/observation.rs`` ever changes the layout
+# or order of these terms, this block has to move in lockstep — and
+# the policy has to be retrained, because the input layer shape is
+# baked into the ONNX.
 # ---------------------------------------------------------------------------
 @configclass
 class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
+        base_lin_vel = ObsTerm(
+            func=mdp.base_lin_vel,
+            noise=UniformNoiseCfg(n_min=-0.2, n_max=0.2),
+        )
         base_ang_vel = ObsTerm(
             func=mdp.imu_ang_vel,
             params={"asset_cfg": SceneEntityCfg("imu")},
@@ -405,6 +433,10 @@ class ObservationsCfg:
             noise=UniformNoiseCfg(n_min=-0.5, n_max=0.5),
         )
         actions = ObsTerm(func=mdp.last_action)
+        velocity_commands = ObsTerm(
+            func=mdp.generated_commands,
+            params={"command_name": "base_velocity"},
+        )
 
     def __post_init__(self):
         self.policy = self.PolicyCfg()
