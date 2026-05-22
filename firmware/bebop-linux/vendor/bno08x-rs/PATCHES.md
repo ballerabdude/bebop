@@ -153,50 +153,43 @@ field would walk past the slice end.
 **Upstream-as-a-PR plausibility:** high. Pure bug fix, no API change,
 small diff. Any downstream that ever sees a large advert hits this.
 
-### `[6/6]`  Harden SPI bring-up: longer RST hold, longer wake timeout, explicit INT pull-up
+### `[6/6]`  Harden SPI bring-up: stale-packet drain, Hillcrest RST timing, INT pull-up
 
 * `src/interface/spi.rs::<SpiInterface as SensorInterface>::setup`
+  (timing constants: `SPI_SETUP_*_MS`, regression-tested in
+  `tests/spi_reset_timing.rs`)
 * `src/interface/gpio.rs::GpiodIn::new`
 
-Three changes that together mirror the more conservative reset
-sequence in Adafruit's CircuitPython BNO08x driver
-(<https://github.com/adafruit/Adafruit_CircuitPython_BNO08x/blob/main/adafruit_bno08x/spi.py>):
+**Failure mode (warm restart after mid-stream exit):** If a previous
+`bebop-linux` / `imu-probe` process died ungracefully (`kill -9`, panic,
+OOM), the BNO085 keeps streaming SHTP reports onto MISO. The next host
+open hits a wedged bus: `CommError(SensorUnresponsive)`,
+`InvalidChipId(0)`, or stage-4 all-zero quaternions until a physical
+3.3 V power cycle — roughly 3–4 failed bring-up attempts per restart.
 
-1. **10 ms settle with RST high before pulling low.** Cold-boot
-   scenarios where the 3.3 V rail just stabilized used to fail because
-   the rail was still slewing when the first RST low edge landed.
-2. **10 ms RST low hold (was 2 ms).** The BNO085 datasheet's minimum is
-   only 10 µs, but a longer pulse flushes states the brief pulse
-   cannot. Adafruit holds for 10 ms; we match.
-3. **3000 ms HINTN wake timeout (was 200 ms).** After RST releases, the
-   chip can take well over 500 ms to bring HINTN low for the first
-   time — particularly the first power-on of the day or after a
-   motor-induced rail dip. The upstream 200 ms window was inside that
-   tail, producing spurious `CommError(SensorUnresponsive)` errors that
-   triggered the bring-up retry loop in `bebop-linux/src/imu.rs`.
-4. **Explicit `Bias::PullUp` on the INT GPIO line.** The BNO drives
-   HINTN open-drain, so without an active host-side pull-up the line
-   floats whenever the chip is unpowered or mid-reset. The Adafruit
-   driver explicitly sets `Pull.UP`; the upstream Rust crate left bias
-   at `AsIs`, inheriting whatever the kernel device tree provided
-   (which on a Jetson Orin Nano dev kit is "disabled" for
-   general-purpose pins, leaving INT susceptible to EMI glitches on
-   long unshielded jumper wires).
+**Upstream values:** 2 ms RST low hold, 200 ms HINTN wait, no pre-reset
+drain, no post-awake settle.
+
+**Bebop values (see `SPI_SETUP_*_MS` in `spi.rs`):**
+
+| Phase | Upstream | Bebop | Reference |
+|-------|----------|-------|-----------|
+| Pre-reset drain (RST high) | — | **50 ms** | Bebop-specific: let in-flight stale SHTP drain |
+| RST low hold | 2 ms | **10 ms** | Hillcrest `RESET_DELAY` in [sh2_hal_spi.c](https://github.com/hcrest/bno080-nucleo-demo/blob/master/Hillcrest/sh2_hal_spi.c) |
+| HINTN wake timeout | 200 ms | **500 ms** | Hillcrest warm-boot window (sh2_hal / SHTP open path) |
+| Post-awake settle | — | **50 ms** | Avoid `verify_product_id` racing the advert response |
+
+5. **Explicit `Bias::PullUp` on the INT GPIO line** (`gpio.rs`). The BNO
+   drives HINTN open-drain; without a host pull-up the line floats when
+   the chip is unpowered or mid-reset. Upstream left bias at `AsIs`.
 
 This patch does NOT recover the rare "hard-wedged" state where the BNO
-ignores RST entirely — we've observed that on a humanoid bring-up with
-high motor-induced EMI, and only a physical 3.3 V power cycle clears
-it. The fix for that case is to put the BNO supply behind a load
-switch the firmware can toggle (a future PCB revision); the patches
-here address the common failure modes that brief pulses *should* have
-recovered.
+ignores RST entirely (motor EMI, broken RST trace) — only a supply
+power-cycle clears that. A future load-switch on the BNO rail is the
+hardware fix.
 
-**Upstream-as-a-PR plausibility:** high. Strict tightening of the
-existing reset sequence with no API change and no negative impact on
-correctly-wired installs — the longer timeouts only fire on the
-slow-boot / wedged paths that previously returned an error. The pull-up
-addition is a sensible default for the only input line the driver
-requests.
+**Upstream-as-a-PR plausibility:** high. No API change; longer waits only
+extend the slow-boot path that previously returned errors.
 
 ## Re-vendoring procedure
 

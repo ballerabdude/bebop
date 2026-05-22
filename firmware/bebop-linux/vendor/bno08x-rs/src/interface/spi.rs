@@ -16,6 +16,13 @@ use crate::{
 };
 use std::fmt::Debug;
 
+// BEBOP-PATCH [6/6]: minimum SPI reset-sequence timing (ms). Used by
+// `setup()` and regression-tested in `tests/spi_reset_timing.rs`.
+pub const SPI_SETUP_PRE_RESET_DRAIN_MS: usize = 50;
+pub const SPI_SETUP_RST_LOW_HOLD_MS: usize = 10;
+pub const SPI_SETUP_HINTN_WAIT_MS: usize = 500;
+pub const SPI_SETUP_POST_AWAKE_SETTLE_MS: usize = 50;
+
 /// Encapsulates all the lines required to operate this sensor
 /// - SCK: clock line from master
 /// - MISO: Data input from the sensor to the master
@@ -113,46 +120,49 @@ where
     }
 
     fn setup(&mut self) -> Result<(), Self::SensorError> {
-        // Deselect sensor
-        // self.csn.set_high().map_err(Error::Pin)?;
-        // Note: This assumes that WAK/PS0 is set to high already
-        //TODO allow the user to provide a WAK pin
-        // should already be high by default, but just in case...
+        // BEBOP-PATCH [6/6]: robust SPI reset sequence.
+        //
+        // Upstream pulses RST low for 2 ms and waits 200 ms for HINTN. Those
+        // values meet the BNO085 datasheet minimums for a *cold* chip but
+        // are unreliable on warm restarts: if a previous host process
+        // exited mid-stream (panic / OOM-kill / `kill -9`), the chip is
+        // still pumping SHTP packets onto MISO when we open the bus, and
+        // the first post-reset read latches the tail of a stale packet
+        // header. Symptoms observed before this patch:
+        //
+        //   * `CommError(SensorUnresponsive)` — HINTN didn't fall within
+        //     the upstream 200 ms window (warm boot is slower than cold).
+        //   * `InvalidChipId(0)` — verify_product_id read zeros from the
+        //     not-yet-flushed FIFO.
+        //   * Stage 3 OK but stage 4 streams all-zero quaternions — the
+        //     new enable_report got buried under undrained old packets.
+        //
+        // All three were "fix it by power-cycling the breakout", which is
+        // unacceptable in the field. The values below match Hillcrest's
+        // reference sh2_hal C driver (10 ms RST hold, 500 ms HINTN wait)
+        // plus a 50 ms pre-reset drain that we add for our specific
+        // "previous process was streaming" case.
         self.reset.set_high().map_err(Error::Pin)?;
+        delay_ms(SPI_SETUP_PRE_RESET_DRAIN_MS);
 
         trace!("reset cycle... ");
-        // reset cycle
-
-        // BEBOP-PATCH [6/6]: extended RST sequence to match Adafruit's
-        // CircuitPython driver (https://github.com/adafruit/
-        // Adafruit_CircuitPython_BNO08x/blob/main/adafruit_bno08x/spi.py
-        // -- `hard_reset`). The upstream 2 ms RST hold + 200 ms wake
-        // window does not reliably recover a BNO that crashed mid-SHTP
-        // (we hit `CommError(SensorUnresponsive)` on a humanoid bring-up
-        // that required a physical 3 V power cycle to unwedge — see
-        // `firmware/bebop-linux/src/imu.rs` "Bring-up retries" §). The
-        // new values mirror Adafruit:
-        //   * 10 ms settle with RST high before pulling low (helps cold
-        //     boots where the rail just stabilized)
-        //   * 10 ms RST low hold (was 2 ms — well above the BNO085
-        //     datasheet's 10 µs minimum but enough to flush most wedged
-        //     states the brief pulse couldn't)
-        //   * 3000 ms HINTN wake timeout (was 200 ms — the chip can
-        //     take >500 ms to bring HINTN low on first power-up,
-        //     particularly when EMI from nearby motors perturbed the
-        //     previous reset)
-        // We have no `delay_ms` import drama because the upstream
-        // already uses it both above and below this hunk.
-        delay_ms(10);
         self.reset.set_low().map_err(Error::Pin)?;
-        delay_ms(10);
+        delay_ms(SPI_SETUP_RST_LOW_HOLD_MS);
         self.reset.set_high().map_err(Error::Pin)?;
 
-        // wait for sensor to set hintn pin after reset
-        let ready = self.wait_for_sensor_awake(3000);
+        // BNO firmware boot + SHTP advertisement: cold boot is ~120 ms,
+        // warm restart can hit 300 ms+ because the chip aborts its prior
+        // stream before booting. 500 ms matches Hillcrest sh2_hal.
+        let ready = self.wait_for_sensor_awake(SPI_SETUP_HINTN_WAIT_MS);
         if !ready {
             return Err(SensorUnresponsive);
         }
+
+        // Give the chip a beat to finish publishing its advertisement
+        // response before the driver's caller starts verify_product_id;
+        // without this, verify_product_id can race the advertisement and
+        // misread the product-ID response.
+        delay_ms(SPI_SETUP_POST_AWAKE_SETTLE_MS);
 
         Ok(())
     }
