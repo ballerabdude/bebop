@@ -46,7 +46,7 @@ import omni.usd
 from pxr import Gf, UsdGeom, UsdPhysics
 
 ROBOT_CANDIDATES = ["/World/bebopv2", "/bebopv2"]
-LIFT_Z = 0.65  # meters — half the leg length, so the foot lands on z=0
+LIFT_Z = 0.8  # meters — half the leg length, so the foot lands on z=0
 
 # IMU mount on base_link. Translation is in the base_link frame; tweak
 # to match the physical BNO085 mount on the real robot if you have it.

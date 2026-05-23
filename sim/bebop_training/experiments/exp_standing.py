@@ -447,7 +447,7 @@ BEBOP_V2_STANDING_CFG = ArticulationCfg(
         # The USD root carries a built-in +Z translation so feet touch the
         # ground when joint angles are zero. Must match that or the legs
         # spawn below the floor.
-        pos=(0.0, 0.0, 0.6539092050794861),
+        pos=(0.0, 0.0, 0.8),
         joint_pos={joint_name: 0.0 for joint_name in JOINT_NAMES_ALL},
         joint_vel={joint_name: 0.0 for joint_name in JOINT_NAMES_ALL},
     ),
@@ -852,7 +852,7 @@ class RewardsCfg:
         func=mdp.base_height_l2,
         weight=-1.0,
         params={
-            "target_height": 0.6539092050794861,
+            "target_height": 0.8,
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )

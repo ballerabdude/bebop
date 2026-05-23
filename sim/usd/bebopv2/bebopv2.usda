@@ -7,8 +7,8 @@
                 double radius = 5
             }
             dictionary Perspective = {
-                double3 position = (2.852610261767027, 1.0545391150351002, 0.6934635413449527)
-                double3 target = (-0.22632403074498875, -0.7844207681672872, 0.5924502130600194)
+                double3 position = (1.9731796212195951, 0.05174401507976101, 0.1385809725382222)
+                double3 target = (-0.46866870136798666, -0.840231329291567, 0.21487915153491943)
             }
             dictionary Right = {
                 double3 position = (0, -5, 0)
@@ -84,7 +84,7 @@ def Xform "bebopv2" (
     )
     quatf xformOp:orient = (1, 0, 0, 0)
     float3 xformOp:scale = (1, 1, 1)
-    double3 xformOp:translate = (0, 0, 0.65)
+    double3 xformOp:translate = (0, 0, 0.7)
     uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
 
     over "Physics"
@@ -236,10 +236,10 @@ over "OmniverseKit_Persp" (
     float exposure:time = 0.02
     float focalLength = 18.147562
     float focusDistance = 400
-    custom uniform vector3d omni:kit:centerOfInterest = (0, 0, -3.5877309712582126)
-    float3 xformOp:rotateXYZ = (88.38661, 4.770832e-14, 120.84867)
+    custom uniform vector3d omni:kit:centerOfInterest = (0, 0, -2.6007815474599836)
+    float3 xformOp:rotateXYZ = (91.68111, 6.36111e-14, 110.06659)
     float3 xformOp:scale = (1, 1, 1)
-    double3 xformOp:translate = (2.852610261767027, 1.0545391150351002, 0.6934635413449527)
+    double3 xformOp:translate = (1.9731796212195951, 0.05174401507976101, 0.1385809725382222)
     uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
 }
 
