@@ -90,8 +90,11 @@ joints:
   # decoded kp / kd emitted by the policy. MUST mirror `POLICY_KP_MIN/MAX`
   # and `POLICY_KD_MIN/MAX` in the sim config.
 
-  # ----- Hip abduction (RS04) -----------------------------------------------
-  hip_abduction_left_joint:
+  # ----- Hip flexion (RS04) -------------------------------------------------
+  # Top joint off base_link, Y-axis pitch. Renamed from
+  # hip_abduction_*_joint to match the URDF anatomical rename — same
+  # physical motors (CAN IDs 31 / 41), same RS04 envelope.
+  hip_flexion_left_joint:
     can_interface: can0
     motor_id: 31
     model: RS04
@@ -99,7 +102,7 @@ joints:
     hold_gains:  { kp: 40.0,  kd: 3.0 }
     policy_gain_clamps: { kp_min: 5.0, kp_max: 100.0, kd_min: 0.5, kd_max: 5.0 }
 
-  hip_abduction_right_joint:
+  hip_flexion_right_joint:
     can_interface: can1
     motor_id: 41
     model: RS04
@@ -107,8 +110,10 @@ joints:
     hold_gains:  { kp: 40.0,  kd: 3.0 }
     policy_gain_clamps: { kp_min: 5.0, kp_max: 100.0, kd_min: 0.5, kd_max: 5.0 }
 
-  # ----- Femur / hip pitch (RS03) -------------------------------------------
-  femur_left_joint:
+  # ----- Hip abduction (RS03) -----------------------------------------------
+  # X-axis roll, between the hip_flexion and knee_flexion links.
+  # Renamed from femur_*_joint (motor IDs 32 / 42 unchanged).
+  hip_abduction_left_joint:
     can_interface: can0
     motor_id: 32
     model: RS03
@@ -116,7 +121,7 @@ joints:
     hold_gains:  { kp: 160.0, kd: 6.0 }
     policy_gain_clamps: { kp_min: 20.0, kp_max: 300.0, kd_min: 1.0, kd_max: 8.0 }
 
-  femur_right_joint:
+  hip_abduction_right_joint:
     can_interface: can1
     motor_id: 42
     model: RS03
@@ -124,8 +129,9 @@ joints:
     hold_gains:  { kp: 160.0, kd: 6.0 }
     policy_gain_clamps: { kp_min: 20.0, kp_max: 300.0, kd_min: 1.0, kd_max: 8.0 }
 
-  # ----- Shin / knee (RS04) -------------------------------------------------
-  shin_left_joint:
+  # ----- Knee flexion (RS04) ------------------------------------------------
+  # Knee pitch. Renamed from shin_*_joint (motor IDs 34 / 44 unchanged).
+  knee_flexion_left_joint:
     can_interface: can0
     motor_id: 34
     model: RS04
@@ -133,7 +139,7 @@ joints:
     hold_gains:  { kp: 120.0, kd: 4.0 }
     policy_gain_clamps: { kp_min: 10.0, kp_max: 250.0, kd_min: 1.0, kd_max: 8.0 }
 
-  shin_right_joint:
+  knee_flexion_right_joint:
     can_interface: can1
     motor_id: 44
     model: RS04

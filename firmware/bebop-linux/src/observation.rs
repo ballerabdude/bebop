@@ -15,16 +15,31 @@
 //! the URDF. The 24-dim MIT-mode action stacks three of these 8-slot
 //! groups in the order: positions, kp, kd.
 //!
-//! | idx | joint                         |
-//! |-----|-------------------------------|
-//! |  0  | `hip_abduction_left_joint`    |
-//! |  1  | `hip_abduction_right_joint`   |
-//! |  2  | `femur_left_joint`            |
-//! |  3  | `femur_right_joint`           |
-//! |  4  | `shin_left_joint`             |
-//! |  5  | `shin_right_joint`            |
-//! |  6  | `foot_left_joint`             |
-//! |  7  | `foot_right_joint`            |
+//! | idx | joint                          |
+//! |-----|--------------------------------|
+//! |  0  | `hip_flexion_left_joint`       |
+//! |  1  | `hip_flexion_right_joint`      |
+//! |  2  | `hip_abduction_left_joint`     |
+//! |  3  | `hip_abduction_right_joint`    |
+//! |  4  | `knee_flexion_left_joint`      |
+//! |  5  | `knee_flexion_right_joint`     |
+//! |  6  | `foot_left_joint`              |
+//! |  7  | `foot_right_joint`             |
+//!
+//! The names above were renamed end-to-end with the URDF / USD update
+//! that re-aligned joint labels to their actual anatomical function
+//! (see `ros2/src/bebopv2_description/CHANGELOG.md`). The chain order
+//! is unchanged, so the per-slot physical motor mapping stays:
+//!
+//! - slots 0,1 — Robstride RS04, top joint off `base_link`, Y-axis pitch
+//! - slots 2,3 — Robstride RS03, X-axis roll
+//! - slots 4,5 — Robstride RS04, knee
+//! - slots 6,7 — Robstride RS02, ankle
+//!
+//! Any ONNX trained before the rename is structurally compatible (same
+//! input / output dims, same slot semantics) and will only need a
+//! fine-tune for the slight inertia change at the redesigned
+//! `hip_flexion_*_1` link.
 
 use crate::config::{dims, scales, JointState, PolicyGainClamps};
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
@@ -34,12 +49,12 @@ pub const NUM_JOINTS: usize = 8;
 
 /// Joint names in policy order. Index into the observation/action vector.
 pub const JOINT_NAMES: [&str; NUM_JOINTS] = [
+    "hip_flexion_left_joint",
+    "hip_flexion_right_joint",
     "hip_abduction_left_joint",
     "hip_abduction_right_joint",
-    "femur_left_joint",
-    "femur_right_joint",
-    "shin_left_joint",
-    "shin_right_joint",
+    "knee_flexion_left_joint",
+    "knee_flexion_right_joint",
     "foot_left_joint",
     "foot_right_joint",
 ];
