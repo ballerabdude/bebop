@@ -196,6 +196,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "gpiod",
  "nalgebra",
  "ndarray 0.16.1",
  "ort",

@@ -325,8 +325,10 @@ pub fn spawn_imu_thread(
     shared: ImuShared,
 ) -> Option<JoinHandle<()>> {
     /// Initial sleep between bring-up retries. Doubles each failure
-    /// up to [`BRINGUP_BACKOFF_MAX_MS`].
-    const BRINGUP_BACKOFF_MIN_MS: u64 = 250;
+    /// up to [`BRINGUP_BACKOFF_MAX_MS`]. 1 s is the floor below which
+    /// the BNO's own internal state-machine timeouts haven't fired yet,
+    /// so retrying faster is wasted SPI bandwidth.
+    const BRINGUP_BACKOFF_MIN_MS: u64 = 1_000;
     /// Cap on the bring-up retry backoff. 5 s keeps us responsive to
     /// the operator power-cycling the IMU board mid-runtime, while
     /// being long enough that we're not eating SPI bandwidth on a
@@ -378,6 +380,55 @@ pub fn spawn_imu_thread(
     }
 
     Some(std::thread::spawn(move || {
+        // BEBOP: One-shot aggressive RST pulse before the driver gets near the
+        // chip. If the previous bebop-linux process died ungracefully (panic,
+        // OOM, kill -9, hard power cut), the BNO is still streaming reports
+        // from its previous subscription. The vendored crate's setup() handles
+        // this (see BEBOP-PATCH [6/6] in vendor/bno08x-rs), but we belt-and-
+        // suspenders it here so even a worst-case chip state is cleared
+        // before the first SPI transaction.
+        //
+        // Best-effort: if the GPIO line is unavailable (already claimed,
+        // chip not present, etc.) we silently fall through and let the
+        // retry loop deal with whatever state the chip is in.
+        {
+            use gpiod::{Chip, Options};
+            match Chip::new(&cfg.rst_chip) {
+                Ok(chip) => match chip.request_lines(
+                    Options::output([cfg.rst_line]).consumer("bebop-imu-prereset"),
+                ) {
+                    Ok(rst) => {
+                        let _ = rst.set_values([false]); // RST low
+                        std::thread::sleep(Duration::from_millis(100));
+                        let _ = rst.set_values([true]); // release
+                        // Drop `rst` here so the driver can claim the line below.
+                        std::thread::sleep(Duration::from_millis(300));
+                        info!(
+                            target: "bebop_linux::imu",
+                            rst_chip = %cfg.rst_chip,
+                            rst_line = cfg.rst_line,
+                            "IMU: pre-reset RST pulse complete (clearing any stale chip state)"
+                        );
+                    }
+                    Err(e) => warn!(
+                        target: "bebop_linux::imu",
+                        ?e,
+                        rst_chip = %cfg.rst_chip,
+                        rst_line = cfg.rst_line,
+                        "IMU: pre-reset RST pulse skipped (could not request GPIO line); \
+                         retry loop will handle bring-up"
+                    ),
+                },
+                Err(e) => warn!(
+                    target: "bebop_linux::imu",
+                    ?e,
+                    rst_chip = %cfg.rst_chip,
+                    "IMU: pre-reset RST pulse skipped (could not open gpiochip); \
+                     retry loop will handle bring-up"
+                ),
+            }
+        }
+
         // ---------- Bring-up: retry forever until success or shutdown ----------
         //
         // Both this loop body and the streaming loop below are inlined

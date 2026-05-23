@@ -106,6 +106,9 @@ bytes = "1.7"
 # re-vendoring notes.
 bno08x-rs = { path = "vendor/bno08x-rs" }
 
+# GPIO pre-reset pulse in `imu.rs` (same version as `bno08x-rs`).
+gpiod = "0.3.0"
+
 # Argument parsing for the `imu-probe` diagnostic binary. Pulled in via
 # the `derive` feature so the probe can declare its CLI as a struct.
 clap = { version = "4", features = ["derive"] }
