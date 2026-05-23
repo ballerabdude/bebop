@@ -3,7 +3,7 @@
     customLayerData = {
         string creator = "URDF USD Converter v0.1.0"
     }
-    doc = """Generated from Composed Stage of root layer /tmp/tmp6lfb044p/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmpy8zi28yv/bebopv2.usdc
 
 
 Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/usdex/bebopv2.usdc

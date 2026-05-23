@@ -80,6 +80,13 @@ lab-up:
 lab-down:
     docker compose --profile lab down
 
+# Launch the Isaac Sim GUI inside the running bebop_isaac_sim container.
+# Requires the sim profile to be up (`just sim-up`) and X11 forwarding on
+# the host; `xhost +local:docker` is run best-effort so windows can open.
+sim-launch:
+    @xhost +local:docker >/dev/null 2>&1 || true
+    docker exec -it bebop_isaac_sim /isaac-sim/isaac-sim.sh
+
 # Isaac Sim is launchable from inside this container via
 # `/workspace/isaaclab/isaaclab.sh -s`, so no separate sim-shell is needed.
 #
@@ -93,17 +100,39 @@ lab-shell:
 ros2-build:
     docker compose build ros2_docker
 
-# Open an interactive shell in the running ROS 2 dev container.
-ros2-shell:
+# Start the ROS 2 dev container and ensure the entrypoint bootstrap has run.
+ros2-up:
+    docker compose --profile sim up --build -d ros2_docker
+    docker exec bebop_ros2 bash -lc 'source /ros_ws_entrypoint.sh'
+
+# Open an interactive shell in the ROS 2 dev container.
+ros2-shell: ros2-up
     docker exec -it bebop_ros2 bash
 
 # Re-expand bebopv2.xacro into bebopv2.urdf (with absolute mesh paths).
-# Runs inside bebop_ros2; pass extra flags through, e.g.
+# Starts/runs inside bebop_ros2, builds just the description package (to
+# avoid pulling in unrelated/broken packages like micro_ros_msgs), then
+# passes extra flags through, e.g.
 #   `just ros2-urdf --mesh-prefix /workspace/bebop_bot/ros2/src/bebopv2_description/meshes`
-ros2-urdf *FLAGS:
+ros2-urdf *FLAGS: ros2-up
     docker exec -it bebop_ros2 bash -lc \
         'source /ros_ws_entrypoint.sh && \
+         colcon build --packages-up-to bebopv2_description && \
+         source install/setup.bash && \
          "$ROS_WS"/src/bebopv2_description/scripts/xacro-to-urdf.sh {{FLAGS}}'
+
+# Launch RViz with the bebopv2_description display (robot_state_publisher +
+# joint_state_publisher_gui + rviz2 preloaded with config/display.rviz).
+# Requires X11 forwarding on the host; run `xhost +local:docker` once per
+# login session if windows fail to open. Pass extra args through, e.g.
+#   `just ros2-rviz gui:=false`
+ros2-rviz *FLAGS: ros2-up
+    @xhost +local:docker >/dev/null 2>&1 || true
+    docker exec -it bebop_ros2 bash -lc \
+        'source /ros_ws_entrypoint.sh && \
+         colcon build --packages-up-to bebopv2_description && \
+         source install/setup.bash && \
+         ros2 launch bebopv2_description display.launch.py {{FLAGS}}'
 
 # --- Firmware (PlatformIO) -------------------------------------------------
 

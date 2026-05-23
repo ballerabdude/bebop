@@ -3,7 +3,7 @@
     customLayerData = {
         string creator = "URDF USD Converter v0.1.0"
     }
-    doc = """Generated from Composed Stage of root layer /tmp/tmp6lfb044p/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmpy8zi28yv/bebopv2.usdc
 
 
 Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/usdex/bebopv2.usdc
@@ -26,11 +26,12 @@ def Scope "Instances"
     )
     {
         over "base_link" (
-            apiSchemas = ["MaterialBindingAPI"]
+            apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
         )
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/base_link/VisualMaterials/silver>
+            token physics:approximation = "convexHull"
         }
 
         def Scope "VisualMaterials"
@@ -44,16 +45,27 @@ def Scope "Instances"
         }
     }
 
-    def Xform "base_link_1" (
-        prepend references = @./geometries.usd@</Geometries/base_link>
+    def Xform "hip_flexion_right_1" (
+        prepend references = @./geometries.usd@</Geometries/hip_flexion_right_1>
     )
     {
-        over "base_link" (
-            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+        over "hip_flexion_right_1" (
+            apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
         )
         {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/hip_flexion_right_1/VisualMaterials/silver>
             token physics:approximation = "convexHull"
-            token purpose = "guide"
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
         }
     }
 
@@ -62,11 +74,12 @@ def Scope "Instances"
     )
     {
         over "hip_abduction_right_1" (
-            apiSchemas = ["MaterialBindingAPI"]
+            apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
         )
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/hip_abduction_right_1/VisualMaterials/silver>
+            token physics:approximation = "convexHull"
         }
 
         def Scope "VisualMaterials"
@@ -80,29 +93,17 @@ def Scope "Instances"
         }
     }
 
-    def Xform "hip_abduction_right_1_1" (
-        prepend references = @./geometries.usd@</Geometries/hip_abduction_right_1>
+    def Xform "knee_flexion_right_1" (
+        prepend references = @./geometries.usd@</Geometries/knee_flexion_right_1>
     )
     {
-        over "hip_abduction_right_1" (
-            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
-        )
-        {
-            token physics:approximation = "convexHull"
-            token purpose = "guide"
-        }
-    }
-
-    def Xform "femur_right_1" (
-        prepend references = @./geometries.usd@</Geometries/femur_right_1>
-    )
-    {
-        over "femur_right_1" (
-            apiSchemas = ["MaterialBindingAPI"]
+        over "knee_flexion_right_1" (
+            apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
         )
         {
             custom rel material:binding
-            prepend rel material:binding = </Instances/femur_right_1/VisualMaterials/silver>
+            prepend rel material:binding = </Instances/knee_flexion_right_1/VisualMaterials/silver>
+            token physics:approximation = "convexHull"
         }
 
         def Scope "VisualMaterials"
@@ -113,55 +114,6 @@ def Scope "Instances"
             )
             {
             }
-        }
-    }
-
-    def Xform "femur_right_1_1" (
-        prepend references = @./geometries.usd@</Geometries/femur_right_1>
-    )
-    {
-        over "femur_right_1" (
-            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
-        )
-        {
-            token physics:approximation = "convexHull"
-            token purpose = "guide"
-        }
-    }
-
-    def Xform "shin_right_1" (
-        prepend references = @./geometries.usd@</Geometries/shin_right_1>
-    )
-    {
-        over "shin_right_1" (
-            apiSchemas = ["MaterialBindingAPI"]
-        )
-        {
-            custom rel material:binding
-            prepend rel material:binding = </Instances/shin_right_1/VisualMaterials/silver>
-        }
-
-        def Scope "VisualMaterials"
-        {
-            def Material "silver" (
-                instanceable = true
-                prepend references = @./materials.usda@</Materials/silver>
-            )
-            {
-            }
-        }
-    }
-
-    def Xform "shin_right_1_1" (
-        prepend references = @./geometries.usd@</Geometries/shin_right_1>
-    )
-    {
-        over "shin_right_1" (
-            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
-        )
-        {
-            token physics:approximation = "convexHull"
-            token purpose = "guide"
         }
     }
 
@@ -170,11 +122,12 @@ def Scope "Instances"
     )
     {
         over "foot_right_1" (
-            apiSchemas = ["MaterialBindingAPI"]
+            apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
         )
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/foot_right_1/VisualMaterials/silver>
+            token physics:approximation = "convexHull"
         }
 
         def Scope "VisualMaterials"
@@ -188,16 +141,27 @@ def Scope "Instances"
         }
     }
 
-    def Xform "foot_right_1_1" (
-        prepend references = @./geometries.usd@</Geometries/foot_right_1>
+    def Xform "hip_flexion_left_1" (
+        prepend references = @./geometries.usd@</Geometries/hip_flexion_left_1>
     )
     {
-        over "foot_right_1" (
-            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+        over "hip_flexion_left_1" (
+            apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
         )
         {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/hip_flexion_left_1/VisualMaterials/silver>
             token physics:approximation = "convexHull"
-            token purpose = "guide"
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
         }
     }
 
@@ -206,11 +170,12 @@ def Scope "Instances"
     )
     {
         over "hip_abduction_left_1" (
-            apiSchemas = ["MaterialBindingAPI"]
+            apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
         )
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/hip_abduction_left_1/VisualMaterials/silver>
+            token physics:approximation = "convexHull"
         }
 
         def Scope "VisualMaterials"
@@ -224,29 +189,17 @@ def Scope "Instances"
         }
     }
 
-    def Xform "hip_abduction_left_1_1" (
-        prepend references = @./geometries.usd@</Geometries/hip_abduction_left_1>
+    def Xform "knee_flexion_left_1" (
+        prepend references = @./geometries.usd@</Geometries/knee_flexion_left_1>
     )
     {
-        over "hip_abduction_left_1" (
-            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
-        )
-        {
-            token physics:approximation = "convexHull"
-            token purpose = "guide"
-        }
-    }
-
-    def Xform "femur_left_1" (
-        prepend references = @./geometries.usd@</Geometries/femur_left_1>
-    )
-    {
-        over "femur_left_1" (
-            apiSchemas = ["MaterialBindingAPI"]
+        over "knee_flexion_left_1" (
+            apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
         )
         {
             custom rel material:binding
-            prepend rel material:binding = </Instances/femur_left_1/VisualMaterials/silver>
+            prepend rel material:binding = </Instances/knee_flexion_left_1/VisualMaterials/silver>
+            token physics:approximation = "convexHull"
         }
 
         def Scope "VisualMaterials"
@@ -257,55 +210,6 @@ def Scope "Instances"
             )
             {
             }
-        }
-    }
-
-    def Xform "femur_left_1_1" (
-        prepend references = @./geometries.usd@</Geometries/femur_left_1>
-    )
-    {
-        over "femur_left_1" (
-            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
-        )
-        {
-            token physics:approximation = "convexHull"
-            token purpose = "guide"
-        }
-    }
-
-    def Xform "shin_left_1" (
-        prepend references = @./geometries.usd@</Geometries/shin_left_1>
-    )
-    {
-        over "shin_left_1" (
-            apiSchemas = ["MaterialBindingAPI"]
-        )
-        {
-            custom rel material:binding
-            prepend rel material:binding = </Instances/shin_left_1/VisualMaterials/silver>
-        }
-
-        def Scope "VisualMaterials"
-        {
-            def Material "silver" (
-                instanceable = true
-                prepend references = @./materials.usda@</Materials/silver>
-            )
-            {
-            }
-        }
-    }
-
-    def Xform "shin_left_1_1" (
-        prepend references = @./geometries.usd@</Geometries/shin_left_1>
-    )
-    {
-        over "shin_left_1" (
-            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
-        )
-        {
-            token physics:approximation = "convexHull"
-            token purpose = "guide"
         }
     }
 
@@ -314,11 +218,12 @@ def Scope "Instances"
     )
     {
         over "foot_left_1" (
-            apiSchemas = ["MaterialBindingAPI"]
+            apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
         )
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/foot_left_1/VisualMaterials/silver>
+            token physics:approximation = "convexHull"
         }
 
         def Scope "VisualMaterials"
@@ -329,19 +234,6 @@ def Scope "Instances"
             )
             {
             }
-        }
-    }
-
-    def Xform "foot_left_1_1" (
-        prepend references = @./geometries.usd@</Geometries/foot_left_1>
-    )
-    {
-        over "foot_left_1" (
-            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
-        )
-        {
-            token physics:approximation = "convexHull"
-            token purpose = "guide"
         }
     }
 }

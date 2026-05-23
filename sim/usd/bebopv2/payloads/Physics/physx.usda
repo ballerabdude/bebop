@@ -4,7 +4,7 @@
         string creator = "URDF USD Converter v0.1.0"
     }
     defaultPrim = "bebopv2"
-    doc = """Generated from Composed Stage of root layer /tmp/tmp6lfb044p/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmpy8zi28yv/bebopv2.usdc
 
 
 Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/usdex/bebopv2.usdc
@@ -34,90 +34,52 @@ over "bebopv2"
         {
             bool physxArticulation:enabledSelfCollisions = 0
 
-            over "hip_abduction_right_1"
+            over "hip_flexion_right_1"
             {
-                over "femur_right_1"
+                over "hip_abduction_right_1"
                 {
-                    over "shin_right_1"
+                    over "knee_flexion_right_1"
                     {
                         over "foot_right_1"
                         {
-                            over "foot_right_1"
-                            {
-                            }
-
-                            over "foot_right_1_1"
-                            {
-                            }
                         }
 
-                        over "shin_right_1"
-                        {
-                        }
-
-                        over "shin_right_1_1"
+                        over "knee_flexion_right_1"
                         {
                         }
                     }
 
-                    over "femur_right_1"
-                    {
-                    }
-
-                    over "femur_right_1_1"
+                    over "hip_abduction_right_1"
                     {
                     }
                 }
 
-                over "hip_abduction_right_1"
-                {
-                }
-
-                over "hip_abduction_right_1_1"
+                over "hip_flexion_right_1"
                 {
                 }
             }
 
-            over "hip_abduction_left_1"
+            over "hip_flexion_left_1"
             {
-                over "femur_left_1"
+                over "hip_abduction_left_1"
                 {
-                    over "shin_left_1"
+                    over "knee_flexion_left_1"
                     {
                         over "foot_left_1"
                         {
-                            over "foot_left_1"
-                            {
-                            }
-
-                            over "foot_left_1_1"
-                            {
-                            }
                         }
 
-                        over "shin_left_1"
-                        {
-                        }
-
-                        over "shin_left_1_1"
+                        over "knee_flexion_left_1"
                         {
                         }
                     }
 
-                    over "femur_left_1"
-                    {
-                    }
-
-                    over "femur_left_1_1"
+                    over "hip_abduction_left_1"
                     {
                     }
                 }
 
-                over "hip_abduction_left_1"
-                {
-                }
-
-                over "hip_abduction_left_1_1"
+                over "hip_flexion_left_1"
                 {
                 }
             }
@@ -125,37 +87,19 @@ over "bebopv2"
             over "base_link"
             {
             }
-
-            over "base_link_1"
-            {
-            }
         }
     }
 
     over "Physics"
     {
-        over "femur_left_joint" (
+        over "knee_flexion_left_joint" (
             prepend apiSchemas = ["PhysxJointAPI"]
         )
         {
             float physxJoint:maxJointVelocity = 5729.578
         }
 
-        over "femur_right_joint" (
-            prepend apiSchemas = ["PhysxJointAPI"]
-        )
-        {
-            float physxJoint:maxJointVelocity = 5729.578
-        }
-
-        over "shin_left_joint" (
-            prepend apiSchemas = ["PhysxJointAPI"]
-        )
-        {
-            float physxJoint:maxJointVelocity = 5729.578
-        }
-
-        over "shin_right_joint" (
+        over "knee_flexion_right_joint" (
             prepend apiSchemas = ["PhysxJointAPI"]
         )
         {
@@ -170,6 +114,20 @@ over "bebopv2"
         }
 
         over "foot_right_joint" (
+            prepend apiSchemas = ["PhysxJointAPI"]
+        )
+        {
+            float physxJoint:maxJointVelocity = 5729.578
+        }
+
+        over "hip_flexion_right_joint" (
+            prepend apiSchemas = ["PhysxJointAPI"]
+        )
+        {
+            float physxJoint:maxJointVelocity = 5729.578
+        }
+
+        over "hip_flexion_left_joint" (
             prepend apiSchemas = ["PhysxJointAPI"]
         )
         {
