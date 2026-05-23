@@ -67,25 +67,25 @@ def _ensure_tensor(
     )
 
 
-def shin_symmetry_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+def knee_symmetry_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Squared left-right knee mismatch, accounting for the mirrored
     joint convention.
 
-    The shin joints (index 4 = left, 5 = right in ``JOINT_NAMES_ALL``)
-    are the knees on this articulation. The USD mirrors the right leg's
-    joint frame about the sagittal plane:
+    The knee_flexion joints (index 4 = left, 5 = right in
+    ``JOINT_NAMES_ALL``) are the knees on this articulation. The USD
+    mirrors the right leg's joint frame about the sagittal plane:
 
-    - ``shin_left_joint``  ``localRot0 = (1, 0, 0, 0)``  limits  ``-45°..+90°``
-    - ``shin_right_joint`` ``localRot0 = (0,-1, 0, 0)``  limits  ``-90°..+45°``
+    - ``knee_flexion_left_joint``  ``localRot0 = (1, 0, 0, 0)``  limits  ``-45°..+90°``
+    - ``knee_flexion_right_joint`` ``localRot0 = (0,-1, 0, 0)``  limits  ``-90°..+45°``
 
     The right joint's local frame is rotated 180° about X relative to the
     left's, so a positive angle on the right rotates the knee the
     *opposite* world direction from a positive angle on the left. A
     physically symmetric crouch is therefore
-    ``shin_left ≈ -shin_right`` (both knees bent forward), and the
-    invariant we want to drive toward zero is the *sum*, not the
-    difference. Using ``(L - R)²`` would actively reward an
-    anti-symmetric "one knee bent forward, one bent backward" pose,
+    ``knee_flexion_left ≈ -knee_flexion_right`` (both knees bent
+    forward), and the invariant we want to drive toward zero is the
+    *sum*, not the difference. Using ``(L - R)²`` would actively reward
+    an anti-symmetric "one knee bent forward, one bent backward" pose,
     which is the opposite of what we want.
 
     The firmware does no sign-flipping in either the observation or
@@ -94,14 +94,20 @@ def shin_symmetry_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     mirrored convention on the real robot. Fixing it sim-side does not
     double-correct anything.
 
-    We don't apply an analogous penalty to hip abduction, femur, or foot
-    pairs because (a) ``femur_deviation`` already pulls both hips toward
-    zero (which is the same value in both mirrored frames), and (b)
-    ``foot_flat`` already biases both feet to the same horizontal
-    orientation using world-frame foot orientation, not joint angles.
-    Knees are the one DoF pair with no other term constraining their
-    relative angle, and the asymmetric "one straight, one bent" crouch
-    is the most common reward-hacking mode PPO falls into here.
+    We don't apply an analogous penalty to hip_flexion, hip_abduction,
+    or foot pairs because (a) ``hip_abduction_deviation`` already pulls
+    both hips toward zero (which is the same value in both mirrored
+    frames), and (b) ``foot_flat`` already biases both feet to the same
+    horizontal orientation using world-frame foot orientation, not
+    joint angles. Knees are the one DoF pair with no other term
+    constraining their relative angle, and the asymmetric "one
+    straight, one bent" crouch is the most common reward-hacking mode
+    PPO falls into here.
+
+    Historical note: this function was named ``shin_symmetry_penalty``
+    before the URDF / USD anatomical rename (v0.9 of ``exp_standing``).
+    The index it operates on (4, 5) is unchanged — only the joint
+    names that map to those slots in ``JOINT_NAMES_ALL`` did.
     """
     robot = env.scene[asset_cfg.name]
     joint_pos = _ensure_tensor(robot.data.joint_pos, env_device=getattr(env, "device", None))
@@ -195,8 +201,8 @@ def foot_flat_reward(
     and concentrates strongly around the flat-foot pose.
 
     Composes cleanly with :func:`torso_upright_via_legs_reward`: the
-    torso term selects shin/ankle angles that keep the torso vertical;
-    this term selects shin/ankle angles that keep the foot horizontal.
+    torso term selects knee/ankle angles that keep the torso vertical;
+    this term selects knee/ankle angles that keep the foot horizontal.
     Together they pin both ends of the pitch chain, which for a
     standing pose corresponds to a straight leg / flat foot / upright
     torso. During locomotion the foot legitimately tilts during swing
@@ -259,21 +265,22 @@ def knee_bend_reward(
       a rigid strut, which the real-robot non-idealities (joint friction,
       gear backlash) can excite into chatter.
 
-    Operates on the AVERAGE of the left + right shin joints (indices 4
-    and 5 in ``JOINT_NAMES_ALL``), so symmetric bending is rewarded.
-    Asymmetric solutions land at the same shin_avg as a no-bend pose
-    and so earn no credit; if the policy starts gaming this with a
-    one-leg bend, wire in ``shin_symmetry_penalty`` alongside.
+    Operates on the AVERAGE of the left + right knee_flexion joints
+    (indices 4 and 5 in ``JOINT_NAMES_ALL``), so symmetric bending is
+    rewarded. Asymmetric solutions land at the same knee_avg as a
+    no-bend pose and so earn no credit; if the policy starts gaming
+    this with a one-leg bend, wire in ``knee_symmetry_penalty``
+    alongside.
 
     Args:
-        target_angle: target shin joint angle in radians, positive ⇒
+        target_angle: target knee_flexion angle in radians, positive ⇒
             knees flexed forward (sign follows the same convention as
-            ``torso_upright_via_legs_reward``'s ``shin_avg``). Default
+            ``torso_upright_via_legs_reward``'s ``knee_avg``). Default
             ``0.4`` (~23°) drops the hip by ~2 cm — modest, but plenty
             for stability gain without compromising the foot/CoM
             stability polygon.
         std: shaping width. Default ``0.2`` ⇒ reward drops to
-            ``exp(-1) ≈ 0.37`` when the shin is off-target by ~11°.
+            ``exp(-1) ≈ 0.37`` when the knee is off-target by ~11°.
             Tighten to ``0.1`` to pin a precise pose; loosen to
             ``0.3+`` for more freedom during recovery.
     """
@@ -281,8 +288,8 @@ def knee_bend_reward(
     joint_pos = _ensure_tensor(
         robot.data.joint_pos, env_device=getattr(env, "device", None)
     )
-    shin_avg = 0.5 * (joint_pos[:, 4] + joint_pos[:, 5])
-    err = (shin_avg - target_angle) * (shin_avg - target_angle)
+    knee_avg = 0.5 * (joint_pos[:, 4] + joint_pos[:, 5])
+    err = (knee_avg - target_angle) * (knee_avg - target_angle)
     return torch.exp(-err / (std * std))
 
 
@@ -306,7 +313,7 @@ def torso_upright_via_legs_reward(
 
     The pitch component is **not** penalised directly. Instead, it is
     folded together with the average ankle (foot) joint angle AND the
-    average knee (shin) joint angle into a *residual*: the slice of
+    average knee_flexion joint angle into a *residual*: the slice of
     torso pitch that neither the ankles nor the knees are compensating
     for. The policy can therefore satisfy this reward by holding the
     torso perfectly vertical, OR by deliberately bending the knees /
@@ -338,7 +345,7 @@ def torso_upright_via_legs_reward(
             angles). Drop to ``0.5`` if the policy starts pitching the
             ankles to "fake" being upright while the torso remains
             tilted.
-        knee_compensation_gain: same idea for the shin (knee) joints.
+        knee_compensation_gain: same idea for the knee_flexion joints.
             Default ``1.0``. The knee and ankle act in series in the
             pitch plane, so the policy can split the compensation
             between them however the reward landscape prefers; tune
@@ -356,15 +363,16 @@ def torso_upright_via_legs_reward(
     roll = proj_grav[:, 1]
 
     joint_pos = _ensure_tensor(robot.data.joint_pos, proj_grav)
-    # JOINT_NAMES_ALL indices: 4/5 = shin_left/right (knee), 6/7 = foot_left/right
-    # (ankle). Same convention as shin_symmetry_penalty / foot_symmetry_penalty.
-    shin_avg = 0.5 * (joint_pos[:, 4] + joint_pos[:, 5])
+    # JOINT_NAMES_ALL indices: 4/5 = knee_flexion_left/right (knee),
+    # 6/7 = foot_left/right (ankle). Same convention as
+    # knee_symmetry_penalty.
+    knee_avg = 0.5 * (joint_pos[:, 4] + joint_pos[:, 5])
     foot_avg = 0.5 * (joint_pos[:, 6] + joint_pos[:, 7])
 
     pitch_residual = (
         pitch
         - foot_compensation_gain * foot_avg
-        - knee_compensation_gain * shin_avg
+        - knee_compensation_gain * knee_avg
     )
     err_sq = pitch_residual * pitch_residual + roll * roll
     return torch.exp(-err_sq / (std * std))

@@ -21,8 +21,8 @@ from isaaclab.utils.noise import UniformNoiseCfg
 from .bebop_v2_actions import VariableImpedanceJointActionCfg
 from .bebop_v2_rewards import (
     foot_flat_reward,
+    knee_symmetry_penalty,
     leg_position_hold_reward,
-    shin_symmetry_penalty,
     torso_upright_via_legs_reward,
 )
 from .bebop_v2_terminations import base_link_on_ground
@@ -33,12 +33,12 @@ from .bebop_v2_terminations import base_link_on_ground
 # ``firmware/bebop-linux/src/observation.rs::JOINT_NAMES``.
 # ---------------------------------------------------------------------------
 JOINT_NAMES_ALL = [
+    "hip_flexion_left_joint",
+    "hip_flexion_right_joint",
     "hip_abduction_left_joint",
     "hip_abduction_right_joint",
-    "femur_left_joint",
-    "femur_right_joint",
-    "shin_left_joint",
-    "shin_right_joint",
+    "knee_flexion_left_joint",
+    "knee_flexion_right_joint",
     "foot_left_joint",
     "foot_right_joint",
 ]
@@ -81,15 +81,20 @@ _KD_MID = _midpoint(POLICY_KD_MIN, POLICY_KD_MAX)
 
 # Per-group tau_max and vel_max — peak-force / peak-velocity envelope.
 # These MUST mirror ``hard_limits.tau_max`` / ``hard_limits.vel_max``
-# in ``firmware/bebop-linux/config/bebop_v2.yaml``.
-FW_HIP_ABDUCTION_TAU_MAX = 84.0
-FW_FEMUR_TAU_MAX = 42.0
-FW_SHIN_TAU_MAX = 84.0
+# in ``firmware/bebop-linux/config/bebop_v2.yaml``. Group naming
+# follows the post-v0.9 anatomical rename:
+#   hip_flexion  = top joint off base_link (Y-axis pitch, RS04, 84 Nm)
+#   hip_abduction= roll axis below hip_flexion         (RS03, 42 Nm)
+#   knee_flexion = knee                                (RS04, 84 Nm)
+#   foot         = ankle                               (RS02, 17 Nm)
+FW_HIP_FLEXION_TAU_MAX = 84.0
+FW_HIP_ABDUCTION_TAU_MAX = 42.0
+FW_KNEE_FLEXION_TAU_MAX = 84.0
 FW_FOOT_TAU_MAX = 17.0
 
+FW_HIP_FLEXION_VEL_MAX = 12.0
 FW_HIP_ABDUCTION_VEL_MAX = 12.0
-FW_FEMUR_VEL_MAX = 12.0
-FW_SHIN_VEL_MAX = 12.0
+FW_KNEE_FLEXION_VEL_MAX = 12.0
 FW_FOOT_VEL_MAX = 20.0
 
 # Position-channel slew + delay. ``FW_MAX_POS_STEP_PER_TICK_RAD`` mirrors
@@ -136,7 +141,20 @@ BEBOP_V2_CFG = ArticulationCfg(
     # write_joint_damping_to_sim. ``effort_limit_sim`` and
     # ``velocity_limit_sim`` mirror the YAML hard_limits.
     actuators={
-        # Robstride RS04 -> hip abduction (lateral leg pitch).
+        # Robstride RS04 -> hip_flexion (top joint off base_link, Y-axis pitch).
+        "hip_flexion": ImplicitActuatorCfg(
+            joint_names_expr=[
+                "hip_flexion_left_joint",
+                "hip_flexion_right_joint",
+            ],
+            effort_limit_sim=FW_HIP_FLEXION_TAU_MAX,
+            velocity_limit_sim=FW_HIP_FLEXION_VEL_MAX,
+            stiffness=_KP_MID[0],
+            damping=_KD_MID[0],
+            armature=0.01,
+            friction=0.0,
+        ),
+        # Robstride RS03 -> hip_abduction (X-axis roll, between hip_flexion and knee_flexion).
         "hip_abduction": ImplicitActuatorCfg(
             joint_names_expr=[
                 "hip_abduction_left_joint",
@@ -144,26 +162,19 @@ BEBOP_V2_CFG = ArticulationCfg(
             ],
             effort_limit_sim=FW_HIP_ABDUCTION_TAU_MAX,
             velocity_limit_sim=FW_HIP_ABDUCTION_VEL_MAX,
-            stiffness=_KP_MID[0],
-            damping=_KD_MID[0],
-            armature=0.01,
-            friction=0.0,
-        ),
-        # Robstride RS03 -> femur (hip pitch).
-        "femur": ImplicitActuatorCfg(
-            joint_names_expr=["femur_left_joint", "femur_right_joint"],
-            effort_limit_sim=FW_FEMUR_TAU_MAX,
-            velocity_limit_sim=FW_FEMUR_VEL_MAX,
             stiffness=_KP_MID[2],
             damping=_KD_MID[2],
             armature=0.005,
             friction=0.0,
         ),
-        # Robstride RS04 -> shin (knee).
-        "shin": ImplicitActuatorCfg(
-            joint_names_expr=["shin_left_joint", "shin_right_joint"],
-            effort_limit_sim=FW_SHIN_TAU_MAX,
-            velocity_limit_sim=FW_SHIN_VEL_MAX,
+        # Robstride RS04 -> knee_flexion (knee).
+        "knee_flexion": ImplicitActuatorCfg(
+            joint_names_expr=[
+                "knee_flexion_left_joint",
+                "knee_flexion_right_joint",
+            ],
+            effort_limit_sim=FW_KNEE_FLEXION_TAU_MAX,
+            velocity_limit_sim=FW_KNEE_FLEXION_VEL_MAX,
             stiffness=_KP_MID[4],
             damping=_KD_MID[4],
             armature=0.01,
@@ -301,10 +312,39 @@ class EventCfg:
     # twice and cannot memorize a single "default rest pose" output.
     # Initial joint velocities are also non-trivial (±0.5 rad/s) so the
     # policy must read joint_vel from the observation, not assume zero.
-    # The ``femur_deviation`` term and the ``shin_symmetry`` knee
-    # penalty pull the policy toward a symmetric near-zero pose in
-    # steady state; spawn diversity only changes *which corner* of the
-    # recovery basin the episode starts in.
+    # The ``hip_abduction_deviation`` term and the ``knee_symmetry``
+    # knee penalty pull the policy toward a symmetric near-zero pose
+    # in steady state; spawn diversity only changes *which corner* of
+    # the recovery basin the episode starts in.
+    reset_hip_flexion = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=["hip_flexion_left_joint", "hip_flexion_right_joint"],
+            ),
+            "position_range": (-0.40, 0.40),    # ~23°  (USD limit ±45°)
+            "velocity_range": (-0.5, 0.5),
+        },
+    )
+    # hip_abduction is the lateral (roll) axis. Reset range was
+    # historically wide so the policy saw splayed spawn poses and had
+    # to recover from them; the strong ``hip_abduction_deviation``
+    # reward (overridden hard in the balance experiment) still pulls
+    # the steady state back to zero.
+    # NOTE (v0.9): the redesigned URDF tightens the hip_abduction
+    # mechanical envelope to ±0.349 / ±0.175 rad (asymmetric per
+    # side), so an offset of ±0.30 from default=0 can over-extend the
+    # right joint's +0.175 limit. Isaac Lab's
+    # ``soft_joint_pos_limit_factor=0.9`` will clamp the spawn into
+    # the soft envelope (~±0.157 on the tight side), which means
+    # post-clamp the actual reset distribution is asymmetric. Either
+    # tighten this range to (-0.15, 0.15) before retraining the
+    # kitchen-sink or accept that ~half of resets will hit the
+    # asymmetric clamp. Left as-is here because this config is the
+    # legacy baseline; the actively-trained ``exp_standing`` does
+    # not use this term.
     reset_hip_abduction = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
@@ -313,35 +353,17 @@ class EventCfg:
                 "robot",
                 joint_names=["hip_abduction_left_joint", "hip_abduction_right_joint"],
             ),
-            "position_range": (-0.40, 0.40),    # ~23°  (USD limit ±45°)
-            "velocity_range": (-0.5, 0.5),
-        },
-    )
-    # Femur is the lateral hip-abduction axis on this articulation
-    # (despite the name — the joint called ``hip_abduction_*_joint`` is
-    # actually fore/aft). Reset range is wide so the policy sees splayed
-    # spawn poses and must learn to recover from them; the strong
-    # ``femur_deviation`` reward (overridden hard in the balance
-    # experiment) still pulls the steady state back to zero.
-    reset_femur = EventTerm(
-        func=mdp.reset_joints_by_offset,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg(
-                "robot",
-                joint_names=["femur_left_joint", "femur_right_joint"],
-            ),
             "position_range": (-0.30, 0.30),    # ~17°
             "velocity_range": (-0.5, 0.5),
         },
     )
-    reset_shin = EventTerm(
+    reset_knee_flexion = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg(
                 "robot",
-                joint_names=["shin_left_joint", "shin_right_joint"],
+                joint_names=["knee_flexion_left_joint", "knee_flexion_right_joint"],
             ),
             "position_range": (-0.60, 0.60),    # ~34°
             "velocity_range": (-0.5, 0.5),
@@ -451,24 +473,27 @@ class RewardsCfg:
     #     params={"asset_cfg": SceneEntityCfg("robot", joint_names=JOINT_NAMES_ALL)},
     # )
 
-    # Targeted anti-splay penalty on the femur joints. Femur is the
-    # lateral hip-abduction axis on this articulation (yes, the joint
-    # named ``hip_abduction_*_joint`` is actually fore/aft pitch; the
-    # naming is historical). Without this term the policy reward-hacks
-    # the standing task by spreading both femurs out for a wider base
-    # of support — it earns more ``alive``/``torso_upright`` reward
-    # than the global ``joint_deviation`` term can offset, and the
-    # resulting pose is brittle on the real robot (low-friction floor
-    # → feet slip outward → fall). Experiments override the weight:
-    # the balance stage cranks it; locomotion may want it relaxed if
-    # the gait needs more lateral authority.
-    femur_deviation = RewTerm(
+    # Targeted anti-splay penalty on the hip_abduction joints —
+    # i.e., the lateral / roll axis that, if left unconstrained,
+    # lets the policy reward-hack the standing task by spreading
+    # both legs outward for a wider base of support. The wider
+    # stance earns more ``alive`` / ``torso_upright`` reward than
+    # the global ``joint_deviation`` term can offset, and the
+    # resulting pose is brittle on the real robot (low-friction
+    # floor → feet slip outward → fall). Experiments override the
+    # weight: the balance stage cranks it; locomotion may want it
+    # relaxed if the gait needs more lateral authority.
+    #
+    # Renamed from ``femur_deviation`` in v0.9 to match the URDF
+    # anatomical rename — same physical motors, same numeric
+    # behaviour.
+    hip_abduction_deviation = RewTerm(
         func=mdp.joint_deviation_l1,
         weight=-0.5,
         params={
             "asset_cfg": SceneEntityCfg(
                 "robot",
-                joint_names=["femur_left_joint", "femur_right_joint"],
+                joint_names=["hip_abduction_left_joint", "hip_abduction_right_joint"],
             ),
         },
     )
@@ -489,8 +514,9 @@ class RewardsCfg:
 
     # Torso upright via ankle + knee compensation. Reads body-frame
     # projected gravity from the IMU sensor and rewards the pitch
-    # component being offset by the average foot AND shin joint angles.
-    # Roll is penalised directly since neither joint has lateral authority.
+    # component being offset by the average foot AND knee_flexion
+    # joint angles. Roll is penalised directly since neither joint
+    # has lateral authority.
     torso_upright_via_legs = RewTerm(
         func=torso_upright_via_legs_reward,
         weight=1.0,
@@ -509,22 +535,24 @@ class RewardsCfg:
         params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.15},
     )
 
-    # Knee (shin) left/right symmetry penalty. The right shin's joint
+    # Knee left/right symmetry penalty. The right knee_flexion joint
     # frame is mirrored about the sagittal plane in the USD
     # (``localRot0 = (0,-1,0,0)`` vs identity on the left, limits
     # flipped from -45..+90 to -90..+45), so a physically symmetric
-    # crouch is ``shin_left ≈ -shin_right``. The reward function
-    # squares ``(shin_left + shin_right)`` — read its docstring before
-    # changing the sign here. This stops the policy from "balancing"
-    # via an asymmetric crouch (one knee bent forward, one bent
-    # backward) that looks fine in sim but collapses on the real robot
-    # where the two shins don't track identical PD commands the same
-    # way.
+    # crouch is ``knee_flexion_left ≈ -knee_flexion_right``. The
+    # reward function squares
+    # ``(knee_flexion_left + knee_flexion_right)`` — read its
+    # docstring before changing the sign here. This stops the policy
+    # from "balancing" via an asymmetric crouch (one knee bent
+    # forward, one bent backward) that looks fine in sim but
+    # collapses on the real robot where the two knees don't track
+    # identical PD commands the same way.
     #
     # We deliberately do NOT mirror the other joint pairs:
-    #   - hip_abduction / femur: ``femur_deviation`` already pulls
-    #     both toward zero, which is the same value in both mirrored
-    #     frames and so encodes the symmetric standing pose for free.
+    #   - hip_flexion / hip_abduction: ``hip_abduction_deviation``
+    #     already pulls both toward zero, which is the same value in
+    #     both mirrored frames and so encodes the symmetric standing
+    #     pose for free.
     #   - foot: foot pitch is dominated by ``foot_flat``, which biases
     #     both feet to the same (horizontal) orientation using
     #     world-frame foot orientation, not joint angles, and so is
@@ -532,8 +560,8 @@ class RewardsCfg:
     #
     # Locomotion experiments MUST override this to zero — walking
     # requires the legs to alternate, which is asymmetry by definition.
-    shin_symmetry = RewTerm(
-        func=shin_symmetry_penalty,
+    knee_symmetry = RewTerm(
+        func=knee_symmetry_penalty,
         weight=-1.5,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )

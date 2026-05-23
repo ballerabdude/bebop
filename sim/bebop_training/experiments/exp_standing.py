@@ -75,7 +75,7 @@ at a time rather than forking into v1, v2, ... files):
        * joint_vel_rel:      ±0.5 rad/s   (finite-diff velocity jitter)
     Result: clean stand under noise, but a small left/right rocking
     appears — the policy reacts to spurious projected-gravity-y
-    noise through the soft hip-abduction joints (kp=40), and the
+    noise through the soft hip-flexion joints (kp=40), and the
     fixed PD can't raise stiffness during steady stance. The fix
     is variable impedance (next).
   * v0.4 — restored variable impedance on the action channel.
@@ -98,7 +98,7 @@ at a time rather than forking into v1, v2, ... files):
           different shape. Train from scratch.
     Result: clean stand under noise, lateral rocking eliminated.
     foot_flat ≈ 0.965, alive ≈ 0.999, mean_reward ≈ 36. Confirmed
-    that variable impedance lets the policy raise hip-abduction
+    that variable impedance lets the policy raise hip-flexion
     stiffness during quiet standing, which was the v0.3 problem.
   * v0.5 — tightened the position-channel slew clamp from 1.0
     rad/tick (effectively unbounded) to 0.020 rad/tick = 2 rad/s
@@ -157,7 +157,10 @@ at a time rather than forking into v1, v2, ... files):
     correctly on the real robot. Still need to address the OOD
     initial-pose issue separately (either pose the robot to near-zero
     before engaging RunPolicy, or widen sim init randomization to
-    cover the real spawn distribution).
+    cover the real spawn distribution). At the time this OOD pose
+    was logged with the joint then-called ``hip_abduction`` at -0.61
+    rad; under the post-rename naming that's the joint now called
+    ``hip_flexion`` (the top joint off ``base_link``, Y-axis pitch).
   * v0.7 — recovery / robustness pass. The deployed v0.6 policy
     showed the same failure mode every test: it sits "calm" in a
     slight forward lean (its trained equilibrium), but the slightest
@@ -195,19 +198,20 @@ at a time rather than forking into v1, v2, ... files):
           so the policy needs to recover from there too. Replaced
           the single ``reset_joints`` term with three:
             * ``reset_joints`` — ±0.05 jitter on every joint (as before)
-            * ``reset_shin_left_crouch`` — additionally biases the
-              left shin into ``(-0.05, +0.45)``, covering both
-              straight-knee AND moderately-bent-forward states. The
-              joint's mirror convention (see ``shin_symmetry_penalty``
-              docstring in ``bebop_v2_rewards.py``) is that +shin_left
-              and -shin_right are the same physical motion — knees
-              bent forward.
-            * ``reset_shin_right_crouch`` — mirror, ``(-0.45, +0.05)``.
-          Femur and foot are deliberately NOT biased. The crouch
-          requires hip / ankle compensation to keep the CoM over the
-          foot and the foot flat; forcing the policy to find that
-          compensation from a randomized knee bend is exactly the
-          lesson we want it to internalize.
+            * ``reset_knee_left_crouch`` — additionally biases the
+              left knee_flexion joint into ``(-0.05, +0.45)``,
+              covering both straight-knee AND moderately-bent-forward
+              states. The joint's mirror convention (see
+              ``knee_symmetry_penalty`` docstring in
+              ``bebop_v2_rewards.py``) is that ``+knee_flexion_left``
+              and ``-knee_flexion_right`` are the same physical
+              motion — knees bent forward.
+            * ``reset_knee_right_crouch`` — mirror, ``(-0.45, +0.05)``.
+          Hip abduction and foot are deliberately NOT biased. The
+          crouch requires hip-flexion / ankle compensation to keep
+          the CoM over the foot and the foot flat; forcing the
+          policy to find that compensation from a randomized knee
+          bend is exactly the lesson we want it to internalize.
     The widened observation distribution from (1)+(2)+(4) means the
     actor will need more training steps to converge than v0.6, and
     the converged reward will be lower (the policy is now solving a
@@ -217,9 +221,9 @@ at a time rather than forking into v1, v2, ... files):
     Observation and action layouts are UNCHANGED from v0.6 (52-dim
     obs, 24-dim action). The ONNX export drops into the same firmware
     loader. No firmware changes required for this version.
-  * v0.8 — added ``shin_symmetry_penalty`` (weight -0.5). The v0.7
+  * v0.8 — added ``knee_symmetry_penalty`` (weight -0.5). The v0.7
     checkpoint converged to the exact reward-hacking mode the comment
-    on ``shin_symmetry_penalty`` in ``bebop_v2_rewards.py`` warned
+    on ``knee_symmetry_penalty`` in ``bebop_v2_rewards.py`` warned
     about: one knee deeply bent, the other near-straight, with the
     near-straight knee oscillating to micro-balance. All other reward
     terms are pose-symmetry-blind (``foot_flat`` is world-frame,
@@ -230,15 +234,16 @@ at a time rather than forking into v1, v2, ... files):
     slowly *rising* entropy curve at 10k iterations (a sign the
     policy hadn't committed because both asymmetric and symmetric
     crouches scored about the same).
-    The v0.7 crouch reset bias (independent shin_left / shin_right
-    randomization) compounded this — half the time the episode
-    started already-asymmetric, so the policy got steady gradient
-    signal that asymmetric crouches were valid. With the new
-    symmetry penalty (which scores ``(shin_left + shin_right)^2``,
-    accounting for the mirrored joint frames so a physically
-    symmetric crouch sums to zero), the asymmetric attractor now
-    costs reward proportional to how unbalanced the bend is, and
-    the policy should commit to a symmetric stance.
+    The v0.7 crouch reset bias (independent knee_flexion_left /
+    knee_flexion_right randomization) compounded this — half the
+    time the episode started already-asymmetric, so the policy got
+    steady gradient signal that asymmetric crouches were valid.
+    With the new symmetry penalty (which scores
+    ``(knee_flexion_left + knee_flexion_right)^2``, accounting for
+    the mirrored joint frames so a physically symmetric crouch sums
+    to zero), the asymmetric attractor now costs reward proportional
+    to how unbalanced the bend is, and the policy should commit to a
+    symmetric stance.
     Weight -0.5 is the value used by the original kitchen-sink
     config (``bebop_v2_base_cfg.py``) and is the minimum that
     reliably breaks the asymmetric attractor without dominating the
@@ -257,6 +262,54 @@ at a time rather than forking into v1, v2, ... files):
          the asymmetric solution before finding the symmetric one;
          expect a recovery within ~3k iterations.
     Observation and action layouts UNCHANGED. No firmware changes.
+  * v0.9 — URDF rename + hip flexion link redesign. The joint names
+    on the articulation were anatomically incorrect: the joint
+    immediately under ``base_link`` was called
+    ``hip_abduction_*_joint`` but its axis is Y (pitch), i.e.
+    flexion. The leg chain has been renamed end-to-end to match the
+    real anatomy:
+       hip_abduction_{l,r}_joint  ->  hip_flexion_{l,r}_joint   (was always pitch)
+       femur_{l,r}_joint          ->  hip_abduction_{l,r}_joint (was always roll)
+       shin_{l,r}_joint           ->  knee_flexion_{l,r}_joint
+       foot_{l,r}_joint           ->  foot_{l,r}_joint            (unchanged)
+    Chain ORDER (base_link -> joint0 -> joint1 -> joint2 -> joint3
+    -> foot) is unchanged, so JOINT_NAMES_ALL still indexes the
+    same physical motors at the same positions and the 24-dim MIT
+    action / 52-dim observation layouts stay byte-identical. The
+    trained v0.8 ONNX is still architecturally compatible.
+    BUT: the link physically attached to the top of the leg
+    (formerly ``hip_abduction_*_1``, now ``hip_flexion_*_1``) was
+    also redesigned in CAD. Mass 1.000 kg -> 1.149 kg, new inertia
+    tensor, new mesh. The torso ``base_link`` mass was also
+    refined from the CAD: 7.0 kg -> 6.70 kg. The USD asset has
+    been re-exported with the new geometry + masses + link names.
+    Sim dynamics therefore changed at the leg root: the rotational
+    inertia about the hip-flexion axis is ~15% higher, so the
+    effective bandwidth on that axis drops a hair. Expect the v0.8
+    policy to *load* (same input / output shape) but converge to a
+    slightly different equilibrium; plan on a fine-tune pass rather
+    than a hard warm-start.
+    Companion edits in this PR:
+       * ``bebop_v2_rewards.py``: ``shin_symmetry_penalty`` renamed
+         to ``knee_symmetry_penalty``. The function itself is index
+         based (still indexes 4 / 5 in JOINT_NAMES_ALL), so the
+         behaviour is identical — only the symbol changed.
+       * Actuator group keys in this file renamed for clarity
+         (``"hip_abduction"`` -> ``"hip_flexion"``, ``"femur"`` ->
+         ``"hip_abduction"``, ``"shin"`` -> ``"knee_flexion"``).
+         Pure dict-key change; no effect on which motors the
+         actuator binds to (Isaac Lab matches actuators by
+         ``joint_names_expr``, not by the group key).
+       * Reset event names renamed ``reset_shin_{l,r}_crouch`` ->
+         ``reset_knee_{l,r}_crouch``.
+    Firmware-side rename of ``JOINT_NAMES`` in
+    ``observation.rs`` + the keys in
+    ``firmware/bebop-linux/config/bebop_v2.yaml`` are NOT done as
+    part of this PR; until they land, do not deploy a v0.9
+    checkpoint to the real robot — sim and firmware joint names
+    will disagree even though the physical motor mapping is
+    identical, and any future YAML-driven safety override would
+    fail to find the renamed joints.
 
 Deployment note: as of v0.4 the policy emits the same 24-dim MIT-mode
 action vector the firmware ``PolicyRunner`` already expects (8 raw
@@ -293,7 +346,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.noise import UniformNoiseCfg
 
 from ..envs.bebop_v2_actions import VariableImpedanceJointActionCfg
-from ..envs.bebop_v2_rewards import foot_flat_reward, shin_symmetry_penalty
+from ..envs.bebop_v2_rewards import foot_flat_reward, knee_symmetry_penalty
 from ..envs.bebop_v2_terminations import base_link_on_ground
 
 
@@ -304,12 +357,12 @@ from ..envs.bebop_v2_terminations import base_link_on_ground
 # duplicated here on purpose so the file is self-contained.
 # ---------------------------------------------------------------------------
 JOINT_NAMES_ALL = [
+    "hip_flexion_left_joint",
+    "hip_flexion_right_joint",
     "hip_abduction_left_joint",
     "hip_abduction_right_joint",
-    "femur_left_joint",
-    "femur_right_joint",
-    "shin_left_joint",
-    "shin_right_joint",
+    "knee_flexion_left_joint",
+    "knee_flexion_right_joint",
     "foot_left_joint",
     "foot_right_joint",
 ]
@@ -323,10 +376,10 @@ JOINT_NAMES_ALL = [
 # ``[-1, 1]`` then an affine map into the per-joint range below. The 8-tuple
 # layout matches ``JOINT_NAMES_ALL`` exactly:
 #
-#     idx 0,1 = hip_abduction_{left,right}   (Robstride RS04)
-#     idx 2,3 = femur_{left,right}           (RS03)
-#     idx 4,5 = shin_{left,right}            (RS04)
-#     idx 6,7 = foot_{left,right}            (RS02)
+#     idx 0,1 = hip_flexion_{left,right}    (Robstride RS04)
+#     idx 2,3 = hip_abduction_{left,right}  (RS03)
+#     idx 4,5 = knee_flexion_{left,right}   (RS04)
+#     idx 6,7 = foot_{left,right}           (RS02)
 #
 # These values MUST mirror ``POLICY_KP_MIN/MAX`` and ``POLICY_KD_MIN/MAX`` in
 # ``bebop_v2_base_cfg.py`` and ``policy_gain_clamps`` in
@@ -400,11 +453,12 @@ BEBOP_V2_STANDING_CFG = ArticulationCfg(
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
-        # Hip abduction (RS04). Policy kp / kd clamps: [5..100] / [0.5..5].
-        "hip_abduction": ImplicitActuatorCfg(
+        # Hip flexion (RS04). Top joint off base_link, Y-axis pitch.
+        # Policy kp / kd clamps: [5..100] / [0.5..5].
+        "hip_flexion": ImplicitActuatorCfg(
             joint_names_expr=[
-                "hip_abduction_left_joint",
-                "hip_abduction_right_joint",
+                "hip_flexion_left_joint",
+                "hip_flexion_right_joint",
             ],
             effort_limit_sim=84.0,
             velocity_limit_sim=12.0,
@@ -413,9 +467,13 @@ BEBOP_V2_STANDING_CFG = ArticulationCfg(
             armature=0.01,
             friction=0.0,
         ),
-        # Femur / hip pitch (RS03). Policy clamps: [20..300] / [1..8].
-        "femur": ImplicitActuatorCfg(
-            joint_names_expr=["femur_left_joint", "femur_right_joint"],
+        # Hip abduction (RS03). Roll axis between hip_flexion and
+        # knee_flexion links. Policy clamps: [20..300] / [1..8].
+        "hip_abduction": ImplicitActuatorCfg(
+            joint_names_expr=[
+                "hip_abduction_left_joint",
+                "hip_abduction_right_joint",
+            ],
             effort_limit_sim=42.0,
             velocity_limit_sim=12.0,
             stiffness=_KP_MID[2],
@@ -423,9 +481,12 @@ BEBOP_V2_STANDING_CFG = ArticulationCfg(
             armature=0.005,
             friction=0.0,
         ),
-        # Shin / knee (RS04). Policy clamps: [10..250] / [1..8].
-        "shin": ImplicitActuatorCfg(
-            joint_names_expr=["shin_left_joint", "shin_right_joint"],
+        # Knee flexion (RS04). Policy clamps: [10..250] / [1..8].
+        "knee_flexion": ImplicitActuatorCfg(
+            joint_names_expr=[
+                "knee_flexion_left_joint",
+                "knee_flexion_right_joint",
+            ],
             effort_limit_sim=84.0,
             velocity_limit_sim=12.0,
             stiffness=_KP_MID[4],
@@ -593,25 +654,27 @@ class ObservationsCfg:
 # same small perturbation v0.6 used, just enough to break determinism
 # and force the policy to read its observations. On top of that:
 #
-# ``reset_shin_{left,right}_crouch`` overrides the shin (knee) joints
+# ``reset_knee_{left,right}_crouch`` overrides the knee_flexion joints
 # with a wider, asymmetric-by-mirror-convention bias so each reset
 # samples something between "straight knees" and "moderately bent
-# forward". The shin convention on this articulation is that
-# ``+shin_left`` and ``-shin_right`` are the same physical knee-forward
-# motion (see ``shin_symmetry_penalty`` docstring); the two terms
-# below therefore use opposite-signed ranges of equal magnitude.
+# forward". The knee_flexion convention on this articulation is that
+# ``+knee_flexion_left`` and ``-knee_flexion_right`` are the same
+# physical knee-forward motion (see ``knee_symmetry_penalty`` docstring);
+# the two terms below therefore use opposite-signed ranges of equal
+# magnitude.
 #
 # These run AFTER ``reset_joints`` (IsaacLab event order = config-class
-# declaration order) and overwrite the shin values, so the ±0.05 jitter
-# on the shins is replaced by the wider crouch range. The other six
-# joints retain their ±0.05 jitter.
+# declaration order) and overwrite the knee_flexion values, so the
+# ±0.05 jitter on the knees is replaced by the wider crouch range. The
+# other six joints retain their ±0.05 jitter.
 #
-# The femur and foot joints are NOT biased here. A knee bend without
-# the matching hip/ankle compensation puts the CoM forward of the
-# foot, which the policy has to correct itself — that compensation
-# chain (femur, knee, ankle acting together) is the actual balance
-# strategy we want the policy to learn, so we don't want to short-
-# circuit it by pre-arranging the start pose.
+# The hip_flexion, hip_abduction, and foot joints are NOT biased here.
+# A knee bend without the matching hip/ankle compensation puts the
+# CoM forward of the foot, which the policy has to correct itself —
+# that compensation chain (hip_flexion, knee_flexion, ankle acting
+# together) is the actual balance strategy we want the policy to
+# learn, so we don't want to short-circuit it by pre-arranging the
+# start pose.
 # ---------------------------------------------------------------------------
 @configclass
 class EventCfg:
@@ -624,11 +687,13 @@ class EventCfg:
             "velocity_range": (-0.1, 0.1),
         },
     )
-    reset_shin_left_crouch = EventTerm(
+    reset_knee_left_crouch = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=["shin_left_joint"]),
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=["knee_flexion_left_joint"]
+            ),
             # (-0.05, +0.45) covers straight knee (~0 rad) up to a
             # moderately-bent-forward stance (~26°). The wider end is
             # close to the v0.2 converged knee-bend angle so the policy
@@ -639,15 +704,17 @@ class EventCfg:
             "velocity_range": (-0.1, 0.1),
         },
     )
-    reset_shin_right_crouch = EventTerm(
+    reset_knee_right_crouch = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=["shin_right_joint"]),
-            # Mirror of shin_left (see ``shin_symmetry_penalty`` for
-            # the sign convention — the right joint's local frame is
-            # rotated 180° about X, so +shin_left and -shin_right are
-            # the same physical motion).
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=["knee_flexion_right_joint"]
+            ),
+            # Mirror of knee_flexion_left (see ``knee_symmetry_penalty``
+            # for the sign convention — the right joint's local frame
+            # is rotated 180° about X, so +knee_flexion_left and
+            # -knee_flexion_right are the same physical motion).
             "position_range": (-0.45, 0.05),
             "velocity_range": (-0.1, 0.1),
         },
@@ -719,7 +786,7 @@ class EventCfg:
 #   joint_pos_limits  — penalise crashing into a joint's hard stop
 #   action_rate_l2    — penalise rapid action changes between ticks
 #   foot_flat         — reward feet's local +z aligned with world +z
-#   shin_symmetry     — penalise asymmetric knee bend (v0.8)
+#   knee_symmetry     — penalise asymmetric knee bend (v0.8)
 #
 # ``action_rate_l2`` (added in v0.1) is the soft analogue of a hard
 # slew clamp: it makes large per-tick action deltas expensive, which
@@ -740,7 +807,7 @@ class EventCfg:
 # AND the CoM over the support polygon (which requires a small
 # forward torso lean given this robot's geometry).
 #
-# ``shin_symmetry`` (added in v0.8) closes a different loophole: the
+# ``knee_symmetry`` (added in v0.8) closes a different loophole: the
 # v0.7 policy converged to an asymmetric crouch — one knee deeply
 # bent, the other near-straight and oscillating — because all the
 # other terms are pose-symmetry-blind. ``foot_flat`` only cares
@@ -748,9 +815,9 @@ class EventCfg:
 # torso z, ``flat_orientation`` only about torso tilt; none of them
 # distinguish "both knees bent 0.3 rad" from "one knee bent 0.6 rad,
 # other straight". The new penalty scores
-# ``(shin_left + shin_right)^2`` (the sum, not the difference,
-# because the right joint's local frame is rotated 180° about X —
-# see the docstring on ``shin_symmetry_penalty`` in
+# ``(knee_flexion_left + knee_flexion_right)^2`` (the sum, not the
+# difference, because the right joint's local frame is rotated 180°
+# about X — see the docstring on ``knee_symmetry_penalty`` in
 # ``bebop_v2_rewards.py``), which is zero exactly when both knees
 # bend forward by the same magnitude. The asymmetric attractor now
 # pays a cost proportional to its imbalance, breaking the tie that
@@ -765,7 +832,7 @@ class EventCfg:
 #   * If the policy starts using heel-balance again (toes lifted,
 #     foot dorsiflexed past ~25°) the v0.7 0.25 std is too loose —
 #     drop back to 0.20 or bump foot_flat weight to 1.5–2.0.
-#   * If ``shin_symmetry`` is too dominant the policy may collapse
+#   * If ``knee_symmetry`` is too dominant the policy may collapse
 #     to fully-straight knees (the only symmetric pose that
 #     completely zeros the penalty), giving up the crouch that
 #     ``foot_flat`` + ``base_height`` jointly prefer. Drop weight to
@@ -805,17 +872,17 @@ class RewardsCfg:
         params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.25},
     )
     # v0.8: breaks the asymmetric-knee attractor the v0.7 policy
-    # parked in. Scores ``(shin_left + shin_right)^2`` (sum, not
-    # difference — see ``shin_symmetry_penalty`` docstring for the
-    # mirrored-frame convention), which is zero when both knees bend
-    # forward equally and grows quadratically with imbalance. Weight
-    # -0.5 matches the original kitchen-sink config value. A 0.3 rad
-    # mismatch (e.g. one knee 0.4, one knee 0.1) costs 0.5 * 0.09 =
-    # 0.045/tick — small per-tick but compounded over a 2000-tick
-    # episode it's a ~90-point reward gap vs. the symmetric solution,
-    # enough to make PPO commit.
-    shin_symmetry = RewTerm(
-        func=shin_symmetry_penalty,
+    # parked in. Scores ``(knee_flexion_left + knee_flexion_right)^2``
+    # (sum, not difference — see ``knee_symmetry_penalty`` docstring
+    # for the mirrored-frame convention), which is zero when both
+    # knees bend forward equally and grows quadratically with
+    # imbalance. Weight -0.5 matches the original kitchen-sink config
+    # value. A 0.3 rad mismatch (e.g. one knee 0.4, one knee 0.1)
+    # costs 0.5 * 0.09 = 0.045/tick — small per-tick but compounded
+    # over a 2000-tick episode it's a ~90-point reward gap vs. the
+    # symmetric solution, enough to make PPO commit.
+    knee_symmetry = RewTerm(
+        func=knee_symmetry_penalty,
         weight=-0.5,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )

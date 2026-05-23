@@ -268,9 +268,9 @@ class VariableImpedanceJointAction(JointPositionAction):
         # ``mdp.reset_joints_by_offset`` are visible in
         # ``self._asset.data.joint_pos``. Seeding from defaults instead
         # would put ``_last_pos_target`` at 0 while the joints are at
-        # e.g. shin=+0.5 rad, so the very first tick would yank everything
-        # back to 0 with full stiffness and erase the spawn pose before
-        # render frame 2.
+        # e.g. knee_flexion=+0.5 rad, so the very first tick would yank
+        # everything back to 0 with full stiffness and erase the spawn
+        # pose before render frame 2.
         if env_ids is None:
             seed_pos = self._current_joint_pos_for_action(slice(None))
             seed_kp = kp_mid.unsqueeze(0).expand(seed_pos.shape[0], -1)

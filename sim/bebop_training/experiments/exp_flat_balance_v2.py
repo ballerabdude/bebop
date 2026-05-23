@@ -14,8 +14,9 @@ biases toward:
 * upright torso (``torso_upright_via_legs``),
 * flat feet (``foot_flat`` — relaxed shaping width here so dynamic
   recovery is not punished for a transient toe-down),
-* legs near zero, especially the femur ("anti-splay"
-  ``femur_deviation``),
+* legs near zero, especially the lateral hip_abduction axis
+  (``hip_abduction_deviation``, the "anti-splay" term — formerly
+  ``femur_deviation`` before the URDF rename),
 * symmetric left/right configuration (the four ``*_symmetry`` terms
   inherited from the base cfg).
 
@@ -55,13 +56,13 @@ class BebopV2FlatBalanceCfg(BebopV2BaseEnvCfg):
         # Reward shaping overrides for the merged balance task.
         self.rewards.leg_hold_reward.weight = 1.0
 
-        # Anti-splay: femur is the actual lateral hip-abduction axis on
-        # this articulation. Keep the deviation penalty strong so the
-        # policy never resorts to widening the stance for a cheap
-        # support polygon. Joint position limits in the USD/firmware
-        # YAML are deliberately left wide for future use; this term
-        # constrains only the *operating* envelope.
-        self.rewards.femur_deviation.weight = -3.0
+        # Anti-splay: hip_abduction is the lateral / roll axis. Keep
+        # the deviation penalty strong so the policy never resorts to
+        # widening the stance for a cheap support polygon. Joint
+        # position limits in the USD/firmware YAML are deliberately
+        # left wide for future use; this term constrains only the
+        # *operating* envelope.
+        self.rewards.hip_abduction_deviation.weight = -3.0
 
         # Feet flat: in steady state we want soles parallel to the
         # ground, but during a push recovery the policy must be allowed
