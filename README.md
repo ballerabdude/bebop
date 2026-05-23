@@ -4,6 +4,8 @@ Bebop is an NVIDIA Jetson–based robot platform. This monorepo contains
 everything needed to design, simulate, build, provision, and update a fleet
 of Bebop robots — plus the customer-facing companion app.
 
+![Bebop robot](ros2/src/bebopv2_description/robot.png)
+
 ## High-Level Architecture
 
 ```
