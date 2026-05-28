@@ -205,6 +205,7 @@ fn build_policy_io_stats(policy_io: &PolicyIoShared) -> proto::PolicyIoStats {
         present: true,
         active: snapshot.active,
         imu_live: snapshot.imu_live,
+        gyro_live: snapshot.gyro_live,
         observation: snapshot.observation,
         raw_action: snapshot.raw_action,
         position_targets_rad: snapshot.position_targets_rad.to_vec(),

@@ -60,10 +60,12 @@ defaults:
   # additionally rejects any clamp that exceeds the motor model's
   # encoder ceiling (`RobstrideSpecs::RSxx.{kp_max, kd_max}` in
   # `firmware/bebop-linux/src/config.rs`).
+  # Defaults are the hip_flexion (RS04) values; the four motor groups
+  # have per-joint overrides below.
   policy_gain_clamps:
-    kp_min: 5.0
+    kp_min: 20.0
     kp_max: 100.0
-    kd_min: 0.5
+    kd_min: 1.5
     kd_max: 5.0
 
 # ============================================================================
@@ -100,7 +102,8 @@ joints:
     model: RS04
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 40.0,  kd: 3.0 }
-    policy_gain_clamps: { kp_min: 5.0, kp_max: 100.0, kd_min: 0.5, kd_max: 5.0 }
+    # v0.15: kp_min raised 5 -> 20, kd_min 0.5 -> 1.5 (basal stance stiffness)
+    policy_gain_clamps: { kp_min: 20.0, kp_max: 100.0, kd_min: 1.5, kd_max: 5.0 }
 
   hip_flexion_right_joint:
     can_interface: can1
@@ -108,7 +111,7 @@ joints:
     model: RS04
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 40.0,  kd: 3.0 }
-    policy_gain_clamps: { kp_min: 5.0, kp_max: 100.0, kd_min: 0.5, kd_max: 5.0 }
+    policy_gain_clamps: { kp_min: 20.0, kp_max: 100.0, kd_min: 1.5, kd_max: 5.0 }
 
   # ----- Hip abduction (RS03) -----------------------------------------------
   # X-axis roll, between the hip_flexion and knee_flexion links.
@@ -119,7 +122,8 @@ joints:
     model: RS03
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
-    policy_gain_clamps: { kp_min: 20.0, kp_max: 300.0, kd_min: 1.0, kd_max: 8.0 }
+    # v0.15: kp_min raised 20 -> 40, kd_min 1.0 -> 2.0
+    policy_gain_clamps: { kp_min: 40.0, kp_max: 300.0, kd_min: 2.0, kd_max: 8.0 }
 
   hip_abduction_right_joint:
     can_interface: can1
@@ -127,7 +131,7 @@ joints:
     model: RS03
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
-    policy_gain_clamps: { kp_min: 20.0, kp_max: 300.0, kd_min: 1.0, kd_max: 8.0 }
+    policy_gain_clamps: { kp_min: 40.0, kp_max: 300.0, kd_min: 2.0, kd_max: 8.0 }
 
   # ----- Knee flexion (RS04) ------------------------------------------------
   # Knee pitch. Renamed from shin_*_joint (motor IDs 34 / 44 unchanged).
@@ -137,7 +141,8 @@ joints:
     model: RS04
     hard_limits: { pos_min: -1.570796, pos_max: 1.570796, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 120.0, kd: 4.0 }
-    policy_gain_clamps: { kp_min: 10.0, kp_max: 250.0, kd_min: 1.0, kd_max: 8.0 }
+    # v0.15: kp_min raised 10 -> 30, kd_min 1.0 -> 2.0
+    policy_gain_clamps: { kp_min: 30.0, kp_max: 250.0, kd_min: 2.0, kd_max: 8.0 }
 
   knee_flexion_right_joint:
     can_interface: can1
@@ -145,7 +150,7 @@ joints:
     model: RS04
     hard_limits: { pos_min: -1.570796, pos_max: 1.570796, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 120.0, kd: 4.0 }
-    policy_gain_clamps: { kp_min: 10.0, kp_max: 250.0, kd_min: 1.0, kd_max: 8.0 }
+    policy_gain_clamps: { kp_min: 30.0, kp_max: 250.0, kd_min: 2.0, kd_max: 8.0 }
 
   # ----- Foot / ankle (RS02) ------------------------------------------------
   foot_left_joint:
@@ -154,16 +159,21 @@ joints:
     model: RS02
     # RS02 datasheet: rated 6 Nm @ 100 rpm, peak 17 Nm (stall, T-N curve at 36 V).
     hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 17.0, temp_max: 65.0 }
-    hold_gains:  { kp: 150.0, kd: 2.50 }
-    policy_gain_clamps: { kp_min: 5.0, kp_max: 250.0, kd_min: 0.2, kd_max: 4.5 }
+    hold_gains:  { kp: 375.0, kd: 5.0 }
+    # v0.15: kp_min raised 5 -> 20, kd_min 0.2 -> 0.8 — was the joint the
+    # v0.14 trained policy left fully soft on deployment (operator could
+    # move the foot by hand while the robot was suspended).
+    # Standing reset (May 2026): foot clamps widened to restore enough
+    # ankle stiffness authority for torso-over-feet balance on hardware.
+    policy_gain_clamps: { kp_min: 30.0, kp_max: 250.0, kd_min: 1.0, kd_max: 5.0 }
 
   foot_right_joint:
     can_interface: can1
     motor_id: 45
     model: RS02
     hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 17.0, temp_max: 65.0 }
-    hold_gains:  { kp: 150.0, kd: 2.50 }
-    policy_gain_clamps: { kp_min: 5.0, kp_max: 250.0, kd_min: 0.2, kd_max: 4.5 }
+    hold_gains:  { kp: 375.0, kd: 5.0 }
+    policy_gain_clamps: { kp_min: 30.0, kp_max: 250.0, kd_min: 1.0, kd_max: 5.0 }
 
 # ============================================================================
 # IMU (Adafruit BNO085 breakout on SPI) — optional
@@ -240,6 +250,7 @@ joints:
 #   rst_chip:                  "gpiochip0"
 #   rst_line:                  (required — no sensible default)
 #   rotation_vector_period_ms: 50      # 20 Hz report cadence hint
+#   spi_max_speed_hz:          1000000 # 1 MHz SPI clock (BNO085 max 3 MHz)
 #   mount:                     identity (sensor frame == body frame)
 # ============================================================================
 
@@ -255,7 +266,16 @@ imu:
   int_line:   144                       # header pin 7  (PAC.06)
   rst_chip:   "gpiochip0"
   rst_line:   106                       # header pin 31 (PQ.06)
-  rotation_vector_period_ms: 50
+  # 5 ms = 200 Hz sensor-report cadence (was 50 ms / 20 Hz). The BNO085
+  # gyro supports up to 1 kHz; 200 Hz gives the policy fresh rate feedback
+  # at low latency. NOTE: this REQUIRES the higher spi_max_speed_hz below —
+  # the driver's historical 80 kHz clock cannot carry 200 Hz of RV + gyro.
+  rotation_vector_period_ms: 5
+  # SPI bus clock for the BNO085. The chip is rated to 3 MHz; 1 MHz is a
+  # safe default with ~12× headroom over the old 80 kHz and comfortably
+  # sustains 200 Hz. If long / unshielded jumpers make reads flaky at
+  # speed (InvalidChipId / garbled headers), step this down (e.g. 500000).
+  spi_max_speed_hz: 1000000
 
   # Bebop V2 PCB orientation: BNO chip sits flat on the back of the torso
   # with its silkscreen +X pointing toward the robot's *right* shoulder,

@@ -4,16 +4,16 @@
         string creator = "URDF USD Converter v0.1.0"
     }
     defaultPrim = "bebopv2"
-    doc = """Generated from Composed Stage of root layer /tmp/tmpy8zi28yv/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmpmbgjp3ib/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/usdex/bebopv2.usdc
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/usdex/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/temp/bebopv2.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/temp/bebopv2.usd
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/bebopv2/payloads/base.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/bebopv2/payloads/base.usd
 """
     kilogramsPerUnit = 1
     metersPerUnit = 1

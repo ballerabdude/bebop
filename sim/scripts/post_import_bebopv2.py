@@ -18,6 +18,18 @@ for a free-standing biped:
      velocity, linear acceleration of the base frame). We attach an
      IMU prim so the asset matches the real robot wherever it's
      loaded — Isaac Sim standalone, Isaac Lab, etc.
+  4. The two foot rigid bodies (`foot_left_1`, `foot_right_1`) lack
+     `PhysxContactReportAPI`, which Isaac Lab's `ContactSensor` requires
+     to surface ground-contact events. Isaac Lab's spawn-time helper
+     `sim.utils.schemas.activate_contact_sensors` walks the asset and
+     adds the API to each rigid body it finds — BUT its walker stops
+     descending once it hits the first rigid body
+     (assumes "nested rigid bodies are not allowed by SDK", which is
+     true for flat humanoid USDs like H1 but not for URDF-imported
+     articulations where the kinematic tree IS the body tree). On our
+     V2 USD the walker stops at `base_link` and never reaches the
+     feet. Pre-baking the contact-report API onto the foot prims in
+     USD fixes this once and for all.
 
 All fixes are idempotent — re-running the script is a no-op if the
 fixes are already in place.
@@ -47,6 +59,15 @@ from pxr import Gf, UsdGeom, UsdPhysics
 
 ROBOT_CANDIDATES = ["/World/bebopv2", "/bebopv2"]
 LIFT_Z = 0.8  # meters — half the leg length, so the foot lands on z=0
+
+# Foot rigid bodies (relative to `<robot>/Geometry/base_link`) that need
+# `PhysxContactReportAPI` baked in for Isaac Lab's `ContactSensor` to
+# detect ground contacts. See `_enable_foot_contact_report` for the
+# full rationale.
+FOOT_BODY_RELATIVE_PATHS = (
+    "hip_flexion_left_1/hip_abduction_left_1/knee_flexion_left_1/foot_left_1",
+    "hip_flexion_right_1/hip_abduction_right_1/knee_flexion_right_1/foot_right_1",
+)
 
 # IMU mount on base_link. Translation is in the base_link frame; tweak
 # to match the physical BNO085 mount on the real robot if you have it.
@@ -147,6 +168,56 @@ def _add_imu(stage, robot_path: str) -> None:
         print(f"[post_import] WARNING: IsaacSensorCreateImuSensor failed for {imu_path}")
 
 
+def _enable_foot_contact_report(stage, robot_path: str) -> None:
+    """Apply `PhysxContactReportAPI` to each foot rigid body.
+
+    Isaac Lab's `sim.utils.schemas.activate_contact_sensors` (the helper
+    that runs at spawn time when `UsdFileCfg.activate_contact_sensors=True`)
+    walks the asset tree and adds the API to each rigid body it finds —
+    but its walker stops descending once it encounters the first
+    rigid body (see comment ``"nested rigid bodies are not allowed by
+    SDK"`` in `isaaclab/sim/schemas/schemas.py::activate_contact_sensors`).
+    For our URDF-imported V2 USD the walker stops at `base_link` and
+    never reaches the leg/foot bodies, so the `ContactSensor` errors out
+    with ``could not find any bodies with contact reporter API`` even
+    when `activate_contact_sensors=True` is set on the spawn cfg.
+
+    Pre-baking the API onto the foot prims fixes this regardless of
+    what the spawn-time walker does, and is also visible to PhysX at
+    parse time (no runtime schema mutation needed).
+    """
+    base_link_path = f"{robot_path}/Geometry/base_link"
+    for rel_path in FOOT_BODY_RELATIVE_PATHS:
+        prim_path = f"{base_link_path}/{rel_path}"
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            print(f"[post_import] no foot prim at {prim_path}; skipping")
+            continue
+
+        applied = list(prim.GetAppliedSchemas())
+        for schema in ("PhysxRigidBodyAPI", "PhysxContactReportAPI"):
+            if schema not in applied:
+                prim.AddAppliedSchema(schema)
+
+        threshold_attr = prim.GetAttribute("physxContactReport:threshold")
+        if not threshold_attr.IsValid():
+            threshold_attr = prim.CreateAttribute(
+                "physxContactReport:threshold",
+                "float",  # type: ignore[arg-type]
+            )
+        threshold_attr.Set(0.0)
+
+        sleep_attr = prim.GetAttribute("physxRigidBody:sleepThreshold")
+        if not sleep_attr.IsValid():
+            sleep_attr = prim.CreateAttribute(
+                "physxRigidBody:sleepThreshold",
+                "float",  # type: ignore[arg-type]
+            )
+        sleep_attr.Set(0.0)
+
+        print(f"[post_import] enabled contact-report API on {prim_path}")
+
+
 def main() -> None:
     stage = omni.usd.get_context().get_stage()
     robot_path = _find_robot_path(stage)
@@ -155,6 +226,7 @@ def main() -> None:
     _ensure_dynamic_base(stage, robot_path)
     _lift_robot(stage, robot_path)
     _add_imu(stage, robot_path)
+    _enable_foot_contact_report(stage, robot_path)
 
     print(
         "[post_import] done. Press Play — the robot should fall under "

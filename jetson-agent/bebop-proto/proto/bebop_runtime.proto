@@ -394,13 +394,15 @@ message ImuStats {
 // Vector layouts mirror `bebop_linux::observation::ObservationBuilder` and
 // the rate-limited `policy I/O` log line:
 //
-//   observation[ 0.. 3)  base_lin_vel
-//   observation[ 3.. 6)  base_ang_vel
-//   observation[ 6.. 9)  projected_gravity
-//   observation[ 9..17)  joint_pos_rel
-//   observation[17..25)  joint_vel
-//   observation[25..49)  last_action (24-dim raw NN output)
-//   observation[49..52)  cmd_vel (vx, vy, wz)
+//   observation[ 0.. 3)  base_ang_vel
+//   observation[ 3.. 6)  projected_gravity
+//   observation[ 6..14)  joint_pos_rel
+//   observation[14..22)  joint_vel
+//   observation[22..46)  last_action (24-dim raw NN output)
+//   observation[46..49)  cmd_vel (vx, vy, wz)
+//
+// (No base_lin_vel channel — the robot cannot observe its base linear
+//  velocity, so it was dropped from the observation and training.)
 //
 //   raw_action[ 0.. 8)  position commands (pre-decode, [-1, 1])
 //   raw_action[ 8..16)  kp commands
@@ -414,10 +416,17 @@ message PolicyIoStats {
   // True while the 100 Hz loop is actively inferring (RunPolicy + !E-STOP).
   bool   active                 = 2;
   // Whether the observation builder is consuming live BNO085 readings
-  // (`true`) or the synthetic upright fallback (`false`).
+  // (`true`) or the synthetic upright fallback (`false`). Driven by the
+  // rotation-vector (0x28) freshness clock.
   bool   imu_live               = 3;
+  // Whether `base_ang_vel` is sourced from a live calibrated-gyro (0x02)
+  // report. Tracked separately from `imu_live`: the gyro subscription can
+  // be dead while the attitude quaternion is fresh, which silently zeros
+  // the policy's primary rate-feedback channel. UIs should flag
+  // `imu_live && !gyro_live` as a degraded/unsafe state.
+  bool   gyro_live              = 4;
 
-  // Full 52-element observation fed to ONNX on the most recent tick.
+  // Full 49-element observation fed to ONNX on the most recent tick.
   repeated float observation    = 10;
   // Full 24-element raw NN output from the most recent tick.
   repeated float raw_action     = 11;

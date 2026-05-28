@@ -7,8 +7,8 @@
                 double radius = 5
             }
             dictionary Perspective = {
-                double3 position = (1.9731796212195951, 0.05174401507976101, 0.1385809725382222)
-                double3 target = (-0.46866870136798666, -0.840231329291567, 0.21487915153491943)
+                double3 position = (1.1432395721366064, 1.5991745035247575, -0.39756787186536924)
+                double3 target = (-0.04474466986985548, 0.26934589722727087, -0.32490759822411086)
             }
             dictionary Right = {
                 double3 position = (0, -5, 0)
@@ -28,16 +28,16 @@
         }
     }
     defaultPrim = "bebopv2"
-    doc = """Generated from Composed Stage of root layer /tmp/tmpy8zi28yv/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmpmbgjp3ib/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/usdex/bebopv2.usdc
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/usdex/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/temp/bebopv2.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/temp/bebopv2.usd
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/bebopv2/payloads/base.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/bebopv2/payloads/base.usd
 """
     kilogramsPerUnit = 1
     metersPerUnit = 1
@@ -52,54 +52,13 @@ def Xform "bebopv2" (
     append variantSets = "Physics"
 )
 {
-    string[] isaac:changelog (
-        displayName = "Changelog"
-    )
-    string isaac:description (
-        displayName = "Description"
-    )
-    token isaac:license (
-        displayName = "License"
-    )
-    string isaac:nameOverride (
-        displayName = "Name Override"
-    )
-    string isaac:namespace (
-        displayName = "Namespace"
-    )
-    rel isaac:physics:robotJoints (
-        displayName = "Robot Joints"
-    )
-    rel isaac:physics:robotLinks (
-        displayName = "Robot Links"
-    )
-    token isaac:robotType (
-        displayName = "Robot Type"
-    )
-    string isaac:source (
-        displayName = "Source"
-    )
-    string isaac:version (
-        displayName = "Version"
-    )
-    quatf xformOp:orient = (1, 0, 0, 0)
-    float3 xformOp:scale = (1, 1, 1)
-    double3 xformOp:translate = (0, 0, 0.7)
-    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+    double3 xformOp:translate = (0, 0, 0.8)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
 
     over "Physics"
     {
         over "root_joint"
         {
-            bool[] isaac:actuator (
-                displayName = "Actuator"
-            )
-            string isaac:NameOverride (
-                displayName = "Joint Name Override"
-            )
-            token[] isaac:physics:DofOffsetOpOrder (
-                displayName = "Dof Offset Op Order"
-            )
             bool physics:jointEnabled = 0
         }
     }
@@ -236,10 +195,10 @@ over "OmniverseKit_Persp" (
     float exposure:time = 0.02
     float focalLength = 18.147562
     float focusDistance = 400
-    custom uniform vector3d omni:kit:centerOfInterest = (0, 0, -2.6007815474599836)
-    float3 xformOp:rotateXYZ = (91.68111, 6.36111e-14, 110.06659)
+    custom uniform vector3d omni:kit:centerOfInterest = (0, 0, -1.7846652898368383)
+    float3 xformOp:rotateXYZ = (92.33337, -1.9083329e-14, 138.22443)
     float3 xformOp:scale = (1, 1, 1)
-    double3 xformOp:translate = (1.9731796212195951, 0.05174401507976101, 0.1385809725382222)
+    double3 xformOp:translate = (1.1432395721366064, 1.5991745035247575, -0.39756787186536924)
     uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
 }
 

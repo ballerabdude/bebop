@@ -30,14 +30,18 @@ pub mod timing {
 /// declaration order:
 ///
 /// ```text
-///   [ 0.. 3)  base_lin_vel       (m/s, body frame)
-///   [ 3.. 6)  base_ang_vel       (rad/s, body frame)
-///   [ 6.. 9)  projected_gravity  (unit vector in body frame)
-///   [ 9..17)  joint_pos_rel      (rad, JOINT_NAMES order)
-///   [17..25)  joint_vel_rel      (rad/s, JOINT_NAMES order)
-///   [25..49)  last_action        (raw NN output, 24 dims: pos | kp | kd)
-///   [49..52)  velocity_commands  (vx, vy, wz)
+///   [ 0.. 3)  base_ang_vel       (rad/s, body frame)
+///   [ 3.. 6)  projected_gravity  (unit vector in body frame)
+///   [ 6..14)  joint_pos_rel      (rad, JOINT_NAMES order)
+///   [14..22)  joint_vel_rel      (rad/s, JOINT_NAMES order)
+///   [22..46)  last_action        (raw NN output, 24 dims: pos | kp | kd)
+///   [46..49)  velocity_commands  (vx, vy, wz)
 /// ```
+///
+/// NOTE: there is deliberately **no** `base_lin_vel` channel. Bebop V2 has
+/// no wheel odometry / VIO, so the real robot could only ever feed zeros;
+/// training against the sim's privileged ground-truth velocity was a
+/// sim-to-real gap, so it was removed from the observation entirely.
 ///
 /// Action layout: 24 floats. MIT-mode variable impedance, 3 channels
 /// per joint in JOINT_NAMES order:
@@ -51,7 +55,7 @@ pub mod timing {
 /// mirror `POLICY_KP_MIN/MAX` and `POLICY_KD_MIN/MAX` in the sim
 /// config.
 pub mod dims {
-    pub const OBS_DIM: usize = 52;
+    pub const OBS_DIM: usize = 49;
     pub const ACTION_DIM: usize = 24;
     pub const HISTORY_STEPS: usize = 1;
     pub const TOTAL_OBS_DIM: usize = OBS_DIM * HISTORY_STEPS;
@@ -373,9 +377,14 @@ pub struct ImuConfig {
     /// Line offset within `rst_chip` for `RST`.
     pub rst_line: u32,
     /// SH-2 sensor-report cadence hint, in milliseconds. Lower = more
-    /// samples/sec; bounded by the chip's gyro rate (1 kHz). Anything
-    /// ≥ 5 ms is comfortably safe.
+    /// samples/sec; bounded by the chip's gyro rate (1 kHz) and the SPI
+    /// throughput (see `spi_max_speed_hz`). 5 ms = 200 Hz; 50 ms = 20 Hz.
     pub rotation_vector_period_ms: u16,
+    /// SPI bus clock (Hz) for the BNO08x. The chip is rated to 3 MHz;
+    /// 80 kHz (the driver's historical default) cannot carry high report
+    /// rates. Defaults to 1 MHz, which sustains a 200 Hz RV + gyro pair
+    /// with margin. Lower it if long / unshielded jumpers make reads flaky.
+    pub spi_max_speed_hz: u32,
     /// Constant **sensor-to-body** rotation, stored as a unit quaternion
     /// in XYZW order. Every raw BNO reading is post-multiplied by this
     /// before publishing, so downstream consumers always see a body-frame
@@ -608,6 +617,17 @@ impl RobotConfig {
                 if rotation_vector_period_ms == 0 {
                     return Err(anyhow!("imu.rotation_vector_period_ms must be >= 1"));
                 }
+                // Default 1 MHz: ~12× the historical 80 kHz, enough to carry
+                // a 200 Hz RV + gyro pair with headroom, while staying well
+                // under the BNO08x's 3 MHz SPI ceiling. Tune down for long /
+                // unshielded jumper wiring if reads get flaky at speed.
+                let spi_max_speed_hz = raw_imu.spi_max_speed_hz.unwrap_or(1_000_000);
+                if spi_max_speed_hz == 0 || spi_max_speed_hz > 3_000_000 {
+                    return Err(anyhow!(
+                        "imu.spi_max_speed_hz must be in 1..=3_000_000 (BNO08x SPI ceiling \
+                         is 3 MHz); got {spi_max_speed_hz}"
+                    ));
+                }
                 let mount_quat_sensor_body = match raw_imu.mount {
                     Some(m) => build_mount_quat_sensor_body(&m)?,
                     None => ImuConfig::IDENTITY_QUAT,
@@ -619,6 +639,7 @@ impl RobotConfig {
                     rst_chip,
                     rst_line,
                     rotation_vector_period_ms,
+                    spi_max_speed_hz,
                     mount_quat_sensor_body,
                 })
             })
@@ -702,6 +723,8 @@ struct RawImu {
     /// Line offset within `rst_chip`. **Required.**
     rst_line: Option<u32>,
     rotation_vector_period_ms: Option<u16>,
+    /// SPI clock in Hz. Defaults to 1 MHz. See [`ImuConfig::spi_max_speed_hz`].
+    spi_max_speed_hz: Option<u32>,
     mount: Option<RawMount>,
 }
 

@@ -4,16 +4,16 @@
         string creator = "URDF USD Converter v0.1.0"
     }
     defaultPrim = "bebopv2"
-    doc = """Generated from Composed Stage of root layer /tmp/tmpy8zi28yv/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmpmbgjp3ib/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/usdex/bebopv2.usdc
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/usdex/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/temp/bebopv2.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/temp/bebopv2.usd
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/bebopv2/payloads/base.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/bebopv2/payloads/base.usd
 """
     kilogramsPerUnit = 1
     metersPerUnit = 1
@@ -62,13 +62,20 @@ over "bebopv2"
                         quatf physics:principalAxes = (0.5085357, 0.50001705, 0.49668103, 0.49465376)
 
                         over "foot_right_1" (
-                            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+                            prepend apiSchemas = [
+                                "PhysicsRigidBodyAPI",
+                                "PhysicsMassAPI",
+                                "PhysxRigidBodyAPI",
+                                "PhysxContactReportAPI",
+                            ]
                         )
                         {
                             point3f physics:centerOfMass = (0.022189349, 0.016069982, -0.04081689)
                             float3 physics:diagonalInertia = (0.0008919446, 0.0020723299, 0.0023467257)
                             float physics:mass = 0.64200103
                             quatf physics:principalAxes = (0.85334855, -0.5145566, -0.051467456, 0.06617266)
+                            float physxContactReport:threshold = 0.0
+                            float physxRigidBody:sleepThreshold = 0.0
                         }
                     }
                 }
@@ -102,13 +109,20 @@ over "bebopv2"
                         quatf physics:principalAxes = (0.4983984, 0.5015965, 0.5015965, 0.4983984)
 
                         over "foot_left_1" (
-                            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+                            prepend apiSchemas = [
+                                "PhysicsRigidBodyAPI",
+                                "PhysicsMassAPI",
+                                "PhysxRigidBodyAPI",
+                                "PhysxContactReportAPI",
+                            ]
                         )
                         {
                             point3f physics:centerOfMass = (0.02219242, -0.016069975, -0.040821377)
                             float3 physics:diagonalInertia = (0.0008919446, 0.0020723299, 0.0023467257)
                             float physics:mass = 0.6420025
                             quatf physics:principalAxes = (-0.5145566, 0.85334855, 0.06617266, -0.051467456)
+                            float physxContactReport:threshold = 0.0
+                            float physxRigidBody:sleepThreshold = 0.0
                         }
                     }
                 }

@@ -1,59 +1,22 @@
-# bebop_lab/__init__.py
+# bebop_training/__init__.py
+#
+# Single-task package: registers the standing-balance task and its PPO
+# config with Gym so ``train_bebop.py`` / ``play_bebop.py`` can resolve
+# the task by id. The flat-balance, flat-locomotion, and rough-terrain
+# experiments were removed in May 2026 to focus the codebase on a
+# single, validatable hardware-deployable policy. Re-add new
+# experiments here as separate ``gym.register`` blocks once each one
+# has its own working ``BebopV2*Cfg``.
 
 import gymnasium as gym
 
-# Import the specific Experiment Config
-from .experiments.exp_flat_balance import BebopFlatBalanceCfg
-from .experiments.exp_flat_balance_v2 import BebopV2FlatBalanceCfg
-from .experiments.exp_flat_locomotion_v2 import BebopV2FlatLocomotionCfg
 from .experiments.exp_standing import BebopV2StandingCfg
-
-# Import the Agent/PPO Config
-from .agents.rsl_rl_ppo_cfg import BebopPPOBaseCfg, BebopPPOLocomotionCfg
-
-# Register the Flat Balance Task
-gym.register(
-    id="Isaac-Bebop-Flat-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": BebopFlatBalanceCfg,
-        "rsl_rl_cfg_entry_point": BebopPPOBaseCfg,
-    },
-)
-
-# Register the Flat Balance Task for Bebop V2 articulation. This task
-# now subsumes the old stand-under-push (FlatRobust) experiment: the
-# base EventCfg includes both initial-condition randomisation and
-# periodic mid-episode pushes, so a single training stage produces a
-# policy that holds still AND recovers from disturbances.
-gym.register(
-    id="Isaac-BebopV2-Flat-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": BebopV2FlatBalanceCfg,
-        "rsl_rl_cfg_entry_point": BebopPPOBaseCfg,
-    },
-)
-
-# Register the Flat Locomotion (velocity-tracking walk) Task for Bebop V2.
-# Uses the locomotion-tuned PPO config (higher entropy, fresh action std).
-gym.register(
-    id="Isaac-BebopV2-Locomotion-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": BebopV2FlatLocomotionCfg,
-        "rsl_rl_cfg_entry_point": BebopPPOLocomotionCfg,
-    },
-)
+from .agents.rsl_rl_ppo_cfg import BebopPPOBaseCfg
 
 # Minimal "just stand" baseline for Bebop V2. Stripped of every
 # domain-randomization, action-shaping, and reward-shaping bell and
 # whistle so each subsequent v1, v2, ... experiment can re-add exactly
 # one feature at a time and attribute its effect on the final policy.
-# Uses the base PPO config (same actor/critic shape as the other tasks).
 gym.register(
     id="Isaac-BebopV2-Standing-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",

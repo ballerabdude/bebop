@@ -3,16 +3,16 @@
     customLayerData = {
         string creator = "URDF USD Converter v0.1.0"
     }
-    doc = """Generated from Composed Stage of root layer /tmp/tmpy8zi28yv/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmpmbgjp3ib/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/usdex/bebopv2.usdc
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/usdex/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/temp/bebopv2.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/temp/bebopv2.usd
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/bebopv2/payloads/base.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/bebopv2/payloads/base.usd
 """
     kilogramsPerUnit = 1
     metersPerUnit = 1
@@ -31,7 +31,7 @@ def Scope "Instances"
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/base_link/VisualMaterials/silver>
-            token physics:approximation = "convexHull"
+            token physics:approximation = "convexDecomposition"
         }
 
         def Scope "VisualMaterials"
@@ -55,7 +55,7 @@ def Scope "Instances"
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/hip_flexion_right_1/VisualMaterials/silver>
-            token physics:approximation = "convexHull"
+            token physics:approximation = "convexDecomposition"
         }
 
         def Scope "VisualMaterials"
@@ -79,7 +79,7 @@ def Scope "Instances"
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/hip_abduction_right_1/VisualMaterials/silver>
-            token physics:approximation = "convexHull"
+            token physics:approximation = "convexDecomposition"
         }
 
         def Scope "VisualMaterials"
@@ -103,7 +103,7 @@ def Scope "Instances"
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/knee_flexion_right_1/VisualMaterials/silver>
-            token physics:approximation = "convexHull"
+            token physics:approximation = "convexDecomposition"
         }
 
         def Scope "VisualMaterials"
@@ -127,7 +127,7 @@ def Scope "Instances"
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/foot_right_1/VisualMaterials/silver>
-            token physics:approximation = "convexHull"
+            token physics:approximation = "convexDecomposition"
         }
 
         def Scope "VisualMaterials"
@@ -151,7 +151,7 @@ def Scope "Instances"
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/hip_flexion_left_1/VisualMaterials/silver>
-            token physics:approximation = "convexHull"
+            token physics:approximation = "convexDecomposition"
         }
 
         def Scope "VisualMaterials"
@@ -175,7 +175,7 @@ def Scope "Instances"
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/hip_abduction_left_1/VisualMaterials/silver>
-            token physics:approximation = "convexHull"
+            token physics:approximation = "convexDecomposition"
         }
 
         def Scope "VisualMaterials"
@@ -199,7 +199,7 @@ def Scope "Instances"
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/knee_flexion_left_1/VisualMaterials/silver>
-            token physics:approximation = "convexHull"
+            token physics:approximation = "convexDecomposition"
         }
 
         def Scope "VisualMaterials"
@@ -223,7 +223,7 @@ def Scope "Instances"
         {
             custom rel material:binding
             prepend rel material:binding = </Instances/foot_left_1/VisualMaterials/silver>
-            token physics:approximation = "convexHull"
+            token physics:approximation = "convexDecomposition"
         }
 
         def Scope "VisualMaterials"

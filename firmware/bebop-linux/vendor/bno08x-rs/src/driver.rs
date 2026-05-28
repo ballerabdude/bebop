@@ -381,6 +381,28 @@ impl<'a> BNO08x<'a, SpiInterface<SpiDevice, GpiodIn, GpiodOut>> {
         reset_gpiochip: &str,
         reset_pin: u32,
     ) -> io::Result<BNO08x<'a, SpiInterface<SpiDevice, GpiodIn, GpiodOut>>> {
+        Self::new_spi_with_speed(
+            spidevice,
+            hintn_gpiochip,
+            hintn_pin,
+            reset_gpiochip,
+            reset_pin,
+            crate::interface::spidev::DEFAULT_SPI_MAX_SPEED_HZ,
+        )
+    }
+
+    /// Like [`new_spi`](BNO08x::new_spi) but with an explicit SPI clock
+    /// (Hz). Use this to sustain high report rates — see
+    /// [`SpiDevice::new_with_speed`] for the throughput / signal-integrity
+    /// tradeoff.
+    pub fn new_spi_with_speed(
+        spidevice: &str,
+        hintn_gpiochip: &str,
+        hintn_pin: u32,
+        reset_gpiochip: &str,
+        reset_pin: u32,
+        spi_max_speed_hz: u32,
+    ) -> io::Result<BNO08x<'a, SpiInterface<SpiDevice, GpiodIn, GpiodOut>>> {
         let hintn: GpiodIn;
         let reset: GpiodOut;
         if hintn_gpiochip == reset_gpiochip {
@@ -394,7 +416,7 @@ impl<'a> BNO08x<'a, SpiInterface<SpiDevice, GpiodIn, GpiodOut>> {
             reset = GpiodOut::new(&chip1, reset_pin)?;
         }
 
-        let spidev = SpiDevice::new(spidevice)?;
+        let spidev = SpiDevice::new_with_speed(spidevice, spi_max_speed_hz)?;
         let ctrl_lines: SpiControlLines<SpiDevice, GpiodIn, GpiodOut> =
             SpiControlLines::<SpiDevice, GpiodIn, GpiodOut> {
                 spi: spidev,

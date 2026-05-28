@@ -116,29 +116,16 @@ pub struct VelocityCommand {
     pub angular_z: f32,
 }
 
-/// Estimated base linear velocity in body frame (m/s).
-///
-/// Bebop V2 has no wheels, so this cannot be derived from joint
-/// instrumentation alone. Feed it from an external estimator (EKF over
-/// IMU + foot-contact, visual odometry, T265, ...). For first bring-up
-/// publishing zeros is acceptable — see
-/// `ros2/src/bebop_pilot/config/policy_runner.yaml::lin_vel_source`.
-#[derive(Debug, Clone, Default)]
-pub struct BaseVelocity {
-    pub linear: [f32; 3],
-}
-
 // ---------------------------------------------------------------------------
 // Observation builder
 // ---------------------------------------------------------------------------
 
-/// Stateful builder that assembles the 52-element observation vector once
+/// Stateful builder that assembles the 49-element observation vector once
 /// per control tick. Update the individual fields whenever fresh data
 /// arrives (IMU 200 Hz, joint feedback ~100 Hz, cmd_vel async); call
 /// [`ObservationBuilder::build`] at the policy rate.
 pub struct ObservationBuilder {
     pub imu: ImuState,
-    pub base_velocity: BaseVelocity,
     pub cmd_vel: VelocityCommand,
     pub joint_positions: [f32; NUM_JOINTS],
     pub joint_velocities: [f32; NUM_JOINTS],
@@ -156,7 +143,6 @@ impl ObservationBuilder {
     pub fn new() -> Self {
         Self {
             imu: ImuState::default(),
-            base_velocity: BaseVelocity::default(),
             cmd_vel: VelocityCommand::default(),
             joint_positions: [0.0; NUM_JOINTS],
             joint_velocities: [0.0; NUM_JOINTS],
@@ -175,10 +161,6 @@ impl ObservationBuilder {
 
     pub fn update_imu(&mut self, imu: ImuState) {
         self.imu = imu;
-    }
-
-    pub fn update_base_velocity(&mut self, linear: [f32; 3]) {
-        self.base_velocity.linear = linear;
     }
 
     /// Update joint state from the supervisor's per-joint feedback.
@@ -205,26 +187,23 @@ impl ObservationBuilder {
         }
     }
 
-    /// Assemble the 52-element observation vector. Layout matches
-    /// `bebop_v2_base_cfg.py::PolicyCfg`:
+    /// Assemble the 49-element observation vector. Layout matches
+    /// `exp_standing.py::PolicyCfg`:
     ///
     /// ```text
-    ///   [ 0.. 3)  base_lin_vel
-    ///   [ 3.. 6)  base_ang_vel
-    ///   [ 6.. 9)  projected_gravity
-    ///   [ 9..17)  joint_pos_rel       (q - q_default)
-    ///   [17..25)  joint_vel_rel       (q_dot - q_dot_default; q_dot_default = 0)
-    ///   [25..49)  last_action         (24-dim raw NN output: pos | kp | kd)
-    ///   [49..52)  velocity_commands   (vx, vy, wz)
+    ///   [ 0.. 3)  base_ang_vel
+    ///   [ 3.. 6)  projected_gravity
+    ///   [ 6..14)  joint_pos_rel       (q - q_default)
+    ///   [14..22)  joint_vel_rel       (q_dot - q_dot_default; q_dot_default = 0)
+    ///   [22..46)  last_action         (24-dim raw NN output: pos | kp | kd)
+    ///   [46..49)  velocity_commands   (vx, vy, wz)
     /// ```
+    ///
+    /// There is no `base_lin_vel` channel — the robot cannot observe it
+    /// (no odometry / VIO), so it was dropped from training too.
     pub fn build(&self) -> Vec<f32> {
         let mut obs = vec![0.0_f32; dims::OBS_DIM];
         let mut idx = 0;
-
-        for &v in &self.base_velocity.linear {
-            obs[idx] = v.clamp(-scales::CLIP_LIN_VEL, scales::CLIP_LIN_VEL) * scales::SCALE_LIN_VEL;
-            idx += 1;
-        }
 
         for &v in &self.imu.angular_velocity {
             obs[idx] = v.clamp(-scales::CLIP_ANG_VEL, scales::CLIP_ANG_VEL) * scales::SCALE_ANG_VEL;
@@ -377,13 +356,12 @@ mod tests {
         let builder = ObservationBuilder::new();
         let obs = builder.build();
         assert_eq!(obs.len(), dims::OBS_DIM);
-        assert_eq!(obs.len(), 52);
+        assert_eq!(obs.len(), 49);
     }
 
     #[test]
     fn observation_layout_is_v2() {
         let mut builder = ObservationBuilder::new();
-        builder.update_base_velocity([0.1, 0.2, 0.3]);
         builder.update_imu(ImuState {
             // XYZW identity (scalar last).
             quaternion: [0.0, 0.0, 0.0, 1.0],
@@ -402,17 +380,16 @@ mod tests {
         });
 
         let obs = builder.build();
-        assert_eq!(&obs[0..3], &[0.1, 0.2, 0.3]); // base_lin_vel
-        assert_eq!(&obs[3..6], &[0.4, 0.5, 0.6]); // base_ang_vel
+        assert_eq!(&obs[0..3], &[0.4, 0.5, 0.6]); // base_ang_vel
                                                   // projected_gravity in body frame for identity quat -> (0, 0, -1)
-        assert!(obs[6].abs() < 1e-5 && obs[7].abs() < 1e-5);
-        assert!((obs[8] - (-1.0)).abs() < 1e-5);
-        assert_eq!(&obs[9..17], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]); // joint_pos
+        assert!(obs[3].abs() < 1e-5 && obs[4].abs() < 1e-5);
+        assert!((obs[5] - (-1.0)).abs() < 1e-5);
+        assert_eq!(&obs[6..14], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]); // joint_pos
                                                                             // joint_vel: 80.0 exceeds CLIP_DOF_VEL=15.0, so it should clamp.
-        assert!((obs[17] - 10.0).abs() < 1e-5);
-        assert!((obs[24] - scales::CLIP_DOF_VEL).abs() < 1e-5);
-        assert_eq!(&obs[25..49], last_action.as_slice()); // last_action (24 dims)
-        assert_eq!(&obs[49..52], &[0.7, 0.8, 0.9]); // velocity_commands
+        assert!((obs[14] - 10.0).abs() < 1e-5);
+        assert!((obs[21] - scales::CLIP_DOF_VEL).abs() < 1e-5);
+        assert_eq!(&obs[22..46], last_action.as_slice()); // last_action (24 dims)
+        assert_eq!(&obs[46..49], &[0.7, 0.8, 0.9]); // velocity_commands
     }
 
     fn default_clamps() -> [PolicyGainClamps; NUM_JOINTS] {
@@ -435,14 +412,18 @@ mod tests {
 
         let decoded = decode_policy_action(&raw, &defaults, &clamps);
 
-        assert!((decoded.targets[0] - 0.4).abs() < 1e-5); //  0.5 * 0.8
-        assert!((decoded.targets[1] - (-0.4)).abs() < 1e-5); // -0.5 * 0.8
-        assert!((decoded.targets[2] - 0.8).abs() < 1e-5); // clipped to  1.0 -> 0.8
-        assert!((decoded.targets[3] - (-0.8)).abs() < 1e-5); // clipped to -1.0 -> -0.8
+        // Derive expectations from SCALE_ACTION so this can't go stale if
+        // the position scale is retuned (it MUST stay in lock-step with
+        // the sim's `pos_scale` either way).
+        let s = scales::SCALE_ACTION;
+        assert!((decoded.targets[0] - 0.5 * s).abs() < 1e-5); //  0.5 * s
+        assert!((decoded.targets[1] - (-0.5 * s)).abs() < 1e-5); // -0.5 * s
+        assert!((decoded.targets[2] - s).abs() < 1e-5); // clipped 1.5 -> 1.0 -> s
+        assert!((decoded.targets[3] - (-s)).abs() < 1e-5); // clipped -1.5 -> -1.0 -> -s
         assert!(decoded.targets[4].abs() < 1e-5);
-        assert!((decoded.targets[5] - 0.2).abs() < 1e-5);
-        assert!((decoded.targets[6] - (-0.2)).abs() < 1e-5);
-        assert!((decoded.targets[7] - 0.8).abs() < 1e-5);
+        assert!((decoded.targets[5] - 0.25 * s).abs() < 1e-5);
+        assert!((decoded.targets[6] - (-0.25 * s)).abs() < 1e-5);
+        assert!((decoded.targets[7] - s).abs() < 1e-5);
     }
 
     #[test]

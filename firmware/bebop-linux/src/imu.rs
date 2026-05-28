@@ -112,6 +112,12 @@ pub struct ImuSnapshot {
     pub angular_velocity_body: Option<[f32; 3]>,
     pub heading_accuracy_rad: f32,
     pub last_update: Option<Instant>,
+    /// Timestamp of the most recent *gyro* (0x02) sample published into
+    /// `angular_velocity_body`. Tracked separately from `last_update`
+    /// (which the rotation-vector path also bumps) so consumers can tell
+    /// "attitude fresh but gyro dead" from "everything fresh". `None`
+    /// until the first gyro sample arrives.
+    pub gyro_last_update: Option<Instant>,
     pub report_period_ms: u16,
 }
 
@@ -121,6 +127,19 @@ impl ImuSnapshot {
     /// `true` before the first frame so the UI greys out the widget.
     pub fn is_stale(&self, now: Instant) -> bool {
         let Some(last) = self.last_update else {
+            return true;
+        };
+        let budget_ms = (self.report_period_ms as u64).saturating_mul(3).max(250);
+        now.duration_since(last) > Duration::from_millis(budget_ms)
+    }
+
+    /// True if no fresh *gyro* (0x02) sample has arrived within the same
+    /// budget as [`is_stale`]. Returns `true` before the first gyro
+    /// sample, so a never-subscribed gyro reads as stale forever (which
+    /// is exactly the signal the policy runner needs to flag a dead
+    /// rate-feedback channel).
+    pub fn gyro_is_stale(&self, now: Instant) -> bool {
+        let Some(last) = self.gyro_last_update else {
             return true;
         };
         let budget_ms = (self.report_period_ms as u64).saturating_mul(3).max(250);
@@ -345,6 +364,25 @@ pub fn spawn_imu_thread(
     /// works out to roughly one line per minute.
     const BRINGUP_PERIODIC_INFO_EVERY: u32 = 12;
 
+    /// Escalating hard-reset schedule between failed bring-up attempts.
+    /// The driver's own `setup()` only asserts RSTN for ~10 ms, which
+    /// recovers a chip that merely had a stale SHTP subscription. A chip
+    /// wedged by a brown-out or a half-finished protocol exchange often
+    /// needs a much longer reset assertion before it re-enumerates — the
+    /// symptom is repeated `InvalidChipId(0)` / `SensorUnresponsive` that
+    /// otherwise only a manual power-cycle clears. We grow the RSTN
+    /// low-hold geometrically with consecutive failures (50, 100, 200,
+    /// 400, 800 ms) up to [`RST_HOLD_MAX_MS`]. NOTE: this still cannot
+    /// recover a chip that needs a true power-cycle (latched supervisor /
+    /// brown-out) — for that, drive the BNO's VIN through a GPIO load
+    /// switch and power-cycle it here instead.
+    const RST_HOLD_BASE_MS: u64 = 50;
+    const RST_HOLD_MAX_SHIFT: u32 = 4;
+    const RST_HOLD_MAX_MS: u64 = 800;
+    /// Post-release settle before the driver re-opens the bus. The BNO
+    /// boot + SHTP advertisement is ~120 ms cold, longer warm.
+    const RST_SETTLE_MS: u64 = 350;
+
     let period_ms = cfg.rotation_vector_period_ms;
     let mount_quat = cfg.mount_quat_sensor_body;
     let mount_is_identity = mount_quat == ImuConfig::IDENTITY_QUAT;
@@ -379,6 +417,30 @@ pub fn spawn_imu_thread(
         false
     }
 
+    /// Drive RSTN low for `low_hold`, release, then wait `settle` for the
+    /// chip to boot. Requests and immediately drops the gpiod line so the
+    /// driver can claim it afterwards. Best-effort: returns `false` if the
+    /// line can't be claimed (the chip is likely already owned by the
+    /// driver, or absent) — the driver's own `setup()` reset still runs in
+    /// that case.
+    fn pulse_rst(rst_chip: &str, rst_line: u32, low_hold: Duration, settle: Duration) -> bool {
+        use gpiod::{Chip, Options};
+        let Ok(chip) = Chip::new(rst_chip) else {
+            return false;
+        };
+        let Ok(rst) =
+            chip.request_lines(Options::output([rst_line]).consumer("bebop-imu-reset"))
+        else {
+            return false;
+        };
+        let _ = rst.set_values([false]); // assert reset (active low)
+        std::thread::sleep(low_hold);
+        let _ = rst.set_values([true]); // release
+        drop(rst); // free the line for the driver's own setup()
+        std::thread::sleep(settle);
+        true
+    }
+
     Some(std::thread::spawn(move || {
         // BEBOP: One-shot aggressive RST pulse before the driver gets near the
         // chip. If the previous bebop-linux process died ungracefully (panic,
@@ -391,42 +453,26 @@ pub fn spawn_imu_thread(
         // Best-effort: if the GPIO line is unavailable (already claimed,
         // chip not present, etc.) we silently fall through and let the
         // retry loop deal with whatever state the chip is in.
-        {
-            use gpiod::{Chip, Options};
-            match Chip::new(&cfg.rst_chip) {
-                Ok(chip) => match chip.request_lines(
-                    Options::output([cfg.rst_line]).consumer("bebop-imu-prereset"),
-                ) {
-                    Ok(rst) => {
-                        let _ = rst.set_values([false]); // RST low
-                        std::thread::sleep(Duration::from_millis(100));
-                        let _ = rst.set_values([true]); // release
-                        // Drop `rst` here so the driver can claim the line below.
-                        std::thread::sleep(Duration::from_millis(300));
-                        info!(
-                            target: "bebop_linux::imu",
-                            rst_chip = %cfg.rst_chip,
-                            rst_line = cfg.rst_line,
-                            "IMU: pre-reset RST pulse complete (clearing any stale chip state)"
-                        );
-                    }
-                    Err(e) => warn!(
-                        target: "bebop_linux::imu",
-                        ?e,
-                        rst_chip = %cfg.rst_chip,
-                        rst_line = cfg.rst_line,
-                        "IMU: pre-reset RST pulse skipped (could not request GPIO line); \
-                         retry loop will handle bring-up"
-                    ),
-                },
-                Err(e) => warn!(
-                    target: "bebop_linux::imu",
-                    ?e,
-                    rst_chip = %cfg.rst_chip,
-                    "IMU: pre-reset RST pulse skipped (could not open gpiochip); \
-                     retry loop will handle bring-up"
-                ),
-            }
+        if pulse_rst(
+            &cfg.rst_chip,
+            cfg.rst_line,
+            Duration::from_millis(100),
+            Duration::from_millis(300),
+        ) {
+            info!(
+                target: "bebop_linux::imu",
+                rst_chip = %cfg.rst_chip,
+                rst_line = cfg.rst_line,
+                "IMU: pre-reset RST pulse complete (clearing any stale chip state)"
+            );
+        } else {
+            warn!(
+                target: "bebop_linux::imu",
+                rst_chip = %cfg.rst_chip,
+                rst_line = cfg.rst_line,
+                "IMU: pre-reset RST pulse skipped (could not claim GPIO line); \
+                 retry loop will handle bring-up"
+            );
         }
 
         // ---------- Bring-up: retry forever until success or shutdown ----------
@@ -449,18 +495,50 @@ pub fn spawn_imu_thread(
                 return;
             }
             attempt += 1;
+
+            // Escalating hard reset before re-opening the bus. Skipped on
+            // the first attempt (the one-shot pre-reset above already
+            // pulsed RSTN); on each subsequent failure the low-hold grows
+            // geometrically up to RST_HOLD_MAX_MS to shake loose a chip a
+            // short pulse can't recover. See RST_HOLD_* docs above.
+            if attempt > 1 {
+                let hold_ms = (RST_HOLD_BASE_MS
+                    .saturating_mul(1u64 << (attempt - 2).min(RST_HOLD_MAX_SHIFT)))
+                .min(RST_HOLD_MAX_MS);
+                if pulse_rst(
+                    &cfg.rst_chip,
+                    cfg.rst_line,
+                    Duration::from_millis(hold_ms),
+                    Duration::from_millis(RST_SETTLE_MS),
+                ) && attempt <= BRINGUP_LOUD_ATTEMPTS
+                {
+                    info!(
+                        target: "bebop_linux::imu",
+                        attempt,
+                        hold_ms,
+                        "IMU: escalating hard reset before retry"
+                    );
+                }
+            }
+
             let bringup_result: Result<_, String> = (|| {
-                let mut imu = BNO08x::new_spi(
+                let mut imu = BNO08x::new_spi_with_speed(
                     &cfg.spi_device,
                     &cfg.int_chip,
                     cfg.int_line,
                     &cfg.rst_chip,
                     cfg.rst_line,
+                    cfg.spi_max_speed_hz,
                 )
                 .map_err(|e| {
                     format!(
-                        "open SPI={} INT={}:{} RST={}:{}: {e:?}",
-                        cfg.spi_device, cfg.int_chip, cfg.int_line, cfg.rst_chip, cfg.rst_line
+                        "open SPI={}@{}Hz INT={}:{} RST={}:{}: {e:?}",
+                        cfg.spi_device,
+                        cfg.spi_max_speed_hz,
+                        cfg.int_chip,
+                        cfg.int_line,
+                        cfg.rst_chip,
+                        cfg.rst_line
                     )
                 })?;
                 imu.init()
@@ -528,23 +606,61 @@ pub fn spawn_imu_thread(
         // stream (0x07) takes several seconds to converge after a
         // power cycle.
         //
-        // Unlike the rotation vector, we don't retry the gyro: a
-        // failed gyro subscription leaves the policy with synthetic
-        // angular velocity = 0, which is a safe (if degraded) state.
-        // The single warn is loud enough to surface in observability
-        // tools without spamming the log.
-        match imu.enable_report(SENSOR_REPORTID_GYROSCOPE, period_ms) {
-            Ok(true) => info!(period_ms, "IMU: enabled report 0x02 (Calibrated Gyroscope)"),
-            Ok(false) => warn!(
-                period_ms,
-                "IMU: no GET_FEATURE_RESP for 0x02 within 2 s; \
-                 continuing on the assumption the chip is streaming anyway"
-            ),
-            Err(e) => warn!(
-                ?e,
-                "IMU: SET_FEATURE for 0x02 failed; angular_velocity_body \
-                 will stay None and PolicyRunner will use a zero gyro"
-            ),
+        // The gyro is the policy's primary rate-feedback channel
+        // (`base_ang_vel`); a silently-failed subscription zeros it and
+        // the robot runs blind on rotation rate. We therefore RETRY the
+        // SET_FEATURE up to `GYRO_ENABLE_MAX_ATTEMPTS` times instead of
+        // the previous one-shot best-effort. `Ok(false)` (no
+        // GET_FEATURE_RESP within the crate's window) is not treated as
+        // a hard failure — some BNO085 firmware revs stream 0x02
+        // correctly without acking — but a hard `Err` is retried after
+        // a short backoff.
+        const GYRO_ENABLE_MAX_ATTEMPTS: u32 = 5;
+        let mut gyro_subscribed = false;
+        for attempt in 1..=GYRO_ENABLE_MAX_ATTEMPTS {
+            match imu.enable_report(SENSOR_REPORTID_GYROSCOPE, period_ms) {
+                Ok(true) => {
+                    info!(
+                        period_ms,
+                        attempt, "IMU: enabled report 0x02 (Calibrated Gyroscope)"
+                    );
+                    gyro_subscribed = true;
+                    break;
+                }
+                Ok(false) => {
+                    // No ack, but likely streaming anyway. Accept it; the
+                    // streaming loop's gyro watchdog is the real source of
+                    // truth on whether samples actually arrive.
+                    warn!(
+                        period_ms,
+                        attempt,
+                        "IMU: no GET_FEATURE_RESP for 0x02 within 2 s; \
+                         continuing on the assumption the chip is streaming anyway"
+                    );
+                    gyro_subscribed = true;
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        ?e,
+                        attempt,
+                        max = GYRO_ENABLE_MAX_ATTEMPTS,
+                        "IMU: SET_FEATURE for 0x02 failed; retrying"
+                    );
+                    if sleep_or_shutdown(Duration::from_millis(250), &shutdown) {
+                        return;
+                    }
+                }
+            }
+        }
+        if !gyro_subscribed {
+            error!(
+                "IMU: could not subscribe to 0x02 (Calibrated Gyroscope) after {} attempts; \
+                 angular_velocity_body will stay None and the policy will run with a ZERO \
+                 gyro (no rate feedback — expect instability). Will keep attempting to read \
+                 the gyro cache in the stream loop in case the chip starts emitting it.",
+                GYRO_ENABLE_MAX_ATTEMPTS
+            );
         }
 
         info!(
@@ -552,6 +668,17 @@ pub fn spawn_imu_thread(
             "IMU: streaming AR/VR-stabilized rotation vector + calibrated gyro \
              into shared state (consumed by PolicyRunner and telemetry pump)"
         );
+
+        // Gyro watchdog state. A subscription can be accepted (or even
+        // ack'd) yet never actually stream 0x02 samples — the failure
+        // mode that silently zeros `base_ang_vel`. We track whether
+        // we've ever seen a real gyro sample and, until we have, emit a
+        // periodic loud warning so a dead gyro is obvious in the logs
+        // instead of hiding behind a fresh quaternion.
+        const GYRO_WATCHDOG_PERIOD: Duration = Duration::from_secs(5);
+        let stream_started = Instant::now();
+        let mut gyro_ever_seen = false;
+        let mut last_gyro_warn: Option<Instant> = None;
 
         // ---------- Streaming loop ----------
         while !shutdown.load(Ordering::SeqCst) {
@@ -635,9 +762,21 @@ pub fn spawn_imu_thread(
                             // `last_update` already covers both
                             // reports — they arrive on the same data
                             // channel at the same cadence, so a single
-                            // staleness clock is sufficient.
+                            // staleness clock is sufficient for the
+                            // attitude widget. `gyro_last_update` is the
+                            // gyro-specific clock the policy runner reads
+                            // to decide `gyro_live`.
                             g.last_update = Some(now);
+                            g.gyro_last_update = Some(now);
                             g.report_period_ms = period_ms;
+                        }
+                        if !gyro_ever_seen {
+                            info!(
+                                target: "bebop_linux::imu",
+                                "IMU: first calibrated-gyro (0x02) sample received; \
+                                 base_ang_vel is now live"
+                            );
+                            gyro_ever_seen = true;
                         }
                     }
                 }
@@ -647,7 +786,31 @@ pub fn spawn_imu_thread(
                     "calibrated gyroscope read"
                 ),
             }
-            std::thread::sleep(Duration::from_millis(2));
+
+            // Watchdog: if we've been streaming the rotation vector for a
+            // while but no gyro sample has *ever* landed, the 0x02
+            // subscription is effectively dead. Warn periodically — this
+            // is the exact condition that leaves the policy with a zero
+            // `base_ang_vel` while everything else looks healthy.
+            if !gyro_ever_seen
+                && now.duration_since(stream_started) > GYRO_WATCHDOG_PERIOD
+                && last_gyro_warn.is_none_or(|t| now.duration_since(t) > GYRO_WATCHDOG_PERIOD)
+            {
+                warn!(
+                    target: "bebop_linux::imu",
+                    elapsed_s = now.duration_since(stream_started).as_secs(),
+                    "IMU: rotation vector is streaming but NO calibrated-gyro (0x02) sample \
+                     has arrived. base_ang_vel will be zeroed and any balance policy will run \
+                     without rate feedback. Check the BNO085 0x02 subscription / wiring."
+                );
+                last_gyro_warn = Some(now);
+            }
+
+            // 1 ms poll cadence. At the default 200 Hz report rate the chip
+            // emits an RV + gyro pair every ~5 ms; a 1 ms loop drains the
+            // FIFO with margin (handle_all_messages above batches whatever
+            // accumulated). Was 2 ms when the IMU ran at 20 Hz.
+            std::thread::sleep(Duration::from_millis(1));
         }
 
         // ---------- Graceful disable (restart hygiene) ----------

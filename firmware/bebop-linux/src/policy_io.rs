@@ -16,8 +16,14 @@ pub struct PolicyIoSnapshot {
     /// True while RunPolicy is active and E-STOP is not latched.
     pub active: bool,
     /// Whether observations use live BNO085 readings vs synthetic fallback.
+    /// Driven by the rotation-vector (0x28) freshness clock.
     pub imu_live: bool,
-    /// Full 52-dim observation vector fed to ONNX.
+    /// Whether `base_ang_vel` is sourced from a live calibrated-gyro
+    /// (0x02) report. Tracked separately from `imu_live` because the gyro
+    /// subscription can be dead while the attitude quaternion is fresh,
+    /// which silently zeros the policy's rate-feedback channel.
+    pub gyro_live: bool,
+    /// Full 49-dim observation vector fed to ONNX.
     pub observation: Vec<f32>,
     /// Full 24-dim raw NN output.
     pub raw_action: Vec<f32>,
@@ -50,6 +56,7 @@ impl PolicyIoSnapshot {
     pub fn clear_tick(&mut self) {
         self.active = false;
         self.imu_live = false;
+        self.gyro_live = false;
         self.observation.clear();
         self.raw_action.clear();
         self.position_targets_rad = [0.0; NUM_JOINTS];
@@ -61,6 +68,7 @@ impl PolicyIoSnapshot {
     pub fn publish_tick(
         &mut self,
         imu_live: bool,
+        gyro_live: bool,
         observation: &[f32],
         raw_action: &[f32],
         position_targets_rad: &[f32; NUM_JOINTS],
@@ -69,6 +77,7 @@ impl PolicyIoSnapshot {
     ) {
         self.active = true;
         self.imu_live = imu_live;
+        self.gyro_live = gyro_live;
         self.observation.clear();
         self.observation.extend_from_slice(observation);
         self.raw_action.clear();

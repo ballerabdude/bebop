@@ -116,7 +116,11 @@ export interface PolicyIoView {
   present: boolean;
   active: boolean;
   imuLive: boolean;
-  /** Full 52-dim observation vector (see layout in proto docs). */
+  /** Whether `base_ang_vel` is sourced from a live calibrated gyro (0x02).
+   *  Distinct from `imuLive`: a dead gyro zeros the policy's rate-feedback
+   *  channel even while the attitude quaternion stays fresh. */
+  gyroLive: boolean;
+  /** Full 49-dim observation vector (see layout in proto docs). */
   observation: number[];
   /** Full 24-dim raw NN output. */
   rawAction: number[];

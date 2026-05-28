@@ -22,7 +22,7 @@ use bebop_linux::server;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::signal;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -195,14 +195,59 @@ async fn main() -> Result<()> {
     let sup_tick = supervisor.clone();
     let pr_tick = policy_runner.clone();
     let shutdown_tick = shutdown_flag.clone();
+
+    /// Control-loop period: 100 Hz. Also the per-cycle work budget — if
+    /// the body takes longer than this the loop can't sustain 100 Hz.
+    const TICK_PERIOD: Duration = Duration::from_millis(10);
+    /// A wake-to-wake interval longer than this counts as a "late" tick
+    /// (1.5× the period) — the loop slipped behind schedule.
+    const TICK_LATE_THRESHOLD: Duration = Duration::from_millis(15);
+    /// How often to emit the loop-health summary.
+    const HEALTH_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
     let tick_handle = tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_millis(10));
+        let mut ticker = tokio::time::interval(TICK_PERIOD);
+        // `Delay` means an overrunning cycle pushes the next tick out
+        // rather than firing back-to-back to "catch up". That keeps the
+        // motors from getting a burst of commands after a stall, but it
+        // also means the loop silently runs *slower* than 100 Hz when the
+        // body can't keep up — which is invisible without the
+        // instrumentation below.
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        // --- 100 Hz loop-health instrumentation ---------------------------
+        // We can't tell from the outside whether the control loop is
+        // actually hitting 100 Hz, so measure it here: per cycle we track
+        // the body's work time and the wake-to-wake interval, then summarize
+        // once per HEALTH_LOG_INTERVAL. A clean loop logs at `info`; any
+        // missed deadline (work over budget, or a wake that slipped late)
+        // escalates the summary to `warn` so it's obvious in journalctl.
+        let mut last_wake: Option<Instant> = None;
+        let mut window_start = Instant::now();
+        let mut cycles: u64 = 0;
+        let mut overruns: u64 = 0; // body work exceeded the tick budget
+        let mut late_wakes: u64 = 0; // wake-to-wake interval slipped late
+        let mut sum_work = Duration::ZERO;
+        let mut max_work = Duration::ZERO;
+        let mut max_interval = Duration::ZERO;
+
         loop {
             ticker.tick().await;
             if shutdown_tick.load(Ordering::SeqCst) {
                 break;
             }
+            let wake = Instant::now();
+            if let Some(prev) = last_wake {
+                let interval = wake.duration_since(prev);
+                if interval > max_interval {
+                    max_interval = interval;
+                }
+                if interval > TICK_LATE_THRESHOLD {
+                    late_wakes += 1;
+                }
+            }
+            last_wake = Some(wake);
+
             sup_tick.run_watchdog();
             if sup_tick.mode() == Mode::DialIn {
                 sup_tick.tick_dial_in_hold();
@@ -219,6 +264,56 @@ async fn main() -> Result<()> {
                 if let Some(pr) = g.as_mut() {
                     pr.tick();
                 }
+            }
+
+            let work = wake.elapsed();
+            cycles += 1;
+            sum_work += work;
+            if work > max_work {
+                max_work = work;
+            }
+            if work > TICK_PERIOD {
+                overruns += 1;
+            }
+
+            let window = window_start.elapsed();
+            if window >= HEALTH_LOG_INTERVAL {
+                let hz = cycles as f64 / window.as_secs_f64();
+                let mean_work_us = if cycles > 0 {
+                    (sum_work.as_micros() as u64) / cycles
+                } else {
+                    0
+                };
+                if overruns > 0 || late_wakes > 0 {
+                    warn!(
+                        target: "bebop_linux::loop",
+                        hz = format_args!("{hz:.1}"),
+                        cycles,
+                        overruns,
+                        late_wakes,
+                        mean_work_us,
+                        max_work_us = max_work.as_micros() as u64,
+                        max_interval_us = max_interval.as_micros() as u64,
+                        "100 Hz control loop missing its deadline (target 100 Hz / 10 ms)"
+                    );
+                } else {
+                    info!(
+                        target: "bebop_linux::loop",
+                        hz = format_args!("{hz:.1}"),
+                        cycles,
+                        mean_work_us,
+                        max_work_us = max_work.as_micros() as u64,
+                        max_interval_us = max_interval.as_micros() as u64,
+                        "100 Hz control loop healthy"
+                    );
+                }
+                window_start = Instant::now();
+                cycles = 0;
+                overruns = 0;
+                late_wakes = 0;
+                sum_work = Duration::ZERO;
+                max_work = Duration::ZERO;
+                max_interval = Duration::ZERO;
             }
         }
     });

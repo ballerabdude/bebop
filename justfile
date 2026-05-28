@@ -64,6 +64,14 @@ app-web:
 
 # --- Sim / training (Isaac Sim + Isaac Lab) --------------------------------
 
+# TensorBoard for rsl_rl logs (run from repo root; opens sim/logs/rsl_rl).
+tb:
+    tensorboard --logdir sim/logs/rsl_rl
+
+# Copy-friendly run list with play/resume commands (companion to TensorBoard).
+tb-runs PORT="6007":
+    cd sim && python scripts/training_runs_server.py --port {{PORT}}
+
 # Bring up Isaac Sim + the ROS 2 dev container (profile: sim).
 sim-up:
     docker compose --profile sim up --build -d
@@ -93,6 +101,25 @@ sim-launch:
 # Open an interactive shell in the running Isaac Lab container.
 lab-shell:
     docker exec -it bebop_isaac_lab bash
+
+# Play a trained policy with the interactive torso-push controller wired up.
+# Defaults to the standing task and the most recent run under
+# sim/logs/rsl_rl/Isaac-BebopV2-Standing-v0. Override with TASK / RESUME.
+#
+# Once the Isaac Sim window opens, CLICK INSIDE THE VIEWPORT so it receives
+# keyboard focus, then use:
+#     I/K = pitch nose-down / nose-up
+#     J/L = roll left / right
+#     W/S = push forward / backward    A/D = push left / right
+#     +/- = scale impulse 1.25x        R = reset env  H = help  0 = print scale
+# See sim/play_bebop.py module docstring for the full reference.
+lab-play TASK="Isaac-BebopV2-Standing-v0" RESUME="logs/rsl_rl/Isaac-BebopV2-Standing-v0":
+    @xhost +local:docker >/dev/null 2>&1 || true
+    docker exec -it bebop_isaac_lab bash -lc \
+        'cd /workspace/bebop_bot/sim && \
+         /workspace/isaaclab/isaaclab.sh -p play_bebop.py \
+            --task {{TASK}} \
+            --resume {{RESUME}}'
 
 # --- ROS 2 dev container ---------------------------------------------------
 

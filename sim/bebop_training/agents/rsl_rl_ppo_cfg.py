@@ -29,25 +29,43 @@ class BebopPPOBaseCfg(RslRlOnPolicyRunnerCfg):
     #
     # `std_type` must be ``"scalar"`` or ``"log"`` for the Gaussian head in
     # this repo's bundled rsl_rl (``"per_dim"`` is not supported and crashes
-    # at runner init). MIT-mode 24-dim actions still train fine with a
-    # shared scalar std; tune ``entropy_coef`` / ``init_std`` if gain
-    # channels need more exploration.
+    # at runner init). We use ``"log"`` so the std is ``exp(log_std)`` —
+    # mathematically positive by construction. With ``"scalar"`` the std
+    # is a directly-learnable parameter that a single bad gradient (on
+    # the heels of a value-loss spike) can push negative, causing
+    # ``Normal(mean, std)`` to raise ``normal expects all elements of
+    # std >= 0.0`` mid-training. MIT-mode 24-dim actions still train fine
+    # with a shared log-std; tune ``entropy_coef`` / ``init_std`` if
+    # gain channels need more exploration.
+    #
+    # ``obs_normalization=True`` wraps the policy input with rsl_rl's
+    # ``EmpiricalNormalization`` (running mean / std with outlier clip
+    # to ±5σ). This is the standard PPO default for mixed-scale inputs
+    # — joint_vel is rad/s, projected_gravity is in [-1, 1], and
+    # last_action is in [-1, 1] — and more importantly it stops a
+    # single transient PhysX outlier (knee contact pop sending one env's
+    # joint_vel to a huge value for one tick) from NaN-ing the actor's
+    # ``log_std`` gradient and crashing the next rollout with the same
+    # ``normal expects std >= 0.0`` error. The normalization stats are
+    # saved with the checkpoint, so the ONNX export path picks them up
+    # automatically — the deployed firmware sees the same normalized
+    # input the policy was trained on.
     actor = {
         "class_name": "MLPModel",
         "hidden_dims": [512, 256, 128],
         "activation": "elu",
-        "obs_normalization": False,
+        "obs_normalization": True,
         "distribution_cfg": {
             "class_name": "GaussianDistribution",
             "init_std": 1.0,
-            "std_type": "scalar",
+            "std_type": "log",
         },
     }
     critic = {
         "class_name": "MLPModel",
         "hidden_dims": [512, 256, 128],
         "activation": "elu",
-        "obs_normalization": False,
+        "obs_normalization": True,
         "distribution_cfg": None,
     }
 
@@ -78,14 +96,23 @@ class BebopPPOBaseCfg(RslRlOnPolicyRunnerCfg):
         num_mini_batches=4,
         
         # Learning Rate
-        learning_rate=1.0e-3,    # Standard starting point
+        # 5e-4 (not 1e-3) because the adaptive schedule struggles to
+        # outrun a value-loss spike when running with many mini-batches
+        # (e.g. --num_envs 8192 --num_mini_batches 12 => 60 updates per
+        # iteration). 1e-3 trained fine at the default 4096/4, but the
+        # value loss diverged on the 8192/12 config (see git history for
+        # the 3380-iter crash with "normal expects std >= 0.0").
+        learning_rate=5.0e-4,
         schedule="adaptive",     # Lowers LR if updates are too drastic (KL divergence high)
         
         # PPO Math
         gamma=0.99,              # Discount factor (future rewards importance)
         lam=0.95,                # GAE (Generalized Advantage Estimation) lambda
         desired_kl=0.01,         # Target KL divergence for adaptive schedule
-        max_grad_norm=1.0,       # Gradient clipping to prevent exploding gradients
+        # 0.5 (not 1.0) caps the worst single-update damage when the
+        # critic momentarily learns absurd targets — keeps the actor
+        # mean from drifting to ±1e6 in one step on a bad batch.
+        max_grad_norm=0.5,
     )
 
 @configclass
@@ -93,11 +120,27 @@ class BebopPPOLowLRCfg(BebopPPOBaseCfg):
     """
     Variant: Low Learning Rate.
     Use this if the 'Base' config learns to stand but then jitters/explodes later in training.
+
+    Inherits the full base algorithm block; only the learning rate and
+    minibatch count are overridden. The previous version replaced the
+    whole ``algorithm`` object with a two-field cfg, which silently
+    dropped ``entropy_coef``, ``gamma``, ``lam``, ``clip_param``,
+    ``desired_kl``, ``max_grad_norm`` and the LR schedule.
     """
     experiment_name = "bebop_low_lr"
     algorithm = RslRlPpoAlgorithmCfg(
-        learning_rate=1.0e-4, # 10x smaller learning rate
-        num_mini_batches=8    # More batches for smoother updates
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.02,
+        num_learning_epochs=5,
+        num_mini_batches=8,
+        learning_rate=1.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
     )
 
 
@@ -114,16 +157,18 @@ class BebopPPOLocomotionCfg(BebopPPOBaseCfg):
 
     # Re-initialize the action distribution with more noise so resumed
     # checkpoints can rediscover exploration. Same ``std_type`` contract as
-    # the base cfg (scalar only in this rsl_rl build).
+    # the base cfg — ``"log"`` so std stays positive across any gradient,
+    # and ``obs_normalization=True`` to inherit the running stats from
+    # the standing checkpoint (rsl_rl restores them automatically).
     actor = {
         "class_name": "MLPModel",
         "hidden_dims": [512, 256, 128],
         "activation": "elu",
-        "obs_normalization": False,
+        "obs_normalization": True,
         "distribution_cfg": {
             "class_name": "GaussianDistribution",
             "init_std": 1.0,
-            "std_type": "scalar",
+            "std_type": "log",
         },
     }
 
@@ -140,5 +185,5 @@ class BebopPPOLocomotionCfg(BebopPPOBaseCfg):
         gamma=0.99,
         lam=0.95,
         desired_kl=0.02,
-        max_grad_norm=1.0,
+        max_grad_norm=0.5,
     )

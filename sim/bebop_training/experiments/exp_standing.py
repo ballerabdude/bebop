@@ -1,328 +1,76 @@
-"""Minimal "just stand" experiment for the Bebop V2 articulation.
+"""Minimal standing-balance experiment for Bebop V2.
 
-This file is the deliberate anti-thesis of ``exp_flat_balance_v2.py``: it
-takes the kitchen-sink training config (variable-impedance MIT-mode
-action, wide initial-state randomization, mid-episode pushes, friction
-randomization, observation noise, eight reward shaping terms) and
-strips every one of them away. The point is to establish a baseline
-where every knob is at its boring default, train a policy on it, and
-then **add one feature at a time** so each addition's effect on the
-final policy is attributable.
+Train a policy that keeps the torso upright, then deploy the exported ONNX
+to the real robot and debug before adding the next feature. This file is the
+single source of truth for the standing task config; add one knob at a time
+and validate on hardware after each training run.
 
-What's intentionally kept (because the real robot can't run without them):
-  * The IMU sensor (BNO085) is the only thing telling the policy which
-    way is up. Without it there is no balance task to learn.
-  * Joint encoders feed ``joint_pos`` / ``joint_vel``. Same reason.
-  * Fixed PD on each actuator — the policy emits position targets only,
-    the underlying Robstride PD loop closes the inner control. Gains
-    here mirror the firmware's ``hold_gains`` (the tested "armed but no
-    policy active" values from ``bebop_v2.yaml``) so sim and real run
-    the same closed-loop dynamics.
+Kept because the real robot needs them:
+  * IMU (BNO085) — projected gravity and gyro for balance.
+  * Joint encoders — ``joint_pos`` / ``joint_vel`` observations.
+  * MIT-mode variable impedance — 24-dim action (8 pos + 8 kp + 8 kd), same
+    decode as ``firmware/bebop-linux/config/bebop_v2.yaml``.
+  * 49-dim observation layout matching ``observation.rs`` (base_ang_vel,
+    projected_gravity, joint_pos, joint_vel, last_action, cmd_vel — note
+    no base_lin_vel; the robot cannot observe it).
+  * DCMotor actuators — explicit PD + torque-speed saturation (not implicit
+    PhysX drives, which can stand at zero pose without a policy).
+  * IMU sample rate (200 Hz) and action delay (20 ms) matching the real
+    loop (``bebop_v2.yaml`` ``rotation_vector_period_ms = 5``).
 
-What's intentionally OFF in this baseline:
-  * Mass / friction / CoM randomization. With the CAD mass now corrected
-    to the bench-measured 7 kg torso, "no randomization" means sim
-    trains on the *real* mass.
-  * Mid-episode pushes (``push_robot`` event).
-  * Wide initial-state randomization. Init pose is tight (±3°) so the
-    policy never has to learn fall-recovery here.
-  * Action delay (``action_delay_steps=0`` on the action term),
-    torque penalties, most reward shaping.
-  * IMU sample-rate staleness. The real BNO085 emits the AR/VR fused
-    rotation vector at 20 Hz, but the sim ``ImuCfg`` runs at the
-    physics tick (200 Hz). The observation noise added in v0.3 covers
-    Gaussian sensor noise but NOT the staleness — that's a separate
-    knob (``update_period=0.05`` on the ImuCfg) we will add when the
-    rest of sim-to-real is closer to dialled in.
+Reward set:
+  * ``alive``               — +1/tick while base_link is above the
+                              ground-contact termination threshold.
+  * ``torso_pitch``         — asymmetric IMU pitch: reward ~17° back lean
+                              (``proj_grav[0] ≈ -0.30``), penalize forward
+                              pitch (hardware falls on any forward lean).
+  * ``joint_pos_limits``    — quadratic penalty for exceeding the URDF
+                              joint soft limits.
+  * ``track_lin_vel_xy`` /
+    ``track_ang_vel_z``     — bounded ``exp(-err²/σ²)`` reward tracking
+                              the (zero) ``base_velocity`` command, i.e.
+                              "be still." Saturates to 0 (not punitive)
+                              during legitimate recovery transients, so
+                              it composes with ``alive`` and
+                              ``torso_pitch`` instead of fighting them.
+  * ``lin_vel_z_l2`` /
+    ``ang_vel_xy_l2``       — small L2 penalties on the off-command
+                              DOFs (vertical bounce, roll/pitch rate)
+                              that should be ~0 in every regime.
+  * ``action_rate_l2`` / ``action_l2`` — action smoothness + magnitude.
 
-Change log (this file is being mutated in place to add features one
-at a time rather than forking into v1, v2, ... files):
-  * v0 — initial four-reward minimum (alive, flat_orientation,
-    base_height, joint_pos_limits). Result: policy stands but feet
-    micro-oscillate, causing torso to drift horizontally because no
-    term penalizes either action-rate jitter OR lateral velocity.
-  * v0.1 — added ``action_rate_l2`` (weight -0.05). Directly punishes
-    the policy emitting commands that change rapidly between ticks,
-    which suppresses the foot oscillation at its source rather than
-    via its drift-velocity symptom. Also implicitly caps how large
-    the action-distribution std can grow, because wider std produces
-    more action-rate variance per step. Result: clean, deterministic
-    standing pose — but the policy converged to a heel-balance trick
-    (toes lifted, support entirely on the heel) because the foot's
-    geometric centre sits forward of the torso CoM. Rotating the
-    foot toes-up was the cheapest single-joint way to put the
-    support point under the CoM without leaning the torso forward.
-  * v0.2 — added ``foot_flat`` reward (weight 1.0, std=0.15). Closes
-    the heel-balance loophole by giving up to +1.0/tick when both
-    feet's local +z axes align with world up, falling off as
-    exp(-(g_x^2 + g_y^2) / std^2). At ~8.6° foot tilt the reward
-    drops to 0.37/tick — small enough to crowd out the heel trick
-    but tolerant enough to allow the small foot tilt a real ankle
-    strategy needs. The policy now has to find option 1 (lean torso
-    forward via hip / knee / ankle coordination) to keep both feet
-    flat AND the CoM over the support polygon. Result: clean
-    feet-flat / slight-forward-lean / bent-knee standing pose,
-    mean_reward ≈ 40, foot_flat ≈ 0.985, flat_orientation ≈ -0.0005.
-  * v0.3 — added Gaussian observation noise on the four
-    sensor-derived observation terms (IMU gyro, projected gravity,
-    joint position, joint velocity). The previous-action obs gets
-    no noise — that's the policy's own output, not a sensor. Noise
-    magnitudes mirror the original kitchen-sink config's tuned
-    values for the BNO085 + Robstride encoder hardware:
-       * imu_ang_vel:        ±0.3 rad/s   (gyro bias drift envelope)
-       * projected_gravity:  ±0.05        (~3° rotation-vector error)
-       * joint_pos_rel:      ±0.02 rad    (encoder + backlash)
-       * joint_vel_rel:      ±0.5 rad/s   (finite-diff velocity jitter)
-    Result: clean stand under noise, but a small left/right rocking
-    appears — the policy reacts to spurious projected-gravity-y
-    noise through the soft hip-flexion joints (kp=40), and the
-    fixed PD can't raise stiffness during steady stance. The fix
-    is variable impedance (next).
-  * v0.4 — restored variable impedance on the action channel.
-    ``JointPositionActionCfg`` (8-dim raw → 8 joint positions)
-    becomes ``VariableImpedanceJointActionCfg`` (24-dim raw →
-    8 positions + 8 kp + 8 kd per tick). Per-joint kp/kd clamps
-    mirror ``POLICY_KP_MIN/MAX`` and ``POLICY_KD_MIN/MAX`` in the
-    original kitchen-sink config and the firmware YAML's
-    ``policy_gain_clamps``. The slew clamp on the position channel
-    is set permissively (``max_pos_step_per_tick=1.0``, equivalent
-    to 100 rad/s @ 100 Hz, effectively unbounded) so the soft
-    ``action_rate_l2`` penalty stays the only thing shaping the
-    per-tick position deltas — that knob will tighten in v0.5.
-    Action delay is also off (``action_delay_steps=0``); that's a
-    v0.6+ knob.
-    Two consequences worth flagging:
-       1. Observation dim 30 -> 46 (last_action grows 8 -> 24).
-       2. Action dim 8 -> 24. The previous v0.3 checkpoint can't
-          warm-start this — the actor's input + output layers have
-          different shape. Train from scratch.
-    Result: clean stand under noise, lateral rocking eliminated.
-    foot_flat ≈ 0.965, alive ≈ 0.999, mean_reward ≈ 36. Confirmed
-    that variable impedance lets the policy raise hip-flexion
-    stiffness during quiet standing, which was the v0.3 problem.
-  * v0.5 — tightened the position-channel slew clamp from 1.0
-    rad/tick (effectively unbounded) to 0.020 rad/tick = 2 rad/s
-    at the 100 Hz policy tick. This matches the firmware safety
-    envelope target. With the clamp this tight the action term
-    will sometimes bind — i.e., the policy commands a per-tick
-    position delta larger than 0.020 and the clamp truncates it.
-    The policy must learn to compensate (either by emitting
-    smaller per-tick deltas via a forward-looking action, or by
-    relying more on kp/kd modulation when fast position changes
-    aren't available). The kp/kd channels are NOT slew-clamped —
-    gain modulation can still be instantaneous between ticks.
-    Important sim-to-real coupling: the firmware currently
-    enforces 0.015 rad/tick (1.5 rad/s). For this policy to
-    deploy cleanly, ``defaults.slew.max_pos_step_per_tick`` in
-    ``firmware/bebop-linux/config/bebop_v2.yaml`` MUST be raised
-    to 0.020 in lockstep with this training run; otherwise the
-    firmware will clip more aggressively than the policy expects
-    and tracking will lag. Don't deploy this checkpoint to a
-    firmware still at 0.015.
-  * v0.6 — restored ``base_lin_vel`` (first) and ``velocity_commands``
-    (last) in the policy observation vector to match the firmware's
-    52-dim contract. v0.0 stripped both terms on the reasoning that
-    they were "useless for standing" — base_lin_vel is firmware-zero
-    on the real robot (no velocity estimator wired in) and the
-    velocity command is hard-coded to (0,0,0) for the stand task —
-    but the firmware ``observation.rs`` builder still emits all 52
-    dims regardless of task. Deploying the v0.5 policy (obs_dim=46)
-    against the firmware (obs_dim=52) latches E-STOP with
-    "Inference failed" because the ONNX input layer can't take the
-    larger tensor. Adding the two terms back with the same noise
-    levels as the kitchen-sink config keeps sim and firmware
-    aligned without firmware changes. Observation dim 46 -> 52;
-    actor input layer reshapes; previous v0.5 checkpoint cannot
-    warm-start, retrain from scratch.
-  * v0.6.1 — identified and resolved a sim/firmware mismatch on the
-    position scale. v0 through v0.6 trained with sim ``pos_scale=0.5``
-    while the firmware decoder used ``SCALE_ACTION=0.8``. Every
-    deployed command therefore moved the real joint 1.6x farther
-    than the policy expected; combined with an OOD initial pose at
-    deployment (hip_abduction at -0.61 rad vs. the +/-0.40 sim
-    init envelope), the policy panicked, commanded raw values close
-    to +/-1.0, foot joints hit the +/-0.8 rad hard safety limit, and
-    the supervisor latched E-STOP.
-    Rather than retrain at the firmware's 0.8 value, we aligned the
-    firmware to sim's 0.5 (the more task-appropriate value for
-    standing -- the policy never needs ±45° of authority per joint,
-    ±28° is plenty). Changes elsewhere in the tree:
-       * firmware/bebop-linux/src/config.rs::SCALE_ACTION : 0.8 -> 0.5
-       * firmware/bebop-linux/config/bebop_v2.yaml ::
-         defaults.slew.max_pos_step_per_tick : 0.015 -> 0.020
-         (this also brings the firmware slew clamp into alignment
-         with the v0.5 sim training, which was the deferred lockstep
-         from v0.5)
-    With both sides at 0.5 the v0.6 trained ONNX should now decode
-    correctly on the real robot. Still need to address the OOD
-    initial-pose issue separately (either pose the robot to near-zero
-    before engaging RunPolicy, or widen sim init randomization to
-    cover the real spawn distribution). At the time this OOD pose
-    was logged with the joint then-called ``hip_abduction`` at -0.61
-    rad; under the post-rename naming that's the joint now called
-    ``hip_flexion`` (the top joint off ``base_link``, Y-axis pitch).
-  * v0.7 — recovery / robustness pass. The deployed v0.6 policy
-    showed the same failure mode every test: it sits "calm" in a
-    slight forward lean (its trained equilibrium), but the slightest
-    backward tilt sends raw outputs to the ±1.0 envelope and the
-    robot falls. Four reasons, all addressed here together:
-       1. Init pose pitch was ±2°. The policy never saw more than
-          that during training, so anything past it is OOD. Widened
-          to ±0.10 rad (~5.7°) on both pitch AND roll; added a
-          modest initial root angular velocity envelope so the policy
-          also sees "already-falling" start states. The geometric
-          asymmetry (foot center is forward of torso CoM, so
-          backward lean is the unstable direction — see v0.1 note)
-          means backward starts were the gap; symmetric pitch
-          range fills it.
-       2. No mid-episode disturbances. The policy converged to "do
-          nothing, geometry holds me up", which is brittle. Added a
-          ``push_robot`` interval event (4–8 s, ±0.4 m/s linear x,
-          ±0.3 m/s linear y, ±0.3 rad/s pitch / roll) so each 20 s
-          episode sees 3–5 pushes and the policy must learn an active
-          recovery, not just stay-in-place.
-       3. ``foot_flat`` std was 0.15 — strict enough that an 8.6°
-          foot tilt drops the reward to 0.37. That suppresses the
-          natural ankle-strategy recovery from a backward lean
-          (lift the heel, pivot on the toes), which IS a foot tilt.
-          Widened to 0.25 so a foot tilt up to ~14° still scores
-          ~0.37 — loose enough to allow real ankle work during
-          recovery, tight enough to still cost more than the
-          v0.1 heel-balance trick (which was a much larger toe-up
-          rotation).
-       4. Reset joint distribution was narrow (±0.05 rad on every
-          joint) AND centred on default = 0, so the policy only
-          ever saw locked-out legs at reset. The bench-deploy
-          spawn pose is closer to a slight crouch (operator stands
-          the robot up with hands on the torso, knees a bit bent),
-          so the policy needs to recover from there too. Replaced
-          the single ``reset_joints`` term with three:
-            * ``reset_joints`` — ±0.05 jitter on every joint (as before)
-            * ``reset_knee_left_crouch`` — additionally biases the
-              left knee_flexion joint into ``(-0.05, +0.45)``,
-              covering both straight-knee AND moderately-bent-forward
-              states. The joint's mirror convention (see
-              ``knee_symmetry_penalty`` docstring in
-              ``bebop_v2_rewards.py``) is that ``+knee_flexion_left``
-              and ``-knee_flexion_right`` are the same physical
-              motion — knees bent forward.
-            * ``reset_knee_right_crouch`` — mirror, ``(-0.45, +0.05)``.
-          Hip abduction and foot are deliberately NOT biased. The
-          crouch requires hip-flexion / ankle compensation to keep
-          the CoM over the foot and the foot flat; forcing the
-          policy to find that compensation from a randomized knee
-          bend is exactly the lesson we want it to internalize.
-    The widened observation distribution from (1)+(2)+(4) means the
-    actor will need more training steps to converge than v0.6, and
-    the converged reward will be lower (the policy is now solving a
-    harder task: stand AND recover, not just stand). Expect
-    mean_reward to drop from v0.6's ~36 to roughly 25–30 at
-    convergence — that's the cost of robustness.
-    Observation and action layouts are UNCHANGED from v0.6 (52-dim
-    obs, 24-dim action). The ONNX export drops into the same firmware
-    loader. No firmware changes required for this version.
-  * v0.8 — added ``knee_symmetry_penalty`` (weight -0.5). The v0.7
-    checkpoint converged to the exact reward-hacking mode the comment
-    on ``knee_symmetry_penalty`` in ``bebop_v2_rewards.py`` warned
-    about: one knee deeply bent, the other near-straight, with the
-    near-straight knee oscillating to micro-balance. All other reward
-    terms are pose-symmetry-blind (``foot_flat`` is world-frame,
-    ``base_height`` is torso-z, ``flat_orientation`` is torso tilt,
-    none of them care which leg is doing the supporting), so PPO
-    found the asymmetric attractor and parked there with
-    ``action_rate_l2`` symptom ≈ -0.25 (very high jitter) and a
-    slowly *rising* entropy curve at 10k iterations (a sign the
-    policy hadn't committed because both asymmetric and symmetric
-    crouches scored about the same).
-    The v0.7 crouch reset bias (independent knee_flexion_left /
-    knee_flexion_right randomization) compounded this — half the
-    time the episode started already-asymmetric, so the policy got
-    steady gradient signal that asymmetric crouches were valid.
-    With the new symmetry penalty (which scores
-    ``(knee_flexion_left + knee_flexion_right)^2``, accounting for
-    the mirrored joint frames so a physically symmetric crouch sums
-    to zero), the asymmetric attractor now costs reward proportional
-    to how unbalanced the bend is, and the policy should commit to a
-    symmetric stance.
-    Weight -0.5 is the value used by the original kitchen-sink
-    config (``bebop_v2_base_cfg.py``) and is the minimum that
-    reliably breaks the asymmetric attractor without dominating the
-    other terms. If the converged knees come out STIFFLY symmetric
-    (both fully straight, no crouch — i.e. the penalty pushed too
-    hard and the policy gave up on bending at all), drop the weight
-    to -0.2. If the asymmetric pose persists past ~5k iterations,
-    bump to -1.0.
-    Expect secondary improvements:
-       * ``action_rate_l2`` magnitude should decrease (no more
-         one-knee oscillation to micro-balance).
-       * Entropy curve should plateau or start descending — once the
-         policy commits to a symmetric stance the asymmetric escape
-         is no longer free.
-       * ``mean_reward`` may drop transiently as the policy gives up
-         the asymmetric solution before finding the symmetric one;
-         expect a recovery within ~3k iterations.
-    Observation and action layouts UNCHANGED. No firmware changes.
-  * v0.9 — URDF rename + hip flexion link redesign. The joint names
-    on the articulation were anatomically incorrect: the joint
-    immediately under ``base_link`` was called
-    ``hip_abduction_*_joint`` but its axis is Y (pitch), i.e.
-    flexion. The leg chain has been renamed end-to-end to match the
-    real anatomy:
-       hip_abduction_{l,r}_joint  ->  hip_flexion_{l,r}_joint   (was always pitch)
-       femur_{l,r}_joint          ->  hip_abduction_{l,r}_joint (was always roll)
-       shin_{l,r}_joint           ->  knee_flexion_{l,r}_joint
-       foot_{l,r}_joint           ->  foot_{l,r}_joint            (unchanged)
-    Chain ORDER (base_link -> joint0 -> joint1 -> joint2 -> joint3
-    -> foot) is unchanged, so JOINT_NAMES_ALL still indexes the
-    same physical motors at the same positions and the 24-dim MIT
-    action / 52-dim observation layouts stay byte-identical. The
-    trained v0.8 ONNX is still architecturally compatible.
-    BUT: the link physically attached to the top of the leg
-    (formerly ``hip_abduction_*_1``, now ``hip_flexion_*_1``) was
-    also redesigned in CAD. Mass 1.000 kg -> 1.149 kg, new inertia
-    tensor, new mesh. The torso ``base_link`` mass was also
-    refined from the CAD: 7.0 kg -> 6.70 kg. The USD asset has
-    been re-exported with the new geometry + masses + link names.
-    Sim dynamics therefore changed at the leg root: the rotational
-    inertia about the hip-flexion axis is ~15% higher, so the
-    effective bandwidth on that axis drops a hair. Expect the v0.8
-    policy to *load* (same input / output shape) but converge to a
-    slightly different equilibrium; plan on a fine-tune pass rather
-    than a hard warm-start.
-    Companion edits in this PR:
-       * ``bebop_v2_rewards.py``: ``shin_symmetry_penalty`` renamed
-         to ``knee_symmetry_penalty``. The function itself is index
-         based (still indexes 4 / 5 in JOINT_NAMES_ALL), so the
-         behaviour is identical — only the symbol changed.
-       * Actuator group keys in this file renamed for clarity
-         (``"hip_abduction"`` -> ``"hip_flexion"``, ``"femur"`` ->
-         ``"hip_abduction"``, ``"shin"`` -> ``"knee_flexion"``).
-         Pure dict-key change; no effect on which motors the
-         actuator binds to (Isaac Lab matches actuators by
-         ``joint_names_expr``, not by the group key).
-       * Reset event names renamed ``reset_shin_{l,r}_crouch`` ->
-         ``reset_knee_{l,r}_crouch``.
-    Firmware-side rename of ``JOINT_NAMES`` in
-    ``observation.rs`` + the keys in
-    ``firmware/bebop-linux/config/bebop_v2.yaml`` are NOT done as
-    part of this PR; until they land, do not deploy a v0.9
-    checkpoint to the real robot — sim and firmware joint names
-    will disagree even though the physical motor mapping is
-    identical, and any future YAML-driven safety override would
-    fail to find the renamed joints.
+Terminations:
+  * ``imu_pitch_out_of_bounds`` — end episode when ``|pitch| > 20°`` from
+                              vertical (``|proj_grav[0]| > sin(20°)``), before
+                              the torso hits the ground.
+  * ``base_link_ground_contact`` — torso height near floor (fallen).
 
-Deployment note: as of v0.4 the policy emits the same 24-dim MIT-mode
-action vector the firmware ``PolicyRunner`` already expects (8 raw
-positions + 8 raw kp + 8 raw kd, decoded with the same affine clamps
-as in ``firmware/bebop-linux/config/bebop_v2.yaml``). So an ONNX
-export from this experiment should drop into the existing firmware
-loader without code changes — barring observation-layout drift
-between sim and firmware. The observation builder on the firmware
-side ``firmware/bebop-linux/src/observation.rs`` must emit exactly
-the 52-dim vector this file consumes (3 base_lin_vel + 3 base_ang_vel
-+ 3 projected_gravity + 8 joint_pos + 8 joint_vel + 24 last_action +
-3 velocity_commands). If those terms or their order ever drift,
-retrain.
+Reset randomization (this version):
+  * Joints sampled uniformly per-joint within their soft limits via
+    ``reset_joints_uniform_within_limits`` — covers the full configuration
+    box, not just a tight band around the default pose. Some sampled
+    poses are unrecoverable from ``base_link.z = 0.8 m`` (e.g. knee fully
+    folded with foot above ground); expect a non-trivial fraction of
+    episodes to terminate early. Watch ``mean_episode_length`` and the
+    ``base_link_ground_contact`` termination rate to confirm there's
+    still useful signal getting through.
+  * Base roll ±0.30 rad; pitch biased toward back lean ``(-0.35, +0.10)``
+    rad (~−20°..+6°) — forward pitch samples are rare because hardware
+    cannot recover from forward tilt. Yaw full ±π.
+  * Initial angular velocity perturbed by ±0.5 rad/s on all three axes.
+
+Deliberately off (add back one at a time after hardware validation):
+  * Mid-episode pushes, observation noise, contact sensors, stepping rewards.
+  * ``flat_orientation``, ``base_height``, ``joint_deviation_l1``, symmetry
+    penalties beyond the asymmetric pitch term above.
+
+Deployment checklist (every run):
+  1. Export ONNX from the training run.
+  2. Confirm ``pos_scale`` (0.5), ``max_pos_step_per_tick`` (0.020), and
+     ``POLICY_*`` clamps match ``bebop_v2.yaml``.
+  3. Pose the robot near the trained init (joints ≈ 0, torso ~15–20° back)
+     before RunPolicy.
+  4. Log raw actions + decoded targets on hardware; compare to sim play mode.
 """
 
 import math
@@ -331,7 +79,7 @@ import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
 import isaaclab.envs.mdp as mdp
 
-from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.actuators import DCMotorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -343,19 +91,23 @@ from isaaclab.managers import TerminationTermCfg as TermTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ImuCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.noise import UniformNoiseCfg
 
 from ..envs.bebop_v2_actions import VariableImpedanceJointActionCfg
-from ..envs.bebop_v2_rewards import foot_flat_reward, knee_symmetry_penalty
-from ..envs.bebop_v2_terminations import base_link_on_ground
+from ..envs.bebop_v2_events import reset_joints_uniform_within_limits
+from ..envs.bebop_v2_rewards import torso_pitch_asymmetric_reward
+from ..envs.bebop_v2_terminations import base_link_on_ground, imu_pitch_out_of_bounds
 
 
-# ---------------------------------------------------------------------------
-# Joint order MUST match firmware/bebop-linux/src/observation.rs::JOINT_NAMES
-# so an exported ONNX policy from this experiment lines up with the on-robot
-# observation builder. Same list as ``bebop_v2_base_cfg.JOINT_NAMES_ALL`` —
-# duplicated here on purpose so the file is self-contained.
-# ---------------------------------------------------------------------------
+# IMU pitch convention (body FLU, same as obs / firmware):
+#   proj_grav[0] < 0  => torso pitched back (stable band on hardware)
+#   proj_grav[0] > 0  => torso pitched forward (falls)
+PITCH_FALL_LIMIT_DEG = 20.0
+PITCH_FALL_LIMIT_GX = math.sin(math.radians(PITCH_FALL_LIMIT_DEG))
+TARGET_PITCH_BACK_DEG = 17.0
+TARGET_PITCH_BACK_GX = -math.sin(math.radians(TARGET_PITCH_BACK_DEG))
+
+
+# Joint order must match firmware/bebop-linux/src/observation.rs::JOINT_NAMES.
 JOINT_NAMES_ALL = [
     "hip_flexion_left_joint",
     "hip_flexion_right_joint",
@@ -367,63 +119,42 @@ JOINT_NAMES_ALL = [
     "foot_right_joint",
 ]
 
-
-# ---------------------------------------------------------------------------
-# Per-joint kp / kd clamps for the variable-impedance action term (v0.4).
-#
-# The policy emits a 24-dim raw action per tick: 8 raw positions, 8 raw kp,
-# 8 raw kd. The kp / kd channels go through ``tanh``-style clamping into
-# ``[-1, 1]`` then an affine map into the per-joint range below. The 8-tuple
-# layout matches ``JOINT_NAMES_ALL`` exactly:
-#
-#     idx 0,1 = hip_flexion_{left,right}    (Robstride RS04)
-#     idx 2,3 = hip_abduction_{left,right}  (RS03)
-#     idx 4,5 = knee_flexion_{left,right}   (RS04)
-#     idx 6,7 = foot_{left,right}           (RS02)
-#
-# These values MUST mirror ``POLICY_KP_MIN/MAX`` and ``POLICY_KD_MIN/MAX`` in
-# ``bebop_v2_base_cfg.py`` and ``policy_gain_clamps`` in
-# ``firmware/bebop-linux/config/bebop_v2.yaml``. If you change one side,
-# change the other two — the policy bakes in this gain envelope and the
-# firmware loader will reject any clamp exceeding the motor model's
-# encoder ceiling.
-#
-# The minima are non-zero on purpose: the policy can't fully unload a joint
-# (kp -> 0 would mean "the leg goes limp"), only soften it.
-# ---------------------------------------------------------------------------
-POLICY_KP_MIN = [5.0, 5.0, 20.0, 20.0, 10.0, 10.0, 5.0, 5.0]
+# Per-joint kp/kd clamps for the 24-dim MIT action. Must mirror
+# POLICY_KP_MIN/MAX and POLICY_KD_MIN/MAX in bebop_v2_base_cfg.py and
+# policy_gain_clamps in firmware/bebop-linux/config/bebop_v2.yaml.
+POLICY_KP_MIN = [20.0, 20.0, 40.0, 40.0, 30.0, 30.0, 30.0, 30.0]
 POLICY_KP_MAX = [100.0, 100.0, 300.0, 300.0, 250.0, 250.0, 250.0, 250.0]
-POLICY_KD_MIN = [0.5, 0.5, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2]
-POLICY_KD_MAX = [5.0, 5.0, 8.0, 8.0, 8.0, 8.0, 4.5, 4.5]
+POLICY_KD_MIN = [1.5, 1.5, 2.0, 2.0, 2.0, 2.0, 1.0, 1.0]
+POLICY_KD_MAX = [5.0, 5.0, 8.0, 8.0, 8.0, 8.0, 5.0, 5.0]
+
+# Robstride motor friction / armature estimates and T-N curve corners.
+JOINT_FRICTION_HIP_FLEX = 0.5
+JOINT_FRICTION_HIP_ABD = 0.3
+JOINT_FRICTION_KNEE_FLEX = 0.5
+JOINT_FRICTION_FOOT = 0.1
+
+JOINT_ARMATURE_HIP_FLEX = 0.025
+JOINT_ARMATURE_HIP_ABD = 0.012
+JOINT_ARMATURE_KNEE_FLEX = 0.025
+JOINT_ARMATURE_FOOT = 0.004
+
+MOTOR_STALL_TORQUE_RS04 = 120.0
+MOTOR_STALL_TORQUE_RS03 = 60.0
+MOTOR_STALL_TORQUE_RS02 = 17.0
+
+MOTOR_NOLOAD_VEL_RS04 = 20.9
+MOTOR_NOLOAD_VEL_RS03 = 20.4
+MOTOR_NOLOAD_VEL_RS02 = 42.9
 
 
 def _midpoint(lo: list[float], hi: list[float]) -> list[float]:
     return [0.5 * (a + b) for a, b in zip(lo, hi)]
 
 
-# Midpoints are used as the seeded ImplicitActuator stiffness / damping
-# values. The variable-impedance action term overwrites them every tick
-# (via write_joint_stiffness_to_sim / write_joint_damping_to_sim), so
-# these only matter for the first physics sub-step at episode reset
-# before the policy emits its first action.
 _KP_MID = _midpoint(POLICY_KP_MIN, POLICY_KP_MAX)
 _KD_MID = _midpoint(POLICY_KD_MIN, POLICY_KD_MAX)
 
 
-# ---------------------------------------------------------------------------
-# Articulation: USD asset + per-joint Robstride PD seeded at the midpoint
-# of each joint's policy kp / kd clamp range.
-#
-# Under variable impedance (v0.4) the action term overwrites these gains
-# every tick — they only define the actuator state for the first physics
-# sub-step after an episode reset, before the policy has emitted its
-# first action. Using the midpoint here means a zero-raw-output policy
-# would produce the same gains the action term seeds with, so reset
-# transients are minimised.
-#
-# Effort / velocity ceilings mirror the firmware's ``hard_limits`` so
-# sim and real share the same saturation behaviour.
-# ---------------------------------------------------------------------------
 BEBOP_V2_STANDING_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path="/workspace/bebop_bot/sim/usd/bebopv2/bebopv2.usda",
@@ -444,123 +175,78 @@ BEBOP_V2_STANDING_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        # The USD root carries a built-in +Z translation so feet touch the
-        # ground when joint angles are zero. Must match that or the legs
-        # spawn below the floor.
         pos=(0.0, 0.0, 0.8),
         joint_pos={joint_name: 0.0 for joint_name in JOINT_NAMES_ALL},
         joint_vel={joint_name: 0.0 for joint_name in JOINT_NAMES_ALL},
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
-        # Hip flexion (RS04). Top joint off base_link, Y-axis pitch.
-        # Policy kp / kd clamps: [5..100] / [0.5..5].
-        "hip_flexion": ImplicitActuatorCfg(
+        "hip_flexion": DCMotorCfg(
             joint_names_expr=[
                 "hip_flexion_left_joint",
                 "hip_flexion_right_joint",
             ],
+            saturation_effort=MOTOR_STALL_TORQUE_RS04,
             effort_limit_sim=84.0,
             velocity_limit_sim=12.0,
+            velocity_limit=MOTOR_NOLOAD_VEL_RS04,
             stiffness=_KP_MID[0],
             damping=_KD_MID[0],
-            armature=0.01,
-            friction=0.0,
+            armature=JOINT_ARMATURE_HIP_FLEX,
+            friction=JOINT_FRICTION_HIP_FLEX,
         ),
-        # Hip abduction (RS03). Roll axis between hip_flexion and
-        # knee_flexion links. Policy clamps: [20..300] / [1..8].
-        "hip_abduction": ImplicitActuatorCfg(
+        "hip_abduction": DCMotorCfg(
             joint_names_expr=[
                 "hip_abduction_left_joint",
                 "hip_abduction_right_joint",
             ],
+            saturation_effort=MOTOR_STALL_TORQUE_RS03,
             effort_limit_sim=42.0,
             velocity_limit_sim=12.0,
+            velocity_limit=MOTOR_NOLOAD_VEL_RS03,
             stiffness=_KP_MID[2],
             damping=_KD_MID[2],
-            armature=0.005,
-            friction=0.0,
+            armature=JOINT_ARMATURE_HIP_ABD,
+            friction=JOINT_FRICTION_HIP_ABD,
         ),
-        # Knee flexion (RS04). Policy clamps: [10..250] / [1..8].
-        "knee_flexion": ImplicitActuatorCfg(
+        "knee_flexion": DCMotorCfg(
             joint_names_expr=[
                 "knee_flexion_left_joint",
                 "knee_flexion_right_joint",
             ],
+            saturation_effort=MOTOR_STALL_TORQUE_RS04,
             effort_limit_sim=84.0,
             velocity_limit_sim=12.0,
+            velocity_limit=MOTOR_NOLOAD_VEL_RS04,
             stiffness=_KP_MID[4],
             damping=_KD_MID[4],
-            armature=0.01,
-            friction=0.0,
+            armature=JOINT_ARMATURE_KNEE_FLEX,
+            friction=JOINT_FRICTION_KNEE_FLEX,
         ),
-        # Foot / ankle (RS02). Policy clamps: [5..250] / [0.2..4.5].
-        "foot": ImplicitActuatorCfg(
+        "foot": DCMotorCfg(
             joint_names_expr=["foot_left_joint", "foot_right_joint"],
+            saturation_effort=MOTOR_STALL_TORQUE_RS02,
             effort_limit_sim=17.0,
             velocity_limit_sim=20.0,
+            velocity_limit=MOTOR_NOLOAD_VEL_RS02,
             stiffness=_KP_MID[6],
             damping=_KD_MID[6],
-            armature=0.003,
-            friction=0.0,
+            armature=JOINT_ARMATURE_FOOT,
+            friction=JOINT_FRICTION_FOOT,
         ),
     },
 )
 
 
-# ---------------------------------------------------------------------------
-# Actions: MIT-mode variable impedance. 24-dim raw policy output.
-#
-# Layout (raw):
-#   raw[ 0: 8] -> position commands, scaled to ``default + pos_scale * raw``
-#   raw[ 8:16] -> kp commands, affine-mapped to per-joint ``[kp_min, kp_max]``
-#   raw[16:24] -> kd commands, affine-mapped to per-joint ``[kd_min, kd_max]``
-#
-# Position-channel hard slew clamp (v0.5):
-#   ``max_pos_step_per_tick=0.020`` rad/tick = 2 rad/s @ 100 Hz. This
-#   is the safety envelope target. The clamp truncates the absolute
-#   per-tick change of the decoded position target, NOT the policy's
-#   raw output — so the policy is free to emit any raw value, but the
-#   sim only ever advances each joint target by at most 0.020 rad per
-#   tick. The kp / kd channels are NOT slew-clamped (variable
-#   impedance demands instantaneous between-tick gain changes).
-#
-#   This MUST mirror ``defaults.slew.max_pos_step_per_tick`` in
-#   ``firmware/bebop-linux/config/bebop_v2.yaml`` for any deployed
-#   policy. If the firmware is still at 0.015 when you deploy this,
-#   the firmware will clip more tightly than sim and the policy will
-#   lag behind its own commanded targets. Raise the firmware YAML to
-#   0.020 in lockstep, or retrain with the lower value.
-#
-# Action delay is still off (``action_delay_steps=0``). That's the
-# v0.6 knob — adds 2-tick CAN + motor lag to mirror real-robot
-# latency.
-#
-# The kp / kd clamps mirror the firmware YAML's ``policy_gain_clamps``
-# block (see POLICY_*_MIN / POLICY_*_MAX constants at the top of this
-# file). They are not optional — the firmware loader rejects any clamp
-# that exceeds the motor's safe envelope.
-# ---------------------------------------------------------------------------
 @configclass
 class ActionsCfg:
     joint_pos = VariableImpedanceJointActionCfg(
         asset_name="robot",
         joint_names=JOINT_NAMES_ALL,
-        # MUST match ``scales::SCALE_ACTION`` in
-        # ``firmware/bebop-linux/src/config.rs`` (currently 0.5). The
-        # firmware decodes the policy's raw position output as
-        # ``target = default + SCALE_ACTION * clamp(raw, -1, 1)``. If
-        # this constant ever differs from the firmware value, deployed
-        # commands silently mis-scale. 0.5 means raw=±1.0 maps to
-        # ±0.5 rad per joint -- enough for standing and slow walking,
-        # well inside the hard safety envelope (foot joints cap at
-        # ±0.8 rad in firmware). Raise this (sim and firmware
-        # together, then retrain) when transitioning to highly dynamic
-        # motions that need more per-tick reach.
         pos_scale=0.5,
         use_default_offset=True,
         max_pos_step_per_tick=0.020,
-        action_delay_steps=0,
+        action_delay_steps=2,
         kp_min=POLICY_KP_MIN,
         kp_max=POLICY_KP_MAX,
         kd_min=POLICY_KD_MIN,
@@ -568,66 +254,27 @@ class ActionsCfg:
     )
 
 
-# ---------------------------------------------------------------------------
-# Observations: 52-dim policy input matching the firmware's
-# ``observation.rs`` builder contract.
-#
-# Layout (52-dim, post-v0.6):
-#   [ 0: 3] base_lin_vel        — torso linear velocity in body frame
-#                                 (firmware-zero on the real robot; sim
-#                                 ground-truth with wide noise here as a
-#                                 light proxy for "we can't trust this")
-#   [ 3: 6] base_ang_vel        — IMU gyro (BNO085 → body-frame rad/s)
-#   [ 6: 9] projected_gravity   — IMU rotation vector → body-frame gravity
-#   [ 9:17] joint_pos_rel       — encoder positions, relative to default
-#   [17:25] joint_vel_rel       — encoder velocities, relative to default
-#   [25:49] actions             — previous tick's raw policy output (24-dim:
-#                                 8 positions + 8 kp + 8 kd channels)
-#   [49:52] velocity_commands   — base velocity command from the command
-#                                 manager. Pinned to (0,0,0) for the
-#                                 stand task — three constant-zero
-#                                 inputs that the firmware still emits.
-#
-# Per-tick Gaussian noise (v0.3) is injected on the five sensor-derived
-# observation terms so the policy learns to be robust to the real
-# BNO085 + Robstride encoder noise envelope. ``actions`` and
-# ``velocity_commands`` are unnoised — both come from controllable
-# upstream sources (the policy itself, and the command manager) rather
-# than physical sensors.
-#
-# The 52-dim layout MUST stay byte-identical to the firmware-side
-# observation builder. If the firmware's
-# ``firmware/bebop-linux/src/observation.rs`` ever changes the layout
-# or order of these terms, this block has to move in lockstep — and
-# the policy has to be retrained, because the input layer shape is
-# baked into the ONNX.
-# ---------------------------------------------------------------------------
 @configclass
 class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
-        base_lin_vel = ObsTerm(
-            func=mdp.base_lin_vel,
-            noise=UniformNoiseCfg(n_min=-0.2, n_max=0.2),
-        )
+        # NOTE: base_lin_vel is intentionally NOT an observation. Bebop V2
+        # has no wheel odometry or VIO estimator, so the real robot can only
+        # ever feed zeros for it (see firmware policy_runner.rs). Training
+        # against the sim's privileged ground-truth base velocity created a
+        # 3-dim sim-to-real gap that destabilized deployment. The standing
+        # task is at zero command, so base linear velocity carries no policy
+        # signal anyway — it lives only in the (privileged) tracking rewards.
         base_ang_vel = ObsTerm(
             func=mdp.imu_ang_vel,
             params={"asset_cfg": SceneEntityCfg("imu")},
-            noise=UniformNoiseCfg(n_min=-0.3, n_max=0.3),
         )
         projected_gravity = ObsTerm(
             func=mdp.imu_projected_gravity,
             params={"asset_cfg": SceneEntityCfg("imu")},
-            noise=UniformNoiseCfg(n_min=-0.05, n_max=0.05),
         )
-        joint_pos = ObsTerm(
-            func=mdp.joint_pos_rel,
-            noise=UniformNoiseCfg(n_min=-0.02, n_max=0.02),
-        )
-        joint_vel = ObsTerm(
-            func=mdp.joint_vel_rel,
-            noise=UniformNoiseCfg(n_min=-0.5, n_max=0.5),
-        )
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel)
         actions = ObsTerm(func=mdp.last_action)
         velocity_commands = ObsTerm(
             func=mdp.generated_commands,
@@ -638,263 +285,137 @@ class ObservationsCfg:
         self.policy = self.PolicyCfg()
 
 
-# ---------------------------------------------------------------------------
-# Events: reset randomization + mid-episode pushes.
-#
-# Mass / friction / CoM are still NOT randomized — the whole experiment
-# is a clean baseline where sim runs on the bench-measured real values.
-# But what IS randomized matters: the policy is exposed to a wider
-# initial-state distribution than v0.6 AND to mid-episode disturbances
-# (added in v0.7) so the converged behaviour is "stand AND recover from
-# a perturbation", not just "stand from near-zero".
-#
-# Reset bias toward a crouch
-# --------------------------
-# ``reset_joints`` puts a tight ±0.05 rad jitter on every joint — the
-# same small perturbation v0.6 used, just enough to break determinism
-# and force the policy to read its observations. On top of that:
-#
-# ``reset_knee_{left,right}_crouch`` overrides the knee_flexion joints
-# with a wider, asymmetric-by-mirror-convention bias so each reset
-# samples something between "straight knees" and "moderately bent
-# forward". The knee_flexion convention on this articulation is that
-# ``+knee_flexion_left`` and ``-knee_flexion_right`` are the same
-# physical knee-forward motion (see ``knee_symmetry_penalty`` docstring);
-# the two terms below therefore use opposite-signed ranges of equal
-# magnitude.
-#
-# These run AFTER ``reset_joints`` (IsaacLab event order = config-class
-# declaration order) and overwrite the knee_flexion values, so the
-# ±0.05 jitter on the knees is replaced by the wider crouch range. The
-# other six joints retain their ±0.05 jitter.
-#
-# The hip_flexion, hip_abduction, and foot joints are NOT biased here.
-# A knee bend without the matching hip/ankle compensation puts the
-# CoM forward of the foot, which the policy has to correct itself —
-# that compensation chain (hip_flexion, knee_flexion, ankle acting
-# together) is the actual balance strategy we want the policy to
-# learn, so we don't want to short-circuit it by pre-arranging the
-# start pose.
-# ---------------------------------------------------------------------------
 @configclass
 class EventCfg:
+    # Per-joint uniform sampling across each joint's soft limits. With
+    # soft_joint_pos_limit_factor = 0.9, this covers ~90% of the URDF
+    # range for every joint, including the asymmetric knee
+    # (-1.41, +0.71 rad) and hip-abduction (-0.31, +0.16 rad on the
+    # right, mirror on the left) ranges that a symmetric offset can't
+    # represent. The VariableImpedanceJointAction's reset() reads the
+    # post-event joint pose into the slew tracker, so whatever we
+    # sample here becomes the policy's true initial condition (it
+    # won't get yanked back to zero on tick 1).
     reset_joints = EventTerm(
-        func=mdp.reset_joints_by_offset,
+        func=reset_joints_uniform_within_limits,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=JOINT_NAMES_ALL),
-            "position_range": (-0.05, 0.05),  # ~3° on every joint
-            "velocity_range": (-0.1, 0.1),
+            "velocity_range": (-0.5, 0.5),
         },
     )
-    reset_knee_left_crouch = EventTerm(
-        func=mdp.reset_joints_by_offset,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg(
-                "robot", joint_names=["knee_flexion_left_joint"]
-            ),
-            # (-0.05, +0.45) covers straight knee (~0 rad) up to a
-            # moderately-bent-forward stance (~26°). The wider end is
-            # close to the v0.2 converged knee-bend angle so the policy
-            # can keep its trained pose from this start, while the
-            # narrow end keeps backward-compatibility with the v0.6
-            # near-zero start.
-            "position_range": (-0.05, 0.45),
-            "velocity_range": (-0.1, 0.1),
-        },
-    )
-    reset_knee_right_crouch = EventTerm(
-        func=mdp.reset_joints_by_offset,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg(
-                "robot", joint_names=["knee_flexion_right_joint"]
-            ),
-            # Mirror of knee_flexion_left (see ``knee_symmetry_penalty``
-            # for the sign convention — the right joint's local frame
-            # is rotated 180° about X, so +knee_flexion_left and
-            # -knee_flexion_right are the same physical motion).
-            "position_range": (-0.45, 0.05),
-            "velocity_range": (-0.1, 0.1),
-        },
-    )
+    # Wide base-orientation randomization. roll / pitch directly enter
+    # projected_gravity, so the policy actually sees these. yaw is
+    # invariant to projected_gravity and shows up only via imu_ang_vel
+    # over the recovery transient — at zero command the robot is
+    # yaw-symmetric, so full ±pi yaw is a free robustness probe.
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
             "pose_range": {
-                "x":     (0.0, 0.0),
-                "y":     (0.0, 0.0),
-                "z":     (0.0, 0.0),
-                # ±0.10 rad (~5.7°) on both axes. v0.6 was ±0.035
-                # (~2°), which the deployed policy showed it couldn't
-                # generalise beyond — backward tilts past 2° were OOD
-                # and the policy panicked. Symmetric pitch range fills
-                # the gap in both directions; this is the single most
-                # important v0.7 change for backward-recovery.
-                "roll":  (-0.10, 0.10),
-                "pitch": (-0.10, 0.10),
-                "yaw":   (0.0, 0.0),
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "roll": (-0.30, 0.30),
+                # Bias toward back lean; rare forward samples (hardware
+                # cannot recover from forward pitch).
+                "pitch": (-PITCH_FALL_LIMIT_GX, 0.10),
+                "yaw": (-math.pi, math.pi),
             },
             "velocity_range": {
-                "x":     (0.0, 0.0),
-                "y":     (0.0, 0.0),
-                "z":     (0.0, 0.0),
-                # Modest initial angular velocity so some episodes
-                # start "already falling" — forces the policy to
-                # learn dynamic recovery, not just static balance
-                # from rest.
-                "roll":  (-0.3, 0.3),
-                "pitch": (-0.3, 0.3),
-                "yaw":   (0.0, 0.0),
-            },
-        },
-    )
-    # Mid-episode pushes. The 4–8 s interval means a 20 s episode sees
-    # ~3–5 pushes — enough that the policy can't memorize a post-push
-    # settling sequence, must learn a generic recovery instead.
-    # Magnitudes are tuned for a 7 kg torso: ±0.4 m/s longitudinal is
-    # roughly the impulse from a firm shove to the chest, ±0.3 m/s
-    # lateral is the binding case because the biped support polygon
-    # is narrower in y. The angular components nudge the torso a few
-    # degrees per push — enough to require active reaction without
-    # straight-up tipping the robot over.
-    push_robot = EventTerm(
-        func=mdp.push_by_setting_velocity,
-        mode="interval",
-        interval_range_s=(4.0, 8.0),
-        params={
-            "velocity_range": {
-                "x":     (-0.4, 0.4),
-                "y":     (-0.3, 0.3),
-                "roll":  (-0.3, 0.3),
-                "pitch": (-0.3, 0.3),
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "roll": (-0.5, 0.5),
+                "pitch": (-0.5, 0.5),
+                "yaw": (-0.5, 0.5),
             },
         },
     )
 
 
-# ---------------------------------------------------------------------------
-# Rewards: seven terms. Every additional shaping term is a knob we have
-# to defend later. If standing can't be learned with just these, the
-# issue is the dynamics, not the reward landscape.
-#
-#   alive             — +1 every tick the robot is still upright
-#   flat_orientation  — penalise non-vertical torso (gravity off body-z)
-#   base_height       — penalise torso CoM far from the standing height
-#   joint_pos_limits  — penalise crashing into a joint's hard stop
-#   action_rate_l2    — penalise rapid action changes between ticks
-#   foot_flat         — reward feet's local +z aligned with world +z
-#   knee_symmetry     — penalise asymmetric knee bend (v0.8)
-#
-# ``action_rate_l2`` (added in v0.1) is the soft analogue of a hard
-# slew clamp: it makes large per-tick action deltas expensive, which
-# both suppresses foot micro-oscillation and indirectly limits how
-# large the action distribution std can grow (a wider std produces
-# larger expected ``(a_t - a_{t-1})^2``, which costs reward). At the
-# converged smooth-stand pose this term contributes essentially zero
-# to the reward — its only job is to penalise the path away from that
-# pose.
-#
-# ``foot_flat`` (added in v0.2) closes the heel-balance loophole the
-# policy found in v0.1. Without it the cheapest static equilibrium
-# is "rotate the foot toes-up so the heel becomes the contact patch
-# directly under the torso CoM" — a single-joint trick that doesn't
-# need any active balancing. With it, that trick costs the policy
-# the full +1.0/tick foot-flat bonus per foot, forcing it to use a
-# coordinated hip + knee + ankle strategy that keeps both feet flat
-# AND the CoM over the support polygon (which requires a small
-# forward torso lean given this robot's geometry).
-#
-# ``knee_symmetry`` (added in v0.8) closes a different loophole: the
-# v0.7 policy converged to an asymmetric crouch — one knee deeply
-# bent, the other near-straight and oscillating — because all the
-# other terms are pose-symmetry-blind. ``foot_flat`` only cares
-# about world-frame foot orientation, ``base_height`` only about
-# torso z, ``flat_orientation`` only about torso tilt; none of them
-# distinguish "both knees bent 0.3 rad" from "one knee bent 0.6 rad,
-# other straight". The new penalty scores
-# ``(knee_flexion_left + knee_flexion_right)^2`` (the sum, not the
-# difference, because the right joint's local frame is rotated 180°
-# about X — see the docstring on ``knee_symmetry_penalty`` in
-# ``bebop_v2_rewards.py``), which is zero exactly when both knees
-# bend forward by the same magnitude. The asymmetric attractor now
-# pays a cost proportional to its imbalance, breaking the tie that
-# kept PPO sitting there.
-#
-# Weight tuning notes:
-#   * If ``foot_flat`` is too dominant the policy may sacrifice
-#     ``flat_orientation`` (let the torso lean significantly) to
-#     keep the feet flat. If the torso tilt at convergence exceeds
-#     ~10°, drop foot_flat to 0.5 and/or widen its ``std`` (current
-#     default 0.25; loosen toward 0.35 to give recovery more room).
-#   * If the policy starts using heel-balance again (toes lifted,
-#     foot dorsiflexed past ~25°) the v0.7 0.25 std is too loose —
-#     drop back to 0.20 or bump foot_flat weight to 1.5–2.0.
-#   * If ``knee_symmetry`` is too dominant the policy may collapse
-#     to fully-straight knees (the only symmetric pose that
-#     completely zeros the penalty), giving up the crouch that
-#     ``foot_flat`` + ``base_height`` jointly prefer. Drop weight to
-#     -0.2. If asymmetric crouch persists past ~5k iterations,
-#     bump to -1.0.
-#   * If training entropy collapses early (action std crashes toward
-#     zero too fast, policy can't explore, learning stalls), reduce
-#     ``action_rate_l2`` magnitude (e.g. -0.05 -> -0.02) or lower the
-#     PPO ``entropy_coef`` in tandem so the optimizer keeps pushing
-#     on exploration.
-# ---------------------------------------------------------------------------
 @configclass
 class RewardsCfg:
+    """Standing balance rewards aligned with hardware pitch behaviour."""
+
     alive = RewTerm(func=mdp.is_alive, weight=1.0)
-    flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)
-    base_height = RewTerm(
-        func=mdp.base_height_l2,
-        weight=-1.0,
+
+    # Hardware-stable band: torso ~15–20° pitched back. Forward pitch
+    # is penalized inside the reward; ``imu_pitch_out_of_bounds`` ends
+    # the episode at ±20° from vertical.
+    torso_pitch = RewTerm(
+        func=torso_pitch_asymmetric_reward,
+        weight=0.5,
         params={
-            "target_height": 0.8,
-            "asset_cfg": SceneEntityCfg("robot"),
+            "target_gx": TARGET_PITCH_BACK_GX,
+            "good_std": 0.12,
+            "roll_std": 0.15,
+            "forward_penalty_gain": 5.0,
+            "forward_deadband": 0.0,
         },
     )
+
     joint_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
-    foot_flat = RewTerm(
-        func=foot_flat_reward,
+
+    # Zero-command tracking → "be still" reward. CommandsCfg.base_velocity
+    # is pinned to (0, 0, 0) for this standing task, so the exponential
+    # tracking rewards reduce to exp(-||v||² / std²) on base linear-xy
+    # and base angular-z. Bounded in [0, 1] per tick, which is why we use
+    # them as the *carrot* instead of an unbounded L2 velocity penalty:
+    # during a legitimate balance-recovery transient the reward just
+    # saturates toward 0, it does not actively fight `alive` or
+    # `torso_pitch` the way a quadratic stick would.
+    #
+    # std picked so the reward decays to ~1/e at typical drift speeds
+    # but is still close to 1 inside the noise floor of a quiet stand.
+    track_lin_vel_xy = RewTerm(
+        func=mdp.track_lin_vel_xy_exp,
         weight=1.0,
-        # std bumped from 0.15 (v0.2) to 0.25 (v0.7). The original 0.15
-        # made any foot tilt above ~8.6° expensive, which suppressed the
-        # ankle-strategy recovery from a backward lean (the natural
-        # response is to lift the heel and pivot on the toes — that's a
-        # foot tilt). At 0.25 the reward drops to 0.37 at ~14° tilt
-        # instead, which is loose enough for real recovery motion but
-        # still tight enough to crowd out the v0.1 heel-balance trick
-        # (toes-up at ~30°+).
-        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.25},
+        params={"std": 0.25, "command_name": "base_velocity"},
     )
-    # v0.8: breaks the asymmetric-knee attractor the v0.7 policy
-    # parked in. Scores ``(knee_flexion_left + knee_flexion_right)^2``
-    # (sum, not difference — see ``knee_symmetry_penalty`` docstring
-    # for the mirrored-frame convention), which is zero when both
-    # knees bend forward equally and grows quadratically with
-    # imbalance. Weight -0.5 matches the original kitchen-sink config
-    # value. A 0.3 rad mismatch (e.g. one knee 0.4, one knee 0.1)
-    # costs 0.5 * 0.09 = 0.045/tick — small per-tick but compounded
-    # over a 2000-tick episode it's a ~90-point reward gap vs. the
-    # symmetric solution, enough to make PPO commit.
-    knee_symmetry = RewTerm(
-        func=knee_symmetry_penalty,
-        weight=-0.5,
-        params={"asset_cfg": SceneEntityCfg("robot")},
+    track_ang_vel_z = RewTerm(
+        func=mdp.track_ang_vel_z_exp,
+        weight=0.5,
+        params={"std": 0.5, "command_name": "base_velocity"},
     )
 
+    # Off-command DOFs: vertical velocity and roll/pitch rates are not in
+    # the command at all, and a healthy stand has them ~0 in every
+    # regime. Small L2 penalties act as regularizers here — same role as
+    # action_rate_l2 — without competing with the recovery reward.
+    lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-1.0)
+    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
 
-# ---------------------------------------------------------------------------
-# Terminations: episode ends on timeout (success) or on the torso
-# touching the ground (fall). No other termination conditions.
-# ---------------------------------------------------------------------------
+    # Smoothness regularizer: penalize tick-to-tick change in any of the
+    # 24 raw action channels. Catches the high-frequency *flipping* mode
+    # (e.g. foot kp 250 -> 107 -> 250 -> 250 -> 250 across consecutive
+    # ticks). Does NOT catch a policy that camps at the saturation rails
+    # without flipping — that's what action_l2 below is for.
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.02)
+
+    # Magnitude regularizer: penalize raw action magnitude directly.
+    # Each of the 24 channels is clipped to [-1, 1], so a channel parked
+    # at ±1 contributes 1.0/tick to the L2 sum; a policy fully saturated
+    # across all 24 channels pays |w| * 24 = -0.24/tick — comparable in
+    # magnitude to the +1/tick `alive` bonus, so the optimizer is
+    # strongly pushed to leave the rails on every channel that doesn't
+    # earn its keep. With this penalty the policy is pushed toward
+    # raw ≈ 0, which decodes to (default_joint_pos, kp_mid, kd_mid) —
+    # a healthy quiet-standing prior.
+    action_l2 = RewTerm(func=mdp.action_l2, weight=-0.01)
+
+
 @configclass
 class TerminationsCfg:
     time_out = TermTerm(func=mdp.time_out, time_out=True)
+    imu_pitch_out_of_bounds = TermTerm(
+        func=imu_pitch_out_of_bounds,
+        params={
+            "pitch_forward_gx_max": PITCH_FALL_LIMIT_GX,
+            "pitch_back_gx_min": -PITCH_FALL_LIMIT_GX,
+        },
+    )
     base_link_ground_contact = TermTerm(
         func=base_link_on_ground,
         params={
@@ -904,14 +425,6 @@ class TerminationsCfg:
     )
 
 
-# ---------------------------------------------------------------------------
-# Commands: required by the rsl_rl runner, but standing means "do
-# nothing forever". We keep the term present and pinned to zero so the
-# observation layout stays compatible with downstream variants that
-# DO take a velocity command (locomotion experiments) — but no
-# velocity_commands term appears in ``ObservationsCfg`` here, so the
-# command is unused for policy input.
-# ---------------------------------------------------------------------------
 @configclass
 class CommandsCfg:
     base_velocity = mdp.UniformVelocityCommandCfg(
@@ -927,12 +440,9 @@ class CommandsCfg:
     )
 
 
-# ---------------------------------------------------------------------------
-# Top-level env cfg.
-# ---------------------------------------------------------------------------
 @configclass
 class BebopV2StandingCfg(ManagerBasedRLEnvCfg):
-    decimation = 2          # 200 Hz physics, 100 Hz policy
+    decimation = 2
     episode_length_s = 20.0
 
     scene = InteractiveSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
@@ -953,9 +463,6 @@ class BebopV2StandingCfg(ManagerBasedRLEnvCfg):
 
         self.scene.robot = BEBOP_V2_STANDING_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
-        # Fixed ground friction. The base config randomizes friction in
-        # (0.4, 1.2) — we deliberately don't here. Slippery-floor
-        # robustness is a feature to be added in a later experiment.
         self.scene.terrain = terrain_gen.TerrainImporterCfg(
             prim_path="/World/ground",
             terrain_type="plane",
@@ -973,14 +480,9 @@ class BebopV2StandingCfg(ManagerBasedRLEnvCfg):
             spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)),
         )
 
-        # Body-frame IMU sensor mounted on base_link. Identity offset
-        # because the orientation transform between the BNO085 sensor
-        # frame and the body frame is handled in firmware (see the
-        # ``imu.mount`` block in bebop_v2.yaml) — sim treats the IMU as
-        # already-rotated body-frame readings.
         self.scene.imu = ImuCfg(
             prim_path="{ENV_REGEX_NS}/Robot/Geometry/base_link",
-            update_period=0.0,
+            update_period=0.005,
             debug_vis=False,
             offset=ImuCfg.OffsetCfg(
                 pos=(0.0, 0.0, 0.0),

@@ -2,14 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { PolicyIoView } from "../runtime";
 
+// 49-dim observation layout (no base_lin_vel — the robot cannot observe
+// its base linear velocity, so it was dropped from training + obs).
 const OBS_GROUPS: { title: string; start: number; end: number; unit?: string }[] = [
-  { title: "Base lin vel", start: 0, end: 3, unit: "m/s" },
-  { title: "Base ang vel", start: 3, end: 6, unit: "rad/s" },
-  { title: "Projected gravity", start: 6, end: 9 },
-  { title: "Joint pos rel", start: 9, end: 17, unit: "rad" },
-  { title: "Joint vel", start: 17, end: 25, unit: "rad/s" },
-  { title: "Last action", start: 25, end: 49 },
-  { title: "Cmd vel", start: 49, end: 52, unit: "m/s, rad/s" },
+  { title: "Base ang vel", start: 0, end: 3, unit: "rad/s" },
+  { title: "Projected gravity", start: 3, end: 6 },
+  { title: "Joint pos rel", start: 6, end: 14, unit: "rad" },
+  { title: "Joint vel", start: 14, end: 22, unit: "rad/s" },
+  { title: "Last action", start: 22, end: 46 },
+  { title: "Cmd vel", start: 46, end: 49, unit: "m/s, rad/s" },
 ];
 
 const AXIS_LABELS = ["x", "y", "z", "w"];
@@ -448,6 +449,12 @@ export function PolicyIoCard({ policyIo }: { policyIo: PolicyIoView }) {
             <StatusPill
               label={policyIo.imuLive ? "IMU live" : "IMU synthetic"}
               tone={policyIo.imuLive ? "success" : "warn"}
+            />
+          ) : null}
+          {policyIo.active ? (
+            <StatusPill
+              label={policyIo.gyroLive ? "Gyro live" : "Gyro DEAD"}
+              tone={policyIo.gyroLive ? "success" : "warn"}
             />
           ) : null}
           <div

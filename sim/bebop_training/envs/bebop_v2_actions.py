@@ -138,6 +138,56 @@ class VariableImpedanceJointAction(JointPositionAction):
         self._delay_len = cfg.action_delay_steps + 1
         self._delay_buffer: list[torch.Tensor] | None = None
 
+        # Map each Articulation actuator to the column indices in our
+        # action's 8-joint vector. Built once at init.
+        #
+        # Background: ``write_joint_stiffness_to_sim`` / ``..._damping_to_sim``
+        # update PhysX joint drives (which ``ImplicitActuator`` reads) and
+        # ``articulation.data._joint_stiffness`` / ``_joint_damping`` —
+        # but NOT the per-actuator ``actuator.stiffness`` /
+        # ``actuator.damping`` tensors that the EXPLICIT actuators
+        # (``IdealPDActuator``, ``DCMotor``, ``DelayedPDActuator``) read
+        # in their ``compute()`` PD calculation. See Isaac Lab issue
+        # #128 (the same caveat is noted inline in the physx backend
+        # at ``write_joint_damping_to_sim_index``).
+        #
+        # For ``ImplicitActuator`` this loop is harmless — the implicit
+        # actuator's ``compute()`` is a no-op and never reads
+        # ``self.stiffness`` for control purposes. For any explicit
+        # actuator (which is what you want for sim-to-real fidelity)
+        # this loop is the difference between "policy controls the
+        # gains" and "policy commands are silently ignored, actuator
+        # forever uses the seeded midpoints".
+        our_joint_id_list = self._joint_ids
+        if isinstance(our_joint_id_list, slice):
+            our_joint_id_list = list(
+                range(*our_joint_id_list.indices(self._asset.num_joints))
+            )
+        elif hasattr(our_joint_id_list, "cpu"):
+            our_joint_id_list = our_joint_id_list.cpu().tolist()
+        else:
+            our_joint_id_list = list(our_joint_id_list)
+
+        # List of (actuator_obj, indices_into_action_vec_in_actuator_joint_order)
+        self._actuator_gain_routes: list[tuple] = []
+        for _name, actuator in self._asset.actuators.items():
+            actuator_joint_ids = actuator.joint_indices
+            if isinstance(actuator_joint_ids, slice):
+                actuator_joint_ids = list(
+                    range(*actuator_joint_ids.indices(self._asset.num_joints))
+                )
+            elif hasattr(actuator_joint_ids, "cpu"):
+                actuator_joint_ids = actuator_joint_ids.cpu().tolist()
+            else:
+                actuator_joint_ids = list(actuator_joint_ids)
+            try:
+                indices_in_our_vec = [our_joint_id_list.index(j) for j in actuator_joint_ids]
+            except ValueError:
+                # Actuator owns joints outside this action term's set —
+                # skip, gains for those joints aren't ours to manage.
+                continue
+            self._actuator_gain_routes.append((actuator, indices_in_our_vec))
+
     # ------------------------------------------------------------------
     # ActionTerm overrides
     # ------------------------------------------------------------------
@@ -188,22 +238,38 @@ class VariableImpedanceJointAction(JointPositionAction):
             self._delay_buffer = [seed_vec.clone() for _ in range(self._delay_len)]
 
     def process_actions(self, actions: torch.Tensor) -> None:
-        # Store the raw 24-dim action for `last_action` observation /
-        # action_rate_l2 / action_l2 reward computation. We do this
-        # ourselves rather than calling super().process_actions() because
-        # the base class assumes a 1-channel (positions-only) layout and
-        # would mis-scale our kp / kd channels.
-        self._raw_actions[:] = actions
-
         n = self._num_joints
         num_envs = actions.shape[0]
         self._ensure_state(num_envs, actions.device)
         assert self._last_pos_target is not None
         assert self._delay_buffer is not None
 
-        # Clip every channel to [-1, 1]. Defense-in-depth: rsl_rl's
-        # Gaussian head can emit outliers above 1.
+        # Clip every channel to [-1, 1] BEFORE storing as the "raw"
+        # action. The deployed firmware clamps the policy output to
+        # [-1, 1] in `POLICY_*` clamps inside `bebop_v2.yaml`, so this
+        # is the action the real robot would see anyway.
+        #
+        # Also a critical training-stability fix: the stored
+        # ``_raw_actions`` feeds three downstream consumers that all
+        # need bounded inputs to avoid divergence:
+        #   (1) ``last_action`` observation — gets fed back into the
+        #       actor / critic next tick. With unclipped values, a
+        #       single env where the Gaussian head sampled a tail
+        #       outlier (mean=50, std=1) plants 50 into the next obs,
+        #       which matmuls into ever-larger network outputs, until
+        #       within ~10 iters the critic's value head overflows
+        #       float32 (``Mean value loss: inf`` → NaN gradients →
+        #       NaN in ``log_std`` → ``Normal(mean, NaN)`` crashes
+        #       with "normal expects all elements of std >= 0.0").
+        #   (2) ``mdp.action_l2`` / ``mdp.action_rate_l2`` rewards —
+        #       quadratic in the raw action; an unclipped 1e6 outlier
+        #       becomes a −10¹¹ reward, becomes a value target,
+        #       trains the critic into ruin.
+        #   (3) action-delay ring buffer (below) — propagates the same
+        #       raw scale into the slew tracker on the next tick.
+        # All three are bounded once ``_raw_actions`` is clipped.
         raw = actions.clamp(min=-1.0, max=1.0)
+        self._raw_actions[:] = raw
         raw_pos = raw[:, 0:n]
         raw_kp = raw[:, n : 2 * n]
         raw_kd = raw[:, 2 * n : 3 * n]
@@ -240,6 +306,16 @@ class VariableImpedanceJointAction(JointPositionAction):
         applied_kd = applied[:, 2 * n : 3 * n]
         self._asset.write_joint_stiffness_to_sim(applied_kp, joint_ids=self._joint_ids)
         self._asset.write_joint_damping_to_sim(applied_kd, joint_ids=self._joint_ids)
+
+        # Also propagate the live gains into each actuator's per-instance
+        # stiffness / damping tensors. This is required for explicit
+        # actuators (DCMotor / IdealPDActuator / DelayedPDActuator) —
+        # their PD compute() reads from these tensors, not from the
+        # articulation's joint_stiffness buffer. See the issue-#128
+        # explanation in __init__.
+        for actuator, indices in self._actuator_gain_routes:
+            actuator.stiffness[:] = applied_kp[:, indices]
+            actuator.damping[:] = applied_kd[:, indices]
 
     def apply_actions(self) -> None:
         # Per-physics-substep position target write. The base class would

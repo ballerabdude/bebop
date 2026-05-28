@@ -4,11 +4,13 @@
 Usage (from inside `bebop_isaac_lab`, with CWD = `/workspace/bebop_bot/sim`):
 
     /workspace/isaaclab/isaaclab.sh -p train_bebop.py \\
-        --task Isaac-BebopV2-Flat-v0 \\
+        --task Isaac-BebopV2-Standing-v0 \\
         --num_envs 512 --seed 42 --visualizer newton
 
-See `sim/README.md` → "Training" for the full curriculum (stand → push
-recovery → walk) and the rationale behind `--reset_action_std`.
+The only registered task right now is ``Isaac-BebopV2-Standing-v0``
+(see ``bebop_training/__init__.py``). The flat-balance, flat-locomotion,
+and rough-terrain experiments were removed; re-add them as their own
+registered tasks once each one has a working ``BebopV2*Cfg``.
 """
 
 import argparse
@@ -19,8 +21,17 @@ from datetime import datetime
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Train Bebop Robot.")
-parser.add_argument("--task", type=str, default="Isaac-Bebop-Flat-v0", help="Task name.")
+parser.add_argument("--task", type=str, default="Isaac-BebopV2-Standing-v0", help="Task name.")
 parser.add_argument("--num_envs", type=int, default=None, help="Override number of environments.")
+parser.add_argument(
+    "--num_mini_batches",
+    type=int,
+    default=None,
+    help=(
+        "Override PPO num_mini_batches. Scale together with --num_envs to "
+        "keep minibatch size roughly constant (target ~32k samples/minibatch)."
+    ),
+)
 parser.add_argument("--seed", type=int, default=None, help="Random seed.")
 parser.add_argument("--log_root", type=str, default="logs/rsl_rl", help="Root directory for logging")
 parser.add_argument(
@@ -84,6 +95,9 @@ def main():
         env_cfg.scene.num_envs = args.num_envs
     if args.seed is not None:
         env_cfg.seed = args.seed
+    if args.num_mini_batches is not None:
+        agent_cfg.algorithm.num_mini_batches = args.num_mini_batches
+        print(f"[INFO] Override PPO num_mini_batches -> {args.num_mini_batches}")
 
     # 4. Create Environment (Only Once)
     print(f"[INFO] Creating environment for task: {args.task}")

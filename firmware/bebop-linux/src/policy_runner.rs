@@ -43,8 +43,19 @@
 //! That fallback only ever fires when the sensor isn't actually present,
 //! which we surface as a `warn!` once per state transition to avoid log
 //! spam. Joint positions and velocities still come from real motor
-//! feedback, and `base_lin_vel` stays at zero until an estimator is wired
-//! in (see [`SYNTHETIC_BASE_LIN_VEL`]).
+//! feedback.
+//!
+//! ## `imu_live` vs `gyro_live`
+//!
+//! The rotation-vector report (0x28) and the calibrated-gyro report
+//! (0x02) are independent SH-2 subscriptions on the BNO085. The IMU
+//! freshness clock (`imu_live`) is driven by the rotation vector, so it
+//! can read `true` while the gyro is silently dead (subscription never
+//! came up). Because `base_ang_vel` is the policy's primary rate-feedback
+//! channel, a dead gyro is far more dangerous than a stale quaternion —
+//! we therefore track and surface `gyro_live` *separately* (see
+//! [`crate::imu::ImuSnapshot::gyro_is_stale`]) and shout once per
+//! transition when the attitude is live but the gyro is not.
 
 use anyhow::{anyhow, Context, Result};
 use std::panic::AssertUnwindSafe;
@@ -67,7 +78,6 @@ use crate::safety::{BreachReason, Supervisor};
 /// training presents at episode start in the standing task — see module
 /// docs.
 const SYNTHETIC_IMU_QUATERNION_XYZW: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-const SYNTHETIC_BASE_LIN_VEL: [f32; 3] = [0.0, 0.0, 0.0];
 
 pub struct PolicyRunner {
     controller: PolicyController,
@@ -98,6 +108,12 @@ pub struct PolicyRunner {
     /// Edge-detect on the IMU live/synthetic boundary so we log
     /// transitions once instead of every tick.
     imu_was_live: bool,
+    /// Edge-detect on the gyro live/dead boundary, tracked separately
+    /// from `imu_was_live` because the calibrated-gyro report (0x02) is
+    /// a distinct subscription from the rotation vector (0x28). A dead
+    /// gyro zeros `base_ang_vel` — the policy's main rate-feedback
+    /// channel — so we warn loudly on the transition.
+    gyro_was_live: bool,
     /// Last time we emitted the human-readable I/O summary at `info!`.
     /// Per-tick logs would be 100 lines/s; we rate-limit to ~1 Hz.
     last_io_log_at: Option<Instant>,
@@ -190,6 +206,7 @@ impl PolicyRunner {
             policy_gain_clamps,
             was_running: false,
             imu_was_live: false,
+            gyro_was_live: false,
             last_io_log_at: None,
         })
     }
@@ -247,10 +264,19 @@ impl PolicyRunner {
         //    `ImuState`. See the module docs and
         //    `bebop_v2_base_cfg.py::ObservationsCfg` for the matching
         //    sim-side pipeline.
+        // `gyro_live` is tracked independently of `imu_live`: the
+        // rotation vector keeps the IMU snapshot "fresh" even when the
+        // calibrated-gyro subscription is dead, in which case
+        // `angular_velocity_body` is `None` and `base_ang_vel` would be
+        // silently zeroed — the worst-case sim-to-real gap for a balance
+        // policy. We compute it here so the per-tick log and the
+        // telemetry snapshot can show it.
         let now = Instant::now();
+        let mut gyro_live = false;
         let imu_state = match self.imu_shared.lock() {
             Ok(g) if !g.is_stale(now) => {
                 let quaternion = g.quaternion.unwrap_or(SYNTHETIC_IMU_QUATERNION_XYZW);
+                gyro_live = g.angular_velocity_body.is_some() && !g.gyro_is_stale(now);
                 let angular_velocity = g.angular_velocity_body.unwrap_or([0.0; 3]);
                 if !self.imu_was_live {
                     info!(
@@ -283,16 +309,27 @@ impl PolicyRunner {
         };
         self.obs_builder.update_imu(imu_state);
 
-        // Body-frame linear velocity. Bebop V2 has no wheel odometry
-        // and no visual-inertial estimator wired in yet, so we still
-        // feed zeros here. The trained policy was exposed to wide
-        // uniform noise on this channel (see
-        // `BebopV2BaseEnvCfg.ObservationsCfg.base_lin_vel`), so a
-        // constant zero is well within distribution for the standing
-        // task. Wire in an estimator before relying on it for
-        // locomotion.
-        self.obs_builder
-            .update_base_velocity(SYNTHETIC_BASE_LIN_VEL);
+        // Edge-log the gyro live/dead transition. The most dangerous
+        // case is `imu_live && !gyro_live`: the attitude looks healthy
+        // (projected_gravity moving) while base_ang_vel is pinned to
+        // zero, which reads as "IMU is fine" to anyone watching the
+        // rate-limited I/O line. Shout once per transition so a dead
+        // 0x02 subscription is impossible to miss in the logs.
+        if gyro_live != self.gyro_was_live {
+            if gyro_live {
+                info!("IMU gyro live: base_ang_vel now sourced from BNO085 0x02 (calibrated gyro)");
+            } else if self.imu_was_live {
+                warn!(
+                    "IMU gyro DEAD while attitude is live: base_ang_vel is zeroed even though \
+                     projected_gravity is live. The policy is running without rate feedback — \
+                     expect chatter / instability. Check the BNO085 0x02 (Calibrated Gyroscope) \
+                     subscription (see imu.rs bring-up logs)."
+                );
+            } else {
+                warn!("IMU gyro unavailable: base_ang_vel zeroed (IMU not live either)");
+            }
+            self.gyro_was_live = gyro_live;
+        }
 
         // 3) Velocity command. Isaac-BebopV2-Flat-v0 forces (0, 0, 0)
         //    during training; locomotion checkpoints will want a real
@@ -361,13 +398,13 @@ impl PolicyRunner {
             self.last_io_log_at = Some(now);
             info!(
                 imu_live = self.imu_was_live,
-                base_lin_vel = ?&obs[0..3],
-                base_ang_vel = ?&obs[3..6],
-                projected_gravity = ?&obs[6..9],
-                joint_pos_rel = ?&obs[9..17],
-                joint_vel = ?&obs[17..25],
-                last_action = ?&obs[25..49],
-                cmd_vel = ?&obs[49..52],
+                gyro_live,
+                base_ang_vel = ?&obs[0..3],
+                projected_gravity = ?&obs[3..6],
+                joint_pos_rel = ?&obs[6..14],
+                joint_vel = ?&obs[14..22],
+                last_action = ?&obs[22..46],
+                cmd_vel = ?&obs[46..49],
                 raw_action = ?action.as_slice(),
                 position_targets_rad = ?&decoded.targets,
                 kp = ?&decoded.kp,
@@ -379,6 +416,7 @@ impl PolicyRunner {
         if let Ok(mut g) = self.policy_io.lock() {
             g.publish_tick(
                 self.imu_was_live,
+                gyro_live,
                 &obs,
                 &action,
                 &decoded.targets,
