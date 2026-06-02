@@ -84,7 +84,7 @@ class BebopPPOBaseCfg(RslRlOnPolicyRunnerCfg):
         # negative number — symptom of a deterministic policy that
         # ignores observations. Bump this in step when that happens
         # (Locomotion uses 0.04 against its heavier reward landscape).
-        entropy_coef=0.02,
+        entropy_coef=0.01,
         
         # Training Updates
         num_learning_epochs=5,   # How many times to reuse the collected data

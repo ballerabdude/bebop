@@ -32,7 +32,39 @@ parser.add_argument(
         "keep minibatch size roughly constant (target ~32k samples/minibatch)."
     ),
 )
+parser.add_argument(
+    "--entropy_coef",
+    type=float,
+    default=None,
+    help=(
+        "Override PPO entropy_coef (cfg default is 0.02). Lower it (e.g. 0.01) "
+        "to reduce the risk of late-training std runaway — once a value-loss "
+        "spike kills the advantage signal, the entropy bonus is what inflates "
+        "the action std. Don't set it to 0: too little exploration lets the std "
+        "collapse to a near-deterministic policy that ignores observations."
+    ),
+)
 parser.add_argument("--seed", type=int, default=None, help="Random seed.")
+parser.add_argument(
+    "--max_iterations",
+    type=int,
+    default=None,
+    help=(
+        "Override total training iterations (cfg default is 10000). On a "
+        "fresh run this is the absolute target; on --resume it is the number "
+        "of ADDITIONAL iterations to run on top of the loaded checkpoint."
+    ),
+)
+parser.add_argument(
+    "--save_interval",
+    type=int,
+    default=None,
+    help=(
+        "Override how often (in iterations) a model_*.pt checkpoint is "
+        "written (cfg default is 100). Use a larger value like 1000 for very "
+        "long runs to keep fewer, more widely-spaced checkpoints."
+    ),
+)
 parser.add_argument("--log_root", type=str, default="logs/rsl_rl", help="Root directory for logging")
 parser.add_argument(
     "--resume",
@@ -98,6 +130,15 @@ def main():
     if args.num_mini_batches is not None:
         agent_cfg.algorithm.num_mini_batches = args.num_mini_batches
         print(f"[INFO] Override PPO num_mini_batches -> {args.num_mini_batches}")
+    if args.entropy_coef is not None:
+        agent_cfg.algorithm.entropy_coef = args.entropy_coef
+        print(f"[INFO] Override PPO entropy_coef -> {args.entropy_coef}")
+    if args.max_iterations is not None:
+        agent_cfg.max_iterations = args.max_iterations
+        print(f"[INFO] Override max_iterations -> {args.max_iterations}")
+    if args.save_interval is not None:
+        agent_cfg.save_interval = args.save_interval
+        print(f"[INFO] Override save_interval -> {args.save_interval}")
 
     # 4. Create Environment (Only Once)
     print(f"[INFO] Creating environment for task: {args.task}")

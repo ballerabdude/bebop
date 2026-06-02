@@ -21,11 +21,26 @@ Kept because the real robot needs them:
 Reward set:
   * ``alive``               — +1/tick while base_link is above the
                               ground-contact termination threshold.
-  * ``torso_pitch``         — asymmetric IMU pitch: reward ~17° back lean
-                              (``proj_grav[0] ≈ -0.30``), penalize forward
-                              pitch (hardware falls on any forward lean).
+  * ``torso_pitch``         — asymmetric IMU pitch: reward balancing
+                              anywhere in a back-lean *band* (~10°–17°,
+                              ``proj_grav[0]`` in ``[-0.29, -0.17]``) as a
+                              flat-top plateau, so the torso can settle at
+                              a range of pitches instead of one angle;
+                              penalize forward pitch (hardware falls on any
+                              forward lean).
   * ``joint_pos_limits``    — quadratic penalty for exceeding the URDF
                               joint soft limits.
+  * ``joint_effort``        — L2 penalty on applied joint torques, a
+                              proxy for motor electrical/thermal power
+                              (current ∝ torque). Drives "stay alive with
+                              the least effort": a deep crouch costs
+                              continuous holding torque and is pushed
+                              away, while a low-torque (typically
+                              straight-leg) stand is favoured — without
+                              mandating any fixed pose. Replaces the old
+                              fixed ``leg_straightness`` target.
+  * ``joint_motion``        — small L2 penalty on joint velocity to damp
+                              high-frequency knee/joint jitter directly.
   * ``track_lin_vel_xy`` /
     ``track_ang_vel_z``     — bounded ``exp(-err²/σ²)`` reward tracking
                               the (zero) ``base_velocity`` command, i.e.
@@ -46,23 +61,32 @@ Terminations:
   * ``base_link_ground_contact`` — torso height near floor (fallen).
 
 Reset randomization (this version):
-  * Joints sampled uniformly per-joint within their soft limits via
-    ``reset_joints_uniform_within_limits`` — covers the full configuration
-    box, not just a tight band around the default pose. Some sampled
-    poses are unrecoverable from ``base_link.z = 0.8 m`` (e.g. knee fully
-    folded with foot above ground); expect a non-trivial fraction of
-    episodes to terminate early. Watch ``mean_episode_length`` and the
-    ``base_link_ground_contact`` termination rate to confirm there's
-    still useful signal getting through.
-  * Base roll ±0.30 rad; pitch biased toward back lean ``(-0.35, +0.10)``
-    rad (~−20°..+6°) — forward pitch samples are rare because hardware
-    cannot recover from forward tilt. Yaw full ±π.
-  * Initial angular velocity perturbed by ±0.5 rad/s on all three axes.
+  * Joints sampled uniformly per-joint via
+    ``reset_joints_uniform_within_limits`` with
+    ``range_fraction = RESET_JOINT_RANGE_FRACTION`` (0.25), i.e. within
+    25% of the distance from the default pose to each joint's soft
+    limit, preserving the asymmetric knee / hip-abduction shape. This is
+    a deliberately tight band around the nominal pose so most episodes
+    survive and the policy gets dense standing signal. Set the fraction
+    to 1.0 to recover the full-configuration-box behaviour (many
+    unrecoverable inits from ``base_link.z = 0.8 m``, diluted signal);
+    widen it gradually once the robot reliably stands. Watch
+    ``mean_episode_length`` and the ``base_link_ground_contact``
+    termination rate when changing it.
+  * Base roll ±0.30 rad; pitch biased toward back lean ``(-0.26, +0.10)``
+    rad (~−15°..+6°) — forward pitch samples are rare because hardware
+    cannot recover from forward tilt, and the deep edge leaves a ~5°
+    margin below the ±20° fall limit so resets don't terminate on the
+    cliff. Yaw full ±π.
+  * Initial angular velocity perturbed by ±0.3 rad/s on all three axes.
 
 Deliberately off (add back one at a time after hardware validation):
   * Mid-episode pushes, observation noise, contact sensors, stepping rewards.
-  * ``flat_orientation``, ``base_height``, ``joint_deviation_l1``, symmetry
-    penalties beyond the asymmetric pitch term above.
+  * ``flat_orientation``, ``base_height``, symmetry penalties beyond the
+    asymmetric pitch term above. (Fixed straight-leg shaping via
+    ``joint_deviation_l1`` was removed in favour of the ``joint_effort``
+    power objective above — the legs may now bend if it is genuinely
+    cheaper.)
 
 Deployment checklist (every run):
   1. Export ONNX from the training run.
@@ -103,8 +127,42 @@ from ..envs.bebop_v2_terminations import base_link_on_ground, imu_pitch_out_of_b
 #   proj_grav[0] > 0  => torso pitched forward (falls)
 PITCH_FALL_LIMIT_DEG = 20.0
 PITCH_FALL_LIMIT_GX = math.sin(math.radians(PITCH_FALL_LIMIT_DEG))
-TARGET_PITCH_BACK_DEG = 17.0
-TARGET_PITCH_BACK_GX = -math.sin(math.radians(TARGET_PITCH_BACK_DEG))
+
+# Back-lean *band* the torso is rewarded to balance anywhere within (a
+# flat-top plateau, not a single target — so the policy can settle at a
+# range of pitches instead of collapsing onto one angle in playback).
+# proj_grav[0] = -sin(pitch): more negative => deeper back lean. The band
+# is centered on the known-good 17° back lean and extended toward upright
+# (down to 10°). Both edges stay inside the ±20° imu_pitch_out_of_bounds
+# termination so the policy is never rewarded for sitting on the fall
+# cliff (~3° margin at the deep edge). Widen the band for a larger range
+# of stable angles; if you push the deep edge past ~17° also raise
+# PITCH_FALL_LIMIT_DEG (and validate the deep lean on hardware first).
+PITCH_BAND_DEEP_DEG = 17.0
+PITCH_BAND_SHALLOW_DEG = 10.0
+PITCH_BAND_DEEP_GX = -math.sin(math.radians(PITCH_BAND_DEEP_DEG))
+PITCH_BAND_SHALLOW_GX = -math.sin(math.radians(PITCH_BAND_SHALLOW_DEG))
+
+# Initial-pose back-lean range (radians, for reset_root_state_uniform's
+# pose_range["pitch"], which is an Euler angle in rad — NOT a projected
+# gravity component). Previously this used -PITCH_FALL_LIMIT_GX (a sine,
+# ~0.342) as if it were radians, spawning episodes at ~-19.6°, i.e. right
+# on the ±20° imu_pitch_out_of_bounds cliff; combined with the init
+# angular velocity those episodes terminated almost immediately and
+# inflated the pitch-out termination rate without measuring real
+# balance. We now seed within the recoverable back-lean band with a
+# margin below the fall limit. Deep init (~15°) sits just inside the
+# 10–17° torso_pitch reward band; the small forward edge (+6°) makes the
+# policy practice leaning back into the band.
+PITCH_INIT_BACK_RAD = -math.radians(15.0)
+PITCH_INIT_FWD_RAD = math.radians(6.0)
+
+# Fraction of each joint's soft range (measured from the default pose to
+# each limit) used when sampling reset poses. 1.0 = full configuration
+# box (many unrecoverable inits, diluted signal); a small value like 0.25
+# keeps resets near the nominal pose so most episodes survive and the
+# policy gets dense standing signal. Widen toward 1.0 once it stands.
+RESET_JOINT_RANGE_FRACTION = 0.25
 
 
 # Joint order must match firmware/bebop-linux/src/observation.rs::JOINT_NAMES.
@@ -302,6 +360,7 @@ class EventCfg:
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=JOINT_NAMES_ALL),
             "velocity_range": (-0.5, 0.5),
+            "range_fraction": RESET_JOINT_RANGE_FRACTION,
         },
     )
     # Wide base-orientation randomization. roll / pitch directly enter
@@ -319,17 +378,19 @@ class EventCfg:
                 "z": (0.0, 0.0),
                 "roll": (-0.30, 0.30),
                 # Bias toward back lean; rare forward samples (hardware
-                # cannot recover from forward pitch).
-                "pitch": (-PITCH_FALL_LIMIT_GX, 0.10),
+                # cannot recover from forward pitch). Both edges leave a
+                # margin below the ±20° fall limit so resets measure
+                # balance rather than terminating on the cliff.
+                "pitch": (PITCH_INIT_BACK_RAD, PITCH_INIT_FWD_RAD),
                 "yaw": (-math.pi, math.pi),
             },
             "velocity_range": {
                 "x": (0.0, 0.0),
                 "y": (0.0, 0.0),
                 "z": (0.0, 0.0),
-                "roll": (-0.5, 0.5),
-                "pitch": (-0.5, 0.5),
-                "yaw": (-0.5, 0.5),
+                "roll": (-0.3, 0.3),
+                "pitch": (-0.3, 0.3),
+                "yaw": (-0.3, 0.3),
             },
         },
     )
@@ -348,8 +409,9 @@ class RewardsCfg:
         func=torso_pitch_asymmetric_reward,
         weight=0.5,
         params={
-            "target_gx": TARGET_PITCH_BACK_GX,
-            "good_std": 0.12,
+            "band_gx_min": PITCH_BAND_DEEP_GX,
+            "band_gx_max": PITCH_BAND_SHALLOW_GX,
+            "edge_std": 0.12,
             "roll_std": 0.15,
             "forward_penalty_gain": 5.0,
             "forward_deadband": 0.0,
@@ -357,6 +419,43 @@ class RewardsCfg:
     )
 
     joint_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
+
+    # Least-effort posture, via a power objective instead of a fixed
+    # straight-leg target.
+    #
+    # The old ``leg_straightness`` term pinned the knees and hip-abduction
+    # joints to their zero default with an L1 penalty. The intent was
+    # right (straight legs stack the load through the joint, so they hold
+    # the body with little torque), but mandating an exact pose fights
+    # the balance controller: when the genuinely cheapest standing
+    # configuration is a hair off zero, the policy is torn between the
+    # posture target and balance and chatters around it — a plausible
+    # source of the residual knee jitter.
+    #
+    # Replace the hand-picked pose with the physical quantity we actually
+    # care about: the effort needed to stay alive. ``joint_torques_l2``
+    # penalizes the sum of squared applied joint torques — a proxy for
+    # motor electrical/thermal power (current ∝ torque, I²R heating).
+    # The policy is now free to bend the knee if that is genuinely
+    # cheaper, but a deep crouch (knee/abduction motors fighting gravity
+    # continuously) is expensive and gets pushed away on its own. If the
+    # straight-leg rationale holds, the policy rediscovers straight legs
+    # because they minimize holding torque — but it is no longer forced.
+    #
+    # Weight is small because torques are tens of N·m (τ² is in the
+    # hundreds–thousands per tick summed over 8 joints). Start at -1e-5
+    # (≈ -0.02..-0.05/tick at a quiet stand, comparable to the action
+    # regularizers) and raise toward -2.5e-5 if play mode still shows a
+    # high-effort crouch; lower it if the policy goes limp (drops kp to
+    # dodge the penalty) and sags.
+    joint_effort = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
+
+    # Direct jitter damping: penalize squared joint velocity. A buzzing
+    # knee carries velocity even when its mean position is steady, so
+    # this term taxes the chatter the torque/action-rate penalties may
+    # miss. Kept small so it damps high-frequency motion without
+    # over-damping a legitimate balance-recovery sweep.
+    joint_motion = RewTerm(func=mdp.joint_vel_l2, weight=-2.5e-4)
 
     # Zero-command tracking → "be still" reward. CommandsCfg.base_velocity
     # is pinned to (0, 0, 0) for this standing task, so the exponential
@@ -392,7 +491,24 @@ class RewardsCfg:
     # (e.g. foot kp 250 -> 107 -> 250 -> 250 -> 250 across consecutive
     # ticks). Does NOT catch a policy that camps at the saturation rails
     # without flipping — that's what action_l2 below is for.
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.02)
+    #
+    # Bumped -0.02 -> -0.05 to kill the knee/gain jitter seen in playback.
+    # This term is the main lever on the variable-impedance *gain*
+    # channels: a fluttering knee kp (30<->250) modulates joint torque
+    # even when the position target is steady, which reads as visible
+    # knee jitter. Raising the action-rate cost disciplines all 24
+    # channels — position and gains alike. If the legs start to feel
+    # over-damped / sluggish to recover, back off toward -0.03.
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
+
+    # Physical smoothness regularizer at the joints (not the policy
+    # output). Penalizes joint acceleration directly, so it catches
+    # high-frequency chatter that survives a smooth raw-action stream —
+    # e.g. when steady-looking kp/kd commands still drive a buzzing
+    # torque response. Weight is tiny because accelerations are large in
+    # rad/s²; -2.5e-7 is the standard Isaac Lab locomotion value and
+    # contributes only a small fraction per tick at a quiet stand.
+    joint_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
 
     # Magnitude regularizer: penalize raw action magnitude directly.
     # Each of the 24 channels is clipped to [-1, 1], so a channel parked
