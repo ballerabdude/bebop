@@ -109,6 +109,12 @@ bno08x-rs = { path = "vendor/bno08x-rs" }
 # GPIO pre-reset pulse in `imu.rs` (same version as `bno08x-rs`).
 gpiod = "0.3.0"
 
+# USB-serial reader for the Teensy `imu_bridge` backend (`imu_serial.rs`).
+# `default-features = false` drops the libudev-based port *enumeration*
+# (which we don't use — we open a known `/dev/ttyACM*` path) so the crate
+# cross-compiles for the Jetson (aarch64) without a libudev dependency.
+serialport = { version = "4", default-features = false }
+
 # Argument parsing for the `imu-probe` diagnostic binary. Pulled in via
 # the `derive` feature so the probe can declare its CLI as a struct.
 clap = { version = "4", features = ["derive"] }

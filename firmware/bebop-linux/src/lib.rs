@@ -19,6 +19,7 @@
 pub mod can_interface;
 pub mod config;
 pub mod imu;
+pub mod imu_serial;
 pub mod mode;
 pub mod observation;
 pub mod policy;

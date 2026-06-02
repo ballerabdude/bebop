@@ -361,10 +361,47 @@ pub struct RobotConfig {
 /// at boot to bring the chip into a clean SPI-mode session. See
 /// `config/bebop_v2.yaml`'s `imu:` block for the canonical Bebop V2
 /// pinout and a wiring diagram.
+/// Where the runtime gets its BNO085 data from.
+///
+/// Both backends fill the same [`crate::imu::ImuShared`] snapshot with a
+/// body-frame quaternion + gyro, so they are interchangeable from the
+/// policy runner / telemetry pump's point of view. The chassis `mount:`
+/// rotation is applied identically in both paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImuSource {
+    /// Read the BNO085 directly over the Jetson's own SPI bus + GPIOs
+    /// (the historical path; see [`crate::imu::spawn_imu_thread`]).
+    Spi,
+    /// Read pre-fused frames streamed by the Teensy over USB serial
+    /// (see [`crate::imu_serial::spawn_imu_serial_thread`] and the Teensy
+    /// `imu_bridge` firmware). The BNO is wired to the Teensy, not the
+    /// Jetson, so the SPI/INT/RST fields are unused.
+    Serial,
+}
+
+impl std::str::FromStr for ImuSource {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "spi" => Ok(Self::Spi),
+            "serial" | "usb" | "teensy" => Ok(Self::Serial),
+            other => Err(anyhow!(
+                "unknown imu.source {other:?} (expected \"spi\" or \"serial\")"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ImuConfig {
+    /// Which backend feeds the shared IMU snapshot.
+    pub source: ImuSource,
+    /// Serial device the Teensy `imu_bridge` enumerates as, e.g.
+    /// `/dev/ttyACM0`. Only meaningful when `source == Serial`.
+    pub serial_device: String,
     /// SPI character device — e.g. `/dev/spidev0.0` on Jetson Orin Nano
-    /// after `spi1` is enabled in `jetson-io.py`.
+    /// after `spi1` is enabled in `jetson-io.py`. Only meaningful when
+    /// `source == Spi`.
     pub spi_device: String,
     /// GPIO chip (e.g. `gpiochip0`) hosting the BNO `INT`/`HINTN` line.
     pub int_chip: String,
@@ -602,17 +639,36 @@ impl RobotConfig {
                 // matching Jetson Orin Nano's `gpiochip0:144` (header
                 // pin 7, PAC.06) and `gpiochip0:106` (header pin 31,
                 // PQ.06). Override per-robot when the wiring differs.
+                let source = match raw_imu.source.as_deref() {
+                    Some(s) => s.parse::<ImuSource>()?,
+                    None => ImuSource::Spi,
+                };
+
+                let serial_device = raw_imu
+                    .serial_device
+                    .unwrap_or_else(|| "/dev/ttyACM0".to_string());
+
                 let spi_device = raw_imu
                     .spi_device
                     .unwrap_or_else(|| "/dev/spidev0.0".to_string());
                 let int_chip = raw_imu.int_chip.unwrap_or_else(|| "gpiochip0".to_string());
-                let int_line = raw_imu.int_line.ok_or_else(|| {
-                    anyhow!("imu.int_line is required (GPIO line offset within `int_chip`)")
-                })?;
                 let rst_chip = raw_imu.rst_chip.unwrap_or_else(|| "gpiochip0".to_string());
-                let rst_line = raw_imu.rst_line.ok_or_else(|| {
-                    anyhow!("imu.rst_line is required (GPIO line offset within `rst_chip`)")
-                })?;
+                // INT/RST GPIO lines only matter for the SPI backend; the
+                // serial bridge has the BNO wired to the Teensy. Require them
+                // only when `source: spi`, otherwise default to 0 (unused).
+                let (int_line, rst_line) = if source == ImuSource::Spi {
+                    let int_line = raw_imu.int_line.ok_or_else(|| {
+                        anyhow!("imu.int_line is required for source: spi \
+                                 (GPIO line offset within `int_chip`)")
+                    })?;
+                    let rst_line = raw_imu.rst_line.ok_or_else(|| {
+                        anyhow!("imu.rst_line is required for source: spi \
+                                 (GPIO line offset within `rst_chip`)")
+                    })?;
+                    (int_line, rst_line)
+                } else {
+                    (raw_imu.int_line.unwrap_or(0), raw_imu.rst_line.unwrap_or(0))
+                };
                 let rotation_vector_period_ms = raw_imu.rotation_vector_period_ms.unwrap_or(50);
                 if rotation_vector_period_ms == 0 {
                     return Err(anyhow!("imu.rotation_vector_period_ms must be >= 1"));
@@ -633,6 +689,8 @@ impl RobotConfig {
                     None => ImuConfig::IDENTITY_QUAT,
                 };
                 Ok(ImuConfig {
+                    source,
+                    serial_device,
                     spi_device,
                     int_chip,
                     int_line,
@@ -711,6 +769,11 @@ struct RawConfig {
 
 #[derive(Debug, Default, Deserialize)]
 struct RawImu {
+    /// `"spi"` (default) or `"serial"`. Selects the IMU backend.
+    source: Option<String>,
+    /// Serial device for the Teensy `imu_bridge`. Defaults to
+    /// `/dev/ttyACM0`. Only used when `source: serial`.
+    serial_device: Option<String>,
     /// SPI character device. Defaults to `/dev/spidev0.0` (Jetson Orin
     /// Nano `spi1`).
     spi_device: Option<String>,

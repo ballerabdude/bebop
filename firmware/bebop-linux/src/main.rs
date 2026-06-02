@@ -10,8 +10,9 @@
 //! every bus before the process exits.
 
 use anyhow::{Context, Result};
-use bebop_linux::config::RobotConfig;
+use bebop_linux::config::{ImuSource, RobotConfig};
 use bebop_linux::imu;
+use bebop_linux::imu_serial;
 use bebop_linux::mode::Mode;
 use bebop_linux::policy_io;
 use bebop_linux::policy_runner::PolicyRunner;
@@ -141,8 +142,18 @@ async fn main() -> Result<()> {
     let imu_shared = imu::new_shared();
     let imu_present = cfg.imu.is_some();
     let policy_io_shared = policy_io::new_shared();
-    let imu_handle = cfg.imu.as_ref().and_then(|imu_cfg| {
-        imu::spawn_imu_thread(imu_cfg.clone(), shutdown_flag.clone(), imu_shared.clone())
+    // Pick the IMU backend: read the BNO directly over the Jetson's SPI
+    // bus, or consume pre-fused frames from the Teensy `imu_bridge` over
+    // USB serial. Both fill `imu_shared` with the same body-frame snapshot.
+    let imu_handle = cfg.imu.as_ref().and_then(|imu_cfg| match imu_cfg.source {
+        ImuSource::Spi => {
+            imu::spawn_imu_thread(imu_cfg.clone(), shutdown_flag.clone(), imu_shared.clone())
+        }
+        ImuSource::Serial => imu_serial::spawn_imu_serial_thread(
+            imu_cfg.clone(),
+            shutdown_flag.clone(),
+            imu_shared.clone(),
+        ),
     });
 
     let rx_handles = spawn_rx_threads(supervisor.clone(), bus_pool.clone(), shutdown_flag.clone());

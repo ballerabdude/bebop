@@ -180,7 +180,7 @@ pub fn new_shared() -> ImuShared {
 /// tiny local helper to avoid promoting two `[f32; 4]`s into `nalgebra`
 /// types on every IMU sample.
 #[inline]
-fn quat_mul_xyzw(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+pub(crate) fn quat_mul_xyzw(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     let [ax, ay, az, aw] = a;
     let [bx, by, bz, bw] = b;
     [
@@ -202,7 +202,7 @@ fn quat_mul_xyzw(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 /// constant mount multiply preserves that, so this just trims off the
 /// ~1e-6 of float drift that accumulates after the composition.
 #[inline]
-fn quat_normalize_xyzw(q: [f32; 4]) -> [f32; 4] {
+pub(crate) fn quat_normalize_xyzw(q: [f32; 4]) -> [f32; 4] {
     let [x, y, z, w] = q;
     let norm_sq = x * x + y * y + z * z + w * w;
     if norm_sq < 1e-12 {
@@ -239,7 +239,7 @@ fn quat_normalize_xyzw(q: [f32; 4]) -> [f32; 4] {
 /// on the Jetson, but the explicit branch keeps the intent obvious
 /// in flame graphs.
 #[inline]
-fn rotate_vec_by_quat_xyzw(v: [f32; 3], q_sensor_body_xyzw: [f32; 4]) -> [f32; 3] {
+pub(crate) fn rotate_vec_by_quat_xyzw(v: [f32; 3], q_sensor_body_xyzw: [f32; 4]) -> [f32; 3] {
     if q_sensor_body_xyzw == ImuConfig::IDENTITY_QUAT {
         return v;
     }
