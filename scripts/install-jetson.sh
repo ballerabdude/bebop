@@ -392,6 +392,10 @@ EOF
     udevadm trigger --subsystem-match=spidev 2>/dev/null || true
     udevadm trigger --subsystem-match=gpio   2>/dev/null || true
     udevadm trigger --subsystem-match=tty    2>/dev/null || true
+    # `trigger` only *queues* events; wait for the daemon to process them
+    # so the status listing below reflects the symlinks it just created
+    # (otherwise /dev/bebop-imu can race and show up as "not present").
+    udevadm settle 2>/dev/null || true
 
     # 4) Status: list whatever's there now so the operator can tell at a
     #    glance whether the rule actually took effect.
