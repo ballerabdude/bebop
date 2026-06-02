@@ -142,8 +142,9 @@ void loop() {
     uint32_t now_ms = millis();
     if (now_ms - last_stats_ms >= 1000) {
         float dt = (now_ms - last_stats_ms) / 1000.0f;
-        DBG_PORT.printf("[BRIDGE] tx=%.0fHz age=%lums quat=[% .3f % .3f % .3f % .3f] gyro=[% .2f % .2f % .2f]\n",
-                        frames_sent / dt, (unsigned long)imu.getUpdateAge(),
+        DBG_PORT.printf("[BRIDGE] tx=%.0fHz init=%d resets=%lu age=%lums quat=[% .3f % .3f % .3f % .3f] gyro=[% .2f % .2f % .2f]\n",
+                        frames_sent / dt, imu.initialized ? 1 : 0,
+                        (unsigned long)imu.reset_count, (unsigned long)imu.getUpdateAge(),
                         imu.quat_w, imu.quat_x, imu.quat_y, imu.quat_z,
                         imu.gyro_x, imu.gyro_y, imu.gyro_z);
         frames_sent = 0;

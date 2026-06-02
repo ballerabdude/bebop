@@ -56,6 +56,11 @@
 // (The Linux runtime still uses its own default report period.)
 #define BNO085_REPORT_INTERVAL_US 5000
 
+// Minimum spacing between report re-enable attempts after a sensor reset.
+// Bounds how often update() makes blocking SH-2 round-trips when the chip
+// is boot-looping, so it can never starve a fixed-rate caller loop.
+#define BNO085_REENABLE_THROTTLE_MS 250
+
 class BNO085_IMU {
 public:
     // Orientation quaternion (w, x, y, z)
@@ -83,6 +88,9 @@ public:
     bool initialized = false;
     uint32_t last_update_ms = 0;
     uint32_t last_recovery_attempt_ms = 0;
+    // Diagnostics / non-blocking reset handling.
+    uint32_t reset_count = 0;        // total SH-2 resets observed since boot
+    uint32_t last_reenable_ms = 0;   // throttles report re-enable on reset
     
     bool begin() {
         // Bring up the SPI bus. The Adafruit driver pulses RST (passed to
@@ -133,14 +141,34 @@ public:
     
     bool update() {
         if (!initialized) return false;
-        
-        // Check if sensor was reset
+
+        // INT-gate the read. getSensorEvent() -> sh2_service() unconditionally
+        // calls the SPI HAL read, which busy-waits up to 500ms on the INT line
+        // (500 x delay(1)) and then *hardware-resets* the chip if no packet
+        // arrives. Polling it while the FIFO is empty therefore stalls the
+        // caller's loop to a few Hz. The BNO085 drives INT LOW only when a
+        // report is ready, so if INT is high there is nothing to service:
+        // return immediately and let the caller keep its loop/emit cadence.
+        if (digitalRead(BNO085_INT_PIN) != LOW) {
+            return false;
+        }
+
+        // Check if sensor was reset. A flapping/boot-looping sensor sets
+        // this flag continuously; re-enabling reports here involves blocking
+        // SH-2 round-trips, so doing it on *every* reset event stalls the
+        // caller's loop (and starves any fixed-rate emit cadence built on top
+        // of update()). Keep this path non-blocking: never delay(), and
+        // throttle the report re-enable so a wedged chip can't monopolize the
+        // loop. A healthy reset re-enables within REENABLE_THROTTLE_MS anyway.
         if (bno.wasReset()) {
-            SerialUSB1.println("IMU: Sensor reset detected, re-enabling reports...");
-            delay(50);
-            bno.enableReport(SH2_ARVR_STABILIZED_RV, BNO085_REPORT_INTERVAL_US);
-            bno.enableReport(SH2_GYROSCOPE_CALIBRATED, BNO085_REPORT_INTERVAL_US);
-            bno.enableReport(SH2_LINEAR_ACCELERATION, BNO085_REPORT_INTERVAL_US);
+            reset_count++;
+            uint32_t now = millis();
+            if ((now - last_reenable_ms) >= BNO085_REENABLE_THROTTLE_MS) {
+                last_reenable_ms = now;
+                bno.enableReport(SH2_ARVR_STABILIZED_RV, BNO085_REPORT_INTERVAL_US);
+                bno.enableReport(SH2_GYROSCOPE_CALIBRATED, BNO085_REPORT_INTERVAL_US);
+                bno.enableReport(SH2_LINEAR_ACCELERATION, BNO085_REPORT_INTERVAL_US);
+            }
         }
         
         sh2_SensorValue_t sensorValue;

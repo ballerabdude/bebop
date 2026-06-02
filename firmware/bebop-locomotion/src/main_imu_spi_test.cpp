@@ -189,8 +189,16 @@ void loop() {
 
     // Drain a bounded number of events so we always fall through to the
     // heartbeat/print code below, even if the sensor is flooding us.
+    //
+    // INT-gate the read: getSensorEvent() -> sh2_service() busy-waits up to
+    // 500ms on the INT line (and then hardware-resets the chip) if no packet
+    // is ready, so polling it while the FIFO is empty throttles the loop to a
+    // few Hz. The BNO085 drives INT LOW only when a report is ready; skip the
+    // read entirely when INT is high.
     int drained = 0;
-    while (drained < MAX_EVENTS_PER_LOOP && bno.getSensorEvent(&sensorValue)) {
+    while (drained < MAX_EVENTS_PER_LOOP &&
+           digitalRead(IMU_INT_PIN) == LOW &&
+           bno.getSensorEvent(&sensorValue)) {
         drained++;
         event_count++;
         last_event_ms = millis();
