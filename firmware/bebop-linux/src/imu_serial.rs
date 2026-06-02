@@ -107,6 +107,14 @@ pub fn spawn_imu_serial_thread(
     const OPEN_BACKOFF_MIN_MS: u64 = 500;
     const OPEN_BACKOFF_MAX_MS: u64 = 5_000;
     const OPEN_LOUD_ATTEMPTS: u32 = 5;
+    /// How long the stream may go silent before we assume the Teensy is gone
+    /// and reopen the port. Generous on purpose: the bridge prioritizes its
+    /// 200 Hz frame stream, but a stale-IMU `begin_SPI()` recovery on the
+    /// Teensy can briefly (a few hundred ms, occasionally up to ~1-2 s) block
+    /// its loop. A short threshold would thrash the port reopen during those
+    /// stalls even though the link is healthy; a genuine unplug is caught
+    /// immediately by the read-error branch instead.
+    const SILENCE_REOPEN: Duration = Duration::from_secs(6);
     /// USB CDC ignores the baud rate, but the `serialport` builder still
     /// requires one. Any value works; 115200 matches the Teensy's nominal.
     const NOMINAL_BAUD: u32 = 115_200;
@@ -156,7 +164,12 @@ pub fn spawn_imu_serial_thread(
                 .open();
 
             let mut port = match port {
-                Ok(p) => {
+                Ok(mut p) => {
+                    // Assert DTR so hosts/firmware that gate TX on a "connected"
+                    // line state start streaming. The Teensy transmits
+                    // regardless of DTR, but this is harmless and matches what
+                    // `cat`/most terminals do on open.
+                    let _ = p.write_data_terminal_ready(true);
                     info!(
                         device = %device,
                         attempt,
@@ -212,12 +225,13 @@ pub fn spawn_imu_serial_thread(
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
                         // No bytes within the timeout. If the stream has been
-                        // silent for a while the Teensy likely went away; drop
-                        // out to the reopen loop.
-                        if last_seen.elapsed() > Duration::from_secs(2) {
+                        // silent past SILENCE_REOPEN the Teensy likely went
+                        // away (without a hard read error); drop out to reopen.
+                        if last_seen.elapsed() > SILENCE_REOPEN {
                             warn!(
                                 device = %device,
-                                "IMU(serial): no frames for >2 s; reopening port"
+                                silence_s = SILENCE_REOPEN.as_secs(),
+                                "IMU(serial): no frames past silence threshold; reopening port"
                             );
                             continue 'reopen;
                         }

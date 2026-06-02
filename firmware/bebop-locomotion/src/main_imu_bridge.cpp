@@ -38,6 +38,10 @@
 // always send the latest cached values, so the host sees a steady stream.
 #define EMIT_INTERVAL_US 5000
 
+// Cap sensor events drained per loop so a flood (or a wedged FIFO) can't
+// monopolize the loop and starve the emit cadence below.
+#define MAX_EVENTS_PER_LOOP 64
+
 // Primary USB serial carries the binary frames; SerialUSB1 is debug.
 #define FRAME_PORT Serial
 #define DBG_PORT   SerialUSB1
@@ -105,26 +109,35 @@ void setup() {
 }
 
 void loop() {
-    // Drain all pending sensor events so the cached quat/gyro/accel are as
-    // fresh as possible before the next emit. update() handles one event
-    // per call and re-enables reports on sensor reset internally.
-    while (imu.update()) {
-        // keep draining until the SHTP FIFO is empty
-    }
-
-    // Periodic recovery if the sensor wedges (stale data). No-op when healthy.
-    imu.checkAndRecover();
-
+    // 1) EMIT FIRST, on cadence. The host relies on a steady stream, so the
+    //    frame stream is the top priority: emitting before any IMU servicing
+    //    guarantees a slow/blocking IMU op (event drain, report re-enable on
+    //    reset, or a stale-recovery begin_SPI) below can never delay a frame
+    //    that is already due this cycle.
     uint32_t now_us = micros();
     if ((uint32_t)(now_us - last_emit_us) >= EMIT_INTERVAL_US) {
         last_emit_us += EMIT_INTERVAL_US;
-        // If we fell badly behind (e.g. blocked during recovery), don't try
-        // to "catch up" with a burst — resync the cadence to now.
+        // If we fell badly behind (e.g. a blocking re-init ate several ms),
+        // don't burst to "catch up" — resync the cadence to now.
         if ((uint32_t)(now_us - last_emit_us) > EMIT_INTERVAL_US) {
             last_emit_us = now_us;
         }
         emitFrame();
     }
+
+    // 2) Drain a BOUNDED number of sensor events so the cached quat/gyro/accel
+    //    stay fresh without letting a flood starve the emit cadence above.
+    //    update() handles one event per call and re-enables reports on sensor
+    //    reset internally.
+    int drained = 0;
+    while (drained < MAX_EVENTS_PER_LOOP && imu.update()) {
+        drained++;
+    }
+
+    // 3) Rate-limited stale recovery (the driver enforces >=5s between
+    //    attempts). begin_SPI() can block briefly; we already emitted this
+    //    cycle and the cadence resync in (1) absorbs the gap on the next pass.
+    imu.checkAndRecover();
 
     uint32_t now_ms = millis();
     if (now_ms - last_stats_ms >= 1000) {
