@@ -1,31 +1,60 @@
 /**
  * @file BNO085_IMU.h
- * @brief BNO085 IMU driver for Teensy using I2C
- * 
- * Wiring (Teensy 4.1):
- *   - SCL: Pin 19
- *   - SDA: Pin 18
- *   - INT: Pin 36
- *   - RST: Pin 35
- *   - VCC: 3.3V
- *   - GND: GND
+ * @brief BNO085 IMU driver for Teensy using SPI
+ *
+ * ## Why SPI (was I2C)
+ *
+ * Earlier revisions of this driver talked to the BNO over I2C. That
+ * worked on the bench but locked up near the leg motors: the brushless
+ * drive currents bias the BNO's magnetometer enough that its fusion
+ * filter rejects all subsequent mag updates, freezing yaw indefinitely.
+ * We migrate to SPI (dedicated INT line for low-latency reads) and keep
+ * the AR/VR-Stabilized Rotation Vector (report 0x28), whose fusion
+ * pipeline aggressively filters magnetometer disturbances. This mirrors
+ * the Linux runtime (`firmware/bebop-linux/src/imu.rs`, report 0x28 over
+ * SPI) and the validated standalone test (`src/main_imu_spi_test.cpp`).
+ *
+ * ## Wiring (Adafruit BNO085 breakout -> Teensy 4.1, hardware SPI0)
+ *   Board SCL  -> Pin 13  (SCK)   *** also the onboard LED ***
+ *   Board DI   -> Pin 11  (MOSI / data INTO sensor)
+ *   Board SDA  -> Pin 12  (MISO / data OUT of sensor; SDA = MISO in SPI)
+ *   Board CS   -> Pin 10  (chip select)
+ *   Board INT  -> Pin 37  (REQUIRED for SPI - data-ready / host-interrupt)
+ *   Board RST  -> Pin 36  (reset; passed to the driver constructor)
+ *   Board P0   -> 3Vo     (HIGH -> SPI mode)
+ *   Board P1   -> 3Vo     (HIGH -> SPI mode)
+ *   Board VIN  -> 3.3V
+ *   Board GND  -> GND
+ *
+ * IMPORTANT - BNO085 mode straps for SPI (Adafruit board pins P0 / P1):
+ *   P1 = 1, P0 = 1 (both tied HIGH) -> SPI mode. (P1=0, P0=0 is I2C.)
+ *
+ * NOTE - Pin 13 conflict: SCK shares the Teensy onboard LED. Any code
+ * that drives pin 13 as a status LED (e.g. a heartbeat in main.cpp) will
+ * fight the SPI clock. Move the status LED to another pin when this
+ * driver is active.
  */
 
 #ifndef BNO085_IMU_H
 #define BNO085_IMU_H
 
 #include <Arduino.h>
-#include <Wire.h>
+#include <SPI.h>
 #include <Adafruit_BNO08x.h>
 
-// I2C address
-#define BNO085_I2C_ADDR 0x4A
+// SPI chip select.
+#define BNO085_CS_PIN 10
 
-// Interrupt pin (active low, optional)
-#define BNO085_INT_PIN 36
+// Interrupt pin (REQUIRED in SPI mode; the SH-2 SPI HAL waits on it to
+// know when the sensor has data and when it is ready after reset).
+#define BNO085_INT_PIN 37
 
-// Reset pin (optional, set to -1 if not used)
-#define BNO085_RST_PIN 35
+// Reset pin (passed to the Adafruit_BNO08x constructor).
+#define BNO085_RST_PIN 36
+
+// 5ms -> 200Hz requested report rate, matching main_imu_spi_test.cpp.
+// (The Linux runtime still uses its own default report period.)
+#define BNO085_REPORT_INTERVAL_US 5000
 
 class BNO085_IMU {
 public:
@@ -56,23 +85,14 @@ public:
     uint32_t last_recovery_attempt_ms = 0;
     
     bool begin() {
-        // Hardware reset if pin is defined (important for reliable init)
-        if (BNO085_RST_PIN >= 0) {
-            pinMode(BNO085_RST_PIN, OUTPUT);
-            digitalWrite(BNO085_RST_PIN, LOW);
-            delay(10);
-            digitalWrite(BNO085_RST_PIN, HIGH);
-            delay(300);  // BNO085 needs ~300ms after reset
-        }
-        
-        // Initialize I2C
-        Wire.begin();
-        Wire.setClock(100000);  // 100kHz is more reliable for BNO085
-        
-        delay(100);  // Allow I2C to stabilize
+        // Bring up the SPI bus. The Adafruit driver pulses RST (passed to
+        // the constructor) and runs the SHTP boot handshake inside
+        // begin_SPI(), so we don't toggle RST by hand here.
+        SPI.begin();
+        delay(50);
 
-        if (!bno.begin_I2C(BNO085_I2C_ADDR, &Wire)) {
-            SerialUSB1.println("IMU: Failed to initialize I2C");
+        if (!bno.begin_SPI(BNO085_CS_PIN, BNO085_INT_PIN, &SPI)) {
+            SerialUSB1.println("IMU: Failed to initialize SPI (check PS1=PS0=1, INT/RST wiring, power)");
             return false;
         }
 
@@ -82,13 +102,13 @@ public:
         bool rv_ok = false, gyro_ok = false, accel_ok = false;
         
         for (int attempt = 0; attempt < 3; attempt++) {
-            if (!rv_ok && bno.enableReport(SH2_ARVR_STABILIZED_RV, 10000)) {
+            if (!rv_ok && bno.enableReport(SH2_ARVR_STABILIZED_RV, BNO085_REPORT_INTERVAL_US)) {
                 rv_ok = true;
             }
-            if (!gyro_ok && bno.enableReport(SH2_GYROSCOPE_CALIBRATED, 10000)) {
+            if (!gyro_ok && bno.enableReport(SH2_GYROSCOPE_CALIBRATED, BNO085_REPORT_INTERVAL_US)) {
                 gyro_ok = true;
             }
-            if (!accel_ok && bno.enableReport(SH2_LINEAR_ACCELERATION, 10000)) {
+            if (!accel_ok && bno.enableReport(SH2_LINEAR_ACCELERATION, BNO085_REPORT_INTERVAL_US)) {
                 accel_ok = true;
             }
             
@@ -107,7 +127,7 @@ public:
         }
         
         initialized = true;
-        SerialUSB1.println("IMU: Initialized successfully");
+        SerialUSB1.println("IMU: Initialized successfully (SPI, AR/VR RV 0x28)");
         return true;
     }
     
@@ -118,9 +138,9 @@ public:
         if (bno.wasReset()) {
             SerialUSB1.println("IMU: Sensor reset detected, re-enabling reports...");
             delay(50);
-            bno.enableReport(SH2_ARVR_STABILIZED_RV, 10000);
-            bno.enableReport(SH2_GYROSCOPE_CALIBRATED, 10000);
-            bno.enableReport(SH2_LINEAR_ACCELERATION, 10000);
+            bno.enableReport(SH2_ARVR_STABILIZED_RV, BNO085_REPORT_INTERVAL_US);
+            bno.enableReport(SH2_GYROSCOPE_CALIBRATED, BNO085_REPORT_INTERVAL_US);
+            bno.enableReport(SH2_LINEAR_ACCELERATION, BNO085_REPORT_INTERVAL_US);
         }
         
         sh2_SensorValue_t sensorValue;
@@ -168,9 +188,10 @@ public:
         return millis() - last_update_ms;
     }
     
-    // Check for stale data and attempt recovery via hardware reset
-    // Call this periodically (e.g., every loop or every second)
-    // Returns true if a reset was triggered
+    // Check for stale data and attempt recovery by re-running the SPI
+    // bring-up (begin_SPI internally pulses RST and re-does the SHTP
+    // handshake). Call this periodically (e.g. every loop or every
+    // second). Returns true if a recovery was triggered.
     bool checkAndRecover(uint32_t stale_threshold_ms = 2000) {
         if (!initialized) return false;
         
@@ -183,41 +204,27 @@ public:
         }
         
         if (age > stale_threshold_ms) {
-            SerialUSB1.printf("IMU: Data stale (%lums), attempting hardware reset...\n", age);
+            SerialUSB1.printf("IMU: Data stale (%lums), attempting SPI re-init...\n", age);
             last_recovery_attempt_ms = now;
-            
-            // Hardware reset using RST pin
-            if (BNO085_RST_PIN >= 0) {
-                digitalWrite(BNO085_RST_PIN, LOW);
-                delay(10);
-                digitalWrite(BNO085_RST_PIN, HIGH);
-                delay(300);  // BNO085 needs ~300ms after reset
-                
-                // Reinitialize I2C (clear any stuck state)
-                Wire.end();
-                delay(10);
-                Wire.begin();
-                Wire.setClock(100000);
-                delay(100);
-                
-                // Reinitialize sensor
-                if (!bno.begin_I2C(BNO085_I2C_ADDR, &Wire)) {
-                    SerialUSB1.println("IMU: Recovery failed - I2C init failed");
-                    return true;
-                }
-                
-                delay(100);
-                
-                // Re-enable reports
-                bno.enableReport(SH2_ARVR_STABILIZED_RV, 10000);
-                bno.enableReport(SH2_GYROSCOPE_CALIBRATED, 10000);
-                bno.enableReport(SH2_LINEAR_ACCELERATION, 10000);
-                
-                SerialUSB1.println("IMU: Hardware reset complete, reports re-enabled");
+
+            // Re-run the SPI bring-up. begin_SPI() pulses the RST line
+            // (passed to the constructor) and walks the SHTP boot
+            // handshake again, giving a wedged chip a clean restart
+            // without any I2C bus teardown.
+            if (!bno.begin_SPI(BNO085_CS_PIN, BNO085_INT_PIN, &SPI)) {
+                SerialUSB1.println("IMU: Recovery failed - begin_SPI() failed");
                 return true;
-            } else {
-                SerialUSB1.println("IMU: No reset pin defined, cannot recover!");
             }
+
+            delay(100);
+
+            // Re-enable reports
+            bno.enableReport(SH2_ARVR_STABILIZED_RV, BNO085_REPORT_INTERVAL_US);
+            bno.enableReport(SH2_GYROSCOPE_CALIBRATED, BNO085_REPORT_INTERVAL_US);
+            bno.enableReport(SH2_LINEAR_ACCELERATION, BNO085_REPORT_INTERVAL_US);
+
+            SerialUSB1.println("IMU: SPI re-init complete, reports re-enabled");
+            return true;
         }
         return false;
     }
@@ -232,7 +239,8 @@ public:
     }
     
 private:
-    Adafruit_BNO08x bno;
+    // Reset pin is supplied to the constructor; CS/INT go to begin_SPI().
+    Adafruit_BNO08x bno{BNO085_RST_PIN};
     
     void computeProjectedGravity() {
         // Compute R^T * [0, 0, -1] to get gravity in body frame
@@ -247,4 +255,3 @@ private:
 };
 
 #endif // BNO085_IMU_H
-
