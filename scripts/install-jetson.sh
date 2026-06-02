@@ -46,11 +46,14 @@
 #                                             # (JetPack stock kernel does);
 #                                             # implies --setup-can
 #   sudo ./install-jetson.sh --setup-imu      # also configure IMU access:
-#                                             # udev rule giving the `bebop`
+#                                             # udev rules giving the `bebop`
 #                                             # group rw on /dev/spidev* and
-#                                             # /dev/gpiochip* (so bebop-linux
-#                                             # can open SPI + INT/RST GPIOs
-#                                             # without root)
+#                                             # /dev/gpiochip* (SPI backend) AND
+#                                             # a stable /dev/bebop-imu symlink
+#                                             # for the Teensy `imu_bridge`
+#                                             # serial backend (so bebop-linux
+#                                             # can open whichever the YAML
+#                                             # selects without root)
 #   sudo ./install-jetson.sh --setup-imu-only # just configure IMU access;
 #                                             # don't download or install
 #                                             # binaries
@@ -297,18 +300,30 @@ EOF
 # IMU setup helper
 # ---------------------------------------------------------------------------
 #
-# The Bebop V2 IMU is a BNO085 wired for SPI (see
-# `firmware/bebop-linux/config/bebop_v2.yaml` for the pinout). At
-# runtime `bebop-linux` opens three device nodes:
+# The Bebop V2 IMU is a BNO085. There are two supported wiring
+# topologies, selected by `imu.source` in
+# `firmware/bebop-linux/config/bebop_v2.yaml`:
 #
-#   * /dev/spidev0.0 (the SPI controller exposed by jetson-io's `spi1`)
-#   * /dev/gpiochip0 (twice: line 144 for INT/HINTN, line 106 for RST)
+#   * source: spi    — the BNO is wired to the Jetson's SPI bus. At
+#                      runtime `bebop-linux` opens three device nodes:
+#                        - /dev/spidev0.0 (SPI controller via jetson-io `spi1`)
+#                        - /dev/gpiochip0 (line 144 = INT/HINTN, 106 = RST)
+#   * source: serial — the BNO is wired to the Teensy, which runs the
+#                      `imu_bridge` firmware and streams binary frames to
+#                      the Jetson over USB serial. `bebop-linux` opens a
+#                      tty (e.g. /dev/ttyACM0). The Teensy enumerates with
+#                      USB_DUAL_SERIAL as 16c0:048b: interface 0 is the
+#                      binary frame stream, interface 2 is the debug log.
 #
-# JetPack ships these as root-only (mode 0600, owner root:root), so the
-# runtime fails its first `BNO08x::new_spi(...)` call with
-# `PermissionDenied`. This function drops a udev rule that hands them
-# to `${IMU_GROUP}` (default `bebop`, matching the OEM login group), so
-# the runtime can come up as a regular service user without sudo.
+# JetPack ships /dev/spidev* and /dev/gpiochip* as root-only (mode 0600,
+# owner root:root); /dev/ttyACM* are usually group `dialout`. So a
+# non-root runtime fails to open them. This function drops a udev rule
+# that hands all of them to `${IMU_GROUP}` (default `bebop`, matching the
+# OEM login group) so the runtime can come up as a regular service user
+# without sudo. For the serial backend it also creates stable symlinks
+# /dev/bebop-imu (binary stream) and /dev/bebop-imu-debug (log), so the
+# YAML can point at a name that doesn't shift when other USB CDC devices
+# enumerate ahead of the Teensy.
 #
 # Caveat: enabling `spi1` itself is a one-time, *interactive*
 # device-tree change made via `sudo /opt/nvidia/jetson-io/jetson-io.py`
@@ -346,24 +361,37 @@ EOF
     #    (matches happen on device-add, no runtime cost).
     install -d -m 0755 /etc/udev/rules.d
     cat > /etc/udev/rules.d/99-bebop-imu.rules <<EOF
-# Bebop V2 IMU (BNO085 over SPI + INT/RST GPIO).
+# Bebop V2 IMU (BNO085). Covers both wiring topologies; the active one
+# is chosen by 'imu.source' in
+# firmware/bebop-linux/config/bebop_v2.yaml. Remove this file to revert
+# to the default access.
 #
+# --- source: spi -----------------------------------------------------
 # Hand /dev/spidev* and /dev/gpiochip* to the ${IMU_GROUP} group so the
 # bebop-linux runtime can open the SPI bus and toggle the INT/RST
 # GPIOs without root. Specific lines are picked up by gpiod inside the
-# binary; see firmware/bebop-linux/config/bebop_v2.yaml for the active
-# pinout. Remove this file to revert to the default root-only access.
+# binary; see the YAML for the active pinout.
 KERNEL=="spidev*",   GROUP="${IMU_GROUP}", MODE="0660"
 KERNEL=="gpiochip*", GROUP="${IMU_GROUP}", MODE="0660"
+#
+# --- source: serial (Teensy imu_bridge) ------------------------------
+# The Teensy enumerates with USB_DUAL_SERIAL as 16c0:048b and presents
+# two CDC-ACM interfaces. Interface 0 carries the binary IMU frames;
+# interface 2 is the human-readable debug log. Give the ${IMU_GROUP}
+# group access and create stable symlinks so the YAML 'serial_device'
+# can point at /dev/bebop-imu regardless of ttyACM enumeration order.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="16c0", ATTRS{idProduct}=="048b", ENV{ID_USB_INTERFACE_NUM}=="00", GROUP="${IMU_GROUP}", MODE="0660", SYMLINK+="bebop-imu"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="16c0", ATTRS{idProduct}=="048b", ENV{ID_USB_INTERFACE_NUM}=="02", GROUP="${IMU_GROUP}", MODE="0660", SYMLINK+="bebop-imu-debug"
 EOF
     echo "    wrote /etc/udev/rules.d/99-bebop-imu.rules"
 
     # 3) Reload + apply to nodes that are already present. The
-    #    SUBSYSTEM matchers cover both the in-tree (`spidev`) and the
-    #    legacy ("gpio") sysfs paths for the gpiochip devices.
+    #    SUBSYSTEM matchers cover the in-tree (`spidev`), the legacy
+    #    ("gpio") sysfs path for gpiochip devices, and the Teensy tty.
     udevadm control --reload-rules
     udevadm trigger --subsystem-match=spidev 2>/dev/null || true
     udevadm trigger --subsystem-match=gpio   2>/dev/null || true
+    udevadm trigger --subsystem-match=tty    2>/dev/null || true
 
     # 4) Status: list whatever's there now so the operator can tell at a
     #    glance whether the rule actually took effect.
@@ -391,6 +419,22 @@ EOF
         ls -l /dev/gpiochip* 2>/dev/null | sed 's/^/      /'
     else
         echo "      (none — no /dev/gpiochip* nodes found; very unusual on Jetson)"
+    fi
+    echo
+    echo "    Teensy imu_bridge serial (source: serial):"
+    if compgen -G "/dev/bebop-imu*" >/dev/null; then
+        ls -l /dev/bebop-imu* 2>/dev/null | sed 's/^/      /'
+    else
+        cat <<'EOF'
+      (none — /dev/bebop-imu not present)
+      Either the Teensy isn't plugged in / flashed with the `imu_bridge`
+      firmware, or it's running a non-dual-serial USB type. Flash it with:
+
+          pio run -e imu_bridge --target upload   # from firmware/bebop-locomotion
+
+      then re-run `--setup-imu`. Only needed when bebop_v2.yaml sets
+      `imu.source: "serial"`; ignore this for the SPI backend.
+EOF
     fi
 
     # 5) If the invoking user isn't already in the group, nudge them.
