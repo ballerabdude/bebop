@@ -207,6 +207,15 @@ struct Args {
     #[arg(long, default_value_t = false)]
     allow_cap_override: bool,
 
+    /// Relax the position and velocity limits for a FREE-spinning shaft
+    /// (`--setup bench` only): position abort is disabled and velocity is
+    /// allowed up to the motor model's rated speed. Use when the output is
+    /// unattached and may rotate continuously / spin up fast (e.g.
+    /// `friction-sweep`, `torque-step`). Torque, temperature and fault
+    /// protection stay at the deploy envelope.
+    #[arg(long, default_value_t = false)]
+    free_spin: bool,
+
     // --- friction-sweep ----------------------------------------------------
     /// Number of distinct |velocity| set-points in the friction sweep.
     #[arg(long, default_value_t = 6)]
@@ -595,8 +604,26 @@ fn pump_feedback(can: &CanInterface, motor: &mut RobstrideMotor) {
     }
 }
 
-/// Returns an abort reason if any safety condition is breached.
-fn check_abort(motor: &RobstrideMotor, lim: &EffLimits, elapsed_s: f32, grace_s: f32) -> Option<String> {
+/// Highest physically-plausible motor temperature (°C). Robstride RS0x
+/// motors thermal-fault well under 100 °C; anything above this is a CAN
+/// decode / comms glitch on the feedback frame, not a real reading, so we
+/// ignore it for the temperature limit (a genuine over-temp still trips via
+/// the motor's own fault bit, handled in `check_immediate`).
+const TEMP_SANE_MAX_C: f32 = 150.0;
+
+/// Consecutive over-limit feedback frames required before a kinematic
+/// (position/velocity/torque/temperature) abort. Debounces single corrupt
+/// frames so one glitched decode doesn't kill an otherwise-healthy run.
+const LIMIT_STRIKES: u32 = 3;
+
+/// Immediate (un-debounced) safety conditions: motor faults and loss of
+/// communication. These trip on the first occurrence.
+fn check_immediate(
+    motor: &RobstrideMotor,
+    lim: &EffLimits,
+    elapsed_s: f32,
+    grace_s: f32,
+) -> Option<String> {
     let st = &motor.state;
 
     if st.has_error {
@@ -606,27 +633,37 @@ fn check_abort(motor: &RobstrideMotor, lim: &EffLimits, elapsed_s: f32, grace_s:
             motor.fault_description().unwrap_or_else(|| "unknown".into())
         ));
     }
-    // Only trust feedback-derived limits once we have at least one frame.
     if st.last_update_ms != 0 {
-        // 5% margin so quantization / overshoot doesn't false-trip.
-        if st.position < lim.pos_min - 0.05 || st.position > lim.pos_max + 0.05 {
-            return Some(format!("position {:.3} rad outside limits", st.position));
-        }
-        if st.velocity.abs() > lim.vel_max * 1.2 {
-            return Some(format!("velocity {:.2} rad/s exceeds limit", st.velocity));
-        }
-        if st.torque.abs() > lim.tau_max * 1.2 {
-            return Some(format!("torque {:.2} Nm exceeds limit", st.torque));
-        }
-        if st.temperature > lim.temp_max {
-            return Some(format!("temperature {:.1} °C exceeds limit", st.temperature));
-        }
         let age = now_ms().saturating_sub(st.last_update_ms) as f32;
         if age > lim.feedback_timeout_ms {
             return Some(format!("feedback stale ({age:.0} ms > timeout)"));
         }
     } else if elapsed_s > grace_s {
         return Some("no feedback received from motor".into());
+    }
+    None
+}
+
+/// Kinematic-limit breach (debounced by the caller). Returns the reason for
+/// a single frame; an impossible temperature reading is treated as a decode
+/// glitch and ignored here.
+fn check_limit(motor: &RobstrideMotor, lim: &EffLimits) -> Option<String> {
+    let st = &motor.state;
+    if st.last_update_ms == 0 {
+        return None;
+    }
+    // 5% margin so quantization / overshoot doesn't false-trip.
+    if st.position < lim.pos_min - 0.05 || st.position > lim.pos_max + 0.05 {
+        return Some(format!("position {:.3} rad outside limits", st.position));
+    }
+    if st.velocity.abs() > lim.vel_max * 1.2 {
+        return Some(format!("velocity {:.2} rad/s exceeds limit", st.velocity));
+    }
+    if st.torque.abs() > lim.tau_max * 1.2 {
+        return Some(format!("torque {:.2} Nm exceeds limit", st.torque));
+    }
+    if st.temperature > lim.temp_max && st.temperature <= TEMP_SANE_MAX_C {
+        return Some(format!("temperature {:.1} °C exceeds limit", st.temperature));
     }
     None
 }
@@ -741,6 +778,21 @@ fn run(args: Args, stop: Arc<AtomicBool>) -> Result<RunOutcome> {
         confirm_cap_override(&joint, &limits)?;
     }
 
+    // Free-spin: relax the position limit (to the encoder's full ±4π
+    // multiturn range) AND the velocity limit (to the motor model's rated
+    // electrical speed) so a free, low-inertia bench shaft can spin up
+    // without false-tripping. Torque, temperature and fault protection stay
+    // at the deploy envelope. Bench only — on an assembled joint the
+    // position stop and velocity cap are real and must stand.
+    if args.free_spin {
+        if setup != Setup::Bench {
+            bail!("--free-spin is only valid with --setup bench (free, unattached shaft)");
+        }
+        limits.pos_min = -4.0 * std::f32::consts::PI;
+        limits.pos_max = 4.0 * std::f32::consts::PI;
+        limits.vel_max = specs.velocity_max.abs().max(specs.velocity_min.abs());
+    }
+
     // --- open CSV ----------------------------------------------------------
     let out_dir = expand_tilde(&args.out);
     fs::create_dir_all(&out_dir)
@@ -769,10 +821,17 @@ fn run(args: Args, stop: Arc<AtomicBool>) -> Result<RunOutcome> {
         maneuver.as_str(),
         setup.as_str(),
     );
-    println!(
-        "       limits: pos=[{:.3},{:.3}] vel_max={:.2} tau_max={:.2} temp_max={:.1}",
-        limits.pos_min, limits.pos_max, limits.vel_max, limits.tau_max, limits.temp_max
-    );
+    if args.free_spin {
+        println!(
+            "       limits: FREE-SPIN (pos disabled, vel relaxed to {:.1} rad/s) tau_max={:.2} temp_max={:.1}",
+            limits.vel_max, limits.tau_max, limits.temp_max
+        );
+    } else {
+        println!(
+            "       limits: pos=[{:.3},{:.3}] vel_max={:.2} tau_max={:.2} temp_max={:.1}",
+            limits.pos_min, limits.pos_max, limits.vel_max, limits.tau_max, limits.temp_max
+        );
+    }
     println!("       logging to {}", csv_path.display());
     println!("       expect: {}", maneuver.expectation());
 
@@ -799,6 +858,7 @@ fn run(args: Args, stop: Arc<AtomicBool>) -> Result<RunOutcome> {
     let period = Duration::from_secs_f32(1.0 / args.rate_hz.max(1.0));
     let grace_s = 0.5_f32;
     let start = Instant::now();
+    let mut limit_strikes: u32 = 0;
 
     let outcome = loop {
         let tick_start = Instant::now();
@@ -810,8 +870,19 @@ fn run(args: Args, stop: Arc<AtomicBool>) -> Result<RunOutcome> {
 
         pump_feedback(&can, &mut motor);
 
-        if let Some(reason) = check_abort(&motor, &limits, t, grace_s) {
+        // Faults / comms loss abort immediately.
+        if let Some(reason) = check_immediate(&motor, &limits, t, grace_s) {
             break RunOutcome::Aborted(reason);
+        }
+        // Kinematic-limit breaches must persist for a few frames so a single
+        // glitched feedback decode doesn't kill an otherwise-healthy run.
+        if let Some(reason) = check_limit(&motor, &limits) {
+            limit_strikes += 1;
+            if limit_strikes >= LIMIT_STRIKES {
+                break RunOutcome::Aborted(reason);
+            }
+        } else {
+            limit_strikes = 0;
         }
 
         match excitation.command(t, motor.state.position) {

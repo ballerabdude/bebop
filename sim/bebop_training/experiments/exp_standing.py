@@ -21,13 +21,19 @@ Kept because the real robot needs them:
 Reward set:
   * ``alive``               — +1/tick while base_link is above the
                               ground-contact termination threshold.
-  * ``torso_pitch``         — asymmetric IMU pitch: reward balancing
-                              anywhere in a back-lean *band* (~10°–17°,
-                              ``proj_grav[0]`` in ``[-0.29, -0.17]``) as a
-                              flat-top plateau, so the torso can settle at
-                              a range of pitches instead of one angle;
-                              penalize forward pitch (hardware falls on any
-                              forward lean).
+  * ``torso_upright``       — ``flat_orientation_l2``: symmetric L2
+                              penalty on the xy projected-gravity
+                              components, i.e. any torso tilt. No
+                              hardcoded target lean; the policy is simply
+                              rewarded for keeping the torso vertical.
+  * ``lock_pose``           — high-weight bounded ``exp(-Σv²/σ²)`` carrot
+                              on joint velocity. Strongly rewards locking
+                              into a steady pose (any configuration), and
+                              saturates toward 0 (never punitive) during a
+                              recovery transient.
+  * ``feet_straight``       — L1 penalty on hip-abduction deviation from
+                              the zero default, keeping the legs straight
+                              and the feet from splitting outward.
   * ``joint_pos_limits``    — quadratic penalty for exceeding the URDF
                               joint soft limits.
   * ``joint_effort``        — L2 penalty on applied joint torques, a
@@ -47,7 +53,7 @@ Reward set:
                               "be still." Saturates to 0 (not punitive)
                               during legitimate recovery transients, so
                               it composes with ``alive`` and
-                              ``torso_pitch`` instead of fighting them.
+                              ``torso_upright`` instead of fighting them.
   * ``lin_vel_z_l2`` /
     ``ang_vel_xy_l2``       — small L2 penalties on the off-command
                               DOFs (vertical bounce, roll/pitch rate)
@@ -55,8 +61,8 @@ Reward set:
   * ``action_rate_l2`` / ``action_l2`` — action smoothness + magnitude.
 
 Terminations:
-  * ``imu_pitch_out_of_bounds`` — end episode when ``|pitch| > 20°`` from
-                              vertical (``|proj_grav[0]| > sin(20°)``), before
+  * ``imu_pitch_out_of_bounds`` — end episode when ``|pitch| > 10°`` from
+                              vertical (``|proj_grav[0]| > sin(10°)``), before
                               the torso hits the ground.
   * ``base_link_ground_contact`` — torso height near floor (fallen).
 
@@ -73,11 +79,10 @@ Reset randomization (this version):
     widen it gradually once the robot reliably stands. Watch
     ``mean_episode_length`` and the ``base_link_ground_contact``
     termination rate when changing it.
-  * Base roll ±0.30 rad; pitch biased toward back lean ``(-0.26, +0.10)``
-    rad (~−15°..+6°) — forward pitch samples are rare because hardware
-    cannot recover from forward tilt, and the deep edge leaves a ~5°
-    margin below the ±20° fall limit so resets don't terminate on the
-    cliff. Yaw full ±π.
+  * Base pitch symmetric ±8°, inside the ±10° fall limit so resets
+    measure balance rather than terminating on the cliff. Roll and yaw
+    are pinned to zero — the real robot is never dropped sideways or
+    upside-down; it starts upright with the feet an inch off the ground.
   * Initial angular velocity perturbed by ±0.3 rad/s on all three axes.
 
 Deliberately off (add back one at a time after hardware validation):
@@ -92,8 +97,8 @@ Deployment checklist (every run):
   1. Export ONNX from the training run.
   2. Confirm ``pos_scale`` (0.5), ``max_pos_step_per_tick`` (0.020), and
      ``POLICY_*`` clamps match ``bebop_v2.yaml``.
-  3. Pose the robot near the trained init (joints ≈ 0, torso ~15–20° back)
-     before RunPolicy.
+  3. Pose the robot near the trained init (joints ≈ 0, torso upright,
+     within ~±8° pitch) before RunPolicy.
   4. Log raw actions + decoded targets on hardware; compare to sim play mode.
 """
 
@@ -118,44 +123,23 @@ from isaaclab.utils import configclass
 
 from ..envs.bebop_v2_actions import VariableImpedanceJointActionCfg
 from ..envs.bebop_v2_events import reset_joints_uniform_within_limits
-from ..envs.bebop_v2_rewards import torso_pitch_asymmetric_reward
+from ..envs.bebop_v2_rewards import stationary_pose_exp
 from ..envs.bebop_v2_terminations import base_link_on_ground, imu_pitch_out_of_bounds
 
 
 # IMU pitch convention (body FLU, same as obs / firmware):
-#   proj_grav[0] < 0  => torso pitched back (stable band on hardware)
-#   proj_grav[0] > 0  => torso pitched forward (falls)
-PITCH_FALL_LIMIT_DEG = 20.0
+#   proj_grav[0] = -sin(pitch); |proj_grav[0]| grows with tilt either way.
+# The episode terminates symmetrically at ±PITCH_FALL_LIMIT_DEG of torso
+# pitch from vertical; there is no hardcoded target lean — the policy is
+# rewarded (via flat_orientation_l2) for staying upright.
+PITCH_FALL_LIMIT_DEG = 10.0
 PITCH_FALL_LIMIT_GX = math.sin(math.radians(PITCH_FALL_LIMIT_DEG))
 
-# Back-lean *band* the torso is rewarded to balance anywhere within (a
-# flat-top plateau, not a single target — so the policy can settle at a
-# range of pitches instead of collapsing onto one angle in playback).
-# proj_grav[0] = -sin(pitch): more negative => deeper back lean. The band
-# is centered on the known-good 17° back lean and extended toward upright
-# (down to 10°). Both edges stay inside the ±20° imu_pitch_out_of_bounds
-# termination so the policy is never rewarded for sitting on the fall
-# cliff (~3° margin at the deep edge). Widen the band for a larger range
-# of stable angles; if you push the deep edge past ~17° also raise
-# PITCH_FALL_LIMIT_DEG (and validate the deep lean on hardware first).
-PITCH_BAND_DEEP_DEG = 17.0
-PITCH_BAND_SHALLOW_DEG = 10.0
-PITCH_BAND_DEEP_GX = -math.sin(math.radians(PITCH_BAND_DEEP_DEG))
-PITCH_BAND_SHALLOW_GX = -math.sin(math.radians(PITCH_BAND_SHALLOW_DEG))
-
-# Initial-pose back-lean range (radians, for reset_root_state_uniform's
-# pose_range["pitch"], which is an Euler angle in rad — NOT a projected
-# gravity component). Previously this used -PITCH_FALL_LIMIT_GX (a sine,
-# ~0.342) as if it were radians, spawning episodes at ~-19.6°, i.e. right
-# on the ±20° imu_pitch_out_of_bounds cliff; combined with the init
-# angular velocity those episodes terminated almost immediately and
-# inflated the pitch-out termination rate without measuring real
-# balance. We now seed within the recoverable back-lean band with a
-# margin below the fall limit. Deep init (~15°) sits just inside the
-# 10–17° torso_pitch reward band; the small forward edge (+6°) makes the
-# policy practice leaning back into the band.
-PITCH_INIT_BACK_RAD = -math.radians(15.0)
-PITCH_INIT_FWD_RAD = math.radians(6.0)
+# Initial-pose pitch range (radians, for reset_root_state_uniform's
+# pose_range["pitch"], an Euler angle in rad — NOT a projected gravity
+# component). Symmetric ±8° spawn, comfortably inside the ±10° fall limit
+# so resets measure balance rather than terminating on the cliff.
+PITCH_INIT_RAD = math.radians(8.0)
 
 # Fraction of each joint's soft range (measured from the default pose to
 # each limit) used when sampling reset poses. 1.0 = full configuration
@@ -185,17 +169,31 @@ POLICY_KP_MAX = [100.0, 100.0, 300.0, 300.0, 250.0, 250.0, 250.0, 250.0]
 POLICY_KD_MIN = [1.5, 1.5, 2.0, 2.0, 2.0, 2.0, 1.0, 1.0]
 POLICY_KD_MAX = [5.0, 5.0, 8.0, 8.0, 8.0, 8.0, 5.0, 5.0]
 
-# Robstride motor friction / armature estimates and T-N curve corners.
-JOINT_FRICTION_HIP_FLEX = 0.5
-JOINT_FRICTION_HIP_ABD = 0.3
-JOINT_FRICTION_KNEE_FLEX = 0.5
-JOINT_FRICTION_FOOT = 0.1
+# Robstride motor friction / armature and T-N curve corners.
+#
+# Coulomb friction and reflected rotor inertia (armature) are MEASURED via
+# the actuator sysid tool (firmware/bebop-linux/src/bin/sysid.rs +
+# sim/bebop_training/tools/sysid_fit.py), right-side joints, bench / free
+# shaft. Cross-check: hip and knee share the RS04 and their measured rotor
+# inertia matched to 0.4% (0.0310 vs 0.0312) — armature is a motor property,
+# so this is expected; friction differs (~12%) because it is set by each
+# joint's bench assembly, not the motor.
+JOINT_FRICTION_HIP_FLEX = 0.567
+JOINT_FRICTION_HIP_ABD = 0.373
+JOINT_FRICTION_KNEE_FLEX = 0.633
+JOINT_FRICTION_FOOT = 0.159
 
-JOINT_ARMATURE_HIP_FLEX = 0.025
-JOINT_ARMATURE_HIP_ABD = 0.012
-JOINT_ARMATURE_KNEE_FLEX = 0.025
-JOINT_ARMATURE_FOOT = 0.004
+JOINT_ARMATURE_HIP_FLEX = 0.0310
+JOINT_ARMATURE_HIP_ABD = 0.0114
+JOINT_ARMATURE_KNEE_FLEX = 0.0312
+JOINT_ARMATURE_FOOT = 0.0038
 
+# Stall torque (saturation_effort) and no-load speed (velocity_limit) remain
+# datasheet values. The sysid bench runs could NOT measure them faithfully:
+# stall runs were not mechanically blocked, and no-load runs saturated the
+# Robstride velocity encoder full-scale (RS04 ±15, RS03 ±20, RS02 ±30 rad/s),
+# which is below the true no-load speed. Re-measure with a brake fixture +
+# --allow-cap-override before changing these.
 MOTOR_STALL_TORQUE_RS04 = 120.0
 MOTOR_STALL_TORQUE_RS03 = 60.0
 MOTOR_STALL_TORQUE_RS02 = 17.0
@@ -363,11 +361,11 @@ class EventCfg:
             "range_fraction": RESET_JOINT_RANGE_FRACTION,
         },
     )
-    # Wide base-orientation randomization. roll / pitch directly enter
-    # projected_gravity, so the policy actually sees these. yaw is
-    # invariant to projected_gravity and shows up only via imu_ang_vel
-    # over the recovery transient — at zero command the robot is
-    # yaw-symmetric, so full ±pi yaw is a free robustness probe.
+    # Base-orientation randomization. Only torso pitch is perturbed:
+    # roll and yaw are pinned to zero because the real deployment never
+    # drops the robot sideways or upside-down — it starts upright with
+    # the feet an inch off the ground, so a pitch-only spawn matches
+    # hardware and keeps every reset recoverable.
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
@@ -376,13 +374,11 @@ class EventCfg:
                 "x": (0.0, 0.0),
                 "y": (0.0, 0.0),
                 "z": (0.0, 0.0),
-                "roll": (-0.30, 0.30),
-                # Bias toward back lean; rare forward samples (hardware
-                # cannot recover from forward pitch). Both edges leave a
-                # margin below the ±20° fall limit so resets measure
-                # balance rather than terminating on the cliff.
-                "pitch": (PITCH_INIT_BACK_RAD, PITCH_INIT_FWD_RAD),
-                "yaw": (-math.pi, math.pi),
+                "roll": (0.0, 0.0),
+                # Symmetric ±8° pitch spawn, inside the ±10° fall limit so
+                # resets measure balance rather than terminating on the cliff.
+                "pitch": (-PITCH_INIT_RAD, PITCH_INIT_RAD),
+                "yaw": (0.0, 0.0),
             },
             "velocity_range": {
                 "x": (0.0, 0.0),
@@ -395,6 +391,26 @@ class EventCfg:
         },
     )
 
+    # Actuator dynamics randomization. The JOINT_FRICTION_* / JOINT_ARMATURE_*
+    # constants are sysid-measured on the right-side joints only, so the left
+    # side and unit-to-unit / thermal / wear variation are unmodeled. Re-sample
+    # each episode (scale about the measured nominal) so the policy is robust to
+    # the spread instead of overfitting one bench measurement:
+    #   - friction: x[0.7, 1.4]  (assembly-dependent; widest empirical spread)
+    #   - armature: x[0.9, 1.1]  (motor-rotor property; tight, ~0.4% across the
+    #                             two RS04 joints, so only a small band)
+    randomize_actuator_params = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=JOINT_NAMES_ALL),
+            "friction_distribution_params": (0.7, 1.4),
+            "armature_distribution_params": (0.9, 1.1),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
 
 @configclass
 class RewardsCfg:
@@ -402,19 +418,50 @@ class RewardsCfg:
 
     alive = RewTerm(func=mdp.is_alive, weight=1.0)
 
-    # Hardware-stable band: torso ~15–20° pitched back. Forward pitch
-    # is penalized inside the reward; ``imu_pitch_out_of_bounds`` ends
-    # the episode at ±20° from vertical.
-    torso_pitch = RewTerm(
-        func=torso_pitch_asymmetric_reward,
-        weight=0.5,
+    # Stay upright — no hardcoded target lean. ``flat_orientation_l2``
+    # penalizes the squared xy components of projected gravity, i.e. any
+    # torso tilt (forward, back, or sideways) symmetrically, so the policy
+    # is rewarded for keeping the torso vertical. ``imu_pitch_out_of_bounds``
+    # ends the episode at ±10° pitch from vertical.
+    torso_upright = RewTerm(func=mdp.flat_orientation_l2, weight=-2.0)
+
+    # Lock into a steady pose, weighted high. Bounded exp(-Σv²/σ²) carrot
+    # on joint velocity (in [0, 1]/tick), so it strongly favours a rigid,
+    # locked stand — holding *whatever* configuration the policy settles
+    # into — without ever turning punitive during a recovery transient
+    # (it just saturates toward 0). This is the dominant "stay put" signal;
+    # the small joint_motion / action regularizers below still damp
+    # high-frequency chatter that this coarse term may miss.
+    lock_pose = RewTerm(
+        func=stationary_pose_exp,
+        weight=3.0,
+        params={"std": 1.5},
+    )
+
+    # Keep the legs straight / feet from splitting outward: penalize hip
+    # abduction deviation from the zero default pose.
+    #
+    # At weight -0.5 the policy learned to *hack* the stay-upright /
+    # lock_pose carrots by splaying the hip-abduction joints to their
+    # limits: a wide stance is a large static base of support, so it
+    # trivially maxes out torso_upright + lock_pose + alive while the tiny
+    # abduction penalty (~-0.3/tick at full splay) was easily outweighed.
+    # Bump the weight so splaying is clearly net-negative: at -5.0 a full
+    # splay (≈0.6 rad summed) costs ~-3/tick, more than the lock_pose
+    # carrot it was trying to farm. If lateral (roll) recovery starts to
+    # look stiff — the robot can no longer widen its stance to catch a
+    # sideways disturbance — back this off toward -2.0.
+    feet_straight = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-5.0,
         params={
-            "band_gx_min": PITCH_BAND_DEEP_GX,
-            "band_gx_max": PITCH_BAND_SHALLOW_GX,
-            "edge_std": 0.12,
-            "roll_std": 0.15,
-            "forward_penalty_gain": 5.0,
-            "forward_deadband": 0.0,
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=[
+                    "hip_abduction_left_joint",
+                    "hip_abduction_right_joint",
+                ],
+            ),
         },
     )
 
@@ -464,7 +511,7 @@ class RewardsCfg:
     # them as the *carrot* instead of an unbounded L2 velocity penalty:
     # during a legitimate balance-recovery transient the reward just
     # saturates toward 0, it does not actively fight `alive` or
-    # `torso_pitch` the way a quadratic stick would.
+    # `torso_upright` the way a quadratic stick would.
     #
     # std picked so the reward decays to ~1/e at typical drift speeds
     # but is still close to 1 inside the noise floor of a quiet stand.

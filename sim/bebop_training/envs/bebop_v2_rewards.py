@@ -5,6 +5,8 @@ from __future__ import annotations
 import torch
 import warp as wp
 
+from isaaclab.managers import SceneEntityCfg
+
 
 def _ensure_tensor(
     value,
@@ -26,6 +28,39 @@ def _ensure_tensor(
         dtype=torch.float32,
         device=env_device if env_device is not None else "cpu",
     )
+
+
+def stationary_pose_exp(
+    env,
+    std: float = 1.5,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Bounded reward for *locking* into a steady pose (near-zero joint motion).
+
+    Unlike a target-pose term, this rewards holding *whatever* configuration
+    the policy settles into rather than a specific one — the carrot is on the
+    joint velocity, not the joint position. It is a ``exp(-Σv²/σ²)`` kernel
+    over the selected joints, so it is bounded in ``[0, 1]`` per tick (1.0
+    when perfectly still, decaying as the joints move). Being bounded and
+    non-negative, it can be given a large weight to strongly favour a rigid,
+    locked stand without ever turning punitive during a legitimate
+    balance-recovery transient (it just saturates toward 0).
+
+    Args:
+        std: velocity scale (rad/s-ish). The reward is ~1/e once the summed
+            squared joint velocity reaches ``std²``. Smaller => stricter
+            "be perfectly still" requirement.
+        asset_cfg: which articulation / joints to score (defaults to all
+            joints of ``robot``).
+    """
+    asset = env.scene[asset_cfg.name]
+    joint_vel = _ensure_tensor(
+        asset.data.joint_vel, env_device=getattr(env, "device", None)
+    )
+    if asset_cfg.joint_ids is not None:
+        joint_vel = joint_vel[:, asset_cfg.joint_ids]
+    err = torch.sum(torch.square(joint_vel), dim=1)
+    return torch.exp(-err / (std * std))
 
 
 def torso_pitch_asymmetric_reward(
