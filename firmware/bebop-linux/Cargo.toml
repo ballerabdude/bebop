@@ -24,6 +24,16 @@ path = "src/main.rs"
 name = "imu-probe"
 path = "src/bin/imu_probe.rs"
 
+# Single-joint actuator system-identification driver. Reuses the motor
+# stack (RobotConfig + CanInterface + RobstrideMotor) but bypasses the
+# Supervisor/WS server so it can command full MIT-mode kp/kd/torque/velocity
+# excitation and log synchronized feedback to CSV for offline fitting of the
+# Isaac Lab DCMotorCfg params. See `src/bin/sysid.rs` for usage and
+# `sim/bebop_training/tools/sysid_fit.py` for the fitter.
+[[bin]]
+name = "sysid"
+path = "src/bin/sysid.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full", "rt-multi-thread", "time", "sync", "signal", "net", "macros"] }
