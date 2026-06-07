@@ -1,0 +1,19 @@
+# Generated
+bom/
+*-backups/
+fp-info-cache
+*.zip
+
+# Backups
+*.bak
+*~
+_autosave-*
+
+# OS
+.DS_Store
+
+# Local settings
+*.kicad_prl
+
+.history
+~*.lck
