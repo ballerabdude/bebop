@@ -217,7 +217,7 @@ mv firmware/bebop-linux/vendor/bno08x-rs/Cargo.toml.orig \
 ( cd firmware/bebop-linux && cargo run --bin imu-probe -- \
       --spi /dev/spidev0.0 \
       --int-chip gpiochip0 --int-line 144 \
-      --rst-chip gpiochip0 --rst-line 106 \
+      --rst-chip gpiochip0 --rst-line 85 \
       --report-id 0x28 \
       --period-ms 50 --duration-s 10 )
 

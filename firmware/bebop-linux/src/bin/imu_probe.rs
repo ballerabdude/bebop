@@ -63,14 +63,16 @@ use clap::Parser;
     about = "BNO080/BNO085 SPI smoke test (bypasses the production imu.rs path)"
 )]
 struct Args {
-    /// SPI character device. `spi1` in jetson-io maps to `/dev/spidev0.0`
-    /// on Jetson Orin Nano.
+    /// SPI character device for Jetson header pins 19/21/23/24
+    /// (`SPI0_*` in the Jetson pinout). This maps to `/dev/spidev0.0`
+    /// on the Bebop Orin Nano setup.
     #[arg(long, default_value = "/dev/spidev0.0")]
     spi: String,
 
-    /// GPIO chip hosting the BNO `INT` (HINTN) line — usually `gpiochip1`
-    /// on Orin Nano because header pin 7 (`PBB.00`) lives on the AON
-    /// controller.
+    /// GPIO chip hosting the BNO `INT` (HINTN) line. On the Bebop V2
+    /// wiring (header pin 7 → `PAC.06`, line 144) this is `gpiochip0`.
+    /// All 40-pin-header GPIOs live on `gpiochip0`; the AON controller
+    /// (`gpiochip1`) is NOT routed to the header.
     #[arg(long)]
     int_chip: String,
 

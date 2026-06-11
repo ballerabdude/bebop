@@ -399,9 +399,9 @@ pub struct ImuConfig {
     /// Serial device the Teensy `imu_bridge` enumerates as, e.g.
     /// `/dev/ttyACM0`. Only meaningful when `source == Serial`.
     pub serial_device: String,
-    /// SPI character device — e.g. `/dev/spidev0.0` on Jetson Orin Nano
-    /// after `spi1` is enabled in `jetson-io.py`. Only meaningful when
-    /// `source == Spi`.
+    /// SPI character device — e.g. `/dev/spidev0.0` for the Jetson
+    /// header pins 19/21/23/24 (`SPI0_*` in the pinout). Only meaningful
+    /// when `source == Spi`.
     pub spi_device: String,
     /// GPIO chip (e.g. `gpiochip0`) hosting the BNO `INT`/`HINTN` line.
     pub int_chip: String,
@@ -774,8 +774,8 @@ struct RawImu {
     /// Serial device for the Teensy `imu_bridge`. Defaults to
     /// `/dev/ttyACM0`. Only used when `source: serial`.
     serial_device: Option<String>,
-    /// SPI character device. Defaults to `/dev/spidev0.0` (Jetson Orin
-    /// Nano `spi1`).
+    /// SPI character device. Defaults to `/dev/spidev0.0` for the Jetson
+    /// header pins 19/21/23/24 (`SPI0_*` in the pinout).
     spi_device: Option<String>,
     /// GPIO chip for `INT` (`HINTN`). Defaults to `gpiochip0`.
     int_chip: Option<String>,

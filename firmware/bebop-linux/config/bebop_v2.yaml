@@ -205,10 +205,10 @@ joints:
 #     ├─────────────────┼──────────────────────────┼─────────────────────────────┤
 #     │ VIN             │ 3–5 V supply (regulated) │ pin 1 or 17 (3V3)           │
 #     │ GND             │ ground                   │ any GND                     │
-#     │ SCL             │ SCK (clock, input)       │ pin 23 (SPI1_SCK)           │
-#     │ SDA             │ MISO (data out of BNO)   │ pin 21 (SPI1_MISO)          │
-#     │ DI              │ MOSI (data into BNO)     │ pin 19 (SPI1_MOSI)          │
-#     │ CS              │ chip select              │ pin 24 (SPI1_CS0)           │
+#     │ SCL             │ SCK (clock, input)       │ pin 23 (SPI0_SCK)           │
+#     │ SDA             │ MISO (data out of BNO)   │ pin 21 (SPI0_MISO)          │
+#     │ DI              │ MOSI (data into BNO)     │ pin 19 (SPI0_MOSI)          │
+#     │ CS              │ chip select              │ pin 24 (SPI0_CS0)           │
 #     │ INT (HINTN)     │ interrupt to host (LOW)  │ pin 7  (PAC.06)             │
 #     │ RST             │ reset (active LOW)       │ pin 15 (PN.01 / GPIO12)     │
 #     │ P0              │ mode select bit 0 = HIGH │ tied to 3V3                 │
