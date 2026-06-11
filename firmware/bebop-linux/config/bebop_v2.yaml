@@ -165,7 +165,13 @@ joints:
     # move the foot by hand while the robot was suspended).
     # Standing reset (May 2026): foot clamps widened to restore enough
     # ankle stiffness authority for torso-over-feet balance on hardware.
-    policy_gain_clamps: { kp_min: 30.0, kp_max: 250.0, kd_min: 1.0, kd_max: 5.0 }
+    # Jun 2026: kp_min 30 -> 80, kd_min 1.0 -> 3.0. The ckpt-11500 stand
+    # balanced but buzzed near the setpoint (under-damped) and felt soft;
+    # the gains parked at the band midpoint (kp~140, kd~3.0) because nothing
+    # rewards stiffness, so the floor was lifted to force a firmer, better-
+    # damped ankle. kd_max stays 5.0 (RS02 encoder ceiling). MUST mirror
+    # POLICY_KP_MIN/POLICY_KD_MIN[6,7] in sim exp_standing.py.
+    policy_gain_clamps: { kp_min: 80.0, kp_max: 250.0, kd_min: 3.0, kd_max: 5.0 }
 
   foot_right_joint:
     can_interface: can1
@@ -173,7 +179,9 @@ joints:
     model: RS02
     hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 17.0, temp_max: 65.0 }
     hold_gains:  { kp: 375.0, kd: 5.0 }
-    policy_gain_clamps: { kp_min: 30.0, kp_max: 250.0, kd_min: 1.0, kd_max: 5.0 }
+    # Jun 2026: kp_min 30 -> 80, kd_min 1.0 -> 3.0 (mirror of foot_left_joint
+    # and POLICY_KP_MIN/POLICY_KD_MIN[6,7] in sim exp_standing.py).
+    policy_gain_clamps: { kp_min: 80.0, kp_max: 250.0, kd_min: 3.0, kd_max: 5.0 }
 
 # ============================================================================
 # IMU (Adafruit BNO085 breakout on SPI) — optional
@@ -202,7 +210,7 @@ joints:
 #     │ DI              │ MOSI (data into BNO)     │ pin 19 (SPI1_MOSI)          │
 #     │ CS              │ chip select              │ pin 24 (SPI1_CS0)           │
 #     │ INT (HINTN)     │ interrupt to host (LOW)  │ pin 7  (PAC.06)             │
-#     │ RST             │ reset (active LOW)       │ pin 31 (PQ.06)              │
+#     │ RST             │ reset (active LOW)       │ pin 15 (PN.01 / GPIO12)     │
 #     │ P0              │ mode select bit 0 = HIGH │ tied to 3V3                 │
 #     │ P1              │ mode select bit 1 = HIGH │ tied to 3V3                 │
 #     └─────────────────┴──────────────────────────┴─────────────────────────────┘
@@ -220,7 +228,7 @@ joints:
 # below refer to. Cross-check with `sudo gpioinfo gpiochip0`.
 #
 #     pin 7  → gpiochip0 line 144 (PAC.06)   ← INT (HINTN) on this robot
-#     pin 31 → gpiochip0 line 106 (PQ.06)    ← RST on this robot
+#     pin 15 → gpiochip0 line 85  (PN.01)    ← RST on this robot
 #
 # Note: pins 11, 12, 13, 15, 16, 18, 22, 26, 29, 32, 33, 35, 36, 37,
 # 38, 40 are also `gpiochip0` lines (mapping in `bebop-linux/src/config.rs`
@@ -280,7 +288,7 @@ imu:
   int_chip:   "gpiochip0"
   int_line:   144                       # header pin 7  (PAC.06)
   rst_chip:   "gpiochip0"
-  rst_line:   106                       # header pin 31 (PQ.06)
+  rst_line:   85                        # header pin 15 (PN.01 / GPIO12)
   # 5 ms = 200 Hz sensor-report cadence (was 50 ms / 20 Hz). The BNO085
   # gyro supports up to 1 kHz; 200 Hz gives the policy fresh rate feedback
   # at low latency. NOTE: this REQUIRES the higher spi_max_speed_hz below —
@@ -292,14 +300,16 @@ imu:
   # speed (InvalidChipId / garbled headers), step this down (e.g. 500000).
   spi_max_speed_hz: 1000000
 
-  # Bebop V2 PCB orientation: BNO chip sits flat on the back of the torso
-  # with its silkscreen +X pointing toward the robot's *right* shoulder,
-  # +Y toward the *front* of the chest, +Z out the *back* of the PCB
-  # (= up, away from the spine). That is a +90° yaw of the sensor frame
-  # relative to FLU body frame.
+  # Bebop V2 PCB orientation (new board): BNO chip sits flat on the back of
+  # the torso with its silkscreen +X arrow pointing toward the *front* of
+  # the chest, +Z out the *back* of the PCB (= up, away from the spine).
+  # By right-handedness that puts +Y toward the robot's *left*, so the
+  # sensor frame is aligned with the FLU body frame and the mount is
+  # identity (no rotation applied). If +Z actually points *into* the spine
+  # (chip flipped), use sensor_y: "-y" instead and re-verify.
   mount:
-    sensor_x: "-y"   # sensor +X → body -Y  (robot's right)
-    sensor_y: "+x"   # sensor +Y → body +X  (forward)
+    sensor_x: "+x"   # sensor +X → body +X  (forward)
+    sensor_y: "+y"   # sensor +Y → body +Y  (left)
     sensor_z: "+z"   # sensor +Z → body +Z  (up)
 
 # ============================================================================
@@ -318,21 +328,26 @@ server:
 # rail V, board temperature, fault word) and republishes the result to
 # every WS client through `Snapshot.power` / TelemetryFrame.power.
 #
-# Battery chemistry below describes the *pack we ship with* — a 13s LFP
-# (LiFePO4) pack managed by a JK-BMS, 40 Ah nominal. Per-cell endpoints
-# match the BMS's own SOC anchors (SOC-100% = 3.445 V, SOC-0% = 2.700 V),
-# giving a pack range of 13 × 3.45 = 44.85 V full → 13 × 2.70 = 35.10 V
-# empty. The pack BMS will trip on cell UVP (2.50 V) before we ever get
-# to the firmware's "0 %".
+# Battery chemistry below describes the *pack we ship with* — a 13s2p
+# Li-ion pack of 26× Molicel INR21700-P45B (NMC) cells, ~9.0 Ah nominal
+# (2 × 4.5 Ah). The 2p parallel grouping doubles capacity and current
+# headroom (up to ~90 A) but does NOT change voltage — only the 13s
+# series count sets pack voltage. Per-cell endpoints: SOC-100% = 4.20 V
+# (P45B full-charge), SOC-0% anchored at a conservative 3.00 V, giving a
+# pack range of 13 × 4.20 = 54.6 V full → 13 × 3.00 = 39.0 V empty. The
+# P45B datasheet hard cutoff is 2.50 V/cell; the pack BMS will trip on
+# cell UVP before we ever reach the firmware's "0 %".
 #
 # The fuel gauge in the operator app is a linear interpolation between
-# those endpoints. LFP's OCV curve is famously flat between roughly 20 %
-# and 90 % SOC (cells sit at ~3.20–3.30 V across most of the discharge),
-# so this estimate is good for "full / mostly full / getting low / dead"
-# bucketing but should not be trusted to better than ±15 %. The on-pack
-# JK-BMS does coulomb counting and is the authoritative SOC source if
-# you need it — wire that in via the BMS's Bluetooth/UART protocol and
-# replace this block with a coulomb-counter feed when accuracy matters.
+# those endpoints. Unlike LFP, Li-ion (NMC) has a sloped, monotonic OCV
+# curve, so a linear V→SOC estimate tracks reasonably well across most of
+# the range — but it still reads low under heavy current draw (the P45B
+# sags hard at 45 A/cell) and is non-linear near the top/bottom knees, so
+# treat it as a "full / mostly full / getting low / dead" indicator rather
+# than a precise gauge. The on-pack BMS does coulomb counting and is the
+# authoritative SOC source if you need it — wire that in via the BMS's
+# protocol and replace this block with a coulomb-counter feed when
+# accuracy matters.
 #
 # Comment out this block (or delete it) to skip power telemetry entirely;
 # the runtime will still come up cleanly without a power board attached.
@@ -341,6 +356,6 @@ power:
   can_interface: can4
   power_id: 170             # Robstride PowerBoard default address 0xAA (param 6006)
   poll_interval_ms: 1000    # 1 Hz status polling — keeps the bus quiet
-  battery_cells: 13         # 13s LFP pack (3.45 V × 13 = 44.85 V full)
-  cell_full_voltage: 3.45   # LFP SOC-100% anchor (matches JK-BMS setting)
-  cell_empty_voltage: 2.70  # LFP SOC-0%   anchor (matches JK-BMS setting)
+  battery_cells: 13         # 13s series count (2p adds capacity, not voltage) → 4.20 V × 13 = 54.6 V full
+  cell_full_voltage: 4.20   # Molicel P45B (Li-ion NMC) full-charge voltage
+  cell_empty_voltage: 3.00  # conservative empty anchor (P45B datasheet cutoff is 2.50 V)

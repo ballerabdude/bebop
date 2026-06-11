@@ -115,6 +115,39 @@ class VariableImpedanceJointAction(JointPositionAction):
         self._kd_min_t = torch.tensor(cfg.kd_min, device=device, dtype=torch.float32)
         self._kd_max_t = torch.tensor(cfg.kd_max, device=device, dtype=torch.float32)
 
+        # Fixed-gain mode. When enabled, the policy's 16 kp/kd action channels
+        # are IGNORED for physics and a fixed per-joint gain is applied instead
+        # (``kp_fixed`` / ``kd_fixed``, defaulting to the per-joint midpoint of
+        # [kp_min, kp_max] / [kd_min, kd_max]). The action vector stays 24-dim
+        # so the ONNX I/O and the 49-dim observation (last_action is 24) are
+        # unchanged from variable-impedance training and firmware; the gain
+        # channels are simply inert and get regularized toward 0 by action_l2.
+        #
+        # The midpoint default is the value firmware decodes at raw_kp = raw_kd
+        # = 0 (decode_policy_action affine-maps [-1, 1] -> [min, max]), so a
+        # policy whose gain channels are driven to ~0 deploys with the SAME
+        # gains trained here without any firmware change.
+        self._freeze_gains = bool(cfg.freeze_gains)
+        if self._freeze_gains:
+            kp_fixed = list(cfg.kp_fixed) if cfg.kp_fixed else [
+                0.5 * (lo + hi) for lo, hi in zip(cfg.kp_min, cfg.kp_max)
+            ]
+            kd_fixed = list(cfg.kd_fixed) if cfg.kd_fixed else [
+                0.5 * (lo + hi) for lo, hi in zip(cfg.kd_min, cfg.kd_max)
+            ]
+            for name, vec in (("kp_fixed", kp_fixed), ("kd_fixed", kd_fixed)):
+                if len(vec) != n_joints:
+                    raise ValueError(
+                        f"VariableImpedanceJointActionCfg.{name} must have len "
+                        f"{n_joints} (one entry per joint in joint_names order); "
+                        f"got {len(vec)}."
+                    )
+            self._kp_fixed_t = torch.tensor(kp_fixed, device=device, dtype=torch.float32)
+            self._kd_fixed_t = torch.tensor(kd_fixed, device=device, dtype=torch.float32)
+        else:
+            self._kp_fixed_t = None
+            self._kd_fixed_t = None
+
         if torch.any(self._kp_min_t >= self._kp_max_t):
             raise ValueError(
                 "VariableImpedanceJointActionCfg: every kp_min must be < kp_max "
@@ -279,9 +312,16 @@ class VariableImpedanceJointAction(JointPositionAction):
         defaults = self._default_joint_pos_for_action(slice(None))
         pos_target = defaults + self.cfg.pos_scale * raw_pos
 
-        # Affine map raw_{kp,kd} from [-1, 1] to [min, max] per joint.
-        kp = self._kp_min_t + 0.5 * (raw_kp + 1.0) * (self._kp_max_t - self._kp_min_t)
-        kd = self._kd_min_t + 0.5 * (raw_kd + 1.0) * (self._kd_max_t - self._kd_min_t)
+        # Gains. In variable-impedance mode (default) affine-map raw_{kp,kd}
+        # from [-1, 1] to [min, max] per joint. In fixed-gain mode the raw
+        # kp/kd channels are ignored (left only as inert, action_l2-regularized
+        # outputs) and a constant per-joint gain is broadcast to every env.
+        if self._freeze_gains:
+            kp = self._kp_fixed_t.unsqueeze(0).expand(num_envs, -1)
+            kd = self._kd_fixed_t.unsqueeze(0).expand(num_envs, -1)
+        else:
+            kp = self._kp_min_t + 0.5 * (raw_kp + 1.0) * (self._kp_max_t - self._kp_min_t)
+            kd = self._kd_min_t + 0.5 * (raw_kd + 1.0) * (self._kd_max_t - self._kd_min_t)
 
         # Slew clamp on position channel only.
         max_step = self.cfg.max_pos_step_per_tick
@@ -409,3 +449,26 @@ class VariableImpedanceJointActionCfg(JointPositionActionCfg):
 
     kd_max: list[float] = field(default_factory=list)
     """Per-joint upper bound on the decoded kd value, in JOINT_NAMES order."""
+
+    freeze_gains: bool = False
+    """If True, ignore the policy's 16 kp/kd action channels for physics and
+    apply the fixed per-joint gains ``kp_fixed`` / ``kd_fixed`` instead.
+
+    The action vector stays 24-dim (so the ONNX I/O and the 49-dim observation
+    that includes the 24-wide ``last_action`` are unchanged from the
+    variable-impedance config and from firmware); the gain channels are simply
+    inert. Use this to learn a clean position-only quiet stand first, then turn
+    it off to re-introduce variable impedance once the robot stands on hardware.
+    """
+
+    kp_fixed: list[float] = field(default_factory=list)
+    """Per-joint kp applied when ``freeze_gains`` is True, in JOINT_NAMES order.
+    Empty (default) -> midpoint of [kp_min, kp_max] per joint, which is what the
+    firmware decodes at raw_kp = 0, so a policy whose gain channels are
+    regularized toward 0 deploys with these exact gains with no firmware change.
+    """
+
+    kd_fixed: list[float] = field(default_factory=list)
+    """Per-joint kd applied when ``freeze_gains`` is True, in JOINT_NAMES order.
+    Empty (default) -> midpoint of [kd_min, kd_max] per joint (firmware raw_kd =
+    0 decode)."""

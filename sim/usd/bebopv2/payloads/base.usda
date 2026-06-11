@@ -106,14 +106,23 @@ def Xform "bebopv2" (
                             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
                         }
 
-                        def Xform "foot_right_1" (
-                            prepend references = @./instances.usda@</Instances/foot_right_1>
-                        )
+                        def Xform "foot_right_1"
                         {
-                            quatd xformOp:orient = (1, 0, 0, 0)
-                            double3 xformOp:scale = (0.001000000047, 0.001000000047, 0.001000000047)
-                            double3 xformOp:translate = (-0.063523, 0.178, 0.421034)
+                            quatf xformOp:orient = (1, 0, 0, 0)
+                            float3 xformOp:scale = (1, 1, 1)
+                            double3 xformOp:translate = (-0.004429, 0, -0.253461)
                             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                            def Xform "foot_right_1" (
+                                instanceable = true
+                                prepend references = @./instances.usda@</Instances/foot_right_1>
+                            )
+                            {
+                                quatd xformOp:orient = (1, 0, 0, 0)
+                                double3 xformOp:scale = (0.001000000047, 0.001000000047, 0.001000000047)
+                                double3 xformOp:translate = (-0.059094, 0.178, 0.674495)
+                                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                            }
                         }
                     }
                 }
@@ -173,14 +182,23 @@ def Xform "bebopv2" (
                             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
                         }
 
-                        def Xform "foot_left_1" (
-                            prepend references = @./instances.usda@</Instances/foot_left_1>
-                        )
+                        def Xform "foot_left_1"
                         {
-                            quatd xformOp:orient = (1, 0, 0, 0)
-                            double3 xformOp:scale = (0.001000000047, 0.001000000047, 0.001000000047)
-                            double3 xformOp:translate = (-0.063261, -0.1782, 0.420902)
+                            quatf xformOp:orient = (1, 0, 0, 0)
+                            float3 xformOp:scale = (1, 1, 1)
+                            double3 xformOp:translate = (0.000004, 0, -0.2535)
                             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                            def Xform "foot_left_1" (
+                                instanceable = true
+                                prepend references = @./instances.usda@</Instances/foot_left_1>
+                            )
+                            {
+                                quatd xformOp:orient = (1, 0, 0, 0)
+                                double3 xformOp:scale = (0.001000000047, 0.001000000047, 0.001000000047)
+                                double3 xformOp:translate = (-0.063265, -0.1782, 0.674402)
+                                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                            }
                         }
                     }
                 }

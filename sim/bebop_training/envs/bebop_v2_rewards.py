@@ -30,6 +30,89 @@ def _ensure_tensor(
     )
 
 
+def action_gain_rate_l2(
+    env,
+    num_position_channels: int = 8,
+) -> torch.Tensor:
+    """Penalize tick-to-tick change of the variable-impedance kp/kd channels.
+
+    The 24-dim MIT action is laid out as ``[0:8]`` position, ``[8:16]`` kp,
+    ``[16:24]`` kd (see ``VariableImpedanceJointAction``). The stock
+    ``mdp.action_rate_l2`` penalizes the squared change of *all* 24 channels
+    together, which is too diluted to stop the gain channels from flipping —
+    the exact failure seen on hardware (e.g. a foot kp snapping 250 -> 107 ->
+    250 across consecutive ticks). This term isolates the 16 gain channels
+    (everything at or past ``num_position_channels``) and taxes only their
+    tick-to-tick change, so it can be weighted hard enough to enforce smooth,
+    slowly-varying impedance without also over-damping the position targets.
+
+    Returns ``Σ (gain_t - gain_{t-1})²`` over the gain channels; always ``>= 0``,
+    use with a negative weight.
+    """
+    device = getattr(env, "device", None)
+    action = _ensure_tensor(env.action_manager.action, env_device=device)
+    prev_action = _ensure_tensor(env.action_manager.prev_action, env_device=device)
+    gain = action[:, num_position_channels:]
+    gain_prev = prev_action[:, num_position_channels:]
+    return torch.sum(torch.square(gain - gain_prev), dim=1)
+
+
+def action_position_rate_l2(
+    env,
+    num_position_channels: int = 8,
+) -> torch.Tensor:
+    """Penalize tick-to-tick change of the 8 *position* action channels.
+
+    The 24-dim MIT action is ``[0:8]`` position, ``[8:16]`` kp, ``[16:24]`` kd
+    (see ``VariableImpedanceJointAction``). The stock ``mdp.action_rate_l2``
+    averages the squared change of *all 24* channels, so the position targets'
+    own smoothness signal is diluted 3:1 by the gain channels — there is no
+    strong, isolated gradient telling the policy to move the joint *setpoints*
+    smoothly. (The gain channels already get their own isolated rate term,
+    ``action_gain_rate_l2``; this is the position-channel counterpart.)
+
+    For a heavy-torso quiet stand the correct behaviour is slow, smooth
+    counter-balancing of the position commands, NOT fast tick-to-tick setpoint
+    flipping. Isolating ``[0:N]`` lets this be weighted hard enough to force
+    very smooth position changes without over-damping the (separately handled)
+    impedance channels.
+
+    Returns ``Σ (pos_t - pos_{t-1})²`` over the position channels; always
+    ``>= 0``, use with a negative weight.
+    """
+    device = getattr(env, "device", None)
+    action = _ensure_tensor(env.action_manager.action, env_device=device)
+    prev_action = _ensure_tensor(env.action_manager.prev_action, env_device=device)
+    pos = action[:, :num_position_channels]
+    pos_prev = prev_action[:, :num_position_channels]
+    return torch.sum(torch.square(pos - pos_prev), dim=1)
+
+
+def action_gain_l2(
+    env,
+    num_position_channels: int = 8,
+) -> torch.Tensor:
+    """Penalize the magnitude of the kp/kd action channels (center on midpoint).
+
+    Same channel split as :func:`action_gain_rate_l2`. Each gain channel is
+    affine-mapped ``[-1, 1] -> [min, max]`` per joint, so ``raw = 0`` decodes
+    to the per-joint midpoint gain. For a quiet stand the gains are
+    under-determined (many kp/kd combinations earn the same reward), so PPO
+    leaves them noisy and lets them drift toward the rails. Penalizing the
+    squared raw gain magnitude gives those otherwise-flat directions a clean
+    optimum at ``raw = 0`` (the sensible mid-stiffness prior), while staying
+    mild enough that the policy can still move a gain off-midpoint when balance
+    genuinely benefits.
+
+    Returns ``Σ gain²`` over the gain channels; always ``>= 0``, use with a
+    negative weight.
+    """
+    device = getattr(env, "device", None)
+    action = _ensure_tensor(env.action_manager.action, env_device=device)
+    gain = action[:, num_position_channels:]
+    return torch.sum(torch.square(gain), dim=1)
+
+
 def stationary_pose_exp(
     env,
     std: float = 1.5,
@@ -61,6 +144,160 @@ def stationary_pose_exp(
         joint_vel = joint_vel[:, asset_cfg.joint_ids]
     err = torch.sum(torch.square(joint_vel), dim=1)
     return torch.exp(-err / (std * std))
+
+
+def feet_slide(
+    env,
+    sensor_names: list[str],
+    body_names: list[str],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    force_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Penalize a foot sliding along the ground *while it is in contact*.
+
+    Standard Isaac Lab anti-slip term: for each foot it gates the foot's
+    horizontal (xy) world velocity by whether that foot is currently bearing
+    load (contact normal force above ``force_threshold``), then sums over
+    feet. The result is ``>= 0`` and is meant to be used with a negative
+    weight.
+
+    Crucially it only taxes velocity *while in contact*: lifting a foot off
+    the ground (air time) costs nothing, so it does not discourage a recovery
+    step — it just stops the policy from "balancing" by skating its contact
+    point, which is a sim cheat that does not transfer to hardware.
+
+    Because this robot is a nested kinematic tree, each foot has its own
+    single-body ``ContactSensor`` (foot_left_1 / foot_right_1 are not siblings
+    under a common parent, so one wildcard sensor cannot address both). This
+    function therefore takes the parallel lists ``sensor_names`` and
+    ``body_names``: ``sensor_names[i]`` is the contact sensor for the foot
+    whose articulation body is ``body_names[i]``.
+
+    Args:
+        sensor_names: per-foot ``ContactSensor`` scene keys (each tracks one
+            foot body).
+        body_names: articulation body name for each foot, aligned with
+            ``sensor_names`` (used to read that foot's linear velocity).
+        asset_cfg: the robot articulation.
+        force_threshold: contact normal-force magnitude (N) above which a
+            foot counts as planted.
+    """
+    device = getattr(env, "device", None)
+    asset = env.scene[asset_cfg.name]
+    body_lin_vel = _ensure_tensor(asset.data.body_lin_vel_w, env_device=device)
+
+    reward = None
+    for sensor_name, body_name in zip(sensor_names, body_names):
+        contact_sensor = env.scene.sensors[sensor_name]
+        net_forces = _ensure_tensor(
+            contact_sensor.data.net_forces_w_history, env_device=device
+        )
+        # single tracked body -> (N, history, 1, 3); peak |force| over history
+        in_contact = net_forces.norm(dim=-1).max(dim=1)[0][:, 0] > force_threshold
+
+        body_id = asset.body_names.index(body_name)
+        foot_vel_xy = body_lin_vel[:, body_id, :2].norm(dim=-1)
+
+        term = foot_vel_xy * in_contact
+        reward = term if reward is None else reward + term
+
+    return reward
+
+
+def feet_load_symmetry(
+    env,
+    sensor_names: list[str],
+    force_eps: float = 1.0,
+) -> torch.Tensor:
+    """Penalize uneven vertical load between the two feet (anti-one-foot-lean).
+
+    Reads each foot's ``ContactSensor`` net force and returns the load-imbalance
+    fraction::
+
+        |F_left - F_right| / (F_left + F_right + force_eps)
+
+    which is ``0`` when both feet carry equal force and approaches ``1`` when
+    all the weight is on a single foot. Always ``>= 0`` and bounded in
+    ``[0, 1)``, so it is safe to give a firm negative weight without the
+    runaway risk of an unbounded penalty.
+
+    This directly attacks the observed failure mode — the policy settling into
+    an asymmetric stance that loads one leg far more than the other ("leaning
+    on one foot") — by making an even left/right weight split the reward
+    optimum. It is normalized by the total load so it measures the *fraction*
+    of imbalance rather than absolute newtons, which keeps the signal scale-
+    invariant to the robot's weight and to transient contact-force spikes.
+
+    Because the metric is the *ratio*, lifting one foot entirely (its force
+    -> 0) drives the fraction toward 1 (max penalty), so this also discourages
+    standing on a single foot. Both feet briefly airborne (a fall) makes the
+    numerator 0 -> no penalty, but that case is owned by the fall termination,
+    not this term.
+
+    Each foot has its own single-body ``ContactSensor`` (the feet are not
+    siblings in this nested kinematic tree), so this takes the two per-foot
+    sensor scene keys.
+
+    Args:
+        sensor_names: the two per-foot ``ContactSensor`` scene keys
+            ``[left, right]``; each tracks one foot body.
+        force_eps: small force (N) added to the denominator to keep the ratio
+            finite and well-behaved when both feet are momentarily unloaded.
+    """
+    device = getattr(env, "device", None)
+    forces = []
+    for sensor_name in sensor_names:
+        contact_sensor = env.scene.sensors[sensor_name]
+        net_forces = _ensure_tensor(
+            contact_sensor.data.net_forces_w_history, env_device=device
+        )
+        # single tracked body -> (N, history, 1, 3); peak |force| over history
+        forces.append(net_forces.norm(dim=-1).max(dim=1)[0][:, 0])
+
+    f_left, f_right = forces[0], forces[1]
+    total = f_left + f_right + force_eps
+    return torch.abs(f_left - f_right) / total
+
+
+def forward_lean_penalty(
+    env,
+    imu_name: str = "imu",
+    deadband: float = 0.05,
+) -> torch.Tensor:
+    """Penalize parking the torso pitched *forward* (COM over the toes).
+
+    Returns ``relu(g_x - deadband)²`` where ``g_x = projected_gravity_b[0]``
+    (``g_x > 0`` is a forward/nose-down lean in body FLU, same convention as
+    the policy obs / firmware). Always ``>= 0``; use with a **negative**
+    weight. Backward lean (``g_x < 0``) is left entirely to the symmetric
+    ``flat_orientation_l2`` term — this term only taxes the *forward* half.
+
+    Why asymmetric, when the rest of the task is symmetric "stay upright":
+    in sim the policy can hold a forward lean by riding the front edge of the
+    flat foot — the rigid foot's contact patch extends to the toe, so the
+    ground reaction (plus a little ankle torque) statically supports a COM
+    that has crept forward over the toes. On the real robot that strategy
+    falls: the foot is small and the ankle motor (RS02, ~17 N·m) is the
+    weakest joint, so the torso's weight tips it over instead of being held
+    back by the toes. This penalty keeps the resting COM behind the toe line
+    (on the whole foot / heel, which the leg can stack load through) so the
+    policy does not learn the non-transferable toe-balance.
+
+    The ``deadband`` (in ``g_x`` units, ≈ ``sin`` of the angle: 0.05 ≈ 2.9°)
+    means a small forward excursion — including the brief forward overshoot of
+    a genuine recovery catch — costs nothing; only a *sustained / deep*
+    forward lean is penalized, and quadratically, so the gradient grows as the
+    COM approaches the toes. Raise the weight (more negative) if play mode
+    still shows a forward toe-lean stand; lower it / widen the deadband if the
+    robot becomes reluctant to pitch forward at all during a recovery step.
+    """
+    imu = env.scene[imu_name]
+    proj_grav = _ensure_tensor(
+        imu.data.projected_gravity_b, env_device=getattr(env, "device", None)
+    )
+    g_x = proj_grav[:, 0]
+    overshoot = torch.relu(g_x - deadband)
+    return overshoot * overshoot
 
 
 def torso_pitch_asymmetric_reward(

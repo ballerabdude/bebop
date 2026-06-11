@@ -13,8 +13,8 @@
  * Wiring (Teensy 4.1, I2C0 / Wire):
  *   - SCL: Pin 19
  *   - SDA: Pin 18
- *   - INT: Pin 36   (optional, not required for this test)
- *   - RST: Pin 35   (optional, set RST_PIN to -1 if unused)
+ *   - INT: Pin 37   (optional, not required for this test)
+ *   - RST: Pin 36   (optional, set RST_PIN to -1 if unused)
  *   - VCC: 3.3V
  *   - GND: GND
  *

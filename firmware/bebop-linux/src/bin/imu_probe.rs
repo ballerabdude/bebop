@@ -28,7 +28,7 @@
 //! cargo run --bin imu-probe -- \
 //!     --spi /dev/spidev0.0 \
 //!     --int-chip gpiochip0 --int-line 144 \
-//!     --rst-chip gpiochip0 --rst-line 106 \
+//!     --rst-chip gpiochip0 --rst-line 85 \
 //!     --report-id 0x28 \
 //!     --period-ms 50 \
 //!     --duration-s 10
@@ -36,7 +36,7 @@
 //!
 //! Header pin → gpiochip line for Orin Nano (cross-check with
 //! `sudo gpioinfo gpiochip0`): pin 7 → 144 (PAC.06, used as INT),
-//! pin 31 → 106 (PQ.06, used as RST). All 40-pin-header GPIOs live on
+//! pin 15 → 85 (PN.01 / GPIO12, used as RST). All 40-pin-header GPIOs live on
 //! `gpiochip0`; `gpiochip1` (the AON controller) is NOT routed to the
 //! header.
 //!
@@ -176,7 +176,7 @@ fn main() -> ExitCode {
         eprintln!(
             "FAIL [stage 2: init]  SHTP handshake failed: {e:?}\n\
              hint: did you bridge BOTH SPI-enable jumpers on the back of the BNO board?\n\
-             also verify RST is wired to header pin 31 and INT to header pin 7."
+             also verify RST is wired to header pin 15 and INT to header pin 7."
         );
         return ExitCode::from(2);
     }

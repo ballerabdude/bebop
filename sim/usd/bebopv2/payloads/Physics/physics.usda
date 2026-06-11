@@ -183,7 +183,7 @@ over "bebopv2"
             custom rel physics:body1
             prepend rel physics:body1 = </bebopv2/Geometry/base_link/hip_flexion_left_1/hip_abduction_left_1/knee_flexion_left_1/foot_left_1>
             point3f physics:localPos0 = (0.000004, 0, -0.2535)
-            point3f physics:localPos1 = (63.264996, 178.2, -674.402)
+            point3f physics:localPos1 = (0, 0, 0)
             quatf physics:localRot0 = (1, 0, 0, 0)
             quatf physics:localRot1 = (1, 0, 0, 0)
             float physics:lowerLimit = -30.000013
@@ -203,7 +203,7 @@ over "bebopv2"
             custom rel physics:body1
             prepend rel physics:body1 = </bebopv2/Geometry/base_link/hip_flexion_right_1/hip_abduction_right_1/knee_flexion_right_1/foot_right_1>
             point3f physics:localPos0 = (-0.004429, 0, -0.253461)
-            point3f physics:localPos1 = (59.093998, -177.99998, -674.495)
+            point3f physics:localPos1 = (0, 0, 0)
             quatf physics:localRot0 = (-0, -1, 0, 0)
             quatf physics:localRot1 = (0, 1, 0, 0)
             float physics:lowerLimit = -30.000013

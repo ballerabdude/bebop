@@ -50,6 +50,22 @@ envelope.
 If running headlessly (``--headless``), the keyboard bindings are skipped and
 only the CLI ``--push_*`` flags (which apply a single push on startup) and the
 random ``push_robot`` event (controlled by ``--disable_pushes``) are active.
+
+Inspecting policy I/O
+---------------------
+
+Pass ``--print_obs_actions`` to periodically dump the observation fed *into*
+the policy and the action it predicts *out*, for the first robot (env 0).
+The vectors are split into named groups read off the env's observation and
+action managers (e.g. ``base_ang_vel``, ``projected_gravity``, ``joint_pos``,
+... and the action ``pos`` / ``kp`` / ``kd`` channels), so you can sanity-check
+what the network sees and emits without a plotting GUI. ``--print_interval``
+sets how many sim steps elapse between prints (default 50). Works headless::
+
+    /workspace/isaaclab/isaaclab.sh -p play_bebop.py \\
+        --task Isaac-BebopV2-Standing-v0 \\
+        --resume logs/rsl_rl/Isaac-BebopV2-Standing-v0/<run> \\
+        --print_obs_actions --print_interval 25
 """
 
 import argparse
@@ -120,6 +136,22 @@ parser.add_argument(
     "--disable_keyboard_push",
     action="store_true",
     help="Skip wiring up the carb keyboard push subscription (CLI-only mode).",
+)
+
+# Console inspection of the policy I/O for env 0. Prints the observation
+# vector going *into* the policy and the action vector coming *out* of it,
+# split into named groups (obs terms) and channels (action pos / kp / kd),
+# so you can sanity-check what the network sees and emits without a GUI.
+parser.add_argument(
+    "--print_obs_actions",
+    action="store_true",
+    help="Periodically print the obs fed in and the action predicted for env 0.",
+)
+parser.add_argument(
+    "--print_interval",
+    type=int,
+    default=2,
+    help="Sim steps between obs/action prints when --print_obs_actions is set (default 50).",
 )
 
 AppLauncher.add_app_launcher_args(parser)
@@ -350,6 +382,187 @@ def _maybe_override_commands(env_cfg) -> None:
     print(f"[INFO] Pinned velocity command to ({vx:.2f}, {vy:.2f}, {wz:.2f})")
 
 
+def _as_torch(value):
+    """Coerce a warp/torch/array obs or action to a CPU torch tensor."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().to("cpu")
+    torch_view = getattr(value, "torch", None)
+    if isinstance(torch_view, torch.Tensor):
+        return torch_view.detach().to("cpu")
+    try:
+        import warp as wp
+
+        if isinstance(value, wp.array):
+            return wp.to_torch(value).detach().to("cpu")
+    except Exception:
+        pass
+    return torch.as_tensor(value).detach().to("cpu")
+
+
+def _term_dim_length(dim) -> int:
+    """Flatten an Isaac Lab obs-term dim spec to a scalar length."""
+    if isinstance(dim, int):
+        return dim
+    length = 1
+    try:
+        for d in dim:
+            length *= int(d)
+    except TypeError:
+        return int(dim)
+    return length
+
+
+def _extract_policy_obs(obs, env_idx: int = 0) -> torch.Tensor:
+    """Return the flat policy observation row for ``env_idx``.
+
+    ``RslRlVecEnvWrapper`` (rsl_rl >= 4) returns a ``TensorDict`` keyed by
+    observation group (``"policy"``, ``"critic"``, ...), not a bare tensor.
+    Older wrappers returned ``(tensor, extras)`` or the tensor directly.
+    """
+    if isinstance(obs, tuple):
+        obs = obs[0]
+
+    policy_obs = obs
+    if isinstance(obs, dict) and "policy" in obs:
+        policy_obs = obs["policy"]
+    elif hasattr(obs, "keys"):
+        try:
+            if "policy" in obs.keys():
+                policy_obs = obs["policy"]
+        except Exception:
+            pass
+
+    policy_obs = _as_torch(policy_obs)
+    if policy_obs.dim() >= 2:
+        return policy_obs[env_idx].reshape(-1)
+    return policy_obs.reshape(-1)
+
+
+def _policy_obs_dim(obs) -> int | None:
+    """Best-effort policy observation dimension for startup logging."""
+    try:
+        return int(_extract_policy_obs(obs).numel())
+    except Exception:
+        return None
+
+
+def _build_obs_layout(env) -> list[tuple[str, int, int]]:
+    """Return ``[(term_name, start, length), ...]`` for the policy obs group.
+
+    Read straight off the observation manager so the labels track whatever
+    obs terms the active task defines (rather than hardcoding the standing
+    layout). Falls back to a single ``obs`` span if introspection fails.
+    """
+    unwrapped = getattr(env, "unwrapped", env)
+    try:
+        obs_mgr = unwrapped.observation_manager
+        names = list(obs_mgr.active_terms["policy"])
+        dims = obs_mgr.group_obs_term_dim["policy"]
+        layout: list[tuple[str, int, int]] = []
+        start = 0
+        for name, dim in zip(names, dims):
+            length = _term_dim_length(dim)
+            layout.append((name, start, length))
+            start += length
+        return layout
+    except Exception:
+        return []
+
+
+def _obs_segments_from_manager(env, env_idx: int = 0) -> list[tuple[str, list[float]]]:
+    """Return per-term policy obs values by reading the observation manager.
+
+    Used when the policy group is stored as a dict of tensors rather than a
+    single concatenated vector (in that case flat slicing by layout fails).
+    """
+    unwrapped = getattr(env, "unwrapped", env)
+    obs_dict = unwrapped.observation_manager.compute()
+    policy = obs_dict.get("policy", obs_dict)
+    if not isinstance(policy, dict):
+        return []
+
+    segments: list[tuple[str, list[float]]] = []
+    for name, value in policy.items():
+        row = _as_torch(value)
+        if row.dim() >= 2:
+            row = row[env_idx]
+        segments.append((name, row.reshape(-1).tolist()))
+    return segments
+
+
+def _build_action_layout(env, action_dim: int) -> list[tuple[str, int, int]]:
+    """Return ``[(label, start, length), ...]`` for the action vector.
+
+    Splits each action term reported by the action manager. A 24-dim
+    variable-impedance term is further split into ``pos`` / ``kp`` / ``kd``
+    thirds (the MIT-mode layout) for readability.
+    """
+    unwrapped = getattr(env, "unwrapped", env)
+    layout: list[tuple[str, int, int]] = []
+    try:
+        act_mgr = unwrapped.action_manager
+        names = list(act_mgr.active_terms)
+        dims = list(act_mgr.action_term_dim)
+    except Exception:
+        names, dims = [], []
+
+    if not names:
+        return [("action", 0, action_dim)]
+
+    start = 0
+    for name, dim in zip(names, dims):
+        dim = int(dim)
+        if dim % 3 == 0 and dim >= 3:
+            third = dim // 3
+            layout.append((f"{name}.pos", start, third))
+            layout.append((f"{name}.kp", start + third, third))
+            layout.append((f"{name}.kd", start + 2 * third, third))
+        else:
+            layout.append((name, start, dim))
+        start += dim
+    return layout
+
+
+def _format_vec(values, per_line: int = 8, indent: int = 6) -> str:
+    """Pretty-print a 1-D float sequence, wrapping every ``per_line`` items."""
+    pad = " " * indent
+    chunks = []
+    for i in range(0, len(values), per_line):
+        row = "  ".join(f"{v:+8.3f}" for v in values[i : i + per_line])
+        chunks.append((pad if i else "") + row)
+    return "\n".join(chunks) if chunks else f"{pad}(empty)"
+
+
+def _print_snapshot(step, obs_segments, action_row, action_layout) -> None:
+    """Print a labelled obs/action snapshot for the selected env."""
+    label_w = max(
+        [len(n) for n, _ in obs_segments]
+        + [len(n) for n, _, _ in action_layout]
+        + [4]
+    )
+    lines = [f"\n──── step {step} | env 0 ────", "obs (into policy):"]
+    for name, seg in obs_segments:
+        lines.append(f"  {name.ljust(label_w)}  {_format_vec(seg, indent=label_w + 4)}")
+
+    lines.append("action (out of policy):")
+    for name, lo, ln in action_layout:
+        seg = action_row[lo : lo + ln].tolist()
+        lines.append(f"  {name.ljust(label_w)}  {_format_vec(seg, indent=label_w + 4)}")
+    print("\n".join(lines), flush=True)
+
+
+def _collect_obs_segments(obs, env, obs_layout, env_idx: int = 0) -> list[tuple[str, list[float]]]:
+    """Build labelled obs segments for printing."""
+    per_term = _obs_segments_from_manager(env, env_idx)
+    if per_term:
+        return per_term
+
+    obs_row = _extract_policy_obs(obs, env_idx)
+    if obs_layout:
+        return [(name, obs_row[lo : lo + ln].tolist()) for name, lo, ln in obs_layout]
+    return [("obs", obs_row.tolist())]
+
+
 def main() -> int:
     # 1. Build env + agent configs from the gym registry (mirrors train_bebop.py).
     task_spec = gym.spec(args.task)
@@ -392,9 +605,10 @@ def main() -> int:
     policy = runner.get_inference_policy(device=env.device)
 
     # 5. Play loop.
-    # NOTE: rsl_rl 5.x's RslRlVecEnvWrapper returns the obs tensor directly
-    # (shape: ``(num_envs, obs_dim)``), not ``(obs, extras)``. The step()
-    # return arity varies across rsl_rl versions, so we index defensively.
+    # NOTE: recent RslRlVecEnvWrapper returns a TensorDict keyed by obs group
+    # (``"policy"``, ``"critic"``, ...). Older wrappers returned a bare tensor
+    # or ``(obs, extras)``. The inference policy accepts the TensorDict; our
+    # print helper extracts ``obs["policy"]`` before slicing.
     obs = env.get_observations()
     if isinstance(obs, tuple):  # older rsl_rl returned (obs, extras)
         obs = obs[0]
@@ -418,6 +632,21 @@ def main() -> int:
                 flush=True,
             )
 
+    # Optional: console inspection of the policy I/O for env 0. Built once
+    # off the observation/action managers so the labels track the task's
+    # actual obs terms and action layout.
+    obs_layout: list[tuple[str, int, int]] = []
+    action_layout: list[tuple[str, int, int]] = []
+    print_interval = max(1, args.print_interval)
+    if args.print_obs_actions:
+        obs_layout = _build_obs_layout(env)
+        obs_dim = _policy_obs_dim(obs)
+        dim_msg = f"obs_dim={obs_dim}" if obs_dim is not None else "obs_dim=?"
+        print(
+            f"[INFO] Printing env-0 obs/action every {print_interval} step(s). {dim_msg}.",
+            flush=True,
+        )
+
     print("[INFO] Running policy. Close the viewer or Ctrl-C to stop.")
 
     step = 0
@@ -427,6 +656,17 @@ def main() -> int:
                 if push_ctl is not None:
                     push_ctl.apply_pending(env)
                 actions = policy(obs)
+
+                if args.print_obs_actions and step % print_interval == 0:
+                    if not action_layout:
+                        action_layout = _build_action_layout(env, actions.shape[-1])
+                    _print_snapshot(
+                        step,
+                        _collect_obs_segments(obs, env, obs_layout),
+                        _as_torch(actions)[0],
+                        action_layout,
+                    )
+
                 step_result = env.step(actions)
                 obs = step_result[0]
                 step += 1

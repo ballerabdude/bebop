@@ -637,8 +637,8 @@ impl RobotConfig {
                 // The defaults match the validated Bebop V2 pinout (see
                 // `config/bebop_v2.yaml`): SPI device + INT/RST GPIOs
                 // matching Jetson Orin Nano's `gpiochip0:144` (header
-                // pin 7, PAC.06) and `gpiochip0:106` (header pin 31,
-                // PQ.06). Override per-robot when the wiring differs.
+                // pin 7, PAC.06) and `gpiochip0:85` (header pin 15,
+                // PN.01 / GPIO12). Override per-robot when the wiring differs.
                 let source = match raw_imu.source.as_deref() {
                     Some(s) => s.parse::<ImuSource>()?,
                     None => ImuSource::Spi,

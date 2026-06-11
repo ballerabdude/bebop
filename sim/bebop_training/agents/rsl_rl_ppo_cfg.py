@@ -61,9 +61,16 @@ class BebopPPOBaseCfg(RslRlOnPolicyRunnerCfg):
             "std_type": "log",
         },
     }
+    # Critic is intentionally LARGER than the actor (asymmetric actor-critic).
+    # The critic only exists during training — it never deploys — so growing it
+    # is free at inference time on the robot. A higher-capacity value function
+    # gives lower-variance advantage estimates, which stabilizes PPO and yields
+    # cleaner learning on every action channel, including the under-determined
+    # variable-impedance kp/kd channels. The actor stays [512, 256, 128] because
+    # it is the network that runs at 100 Hz on bebop-linux and is latency-bound.
     critic = {
         "class_name": "MLPModel",
-        "hidden_dims": [512, 256, 128],
+        "hidden_dims": [1024, 512, 256],
         "activation": "elu",
         "obs_normalization": True,
         "distribution_cfg": None,
@@ -84,7 +91,22 @@ class BebopPPOBaseCfg(RslRlOnPolicyRunnerCfg):
         # negative number — symptom of a deterministic policy that
         # ignores observations. Bump this in step when that happens
         # (Locomotion uses 0.04 against its heavier reward landscape).
-        entropy_coef=0.01,
+        #
+        # LOWERED 0.01 -> 0.002 for the clean-slate standing reward (alive +
+        # termination + torso_upright + feet_straight + action_l2). With most
+        # penalty terms stripped, the reward landscape is flat, so a 0.01 bonus
+        # overwhelmed the task gradient and inflated the action std without
+        # bound: Loss/entropy plateaued ~57 (per-dim std ~2.6, grown from
+        # init_std=1.0), meaning the policy sampled near-random clipped actions
+        # and never sharpened — alive peaked ~iter 2500 then regressed and the
+        # value loss diverged at the end. The fixed-gain variant amplifies this
+        # (16 inert kp/kd channels get their std set purely by the entropy bonus
+        # vs action_l2, and that noise feeds the last_action obs). 0.002 keeps
+        # some exploration but lets std collapse toward a precise stand. If
+        # entropy still won't come down, lower further (~0.0005); if the policy
+        # goes deterministic too early and ignores the obs, raise it. Re-raise
+        # in step when penalty/shaping terms are added back.
+        entropy_coef=0.002,
         
         # Training Updates
         num_learning_epochs=5,   # How many times to reuse the collected data
@@ -141,6 +163,41 @@ class BebopPPOLowLRCfg(BebopPPOBaseCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
+    )
+
+
+@configclass
+class BebopPPOPushCfg(BebopPPOBaseCfg):
+    """Variant for the push-recovery stand (``Isaac-BebopV2-Standing-Push-v0``).
+
+    Identical to the base PPO block except for a higher ``entropy_coef``. The
+    base was LOWERED to 0.002 for the flat, near-disturbance-free clean-slate
+    stand so the std could collapse to a precise stand. Adding mid-episode
+    pushes re-inflates the reward landscape (the policy must explore a family of
+    recovery motions, not a single quiet pose), so it needs more exploration —
+    the base value would let the actor collapse onto the quiet-stand solution
+    before it ever discovers how to catch a shove. 0.01 is a middle ground
+    between the quiet-stand 0.002 and the locomotion 0.04; raise toward 0.02 if
+    the policy goes deterministic and stops recovering, lower if entropy / the
+    action std refuses to come down (watch Policy/mean_std — it should still
+    settle well below the ~0.5 of the failed run, just higher than the quiet
+    stand).
+    """
+
+    experiment_name = "bebop_push"
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=5.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=0.5,
     )
 
 
