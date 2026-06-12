@@ -28,9 +28,16 @@
 //! rather than block so a fault on the SD card can never wedge the
 //! control loop.
 //!
-//! File layout: one MCAP file per `request_open` → `request_close`
-//! cycle, named
-//! `policy_capture_<label?>_<YYYYmmdd_HHMMSS>.mcap`, with:
+//! File layout: each `request_open` → `request_close` cycle yields ONE
+//! or more MCAP files. The writer transparently rotates whenever the
+//! active file passes [`MAX_FILE_BYTES`] so a single multi-hour session
+//! never produces an unbounded file (long files are painful to scrub in
+//! Foxglove and to copy off the robot). After each rotation we also
+//! prune oldest files in the capture dir until the total on-disk size
+//! is under [`DISK_BUDGET_BYTES`], so the robot can stay on for hours
+//! at a time without filling the eMMC.
+//!
+//! Files are named `policy_capture_<YYYYmmdd_HHMMSS>.mcap`, with:
 //!
 //! - schema name  = `bebop.capture.v1.PolicyCaptureSample`
 //! - schema enc.  = `protobuf` + serialized `FileDescriptorSet`
@@ -77,15 +84,50 @@ const SAMPLE_CHANNEL_CAPACITY: usize = 2000;
 /// power yank at ~1 s of samples regardless of message rate.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Rotate the active capture file when its on-disk size reaches this
+/// many bytes. 256 MiB keeps each file small enough that Foxglove can
+/// load it in a few seconds and that scp / the web download path
+/// completes quickly, while still being large enough that a single
+/// rotation isn't a per-minute event on a continuous 100 Hz capture.
+/// (At ~700 B/sample compressed, this is ~1 h of recording per file.)
+const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Total on-disk size budget for the capture directory. After each
+/// rotation we delete the oldest `policy_capture_*.mcap` files (never
+/// the currently open one) until the directory falls below this. 4 GiB
+/// is comfortable headroom on a 64 GiB eMMC and covers many hours of
+/// continuous capture before the oldest segments start being pruned.
+const DISK_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// How often to check the active file's size for rotation. The Sample
+/// branch fires at ~100 Hz; checking every Nth sample keeps `stat`
+/// overhead negligible while still catching the size threshold within
+/// ~1 s of crossing it. (Worst-case file overshoot at our sample
+/// rate is therefore ~1 s × bytes/s ≪ MAX_FILE_BYTES.)
+const ROTATE_CHECK_EVERY: u64 = 100;
+
+/// Minimum interval between identical "open failed" `error!` lines.
+/// Even with the runner's 5 s open-retry back-off, an operator
+/// toggling modes (or any other path that issues Open commands) can
+/// produce duplicate failures. Logging once per 30 s while the
+/// underlying issue persists is enough to keep the operator aware
+/// without flooding journald. Errors with a NEW message bypass the
+/// throttle and log immediately.
+const OPEN_ERROR_LOG_BACKOFF: Duration = Duration::from_secs(30);
+
 /// Commands sent from the tick thread to the writer thread. Open /
 /// close are explicit instead of being inferred from sample stream
 /// state so the writer thread can ack each transition by publishing
 /// to [`PolicyIoShared`].
 enum CaptureCommand {
-    /// Open a new capture file. The writer chooses the filename
-    /// (sanitized label + timestamp) and publishes the resolved path
-    /// to [`PolicyIoShared::set_capture_state`].
-    Open { label: String },
+    /// Open a new capture session. The writer chooses the filename
+    /// (`policy_capture_<timestamp>.mcap`) and publishes the resolved
+    /// path to [`PolicyIoShared::set_capture_state`]. The writer may
+    /// then rotate the file underneath the runner whenever the active
+    /// segment exceeds [`MAX_FILE_BYTES`] — the runner does NOT need
+    /// to know about rotation; from its perspective the capture stays
+    /// "active" continuously.
+    Open,
     /// One control-tick sample. Serialized inside the writer thread
     /// to keep tick CPU cost minimal.
     Sample(Box<PolicyCaptureSample>),
@@ -136,14 +178,13 @@ impl CaptureHandle {
         }
     }
 
-    /// Request a fresh capture file. The writer opens it on its own
-    /// thread and updates `PolicyIoShared` once the path is known. A
-    /// repeat `request_open` while a file is already open is a no-op
-    /// in the writer thread (we don't auto-rotate mid-capture).
-    pub fn request_open(&self, label: &str) {
-        let _ = self.send_command(CaptureCommand::Open {
-            label: label.to_string(),
-        });
+    /// Request a fresh capture session. The writer opens the first
+    /// file on its own thread and updates `PolicyIoShared` once the
+    /// path is known. A repeat `request_open` while a session is
+    /// already open is a no-op in the writer thread (the writer
+    /// auto-rotates on size; the runner doesn't have to nudge it).
+    pub fn request_open(&self) {
+        let _ = self.send_command(CaptureCommand::Open);
     }
 
     /// Request the writer flush + close the active capture file (if
@@ -282,32 +323,61 @@ fn run_capture_thread(
 ) {
     debug!(dir = %capture_dir.display(), "capture: writer thread started");
     let mut open: Option<OpenCapture> = None;
+    // Throttle the "open failed" log: when the underlying problem is
+    // persistent (read-only fs, missing perms) and the runner keeps
+    // re-requesting (e.g. operator re-toggles modes), we'd otherwise
+    // produce one identical error line per attempt and drown the
+    // journal. Log on the first failure, and again only when the error
+    // text changes OR `OPEN_ERROR_LOG_BACKOFF` has elapsed.
+    let mut last_open_error: Option<(Instant, String)> = None;
 
     loop {
         // `recv_timeout` lets us run a periodic flush even when the
         // tick thread is quiescent. The timeout matches the flush
         // cadence so worst case is two intervals between flushes.
         match rx.recv_timeout(FLUSH_INTERVAL) {
-            Ok(CaptureCommand::Open { label }) => {
+            Ok(CaptureCommand::Open) => {
                 if open.is_some() {
                     debug!(
-                        "capture: ignoring Open while a file is already open \
-                         (toggle Close first to rotate)"
+                        "capture: ignoring Open while a session is already open \
+                         (the writer auto-rotates on size; no manual nudge needed)"
                     );
                     continue;
                 }
-                match open_capture(&capture_dir, &label) {
+                match open_capture(&capture_dir, "") {
                     Ok(c) => {
                         info!(path = %c.path.display(), "capture: opened (MCAP)");
                         publish_status(&policy_io, Some(&c), &dropped_total);
+                        // First file of a session: opportunistically
+                        // prune older segments left behind by prior
+                        // runs so the disk budget is enforced even
+                        // before the first rotation happens.
+                        prune_capture_dir(&capture_dir, DISK_BUDGET_BYTES, &c.path);
                         open = Some(c);
+                        // Clear the open-error throttle so the next
+                        // failure (if any) logs immediately rather
+                        // than being silently swallowed.
+                        last_open_error = None;
                     }
                     Err(e) => {
-                        error!(
-                            dir = %capture_dir.display(),
-                            error = %format!("{e:#}"),
-                            "capture: open failed"
-                        );
+                        let msg = format!("{e:#}");
+                        let now = Instant::now();
+                        let should_log = match last_open_error.as_ref() {
+                            Some((t, prev)) => {
+                                prev != &msg
+                                    || now.duration_since(*t)
+                                        >= OPEN_ERROR_LOG_BACKOFF
+                            }
+                            None => true,
+                        };
+                        if should_log {
+                            error!(
+                                dir = %capture_dir.display(),
+                                error = %msg,
+                                "capture: open failed (retrying every ~5 s in the runner)"
+                            );
+                            last_open_error = Some((now, msg));
+                        }
                         publish_status(&policy_io, None, &dropped_total);
                     }
                 }
@@ -328,6 +398,71 @@ fn run_capture_thread(
                             warn!(path = %path.display(), error = %e, "capture: partial finish failed");
                         }
                         publish_status(&policy_io, None, &dropped_total);
+                        continue;
+                    }
+                    // Periodic rotation check. The mcap writer chunks
+                    // its output and flushes lazily, so we explicitly
+                    // flush here before stat'ing to make the size
+                    // observation accurate. Frequency is bounded by
+                    // `ROTATE_CHECK_EVERY` so the syscall overhead
+                    // stays in the noise even at 100 Hz.
+                    let rows_now = c.rows;
+                    if rows_now % ROTATE_CHECK_EVERY == 0 {
+                        if let Err(e) = c.writer.flush() {
+                            warn!(
+                                path = %c.path.display(),
+                                error = %e,
+                                "capture: pre-rotate flush failed"
+                            );
+                        } else {
+                            c.last_flush = Instant::now();
+                        }
+                        let size = fs::metadata(&c.path).map(|m| m.len()).unwrap_or(0);
+                        if size >= MAX_FILE_BYTES {
+                            let prev_path = c.path.clone();
+                            let prev_rows = c.rows;
+                            // Finish the current segment.
+                            let prev = open.take().expect("just matched");
+                            if let Err(e) = prev.finish() {
+                                warn!(
+                                    path = %prev_path.display(),
+                                    error = %e,
+                                    "capture: finish-on-rotate failed"
+                                );
+                            } else {
+                                info!(
+                                    path = %prev_path.display(),
+                                    rows = prev_rows,
+                                    size_bytes = size,
+                                    "capture: rotated segment (size cap)"
+                                );
+                            }
+                            // Open the next segment immediately so the
+                            // tick thread keeps streaming without a gap.
+                            match open_capture(&capture_dir, "") {
+                                Ok(next) => {
+                                    info!(
+                                        path = %next.path.display(),
+                                        "capture: opened next segment (MCAP)"
+                                    );
+                                    publish_status(&policy_io, Some(&next), &dropped_total);
+                                    prune_capture_dir(
+                                        &capture_dir,
+                                        DISK_BUDGET_BYTES,
+                                        &next.path,
+                                    );
+                                    open = Some(next);
+                                }
+                                Err(e) => {
+                                    error!(
+                                        dir = %capture_dir.display(),
+                                        error = %format!("{e:#}"),
+                                        "capture: open-next-segment failed; capture paused"
+                                    );
+                                    publish_status(&policy_io, None, &dropped_total);
+                                }
+                            }
+                        }
                     }
                 }
                 // Else: a stale sample arrived after Close. Quietly
@@ -467,10 +602,110 @@ fn publish_status(
     }
 }
 
+/// Enforce a total on-disk budget for the capture directory. Walks
+/// the dir for `policy_capture_*.mcap` files, sums their sizes, and
+/// deletes the oldest (by mtime) until the total falls below `budget`.
+/// `keep_open` is never deleted regardless of age — that's the file
+/// the writer thread is currently appending to.
+///
+/// Best-effort: any IO error here is logged at `warn!` but does NOT
+/// halt the writer thread. The capture loop is the only consumer of
+/// the disk budget, so a partial prune just means we'll try again on
+/// the next rotation.
+pub(crate) fn prune_capture_dir(dir: &Path, budget: u64, keep_open: &Path) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(
+                dir = %dir.display(),
+                error = %e,
+                "capture: prune skipped (read_dir failed)"
+            );
+            return;
+        }
+    };
+
+    /// One `policy_capture_*.mcap` segment on disk, captured for the
+    /// oldest-first pruning sweep.
+    struct Segment {
+        path: PathBuf,
+        size: u64,
+        mtime: SystemTime,
+    }
+
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut total: u64 = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("policy_capture_") && n.ends_with(".mcap"))
+        {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
+        let size = meta.len();
+        total += size;
+        segments.push(Segment { path, size, mtime });
+    }
+
+    if total <= budget {
+        return;
+    }
+
+    segments.sort_by_key(|s| s.mtime);
+
+    let mut deleted_count: u32 = 0;
+    let mut deleted_bytes: u64 = 0;
+    for seg in segments {
+        if total <= budget {
+            break;
+        }
+        if seg.path == keep_open {
+            continue;
+        }
+        match fs::remove_file(&seg.path) {
+            Ok(()) => {
+                total = total.saturating_sub(seg.size);
+                deleted_bytes += seg.size;
+                deleted_count += 1;
+            }
+            Err(e) => {
+                warn!(
+                    path = %seg.path.display(),
+                    error = %e,
+                    "capture: prune could not delete segment"
+                );
+            }
+        }
+    }
+
+    if deleted_count > 0 {
+        info!(
+            dir = %dir.display(),
+            deleted_count,
+            deleted_bytes,
+            remaining_bytes = total,
+            budget_bytes = budget,
+            "capture: pruned old segments to keep dir under disk budget"
+        );
+    }
+}
+
 /// Strip a label down to filesystem-safe characters. Accepts ASCII
 /// alphanumerics plus `_` / `-`; everything else (including spaces and
 /// `.`) becomes `_`. Truncated to 32 chars so the timestamp prefix
-/// stays the dominant part of the filename.
+/// stays the dominant part of the filename. Production callers pass an
+/// empty label (the writer auto-rotates rather than tagging files);
+/// kept around so the round-trip test can exercise a labeled file.
 fn sanitize_label(label: &str) -> String {
     let mut out = String::with_capacity(label.len().min(32));
     for c in label.chars().take(32) {

@@ -29,7 +29,6 @@ import {
   SetModeSchema,
   SetMotorEnabledSchema,
   SetMotorTargetSchema,
-  SetPolicyCaptureSchema,
   SetPolicyDryRunSchema,
   SubscribeTelemetrySchema,
   UnsubscribeTelemetrySchema,
@@ -55,11 +54,29 @@ import type {
 
 const DEFAULT_PORT = 9090;
 const ACK_TIMEOUT_MS = 5_000;
+/// How long to wait between auto-reconnect attempts after an unintended
+/// socket close (server reboot, Wi-Fi flap, etc.). Matches the
+/// firmware's ~5 s telemetry-pump period so the operator sees recovery
+/// within a couple of frames; short enough that a brief outage is
+/// barely noticeable but long enough to avoid pegging the CPU /
+/// network if the robot is genuinely down.
+const RECONNECT_DELAY_MS = 5_000;
 
 type PendingResolver = (msg: ServerRuntimeMessage) => void;
 type TelemetryListener = (snapshot: RuntimeSnapshot) => void;
 type EStopListener = (reason: string) => void;
 type ModeListener = (mode: RuntimeMode) => void;
+
+/// Lifecycle of the underlying WebSocket exposed to consumers.
+///
+/// - `disconnected` — no socket, and we're not trying to open one.
+///   Set on initial construction and after `disconnect()`.
+/// - `connecting` — a `new WebSocket(...)` is in flight (initial open
+///   OR an auto-reconnect attempt after an unintended close).
+/// - `connected` — `onopen` fired and the socket is OPEN.
+export type RuntimeConnectionState = "disconnected" | "connecting" | "connected";
+
+type ConnectionStateListener = (state: RuntimeConnectionState) => void;
 
 type ClientPayload = NonNullable<ClientRuntimeMessage["payload"]>;
 
@@ -70,6 +87,27 @@ export class RuntimeTransport {
   private telemetryListeners = new Set<TelemetryListener>();
   private estopListeners = new Set<EStopListener>();
   private modeListeners = new Set<ModeListener>();
+  private connectionStateListeners = new Set<ConnectionStateListener>();
+
+  /// Last (host, port) the caller asked us to open. Stashed so the
+  /// auto-reconnect timer knows where to dial when the socket drops.
+  /// Cleared by `disconnect()`.
+  private endpoint: { host: string; port: number } | null = null;
+  /// True between `connect()` and `disconnect()`. When false, an
+  /// `onclose` is treated as final and does NOT schedule a reconnect.
+  /// Without this flag a `disconnect()` racing with a server close
+  /// would still spawn a reconnect loop that the caller can't cancel.
+  private wantConnected = false;
+  /// `setTimeout` handle for the pending reconnect attempt, if any.
+  /// Cleared on `disconnect()` and whenever the reconnect actually
+  /// fires (so a fresh failure can schedule a new one).
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /// Last subscribed telemetry rate, so we can transparently resume
+  /// the subscription after an auto-reconnect. `null` means the
+  /// caller has not subscribed (or has explicitly unsubscribed) and
+  /// we should NOT re-issue `SubscribeTelemetry` on reconnect.
+  private subscribedRateHz: number | null = null;
+  private connectionState: RuntimeConnectionState = "disconnected";
 
   /** Open the socket and resolve once we get the `open` event.
    *
@@ -81,8 +119,37 @@ export class RuntimeTransport {
    *  the server tried to write to it (broadcasting a ModeChanged event,
    *  for example), at which point it would fail with "Sending after
    *  closing is not allowed".
+   *
+   *  Once `connect()` succeeds, the transport latches `wantConnected =
+   *  true` and will auto-reconnect every `RECONNECT_DELAY_MS` after
+   *  any subsequent close (server reboot, brief Wi-Fi outage, etc.)
+   *  until `disconnect()` is called. Telemetry subscriptions are
+   *  re-established automatically on each reconnect so the operator
+   *  UI continues to receive frames without re-mounting. Consumers
+   *  can subscribe to `onConnectionStateChange` to render a
+   *  "Reconnecting…" indicator while the link is down.
    */
   connect(host: string, port: number = DEFAULT_PORT): Promise<void> {
+    this.endpoint = { host, port };
+    this.wantConnected = true;
+    // Any pending reconnect timer is now obsolete — the caller is
+    // asking us to open RIGHT NOW.
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    return this.openSocket();
+  }
+
+  /// Lower-level open used by both the initial `connect()` call and the
+  /// auto-reconnect timer. Splits the host/port read out of `endpoint`
+  /// so the reconnect path doesn't need to re-thread those args
+  /// through callers.
+  private openSocket(): Promise<void> {
+    const endpoint = this.endpoint;
+    if (!endpoint) {
+      return Promise.reject(new Error("RuntimeTransport: no endpoint set"));
+    }
     // Idempotent: if a socket is already OPEN we trust it. Callers can
     // share a cached transport (see runtime/cache.ts) and not have to
     // remember whether they were the ones who first connected it.
@@ -101,8 +168,9 @@ export class RuntimeTransport {
       }
       this.ws = null;
     }
+    this.setConnectionState("connecting");
     return new Promise((resolve, reject) => {
-      const url = `ws://${host}:${port}/ws`;
+      const url = `ws://${endpoint.host}:${endpoint.port}/ws`;
       const ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
       this.ws = ws;
@@ -124,6 +192,18 @@ export class RuntimeTransport {
           reject(new Error("disconnected during connect"));
           return;
         }
+        this.setConnectionState("connected");
+        // Resume telemetry subscription if the caller had one before
+        // the drop. Fire-and-forget — a failure here just means the
+        // next close will trigger another reconnect, and the operator
+        // already sees the "reconnecting" pulse if anything goes
+        // wrong with subscription itself.
+        const rate = this.subscribedRateHz;
+        if (rate !== null) {
+          void this.subscribeTelemetry(rate).catch(() => {
+            /* surfaced via reconnect loop */
+          });
+        }
         resolve();
       };
       ws.onerror = () => {
@@ -141,22 +221,87 @@ export class RuntimeTransport {
           settled = true;
           reject(new Error("WebSocket closed before open"));
         }
+        // Schedule an auto-reconnect if the caller still wants us
+        // online. `disconnect()` clears `wantConnected` first, so a
+        // deliberate teardown never spawns a reconnect.
+        this.scheduleReconnect();
       };
       ws.onmessage = (ev) => this.onMessage(ev);
     });
   }
 
+  /// Arm the reconnect timer (if not already armed and the caller
+  /// still wants to stay connected). Cleared on `disconnect()` and
+  /// whenever the timer actually fires.
+  private scheduleReconnect(): void {
+    if (!this.wantConnected) {
+      this.setConnectionState("disconnected");
+      return;
+    }
+    if (this.reconnectTimer !== null) return;
+    this.setConnectionState("connecting");
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.wantConnected) return;
+      void this.openSocket().catch(() => {
+        // openSocket() will already have triggered `onclose` which
+        // schedules the next attempt; nothing more to do here.
+      });
+    }, RECONNECT_DELAY_MS);
+  }
+
   disconnect(): void {
+    // Stop the auto-reconnect loop FIRST so a close-event onslaught
+    // doesn't immediately re-arm it.
+    this.wantConnected = false;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.subscribedRateHz = null;
+    this.endpoint = null;
     const ws = this.ws;
-    if (!ws) return;
     this.ws = null;
     // Fail in-flight requests synchronously so awaiters get a useful
     // error immediately, not after the close handshake completes.
     this.failAllPending("WS disconnected by client");
-    try {
-      ws.close();
-    } catch {
-      /* ignore */
+    if (ws) {
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    this.setConnectionState("disconnected");
+  }
+
+  /// Current state of the underlying WebSocket. Cheap to call; the
+  /// transport tracks the state internally rather than peeking at
+  /// `WebSocket.readyState` so consumers see "connecting" during the
+  /// auto-reconnect wait too (when there's no socket object yet).
+  getConnectionState(): RuntimeConnectionState {
+    return this.connectionState;
+  }
+
+  /// Register a callback fired whenever the connection state changes.
+  /// Returns an unsubscribe function. The current state is delivered
+  /// synchronously on subscription so the consumer can render the
+  /// initial pill without an extra `getConnectionState()` call.
+  onConnectionStateChange(cb: ConnectionStateListener): () => void {
+    this.connectionStateListeners.add(cb);
+    cb(this.connectionState);
+    return () => this.connectionStateListeners.delete(cb);
+  }
+
+  private setConnectionState(next: RuntimeConnectionState): void {
+    if (this.connectionState === next) return;
+    this.connectionState = next;
+    for (const cb of this.connectionStateListeners) {
+      try {
+        cb(next);
+      } catch {
+        /* ignore listener errors */
+      }
     }
   }
 
@@ -210,9 +355,17 @@ export class RuntimeTransport {
       case: "subscribeTelemetry",
       value: create(SubscribeTelemetrySchema, { rateHz }),
     });
+    // Remember the rate so an auto-reconnect can transparently
+    // re-subscribe without the caller having to listen for
+    // connection-state changes.
+    this.subscribedRateHz = rateHz;
   }
 
   async unsubscribeTelemetry(): Promise<void> {
+    // Clear the remembered rate FIRST: if the unsubscribe RPC fails
+    // we still don't want a future reconnect to silently re-arm the
+    // subscription the caller explicitly tore down.
+    this.subscribedRateHz = null;
     await this.requestAck({
       case: "unsubscribeTelemetry",
       value: create(UnsubscribeTelemetrySchema, {}),
@@ -288,21 +441,6 @@ export class RuntimeTransport {
     await this.requestAck({
       case: "setPolicyDryRun",
       value: create(SetPolicyDryRunSchema, { enabled }),
-    });
-  }
-
-  /// Start (or stop) appending observation / action samples to an MCAP
-  /// file on the robot. `label` is an optional operator tag that gets
-  /// folded into the timestamped filename for later identification; the
-  /// firmware sanitizes it to `[A-Za-z0-9_-]`. The actual file open /
-  /// close runs on the dedicated capture writer thread; the snapshot's
-  /// `policyIo.captureActive` flag reflects the live file state,
-  /// distinct from "operator requested capture". Open the resulting
-  /// `.mcap` file in Foxglove for replay / plotting.
-  async setPolicyCapture(enabled: boolean, label = ""): Promise<void> {
-    await this.requestAck({
-      case: "setPolicyCapture",
-      value: create(SetPolicyCaptureSchema, { enabled, label }),
     });
   }
 

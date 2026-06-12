@@ -58,7 +58,7 @@ use anyhow::{anyhow, Context, Result};
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use bebop_proto::capture::v1::PolicyCaptureSample;
@@ -110,11 +110,8 @@ pub struct PolicyRunner {
     /// Edge-detect on the IMU live/synthetic boundary so we log
     /// transitions once instead of every tick.
     imu_was_live: bool,
-    /// Last time we emitted the human-readable I/O summary at `info!`.
-    /// Per-tick logs would be 100 lines/s; we rate-limit to ~1 Hz.
-    last_io_log_at: Option<Instant>,
-    /// Operator-driven dry-run + capture flags. The runner reads these
-    /// every tick; the WS server (`handlers.rs`) is the writer.
+    /// Operator-driven dry-run flag. The runner reads this every tick;
+    /// the WS server (`handlers.rs`) is the writer.
     policy_control: PolicyControlShared,
     /// Handle on the MCAP writer thread. The runner calls
     /// `request_open` / `request_close` to manage the capture file's
@@ -139,13 +136,28 @@ pub struct PolicyRunner {
     /// [`PolicyCaptureSample::sim_time_s`] so a single file plots against
     /// a self-contained, 0-based time axis. `None` between captures.
     capture_started_at: Option<Instant>,
+    /// Last time we asked the writer thread to open a capture file
+    /// while one wasn't yet active. Acts as a back-off on retry: if the
+    /// writer can't actually open the file (e.g. read-only filesystem,
+    /// missing permissions), the runner would otherwise re-issue the
+    /// request on every 10 ms tick, swamping the writer channel and
+    /// the journal. With the back-off we retry at most every
+    /// [`CAPTURE_OPEN_RETRY`] until the writer eventually publishes
+    /// `capture_active=true`. Cleared as soon as a file is actually
+    /// open so the next legitimate close→open transition is immediate.
+    last_open_request_at: Option<Instant>,
     /// Edge-detect on the dry-run flag so we log transitions once.
     dry_run_was_on: bool,
 }
 
-/// How often to emit the human-readable observation/action summary at
-/// `info!`. Every tick is still available at `debug!`.
-const IO_LOG_INTERVAL: Duration = Duration::from_secs(1);
+/// Back-off between successive [`crate::policy_capture::CaptureHandle::request_open`]
+/// calls when the writer thread isn't (yet) reporting an active file.
+/// Short enough that a brief transient (e.g. SD card just (re-)mounted)
+/// recovers within a couple of seconds; long enough that a persistent
+/// failure (read-only fs, permissions) doesn't produce 100 retries per
+/// second. Chosen to roughly match the WS auto-reconnect cadence on
+/// the operator app so the two stay visually in sync.
+const CAPTURE_OPEN_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl PolicyRunner {
     /// Load the ONNX policy and resolve the policy-slot ↔ supervisor-joint
@@ -232,22 +244,25 @@ impl PolicyRunner {
             policy_gain_clamps,
             was_running: false,
             imu_was_live: false,
-            last_io_log_at: None,
             policy_control,
             capture,
             capture_was_active: false,
             capture_tick: 0,
             capture_started_at: None,
+            last_open_request_at: None,
             dry_run_was_on: false,
         })
     }
 
     /// Run one inference + TX cycle. The flow is now:
     ///
-    /// 1. Reconcile capture state from [`PolicyControlShared`] (ask the
-    ///    writer thread to open / close the MCAP file as needed; surface
-    ///    `capture_active` / `dry_run` in the telemetry snapshot).
-    /// 2. If we're in `DialIn` with capture active, build the observation
+    /// 1. Reconcile capture state: capture is always-on whenever the
+    ///    runtime is in `DialIn` or `RunPolicy` (and not E-STOPped). The
+    ///    writer thread opens a fresh MCAP file on entry and closes it
+    ///    on exit; size-based rotation happens transparently inside the
+    ///    writer (see [`crate::policy_capture`]). `Idle` stays quiet so
+    ///    long-running idle sessions don't fill the disk with zeros.
+    /// 2. If we're in `DialIn` (with capture active), build the observation
     ///    from real feedback and submit an obs-only sample to the writer
     ///    thread — no inference, no motor TX.
     /// 3. If we're in `RunPolicy` (and not E-STOPped), run the existing
@@ -261,11 +276,17 @@ impl PolicyRunner {
         let estop = sup.estop_active();
 
         // --- 0. Reconcile operator control flags + capture lifecycle ----
-        let (dry_run, capture_requested, capture_label) = match self.policy_control.lock() {
-            Ok(g) => (g.dry_run, g.capture_requested, g.capture_label.clone()),
-            Err(_) => (false, false, String::new()),
+        // Capture is now always-on in the "active" modes (DialIn obs-only,
+        // RunPolicy obs + action). Idle stays quiet because joints are
+        // disabled then and the observation would be a long run of zeros
+        // that swamps the file. E-STOP also closes the file: there's no
+        // useful telemetry to record when the supervisor has latched.
+        let dry_run = match self.policy_control.lock() {
+            Ok(g) => g.dry_run,
+            Err(_) => false,
         };
-        self.reconcile_capture(capture_requested, &capture_label);
+        let should_capture = !estop && (mode == Mode::DialIn || mode == Mode::RunPolicy);
+        self.reconcile_capture(should_capture);
         self.publish_dry_run(dry_run);
 
         if dry_run != self.dry_run_was_on {
@@ -436,32 +457,9 @@ impl PolicyRunner {
             &self.policy_gain_clamps,
         );
 
-        // Rate-limited human-readable summary at info!. We break the
-        // 52-element observation into the same named slices as
-        // `ObservationBuilder::build` so it's actually parseable in a
-        // running terminal. `imu_live` makes it obvious whether the
-        // policy is currently consuming the BNO085 or the synthetic
-        // upright fallback.
-        let should_log_info = self
-            .last_io_log_at
-            .is_none_or(|t| now.duration_since(t) >= IO_LOG_INTERVAL);
-        if should_log_info {
-            self.last_io_log_at = Some(now);
-            info!(
-                imu_live = self.imu_was_live,
-                base_ang_vel = ?&obs[0..3],
-                projected_gravity = ?&obs[3..6],
-                joint_pos_rel = ?&obs[6..14],
-                joint_vel = ?&obs[14..22],
-                last_action = ?&obs[22..46],
-                cmd_vel = ?&obs[46..49],
-                raw_action = ?action.as_slice(),
-                position_targets_rad = ?&decoded.targets,
-                kp = ?&decoded.kp,
-                kd = ?&decoded.kd,
-                "policy I/O"
-            );
-        }
+        // Per-tick policy I/O is now captured to MCAP (see
+        // `crate::policy_capture`); no console log here. Open the latest
+        // file under the capture dir for Foxglove playback / plotting.
 
         if let Ok(mut g) = self.policy_io.lock() {
             g.publish_tick(
@@ -542,14 +540,19 @@ impl PolicyRunner {
         }
     }
 
-    /// Edge-detect the operator's `capture_requested` flag and shoot
-    /// `request_open` / `request_close` at the writer thread. The
-    /// thread is the source of truth for "file actually open" — we
-    /// track its progress via the shared `PolicyIoSnapshot.capture_active`
-    /// field that the writer publishes itself, mirrored here into
-    /// `self.capture_was_active` so the tick body has a cheap local
-    /// check.
-    fn reconcile_capture(&mut self, requested: bool, label: &str) {
+    /// Edge-detect the always-on capture predicate (DialIn/RunPolicy +
+    /// !estop) and ask the writer thread to open / close as needed. The
+    /// writer thread is the source of truth for "file actually open" —
+    /// we track its progress via the shared
+    /// `PolicyIoSnapshot.capture_active` field that the writer publishes
+    /// itself, mirrored here into `self.capture_was_active` so the tick
+    /// body has a cheap local check.
+    ///
+    /// Note: the writer may also rotate the active file underneath us
+    /// when it crosses the size cap. From the runner's perspective that
+    /// looks like `capture_active` staying `true` across ticks — the
+    /// path / row counter just change in the published snapshot.
+    fn reconcile_capture(&mut self, should_capture: bool) {
         let active_on_disk = self
             .policy_io
             .lock()
@@ -557,25 +560,46 @@ impl PolicyRunner {
             .unwrap_or(false);
         // Fresh file just opened: restart the per-capture tick counter and
         // clear the time origin so `tick` / `sim_time_s` are 0-based within
-        // each file. The origin is set lazily on the first sample.
+        // each session. The origin is set lazily on the first sample.
+        // Mid-session rotation keeps `capture_was_active` true, so this
+        // edge only fires on a real open (mode entry), not on each
+        // rotated file.
         if active_on_disk && !self.capture_was_active {
             self.capture_tick = 0;
             self.capture_started_at = None;
+            // Writer accepted the file; drop the open-retry throttle so
+            // the next close→open transition can re-arm cleanly.
+            self.last_open_request_at = None;
         }
         self.capture_was_active = active_on_disk;
 
-        match (active_on_disk, requested) {
+        match (active_on_disk, should_capture) {
             (true, true) | (false, false) => {
                 // Steady state — nothing for the runner to do.
             }
             (false, true) => {
-                // Operator just enabled capture. Fire-and-forget; the
-                // writer thread publishes the resolved path + active=true
-                // into PolicyIoShared as soon as it opens the file.
-                self.capture.request_open(label);
+                // Want capture, but the writer doesn't have a file open
+                // yet. Send a single open request and then wait up to
+                // CAPTURE_OPEN_RETRY before trying again. Without this
+                // throttle a persistent open failure (read-only fs,
+                // perms) makes this branch fire every 10 ms tick and
+                // produces a flood of identical errors in the journal
+                // (one per writer attempt) plus needless channel
+                // pressure.
+                let now = Instant::now();
+                let due = self
+                    .last_open_request_at
+                    .is_none_or(|t| now.duration_since(t) >= CAPTURE_OPEN_RETRY);
+                if due {
+                    self.capture.request_open();
+                    self.last_open_request_at = Some(now);
+                }
             }
             (true, false) => {
                 self.capture.request_close();
+                // Cancel any pending throttle so a subsequent re-entry
+                // can immediately issue a fresh open request.
+                self.last_open_request_at = None;
             }
         }
     }

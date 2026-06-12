@@ -53,16 +53,16 @@ message ClientRuntimeMessage {
     // actuators. The flag persists across mode transitions; clear it
     // explicitly when you want the policy to drive motors again.
     SetPolicyDryRun     set_policy_dry_run     = 11;
-    // Toggle observation/action MCAP capture on the robot. While enabled,
-    // every 100 Hz tick in DIAL_IN (observation-only) or RUN_POLICY
-    // (observation + raw action + decoded action) submits a sample to a
-    // dedicated writer thread that appends to an MCAP file under the
-    // firmware's configured capture directory (CLI `--capture-dir`,
-    // default `~/bebop-captures`). Disabling flushes and closes the
-    // file. `label` is an optional operator-supplied tag folded into the
-    // timestamped filename for later identification.
-    SetPolicyCapture    set_policy_capture     = 12;
+    // Tag 12 was `SetPolicyCapture`, the operator-toggled MCAP capture
+    // request. Capture is now always-on while the runtime is in
+    // DIAL_IN or RUN_POLICY (the firmware auto-rotates the file on
+    // size and prunes oldest segments under a disk budget — see
+    // `firmware/bebop-linux/src/policy_capture.rs`), so the toggle no
+    // longer exists. Reserved so this tag isn't accidentally re-used
+    // by a different message with the same id.
   }
+  reserved 12;
+  reserved "set_policy_capture";
 }
 
 // Server -> client. Streamed; not all messages are responses to a request.
@@ -335,17 +335,6 @@ message SetPolicyDryRun {
   bool enabled = 1;
 }
 
-// Toggle observation/action MCAP capture. See
-// `ClientRuntimeMessage.set_policy_capture` for semantics. The firmware
-// acks the request immediately; the file open/close happens on the
-// dedicated capture writer thread shortly afterward. `label` (optional,
-// alphanumerics + `-_`) is folded into the timestamped filename to make
-// later identification easier; the firmware sanitizes it.
-message SetPolicyCapture {
-  bool enabled = 1;
-  string label = 2;
-}
-
 // ---------------------------------------------------------------------------
 // Server responses / async events
 // ---------------------------------------------------------------------------
@@ -470,16 +459,21 @@ message PolicyIoStats {
   // skipped — armed motors receive no PD command from the policy.
   bool   dry_run                = 5;
   // True while an MCAP capture file is currently open and being
-  // appended to on the robot (the operator sent
-  // `SetPolicyCapture{enabled=true}` and the writer thread has opened
-  // the file).
+  // appended to on the robot. Capture is always-on whenever the
+  // runtime is in DIAL_IN or RUN_POLICY (and not E-STOPped); this
+  // flag will flip to `false` in IDLE / under E-STOP. The writer
+  // auto-rotates the file on size, so this stays `true` across
+  // rotations — only `capture_path` / `capture_rows` change.
   bool   capture_active         = 6;
-  // Absolute filesystem path of the active capture file on the robot, or
-  // empty when no capture is open. Useful to surface in the operator UI
-  // so the user knows which file to scp later. `.mcap` extension.
+  // Absolute filesystem path of the currently-open capture segment on
+  // the robot, or empty when no capture is open. Changes whenever the
+  // writer rotates to a new segment. Files are available via the
+  // runtime HTTP server at `/captures` (list) and `/captures/dl/<name>`
+  // (download). `.mcap` extension.
   string capture_path           = 7;
-  // Number of samples appended to the current capture file. Resets to 0
-  // each time a new capture is opened.
+  // Number of samples appended to the *current* capture segment.
+  // Resets to 0 each time the writer rotates to a new file; the
+  // total across segments is not tracked here.
   uint64 capture_rows           = 8;
   // Cumulative samples the tick thread tried to enqueue but the writer
   // thread's bounded channel was full for. Monotonic across the process

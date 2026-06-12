@@ -1,4 +1,5 @@
 export { RuntimeTransport } from "./wsTransport";
+export type { RuntimeConnectionState } from "./wsTransport";
 export { getOrCreateRuntimeTransport, disposeRuntimeTransport } from "./cache";
 export type {
   BusView,

@@ -46,7 +46,7 @@ socketcan = "3.3"
 # HTTP + WebSocket
 axum = { version = "0.7", features = ["ws", "macros"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 
 # ONNX Runtime for neural network inference.
 #

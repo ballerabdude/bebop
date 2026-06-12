@@ -10,6 +10,7 @@ import type {
   MotorView,
   PolicyIoView,
   PowerView,
+  RuntimeConnectionState,
   RuntimeMode,
   RuntimeSnapshot,
 } from "../runtime";
@@ -48,6 +49,13 @@ export function MotorBenchScreen({
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // Live WS state. Distinct from `connecting` (which only covers the
+  // *initial* handshake): once the transport is past first-open this
+  // flips between `connected` and `connecting` automatically as the
+  // socket drops + auto-reconnects every ~5 s.
+  const [connState, setConnState] = useState<RuntimeConnectionState>(
+    "disconnected",
+  );
   // In-app confirmation modal state. Replaces window.confirm() because
   // Chromium (and a couple others) start showing a "Prevent this page
   // from creating additional dialogs" checkbox after a few prompts; once
@@ -82,47 +90,72 @@ export function MotorBenchScreen({
     transportRef.current = transport;
     const offCallbacks: Array<() => void> = [];
 
-    void (async () => {
-      setConnecting(true);
-      setError(null);
-      try {
-        // connect() is idempotent on the cached transport; if it's
-        // already OPEN this is a no-op.
-        await transport.connect(robotIp, runtimePort);
-        if (cancelled) return;
-        const initial = await transport.getSnapshot();
-        setSnapshot(initial);
-        await transport.subscribeTelemetry(30);
-      } catch (e) {
+    // Register the push-event listeners FIRST, before kicking off the
+    // initial connect, so a fast "connected" edge or an auto-reconnect
+    // after a failed first attempt is never missed.
+    offCallbacks.push(
+      transport.onTelemetry((s) => {
+        if (!cancelled) setSnapshot(s);
+      }),
+    );
+    offCallbacks.push(
+      transport.onEStopLatched(() => {
         if (!cancelled) {
-          setError(
-            e instanceof Error
-              ? e.message
-              : `failed to connect: ${String(e)}`,
-          );
+          // Force a fresh snapshot so E-STOP banner shows up immediately
+          // even if telemetry is paused.
+          void transport.getSnapshot().then((s) => {
+            if (!cancelled) setSnapshot(s);
+          });
         }
-        return;
-      } finally {
-        if (!cancelled) setConnecting(false);
-      }
-
-      offCallbacks.push(
-        transport.onTelemetry((s) => {
-          if (!cancelled) setSnapshot(s);
-        }),
-      );
-      offCallbacks.push(
-        transport.onEStopLatched(() => {
-          if (!cancelled) {
-            // Force a fresh snapshot so E-STOP banner shows up immediately
-            // even if telemetry is paused.
-            void transport.getSnapshot().then((s) => {
-              if (!cancelled) setSnapshot(s);
-            });
+      }),
+    );
+    // Connection-state listener doubles as our "we're live, fetch a
+    // snapshot + (re)subscribe" trigger. Runs on the initial open AND
+    // on every auto-reconnect, so the screen self-heals after a brief
+    // outage without re-mounting.
+    offCallbacks.push(
+      transport.onConnectionStateChange((state) => {
+        if (cancelled) return;
+        setConnState(state);
+        if (state !== "connected") return;
+        void (async () => {
+          try {
+            const s = await transport.getSnapshot();
+            if (cancelled) return;
+            setSnapshot(s);
+            setError(null);
+            // Idempotent on the firmware side (a second subscribe
+            // just updates the rate hint), so safe to call on every
+            // reconnect — the transport also auto-resumes the last
+            // rate internally but doing it here makes the snapshot
+            // refresh and resubscription happen as a unit.
+            await transport.subscribeTelemetry(30);
+          } catch {
+            /* the next reconnect will retry */
+          } finally {
+            if (!cancelled) setConnecting(false);
           }
-        }),
+        })();
+      }),
+    );
+
+    // Kick off the initial connection. Failures (robot offline,
+    // wrong IP, etc.) are surfaced through the connection-state
+    // listener path: the transport keeps auto-retrying every ~5 s,
+    // and the listener flips us back to `connected` whenever it
+    // succeeds.
+    setConnecting(true);
+    setError(null);
+    void transport.connect(robotIp, runtimePort).catch((e) => {
+      if (cancelled) return;
+      setError(
+        e instanceof Error ? e.message : `failed to connect: ${String(e)}`,
       );
-    })();
+      // Keep `connecting` true: the transport is auto-retrying in
+      // the background, so the spinner conveys the right thing
+      // (we're still trying). The reconnect banner takes over once
+      // we have at least one snapshot to anchor the page to.
+    });
 
     return () => {
       cancelled = true;
@@ -211,18 +244,6 @@ export function MotorBenchScreen({
     (enabled: boolean) =>
       refreshAfter(`dry-run:${enabled}`, () =>
         transportRef.current!.setPolicyDryRun(enabled),
-      ),
-    [refreshAfter],
-  );
-
-  // MCAP capture toggle. `label` gets folded into the timestamped
-  // filename on the robot (sanitized to [A-Za-z0-9_-]). Toggling off
-  // closes the current file; toggling on opens a fresh one (so changing
-  // the label requires a stop -> start cycle).
-  const setCapture = useCallback(
-    (enabled: boolean, label: string) =>
-      refreshAfter(`capture:${enabled}`, () =>
-        transportRef.current!.setPolicyCapture(enabled, label),
       ),
     [refreshAfter],
   );
@@ -355,9 +376,19 @@ export function MotorBenchScreen({
       <div className="flex flex-col gap-3">
         <Banner tone="error">
           Couldn&rsquo;t reach the robot runtime at{" "}
-          <code>{robotIp}:{runtimePort}</code>.<br />
+          <code>
+            {robotIp}:{runtimePort}
+          </code>
+          .<br />
           {error}
         </Banner>
+        <div className="flex items-center gap-2 text-text-dim text-sm">
+          <Spinner />
+          <span>
+            Auto-retrying every few seconds. The page will resume as
+            soon as the link is back.
+          </span>
+        </div>
         <Button variant="secondary" onClick={onBack}>
           Back
         </Button>
@@ -512,6 +543,30 @@ export function MotorBenchScreen({
         </Banner>
       ) : null}
 
+      {/* WS reconnect banner. Renders only when the link has dropped
+          *after* the initial connect succeeded (the initial loading
+          state is handled above). The transport auto-retries every
+          ~5 s; the operator sees a pulsing notice until the link is
+          back up, at which point telemetry resumes automatically. */}
+      {connState !== "connected" && snapshot ? (
+        <Banner tone="info">
+          <div className="flex items-center gap-2">
+            <Spinner />
+            <div>
+              <div className="font-semibold">Reconnecting to robot…</div>
+              <div className="text-xs opacity-80">
+                Lost the WebSocket link to{" "}
+                <code>
+                  {robotIp}:{runtimePort}
+                </code>
+                . Auto-retrying every few seconds; the page will resume
+                live telemetry as soon as the link is back.
+              </div>
+            </div>
+          </div>
+        </Banner>
+      ) : null}
+
       {error && snapshot ? <Banner tone="error">{error}</Banner> : null}
 
       {/* Power-board card. Hidden when the firmware has no `power:`
@@ -568,20 +623,24 @@ export function MotorBenchScreen({
         />
       ) : null}
 
-      {/* Policy capture + dry-run controls. Render whenever a policy is
-          loaded so the operator can start an obs-only DialIn capture
-          before ever switching to RUN_POLICY. The component is fully
-          decoupled from the policy lifecycle (it just edits firmware
-          flags); the PolicyIoCard above renders the live state. */}
+      {/* Policy dry-run control + always-on capture status. Render
+          whenever a policy is loaded. MCAP capture is no longer
+          operator-toggled — the firmware writes one continuously while
+          in DIAL_IN / RUN_POLICY and auto-rotates segments by size; the
+          card below just surfaces the live file + lets the operator
+          download finished segments. */}
       {policyIo?.present ? (
         <PolicyCaptureControls
           policyIo={policyIo}
           busyDryRun={busy === "dry-run:true" || busy === "dry-run:false"}
-          busyCapture={busy === "capture:true" || busy === "capture:false"}
           onSetDryRun={setDryRun}
-          onSetCapture={setCapture}
         />
       ) : null}
+
+      {/* Capture downloads. Always rendered (independent of policy
+          presence) since DialIn captures are useful even on a robot
+          without a loaded policy. Hits the firmware's HTTP server. */}
+      <CaptureDownloads robotIp={robotIp} runtimePort={runtimePort} />
 
       {/* Policy I/O visualization. Render whenever a policy is loaded so
           the operator can screenshot a frozen history after stopping
@@ -912,37 +971,21 @@ function PolicyBanner({
   );
 }
 
-/// Two operator knobs that govern bench-side policy I/O capture and
-/// dry-run inference. Independent of mode (the firmware honors both in
-/// IDLE / DIAL_IN / RUN_POLICY), but mounted here next to the policy
-/// banner because the workflows are conceptually paired:
-///
-///  - `Capture` toggles an MCAP writer thread on the robot. DialIn
-///    captures observation-only samples (no actions); RunPolicy
-///    captures the full obs + raw_action + decoded triple. Use it for
-///    noise review (Foxglove plots) and sim playback.
-///  - `Dry run` keeps RUN_POLICY inferring + capturing but skips every
-///    motor command. Pair with capture to record what the policy would
-///    have done against a known-quiet bench pose without the robot
-///    actually moving.
+/// Dry-run toggle plus a read-only status view of the always-on MCAP
+/// capture. Capture itself is no longer operator-driven: the firmware
+/// writes one continuously while in DIAL_IN / RUN_POLICY (DialIn = obs
+/// only; RunPolicy = obs + raw + decoded action) and rotates segments
+/// when the active file passes ~256 MiB. Operators download finished
+/// segments from the `CaptureDownloads` panel below.
 function PolicyCaptureControls({
   policyIo,
   busyDryRun,
-  busyCapture,
   onSetDryRun,
-  onSetCapture,
 }: {
   policyIo: PolicyIoView;
   busyDryRun: boolean;
-  busyCapture: boolean;
   onSetDryRun: (enabled: boolean) => void;
-  onSetCapture: (enabled: boolean, label: string) => void;
 }) {
-  // Local-only label input. We don't push the label up to the firmware
-  // until the operator hits Start; mid-capture label edits don't rename
-  // the open file (the firmware doesn't reopen on label change).
-  const [label, setLabel] = useState("");
-
   const capturing = policyIo.captureActive;
   const dryRun = policyIo.dryRun;
 
@@ -954,7 +997,7 @@ function PolicyCaptureControls({
             Policy bench tools
           </div>
           <div className="text-[13px] text-text font-semibold mt-0.5">
-            Dry run &amp; observation capture
+            Dry run &amp; always-on observation capture
           </div>
           <p className="text-[12px] text-text-dim mt-1 leading-relaxed max-w-prose">
             <span className="text-text font-medium">Dry run</span> keeps
@@ -962,12 +1005,13 @@ function PolicyCaptureControls({
             apply its actions — instead the supervisor sends a
             hold-gains keepalive so the robot freezes in its current
             posture (and the feedback watchdog stays alive).{" "}
-            <span className="text-text font-medium">Capture</span> writes
-            one MCAP sample per 100&nbsp;Hz tick to a dedicated writer
-            thread on the robot (DialIn = obs only; RunPolicy = obs + raw
-            + decoded action) under{" "}
-            <code className="text-text">~/bebop-captures/</code>. Open the
-            file in Foxglove for replay / plotting.
+            <span className="text-text font-medium">MCAP capture</span>{" "}
+            runs automatically whenever the robot is in{" "}
+            <code className="text-text">DIAL_IN</code> (obs only) or{" "}
+            <code className="text-text">RUN_POLICY</code> (obs + raw +
+            decoded action). The firmware rotates segments on size and
+            prunes old files to stay under its disk budget; download
+            finished segments below.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -1001,7 +1045,7 @@ function PolicyCaptureControls({
             />
             {capturing
               ? `Recording ${policyIo.captureRows.toLocaleString()} samples`
-              : "Not recording"}
+              : "Capture idle (IDLE / E-STOP)"}
           </span>
           {policyIo.captureDropped > 0 ? (
             <span
@@ -1051,60 +1095,229 @@ function PolicyCaptureControls({
           </div>
         </div>
 
-        {/* Capture start/stop with optional label. When capturing, the
-            label input + start button disable; Stop replaces them. */}
-        <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev-2/40 px-3 py-2.5 space-y-2">
+        {/* Read-only capture status. Shows the current segment path and
+            sample count so the operator can confirm the writer is
+            keeping up and which file to grab. Rotations are handled
+            transparently by the firmware. */}
+        <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev-2/40 px-3 py-2.5 space-y-1.5">
           <div className="flex items-center justify-between gap-2">
             <div className="text-[12px] text-text font-medium">
-              MCAP capture
+              MCAP capture (always on)
             </div>
-            {capturing && policyIo.capturePath ? (
+            <span
+              className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider ${
+                capturing
+                  ? "border-success/40 bg-success/10 text-success"
+                  : "border-border bg-bg-elev text-text-dim"
+              }`}
+            >
               <span
-                className="text-[10px] text-text-dim font-mono truncate max-w-[55%]"
-                title={policyIo.capturePath}
-              >
-                {policyIo.capturePath}
-              </span>
-            ) : null}
+                className={`inline-block w-1.5 h-1.5 rounded-full ${
+                  capturing ? "bg-success animate-pulse" : "bg-text-dim/50"
+                }`}
+                aria-hidden
+              />
+              {capturing ? "Writing" : "Paused"}
+            </span>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              type="text"
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              disabled={capturing || busyCapture}
-              placeholder="optional label (e.g. noise_floor)"
-              maxLength={32}
-              className="flex-1 min-w-[140px] rounded-[var(--radius-input)] border border-border bg-bg px-2 py-1.5 text-[12px] text-text placeholder:text-text-dim focus:outline-none focus:border-accent disabled:opacity-50 disabled:cursor-not-allowed"
-            />
-            {capturing ? (
-              <Button
-                variant="secondary"
-                onClick={() => onSetCapture(false, label)}
-                loading={busyCapture}
-                disabled={busyCapture}
-                className="py-1.5! text-[12px]! shrink-0"
-              >
-                Stop
-              </Button>
-            ) : (
-              <Button
-                onClick={() => onSetCapture(true, label.trim())}
-                loading={busyCapture}
-                disabled={busyCapture}
-                className="bg-accent! text-white! hover:brightness-110! py-1.5! text-[12px]! shrink-0"
-              >
-                Start
-              </Button>
-            )}
-          </div>
+          {capturing && policyIo.capturePath ? (
+            <div
+              className="text-[10px] text-text-dim font-mono break-all"
+              title={policyIo.capturePath}
+            >
+              {policyIo.capturePath}
+            </div>
+          ) : null}
           <div className="text-[11px] text-text-dim leading-snug">
             {capturing
-              ? "Toggle Stop to flush and close the file. Start a new capture to begin a fresh file."
-              : "Start writes a new timestamped .mcap; the file lives on the Jetson under the configured capture dir. Open it in Foxglove for replay."}
+              ? `Current segment has ${policyIo.captureRows.toLocaleString()} samples. The firmware rotates to a fresh file when the segment reaches ~256 MiB; older segments are pruned to keep the capture dir under its disk budget.`
+              : "Capture pauses in IDLE and during E-STOP. Switch to DIAL_IN or RUN_POLICY to start a fresh segment."}
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------
+// Capture downloads
+// --------------------------------------------------------------------------
+
+/// One row from the firmware's `GET /captures` endpoint. Field names
+/// mirror `CaptureEntry` in `firmware/bebop-linux/src/server/ws.rs`.
+interface CaptureFile {
+  name: string;
+  sizeBytes: number;
+  modifiedMs: number;
+}
+
+interface CapturesResponse {
+  files: CaptureFile[];
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+}
+
+function formatModified(ms: number): string {
+  if (!ms) return "—";
+  const d = new Date(ms);
+  return d.toLocaleString();
+}
+
+/// Lists every `policy_capture_*.mcap` segment on the robot and lets
+/// the operator download any of them. Polls the JSON endpoint on
+/// mount + on a manual refresh; downloads stream via the same HTTP
+/// server (`/captures/dl/<name>`) and are saved through a temporary
+/// blob-URL anchor so they work inside the Tauri webview the same way
+/// they would in a regular browser.
+function CaptureDownloads({
+  robotIp,
+  runtimePort,
+}: {
+  robotIp: string;
+  runtimePort: number;
+}) {
+  const baseUrl = useMemo(
+    () => `http://${robotIp}:${runtimePort}`,
+    [robotIp, runtimePort],
+  );
+  const [files, setFiles] = useState<CaptureFile[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${baseUrl}/captures`, { cache: "no-store" });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const body = (await res.json()) as CapturesResponse;
+      setFiles(body.files ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setFiles([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [baseUrl]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  /// Build the direct download URL for a segment. We deliberately do
+  /// NOT fetch + create a Blob for the download:
+  ///
+  ///  - A blob URL on an HTTP page triggers Chrome's "loaded over an
+  ///    insecure connection" console warning and is blocked outright
+  ///    in some configurations.
+  ///  - `fetch()` participates in the browser's HTTP cache, so a
+  ///    second click on the same file returns 304 Not Modified with
+  ///    no body and the saved file ends up empty.
+  ///  - Loading a multi-hundred-MiB MCAP fully into memory before
+  ///    handing it to the download saver is wasteful when the
+  ///    browser can stream it straight to disk.
+  ///
+  /// A plain `<a href={url} download={name}>` sidesteps all three:
+  /// the browser issues its own GET, follows redirects, supports
+  /// range requests for resume, and writes the bytes directly to
+  /// the destination file.
+  const downloadUrl = useCallback(
+    (name: string) => `${baseUrl}/captures/dl/${encodeURIComponent(name)}`,
+    [baseUrl],
+  );
+
+  return (
+    <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev px-3.5 py-3 space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-wider text-text-dim">
+            Capture downloads
+          </div>
+          <div className="text-[13px] text-text font-semibold mt-0.5">
+            MCAP segments on robot
+          </div>
+          <p className="text-[12px] text-text-dim mt-1 leading-relaxed max-w-prose">
+            Every <code className="text-text">policy_capture_*.mcap</code>{" "}
+            file on the robot, newest first. Open the downloaded file in
+            Foxglove for replay / plotting. The currently-writing segment
+            is included; downloading it grabs whatever bytes are flushed
+            so far.
+          </p>
+        </div>
+        <Button
+          variant="secondary"
+          onClick={() => void refresh()}
+          loading={loading}
+          disabled={loading}
+          className="py-1.5! text-[12px]! shrink-0"
+        >
+          Refresh
+        </Button>
+      </div>
+
+      {error ? (
+        <Banner tone="error">Capture list error: {error}</Banner>
+      ) : null}
+
+      {files === null ? (
+        <div className="text-[12px] text-text-dim italic">Loading…</div>
+      ) : files.length === 0 ? (
+        <div className="text-[12px] text-text-dim italic">
+          No captures on robot yet. They appear as soon as the runtime
+          enters DIAL_IN or RUN_POLICY.
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12px] tabular-nums">
+            <thead className="text-[10px] uppercase tracking-wider text-text-dim">
+              <tr className="border-b border-border">
+                <th className="text-left font-medium py-1.5 pr-3">File</th>
+                <th className="text-right font-medium py-1.5 px-3">Size</th>
+                <th className="text-left font-medium py-1.5 px-3 hidden sm:table-cell">
+                  Modified
+                </th>
+                <th className="text-right font-medium py-1.5 pl-3">Download</th>
+              </tr>
+            </thead>
+            <tbody>
+              {files.map((f) => (
+                <tr key={f.name} className="border-b border-border/40 last:border-b-0">
+                  <td className="py-1.5 pr-3 font-mono text-[11px] break-all text-text">
+                    {f.name}
+                  </td>
+                  <td className="py-1.5 px-3 text-right text-text-dim">
+                    {formatBytes(f.sizeBytes)}
+                  </td>
+                  <td className="py-1.5 px-3 text-text-dim hidden sm:table-cell">
+                    {formatModified(f.modifiedMs)}
+                  </td>
+                  <td className="py-1.5 pl-3 text-right">
+                    {/* Native anchor download: lets the browser
+                        stream the file to disk and avoids the
+                        fetch→blob→object-URL dance that broke on
+                        repeat clicks (304 Not Modified) and produced
+                        an insecure-blob warning on HTTP pages. */}
+                    <a
+                      href={downloadUrl(f.name)}
+                      download={f.name}
+                      className="inline-flex items-center justify-center rounded-[var(--radius-input)] border border-border bg-bg-elev-2 px-2 py-1 text-[11px] font-medium text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors no-underline"
+                    >
+                      Download
+                    </a>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

@@ -165,26 +165,6 @@ pub fn handle_client_message(
                 Err(_) => error_response(request_id, "policy_control mutex poisoned".into()),
             }
         }
-        P::SetPolicyCapture(req) => {
-            // File open/close is owned by PolicyRunner (next tick). We
-            // only stash the operator's intent here so the runner thread
-            // is the sole owner of the file handle.
-            match policy_control.lock() {
-                Ok(mut g) => {
-                    g.capture_requested = req.enabled;
-                    g.capture_label = req.label.clone();
-                    ack(
-                        request_id,
-                        format!(
-                            "policy capture {} (label = {:?})",
-                            if req.enabled { "REQUESTED" } else { "disabled" },
-                            req.label
-                        ),
-                    )
-                }
-                Err(_) => error_response(request_id, "policy_control mutex poisoned".into()),
-            }
-        }
     }
 }
 

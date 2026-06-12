@@ -22,7 +22,18 @@ Environment=RUST_LOG=info,bebop_linux=info
 # is only required once a client transitions to RunPolicy mode.
 # Environment=LD_LIBRARY_PATH=/opt/onnxruntime/lib
 
-ExecStart=/usr/local/bin/bebop-linux --config /etc/bebop/bebop_v2.yaml
+# Persistent capture directory. `ProtectHome=true` (below) makes
+# `/root` (and any `~`-style default) read-only for this service, which
+# was producing a flood of "Read-only file system" errors from the
+# always-on MCAP capture writer. `StateDirectory=bebop-captures` lets
+# systemd create + own `/var/lib/bebop-captures` for us (mode 0750,
+# owned by User=/Group= above), and we point the binary at that path
+# explicitly via `--capture-dir` so it's used regardless of `$HOME`.
+StateDirectory=bebop-captures
+StateDirectoryMode=0750
+ExecStart=/usr/local/bin/bebop-linux \
+    --config /etc/bebop/bebop_v2.yaml \
+    --capture-dir /var/lib/bebop-captures
 
 # Boot retry: if a CAN bus isn't up yet we'll exit non-zero and try again.
 Restart=on-failure
@@ -30,7 +41,9 @@ RestartSec=3
 KillMode=mixed
 TimeoutStopSec=10
 
-# Hardening — relaxed for raw CAN + low-level access.
+# Hardening — relaxed for raw CAN + low-level access. `ProtectHome=true`
+# means MCAP captures MUST land outside `/root`/`/home`; see
+# `StateDirectory=bebop-captures` + the `--capture-dir` flag above.
 NoNewPrivileges=false
 ProtectSystem=false
 ProtectHome=true

@@ -415,6 +415,7 @@ async fn main() -> Result<()> {
     let server_imu = imu_shared.clone();
     let server_policy_io = policy_io_shared.clone();
     let server_policy_control = policy_control_shared.clone();
+    let server_capture_dir = capture_dir.clone();
     let bind_addr = cfg.server.bind_addr.clone();
     let server_handle = tokio::spawn(async move {
         if let Err(e) = server::run_server(
@@ -423,6 +424,7 @@ async fn main() -> Result<()> {
             imu_present,
             server_policy_io,
             server_policy_control,
+            server_capture_dir,
             &bind_addr,
         )
         .await
