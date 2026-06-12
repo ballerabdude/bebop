@@ -45,17 +45,14 @@
 //! spam. Joint positions and velocities still come from real motor
 //! feedback.
 //!
-//! ## `imu_live` vs `gyro_live`
+//! ## IMU liveness
 //!
-//! The rotation-vector report (0x28) and the calibrated-gyro report
-//! (0x02) are independent SH-2 subscriptions on the BNO085. The IMU
-//! freshness clock (`imu_live`) is driven by the rotation vector, so it
-//! can read `true` while the gyro is silently dead (subscription never
-//! came up). Because `base_ang_vel` is the policy's primary rate-feedback
-//! channel, a dead gyro is far more dangerous than a stale quaternion —
-//! we therefore track and surface `gyro_live` *separately* (see
-//! [`crate::imu::ImuSnapshot::gyro_is_stale`]) and shout once per
-//! transition when the attitude is live but the gyro is not.
+//! Rotation vector and calibrated gyro arrive on the same SH-2 data
+//! channel at the same cadence, so a single freshness clock
+//! (`ImuSnapshot::is_stale`, surfaced as `imu_live`) covers both. When
+//! it's true we use the live BNO reading for both attitude and
+//! angular velocity; when false the policy falls back to synthetic
+//! upright (quaternion identity + zero angular velocity).
 
 use anyhow::{anyhow, Context, Result};
 use std::panic::AssertUnwindSafe;
@@ -64,13 +61,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+use bebop_proto::capture::v1::PolicyCaptureSample;
+
 use crate::config::{dims, PolicyGainClamps};
 use crate::imu::ImuShared;
 use crate::mode::Mode;
 use crate::observation::{
-    decode_policy_action, ImuState, ObservationBuilder, VelocityCommand, JOINT_NAMES, NUM_JOINTS,
+    decode_policy_action, DecodedAction, ImuState, ObservationBuilder, VelocityCommand,
+    JOINT_NAMES, NUM_JOINTS,
 };
 use crate::policy::PolicyController;
+use crate::policy_capture::{self, CaptureHandle};
+use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
 use crate::safety::{BreachReason, Supervisor};
 
@@ -108,15 +110,37 @@ pub struct PolicyRunner {
     /// Edge-detect on the IMU live/synthetic boundary so we log
     /// transitions once instead of every tick.
     imu_was_live: bool,
-    /// Edge-detect on the gyro live/dead boundary, tracked separately
-    /// from `imu_was_live` because the calibrated-gyro report (0x02) is
-    /// a distinct subscription from the rotation vector (0x28). A dead
-    /// gyro zeros `base_ang_vel` — the policy's main rate-feedback
-    /// channel — so we warn loudly on the transition.
-    gyro_was_live: bool,
     /// Last time we emitted the human-readable I/O summary at `info!`.
     /// Per-tick logs would be 100 lines/s; we rate-limit to ~1 Hz.
     last_io_log_at: Option<Instant>,
+    /// Operator-driven dry-run + capture flags. The runner reads these
+    /// every tick; the WS server (`handlers.rs`) is the writer.
+    policy_control: PolicyControlShared,
+    /// Handle on the MCAP writer thread. The runner calls
+    /// `request_open` / `request_close` to manage the capture file's
+    /// lifecycle and `send_sample` once per tick while capture is
+    /// active. The writer thread owns the file descriptor; we never
+    /// touch disk on this thread.
+    capture: CaptureHandle,
+    /// Mirrors the writer-thread's "currently has a file open" state so
+    /// the runner can detect when its requested open/close has actually
+    /// taken effect (without locking `policy_io` from inside the tick
+    /// for read-modify-write loops).
+    capture_was_active: bool,
+    /// Monotonic per-capture sample counter. Reset to 0 each time a new
+    /// capture file opens (detected via the `capture_was_active` edge in
+    /// `reconcile_capture`) and written into
+    /// [`PolicyCaptureSample::tick`]. Independent of the MCAP `sequence`
+    /// header so readers that decode the proto payload alone (without
+    /// parsing MCAP records) still get a usable tick axis.
+    capture_tick: u64,
+    /// Wall/monotonic origin of the current capture file, set lazily on
+    /// the first sample after a file opens. Drives
+    /// [`PolicyCaptureSample::sim_time_s`] so a single file plots against
+    /// a self-contained, 0-based time axis. `None` between captures.
+    capture_started_at: Option<Instant>,
+    /// Edge-detect on the dry-run flag so we log transitions once.
+    dry_run_was_on: bool,
 }
 
 /// How often to emit the human-readable observation/action summary at
@@ -135,6 +159,8 @@ impl PolicyRunner {
         supervisor: Arc<Supervisor>,
         imu_shared: ImuShared,
         policy_io: PolicyIoShared,
+        policy_control: PolicyControlShared,
+        capture: CaptureHandle,
         model_path: P,
     ) -> Result<Self> {
         let model_path = model_path.as_ref();
@@ -206,17 +232,58 @@ impl PolicyRunner {
             policy_gain_clamps,
             was_running: false,
             imu_was_live: false,
-            gyro_was_live: false,
             last_io_log_at: None,
+            policy_control,
+            capture,
+            capture_was_active: false,
+            capture_tick: 0,
+            capture_started_at: None,
+            dry_run_was_on: false,
         })
     }
 
-    /// Run one inference + TX cycle. No-ops outside RunPolicy or while
-    /// E-STOP is latched; both branches also clear the on-entry state so
-    /// re-entering RunPolicy starts fresh.
+    /// Run one inference + TX cycle. The flow is now:
+    ///
+    /// 1. Reconcile capture state from [`PolicyControlShared`] (ask the
+    ///    writer thread to open / close the MCAP file as needed; surface
+    ///    `capture_active` / `dry_run` in the telemetry snapshot).
+    /// 2. If we're in `DialIn` with capture active, build the observation
+    ///    from real feedback and submit an obs-only sample to the writer
+    ///    thread — no inference, no motor TX.
+    /// 3. If we're in `RunPolicy` (and not E-STOPped), run the existing
+    ///    inference path; in `dry_run` mode skip the per-joint
+    ///    `safe_send_ctrl` (everything else still runs).
+    /// 4. Otherwise no-op, modulo the on-exit reset that re-enters
+    ///    RunPolicy with a clean controller.
     pub fn tick(&mut self) {
         let sup = self.supervisor.clone();
-        let in_run_policy = sup.mode() == Mode::RunPolicy && !sup.estop_active();
+        let mode = sup.mode();
+        let estop = sup.estop_active();
+
+        // --- 0. Reconcile operator control flags + capture lifecycle ----
+        let (dry_run, capture_requested, capture_label) = match self.policy_control.lock() {
+            Ok(g) => (g.dry_run, g.capture_requested, g.capture_label.clone()),
+            Err(_) => (false, false, String::new()),
+        };
+        self.reconcile_capture(capture_requested, &capture_label);
+        self.publish_dry_run(dry_run);
+
+        if dry_run != self.dry_run_was_on {
+            if dry_run {
+                info!(
+                    "policy DRY-RUN enabled: RunPolicy will still infer + publish + capture, \
+                     but instead of applying the policy action it sends a hold-gains \
+                     keepalive (kp/kd from hold_gains, target = last_target_pos) so the \
+                     robot freezes in its current posture and the feedback watchdog stays \
+                     happy"
+                );
+            } else {
+                info!("policy DRY-RUN disabled: RunPolicy will resume sending PD commands");
+            }
+            self.dry_run_was_on = dry_run;
+        }
+
+        let in_run_policy = mode == Mode::RunPolicy && !estop;
 
         if !in_run_policy {
             if self.was_running {
@@ -229,6 +296,16 @@ impl PolicyRunner {
                 debug!("policy controller reset on RunPolicy exit");
             }
             self.was_running = false;
+
+            // DialIn obs-only capture: build the observation from real
+            // feedback (without running inference) and submit a sample
+            // to the writer thread. We deliberately gate on
+            // `mode == DialIn` (rather than "anything not RunPolicy")
+            // so Idle captures stay quiet — joints are disabled in Idle
+            // and the obs would be a long run of zeros, swamping the file.
+            if mode == Mode::DialIn && !estop && self.capture_was_active {
+                self.capture_dial_in_observation(&sup, dry_run);
+            }
             return;
         }
 
@@ -264,19 +341,15 @@ impl PolicyRunner {
         //    `ImuState`. See the module docs and
         //    `bebop_v2_base_cfg.py::ObservationsCfg` for the matching
         //    sim-side pipeline.
-        // `gyro_live` is tracked independently of `imu_live`: the
-        // rotation vector keeps the IMU snapshot "fresh" even when the
-        // calibrated-gyro subscription is dead, in which case
-        // `angular_velocity_body` is `None` and `base_ang_vel` would be
-        // silently zeroed — the worst-case sim-to-real gap for a balance
-        // policy. We compute it here so the per-tick log and the
-        // telemetry snapshot can show it.
+        // Rotation vector and gyro arrive on the same SH-2 data channel
+        // at the same cadence, so `ImuSnapshot::is_stale` is the single
+        // liveness signal for both. When the IMU is fresh we use the
+        // live quaternion + angular velocity; otherwise we fall back to
+        // synthetic upright.
         let now = Instant::now();
-        let mut gyro_live = false;
         let imu_state = match self.imu_shared.lock() {
             Ok(g) if !g.is_stale(now) => {
                 let quaternion = g.quaternion.unwrap_or(SYNTHETIC_IMU_QUATERNION_XYZW);
-                gyro_live = g.angular_velocity_body.is_some() && !g.gyro_is_stale(now);
                 let angular_velocity = g.angular_velocity_body.unwrap_or([0.0; 3]);
                 if !self.imu_was_live {
                     info!(
@@ -308,28 +381,6 @@ impl PolicyRunner {
             }
         };
         self.obs_builder.update_imu(imu_state);
-
-        // Edge-log the gyro live/dead transition. The most dangerous
-        // case is `imu_live && !gyro_live`: the attitude looks healthy
-        // (projected_gravity moving) while base_ang_vel is pinned to
-        // zero, which reads as "IMU is fine" to anyone watching the
-        // rate-limited I/O line. Shout once per transition so a dead
-        // 0x02 subscription is impossible to miss in the logs.
-        if gyro_live != self.gyro_was_live {
-            if gyro_live {
-                info!("IMU gyro live: base_ang_vel now sourced from BNO085 0x02 (calibrated gyro)");
-            } else if self.imu_was_live {
-                warn!(
-                    "IMU gyro DEAD while attitude is live: base_ang_vel is zeroed even though \
-                     projected_gravity is live. The policy is running without rate feedback — \
-                     expect chatter / instability. Check the BNO085 0x02 (Calibrated Gyroscope) \
-                     subscription (see imu.rs bring-up logs)."
-                );
-            } else {
-                warn!("IMU gyro unavailable: base_ang_vel zeroed (IMU not live either)");
-            }
-            self.gyro_was_live = gyro_live;
-        }
 
         // 3) Velocity command. Isaac-BebopV2-Flat-v0 forces (0, 0, 0)
         //    during training; locomotion checkpoints will want a real
@@ -398,7 +449,6 @@ impl PolicyRunner {
             self.last_io_log_at = Some(now);
             info!(
                 imu_live = self.imu_was_live,
-                gyro_live,
                 base_ang_vel = ?&obs[0..3],
                 projected_gravity = ?&obs[3..6],
                 joint_pos_rel = ?&obs[6..14],
@@ -416,13 +466,36 @@ impl PolicyRunner {
         if let Ok(mut g) = self.policy_io.lock() {
             g.publish_tick(
                 self.imu_was_live,
-                gyro_live,
+                dry_run,
                 &obs,
                 &action,
                 &decoded.targets,
                 &decoded.kp,
                 &decoded.kd,
             );
+        }
+
+        // 7b) Capture (RunPolicy: obs + raw action + decoded action). We
+        // build the proto sample here and hand it off to the writer
+        // thread via a try_send. The runner is back on the hot loop in
+        // a few µs regardless of how slow the disk is — backlog is
+        // surfaced as `capture_dropped` in the next telemetry frame.
+        if self.capture_was_active {
+            // Hoist the Copy field out so it isn't read while `self` is
+            // mutably borrowed as the `build_capture_sample` receiver.
+            let imu_was_live = self.imu_was_live;
+            let sample = self.build_capture_sample(
+                now,
+                Mode::RunPolicy,
+                dry_run,
+                imu_was_live,
+                &joint_pos,
+                &joint_vel,
+                &armed,
+                &obs,
+                Some((&action, &decoded)),
+            );
+            self.capture.send_sample(sample);
         }
 
         // 8) Push to motors. Skip joints the operator hasn't armed: a
@@ -437,8 +510,25 @@ impl PolicyRunner {
         //    kp/kd come from the policy on every tick (MIT-mode variable
         //    impedance). The decode path has already clamped them to the
         //    per-joint `policy_gain_clamps` envelope, so no further
-        //    clipping is needed here. `hold_gains` in the YAML is now
-        //    used only for pre-RunPolicy idle holding.
+        //    clipping is needed here. `hold_gains` in the YAML is used
+        //    for the pre-RunPolicy idle hold AND for the dry-run
+        //    keepalive below.
+        //
+        //    Dry-run path: we still produced + published + captured the
+        //    policy action above, but we deliberately don't apply it.
+        //    Robstride MIT-mode motors only emit feedback in response to
+        //    a control frame, so silently skipping TX would starve the
+        //    supervisor's 100 ms feedback watchdog and immediately latch
+        //    E-STOP on the first armed joint (this was the failure mode
+        //    operators were hitting on the bench). Instead, send a
+        //    hold-gains keepalive at the joint's last target position so
+        //    the robot freezes in whatever posture it had when dry-run
+        //    began. The keepalive is identical in shape to DialIn's
+        //    hold cycle.
+        if dry_run {
+            sup.tick_hold_armed();
+            return;
+        }
         for (slot, &idx) in self.joint_indices.iter().enumerate() {
             if !armed[slot] {
                 continue;
@@ -449,6 +539,192 @@ impl PolicyRunner {
             if let Err(e) = sup.safe_send_ctrl(idx, decoded.targets[slot], kp, kd, 0.0, 0.0) {
                 debug!(joint = %cfg.name, error = %e, "policy TX failed");
             }
+        }
+    }
+
+    /// Edge-detect the operator's `capture_requested` flag and shoot
+    /// `request_open` / `request_close` at the writer thread. The
+    /// thread is the source of truth for "file actually open" — we
+    /// track its progress via the shared `PolicyIoSnapshot.capture_active`
+    /// field that the writer publishes itself, mirrored here into
+    /// `self.capture_was_active` so the tick body has a cheap local
+    /// check.
+    fn reconcile_capture(&mut self, requested: bool, label: &str) {
+        let active_on_disk = self
+            .policy_io
+            .lock()
+            .map(|g| g.capture_active)
+            .unwrap_or(false);
+        // Fresh file just opened: restart the per-capture tick counter and
+        // clear the time origin so `tick` / `sim_time_s` are 0-based within
+        // each file. The origin is set lazily on the first sample.
+        if active_on_disk && !self.capture_was_active {
+            self.capture_tick = 0;
+            self.capture_started_at = None;
+        }
+        self.capture_was_active = active_on_disk;
+
+        match (active_on_disk, requested) {
+            (true, true) | (false, false) => {
+                // Steady state — nothing for the runner to do.
+            }
+            (false, true) => {
+                // Operator just enabled capture. Fire-and-forget; the
+                // writer thread publishes the resolved path + active=true
+                // into PolicyIoShared as soon as it opens the file.
+                self.capture.request_open(label);
+            }
+            (true, false) => {
+                self.capture.request_close();
+            }
+        }
+    }
+
+    /// Push the latest dry-run flag into the shared snapshot. Capture
+    /// state (`active` / `path` / `rows` / `dropped`) is owned by the
+    /// writer thread, which publishes directly into `PolicyIoShared`.
+    fn publish_dry_run(&self, dry_run: bool) {
+        if let Ok(mut g) = self.policy_io.lock() {
+            g.set_dry_run(dry_run);
+        }
+    }
+
+    /// DialIn capture path: gather real joint + IMU feedback, build the
+    /// observation, submit a sample to the writer thread. Does NOT run
+    /// the ONNX session and does NOT send any motor commands. The
+    /// action-related proto fields stay empty (length-0 `repeated`s)
+    /// so the schema is identical to RunPolicy samples.
+    fn capture_dial_in_observation(&mut self, sup: &Arc<Supervisor>, dry_run: bool) {
+        let snapshots = sup.snapshot_motors();
+        let mut joint_pos = [0.0_f32; NUM_JOINTS];
+        let mut joint_vel = [0.0_f32; NUM_JOINTS];
+        let mut armed = [false; NUM_JOINTS];
+        for (slot, &idx) in self.joint_indices.iter().enumerate() {
+            let s = &snapshots[idx];
+            joint_pos[slot] = s.position;
+            joint_vel[slot] = s.velocity;
+            armed[slot] = s.armed;
+        }
+
+        // IMU — same pull as RunPolicy. We don't repeat the live/synthetic
+        // edge logging here: that's a RunPolicy diagnostic and would
+        // otherwise double-fire when the operator hops between modes
+        // mid-capture.
+        let now = Instant::now();
+        let mut imu_live = false;
+        let imu_state = match self.imu_shared.lock() {
+            Ok(g) if !g.is_stale(now) => {
+                imu_live = true;
+                let quaternion = g.quaternion.unwrap_or(SYNTHETIC_IMU_QUATERNION_XYZW);
+                let angular_velocity = g.angular_velocity_body.unwrap_or([0.0; 3]);
+                ImuState {
+                    quaternion,
+                    angular_velocity,
+                    linear_acceleration: [0.0; 3],
+                }
+            }
+            _ => ImuState {
+                quaternion: SYNTHETIC_IMU_QUATERNION_XYZW,
+                angular_velocity: [0.0; 3],
+                linear_acceleration: [0.0; 3],
+            },
+        };
+        self.obs_builder.update_imu(imu_state);
+        // DialIn has no command source today (no policy = no cmd_vel
+        // teleop); train-time defaults to (0, 0, 0) so we do the same.
+        self.obs_builder.update_cmd_vel(VelocityCommand::default());
+        self.obs_builder.joint_positions = joint_pos;
+        self.obs_builder.joint_velocities = joint_vel;
+        // `last_action` stays at its previous value (cleared to zeros on
+        // every RunPolicy exit by `clear_tick` -> `update_last_action`),
+        // so DialIn rows always have last_action = 0 — matching the start
+        // of a training episode.
+
+        let obs = self.obs_builder.build();
+        let sample = self.build_capture_sample(
+            now,
+            Mode::DialIn,
+            dry_run,
+            imu_live,
+            &joint_pos,
+            &joint_vel,
+            &armed,
+            &obs,
+            None,
+        );
+        self.capture.send_sample(sample);
+    }
+
+    /// Build a [`PolicyCaptureSample`] from the current tick's state.
+    /// Hot path — keep it allocation-light (a few small `Vec`s for the
+    /// `repeated` fields, no formatting).
+    #[allow(clippy::too_many_arguments)]
+    fn build_capture_sample(
+        &mut self,
+        now: Instant,
+        mode: Mode,
+        dry_run: bool,
+        imu_live: bool,
+        joint_pos: &[f32; NUM_JOINTS],
+        joint_vel: &[f32; NUM_JOINTS],
+        armed: &[bool; NUM_JOINTS],
+        observation: &[f32],
+        action: Option<(&[f32], &DecodedAction)>,
+    ) -> PolicyCaptureSample {
+        // Anchor `sim_time_s` to the first sample of the current capture
+        // file (the origin is cleared on the open edge in
+        // `reconcile_capture`). This gives each file a self-contained,
+        // 0-based time axis; `wall_time_ns` still carries absolute time.
+        let origin = *self.capture_started_at.get_or_insert(now);
+        let (wall_time_ns, sim_time_s) = policy_capture::timestamps(now, Some(origin));
+
+        // Per-capture monotonic sample counter (distinct from the MCAP
+        // `sequence` header so the proto payload alone is self-describing).
+        let tick = self.capture_tick;
+        self.capture_tick += 1;
+
+        let mode_str = match mode {
+            Mode::Idle => "IDLE",
+            Mode::DialIn => "DIAL_IN",
+            Mode::RunPolicy => "RUN_POLICY",
+        }
+        .to_string();
+
+        let quat = self.obs_builder.imu.quaternion;
+        let ang_vel = self.obs_builder.imu.angular_velocity;
+
+        let (raw_action, position_targets_rad, kp, kd) = match action {
+            Some((raw, decoded)) => (
+                raw.to_vec(),
+                decoded.targets.to_vec(),
+                decoded.kp.to_vec(),
+                decoded.kd.to_vec(),
+            ),
+            None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        };
+
+        PolicyCaptureSample {
+            tick,
+            wall_time_ns,
+            sim_time_s,
+            mode: mode_str,
+            dry_run,
+            imu_live,
+            quat_x: quat[0],
+            quat_y: quat[1],
+            quat_z: quat[2],
+            quat_w: quat[3],
+            ang_vel_x: ang_vel[0],
+            ang_vel_y: ang_vel[1],
+            ang_vel_z: ang_vel[2],
+            joint_pos_rad: joint_pos.to_vec(),
+            joint_vel_rad_s: joint_vel.to_vec(),
+            joint_armed: armed.to_vec(),
+            observation: observation.to_vec(),
+            raw_action,
+            position_targets_rad,
+            kp,
+            kd,
         }
     }
 }
@@ -479,3 +755,8 @@ mod tests {
         assert_eq!(3 * JOINT_NAMES.len(), dims::ACTION_DIM);
     }
 }
+
+// Round-trip tests for the MCAP capture writer live next to the writer
+// itself (see `crate::policy_capture::tests`). Header / schema drift is
+// guarded there because that module owns both the open path and the
+// schema-name constants.

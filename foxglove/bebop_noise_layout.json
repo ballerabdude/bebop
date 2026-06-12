@@ -1,0 +1,235 @@
+{
+  "configById": {
+    "Plot!gyro": {
+      "title": "IMU angular velocity (rad/s) - gyro noise",
+      "paths": [
+        {
+          "value": "/policy_capture.ang_vel_x",
+          "enabled": true,
+          "label": "wx (roll rate)",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.ang_vel_y",
+          "enabled": true,
+          "label": "wy (pitch rate)",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.ang_vel_z",
+          "enabled": true,
+          "label": "wz (yaw rate)",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "custom",
+      "xAxisPath": {
+        "value": "/policy_capture.sim_time_s",
+        "enabled": true,
+        "timestampMethod": "receiveTime"
+      },
+      "sidebarDimension": 240
+    },
+    "Plot!jvel": {
+      "title": "Joint velocity (rad/s) - noisiest channel",
+      "paths": [
+        {
+          "value": "/policy_capture.joint_vel_rad_s[0]",
+          "enabled": true,
+          "label": "hip_flex_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_vel_rad_s[1]",
+          "enabled": true,
+          "label": "hip_flex_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_vel_rad_s[2]",
+          "enabled": true,
+          "label": "hip_abd_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_vel_rad_s[3]",
+          "enabled": true,
+          "label": "hip_abd_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_vel_rad_s[4]",
+          "enabled": true,
+          "label": "knee_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_vel_rad_s[5]",
+          "enabled": true,
+          "label": "knee_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_vel_rad_s[6]",
+          "enabled": true,
+          "label": "foot_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_vel_rad_s[7]",
+          "enabled": true,
+          "label": "foot_R",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "custom",
+      "xAxisPath": {
+        "value": "/policy_capture.sim_time_s",
+        "enabled": true,
+        "timestampMethod": "receiveTime"
+      },
+      "sidebarDimension": 240
+    },
+    "Plot!quat": {
+      "title": "IMU orientation quaternion (XYZW) - drift",
+      "paths": [
+        {
+          "value": "/policy_capture.quat_x",
+          "enabled": true,
+          "label": "qx",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.quat_y",
+          "enabled": true,
+          "label": "qy",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.quat_z",
+          "enabled": true,
+          "label": "qz",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.quat_w",
+          "enabled": true,
+          "label": "qw",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "custom",
+      "xAxisPath": {
+        "value": "/policy_capture.sim_time_s",
+        "enabled": true,
+        "timestampMethod": "receiveTime"
+      },
+      "sidebarDimension": 240
+    },
+    "Plot!jpos": {
+      "title": "Joint position (rad) - encoder noise",
+      "paths": [
+        {
+          "value": "/policy_capture.joint_pos_rad[0]",
+          "enabled": true,
+          "label": "hip_flex_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_pos_rad[1]",
+          "enabled": true,
+          "label": "hip_flex_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_pos_rad[2]",
+          "enabled": true,
+          "label": "hip_abd_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_pos_rad[3]",
+          "enabled": true,
+          "label": "hip_abd_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_pos_rad[4]",
+          "enabled": true,
+          "label": "knee_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_pos_rad[5]",
+          "enabled": true,
+          "label": "knee_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_pos_rad[6]",
+          "enabled": true,
+          "label": "foot_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy_capture.joint_pos_rad[7]",
+          "enabled": true,
+          "label": "foot_R",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "custom",
+      "xAxisPath": {
+        "value": "/policy_capture.sim_time_s",
+        "enabled": true,
+        "timestampMethod": "receiveTime"
+      },
+      "sidebarDimension": 240
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "direction": "row",
+    "first": {
+      "direction": "column",
+      "first": "Plot!gyro",
+      "second": "Plot!jvel",
+      "splitPercentage": 50
+    },
+    "second": {
+      "direction": "column",
+      "first": "Plot!quat",
+      "second": "Plot!jpos",
+      "splitPercentage": 50
+    },
+    "splitPercentage": 50
+  }
+}

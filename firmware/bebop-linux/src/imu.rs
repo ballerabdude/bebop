@@ -112,12 +112,6 @@ pub struct ImuSnapshot {
     pub angular_velocity_body: Option<[f32; 3]>,
     pub heading_accuracy_rad: f32,
     pub last_update: Option<Instant>,
-    /// Timestamp of the most recent *gyro* (0x02) sample published into
-    /// `angular_velocity_body`. Tracked separately from `last_update`
-    /// (which the rotation-vector path also bumps) so consumers can tell
-    /// "attitude fresh but gyro dead" from "everything fresh". `None`
-    /// until the first gyro sample arrives.
-    pub gyro_last_update: Option<Instant>,
     pub report_period_ms: u16,
 }
 
@@ -125,21 +119,12 @@ impl ImuSnapshot {
     /// True if the most recent successful read is older than
     /// `3 × report_period_ms` (clamped to at least 250 ms). Returns
     /// `true` before the first frame so the UI greys out the widget.
+    ///
+    /// This is the *only* IMU liveness signal — the gyro and rotation
+    /// vector arrive on the same SH-2 channel at the same cadence, so
+    /// when this reads "fresh" the calibrated-gyro stream is fresh too.
     pub fn is_stale(&self, now: Instant) -> bool {
         let Some(last) = self.last_update else {
-            return true;
-        };
-        let budget_ms = (self.report_period_ms as u64).saturating_mul(3).max(250);
-        now.duration_since(last) > Duration::from_millis(budget_ms)
-    }
-
-    /// True if no fresh *gyro* (0x02) sample has arrived within the same
-    /// budget as [`is_stale`]. Returns `true` before the first gyro
-    /// sample, so a never-subscribed gyro reads as stale forever (which
-    /// is exactly the signal the policy runner needs to flag a dead
-    /// rate-feedback channel).
-    pub fn gyro_is_stale(&self, now: Instant) -> bool {
-        let Some(last) = self.gyro_last_update else {
             return true;
         };
         let budget_ms = (self.report_period_ms as u64).saturating_mul(3).max(250);
@@ -606,17 +591,13 @@ pub fn spawn_imu_thread(
         // stream (0x07) takes several seconds to converge after a
         // power cycle.
         //
-        // The gyro is the policy's primary rate-feedback channel
-        // (`base_ang_vel`); a silently-failed subscription zeros it and
-        // the robot runs blind on rotation rate. We therefore RETRY the
-        // SET_FEATURE up to `GYRO_ENABLE_MAX_ATTEMPTS` times instead of
-        // the previous one-shot best-effort. `Ok(false)` (no
-        // GET_FEATURE_RESP within the crate's window) is not treated as
-        // a hard failure — some BNO085 firmware revs stream 0x02
-        // correctly without acking — but a hard `Err` is retried after
-        // a short backoff.
+        // We retry SET_FEATURE a few times because the SHTP control
+        // channel occasionally drops an ack during the chip's own
+        // initialization, but we no longer track a separate
+        // freshness clock for the gyro: rotation vector and gyro arrive
+        // on the same data channel at the same cadence, so a fresh
+        // rotation vector implies the gyro is live too.
         const GYRO_ENABLE_MAX_ATTEMPTS: u32 = 5;
-        let mut gyro_subscribed = false;
         for attempt in 1..=GYRO_ENABLE_MAX_ATTEMPTS {
             match imu.enable_report(SENSOR_REPORTID_GYROSCOPE, period_ms) {
                 Ok(true) => {
@@ -624,20 +605,15 @@ pub fn spawn_imu_thread(
                         period_ms,
                         attempt, "IMU: enabled report 0x02 (Calibrated Gyroscope)"
                     );
-                    gyro_subscribed = true;
                     break;
                 }
                 Ok(false) => {
-                    // No ack, but likely streaming anyway. Accept it; the
-                    // streaming loop's gyro watchdog is the real source of
-                    // truth on whether samples actually arrive.
                     warn!(
                         period_ms,
                         attempt,
                         "IMU: no GET_FEATURE_RESP for 0x02 within 2 s; \
                          continuing on the assumption the chip is streaming anyway"
                     );
-                    gyro_subscribed = true;
                     break;
                 }
                 Err(e) => {
@@ -653,32 +629,12 @@ pub fn spawn_imu_thread(
                 }
             }
         }
-        if !gyro_subscribed {
-            error!(
-                "IMU: could not subscribe to 0x02 (Calibrated Gyroscope) after {} attempts; \
-                 angular_velocity_body will stay None and the policy will run with a ZERO \
-                 gyro (no rate feedback — expect instability). Will keep attempting to read \
-                 the gyro cache in the stream loop in case the chip starts emitting it.",
-                GYRO_ENABLE_MAX_ATTEMPTS
-            );
-        }
 
         info!(
             period_ms,
             "IMU: streaming AR/VR-stabilized rotation vector + calibrated gyro \
              into shared state (consumed by PolicyRunner and telemetry pump)"
         );
-
-        // Gyro watchdog state. A subscription can be accepted (or even
-        // ack'd) yet never actually stream 0x02 samples — the failure
-        // mode that silently zeros `base_ang_vel`. We track whether
-        // we've ever seen a real gyro sample and, until we have, emit a
-        // periodic loud warning so a dead gyro is obvious in the logs
-        // instead of hiding behind a fresh quaternion.
-        const GYRO_WATCHDOG_PERIOD: Duration = Duration::from_secs(5);
-        let stream_started = Instant::now();
-        let mut gyro_ever_seen = false;
-        let mut last_gyro_warn: Option<Instant> = None;
 
         // ---------- Streaming loop ----------
         while !shutdown.load(Ordering::SeqCst) {
@@ -729,55 +685,23 @@ pub fn spawn_imu_thread(
             }
 
             // Read the calibrated gyroscope cache and rotate into body
-            // frame. Note this reads the *cached* values held by the
-            // driver — both the rotation-vector and gyroscope reports
+            // frame. Both the rotation-vector and gyroscope reports
             // arrive on the same data channel and the driver updates
-            // its caches as new reports come in, so there's no risk of
-            // racing with the SHTP pump (we already drained it with
-            // `handle_all_messages` above).
-            //
-            // The gyro cache is seeded to all-zeros before the first
-            // report. The driver doesn't expose a "have we ever
-            // received a 0x02?" flag, but the chip starts streaming
-            // 0x02 almost immediately after `enable_report` returns,
-            // so the first real sample lands within a couple of loop
-            // iterations. We initially publish `None` and switch to
-            // `Some(...)` on the first non-zero read so the policy
-            // can distinguish "no gyro yet" from "perfectly still".
-            //
-            // A perfectly-still robot does in principle read exactly
-            // [0, 0, 0], so this distinguishes by sample magnitude
-            // rather than by a separate "received" flag. The BNO's
-            // own noise floor is ~3e-3 rad/s even on a tripod, well
-            // above the 1e-9 threshold below; in practice we publish
-            // `Some(...)` on the *very* first report.
+            // its caches as new reports come in. We publish the latest
+            // cached read on every loop iteration: the cache is seeded
+            // to all-zeros before the first report, so for the ~couple
+            // of ms between `enable_report` returning and the first 0x02
+            // landing we may briefly surface `[0, 0, 0]` — fine for the
+            // policy (which clamps to a zero-mean upright fallback when
+            // the IMU snapshot is stale anyway).
             match imu.gyro() {
                 Ok([wx, wy, wz]) => {
                     let omega_sensor = [wx, wy, wz];
-                    let mag_sq = wx * wx + wy * wy + wz * wz;
-                    if mag_sq > 1e-9 {
-                        let omega_body = rotate_vec_by_quat_xyzw(omega_sensor, mount_quat);
-                        if let Ok(mut g) = shared.lock() {
-                            g.angular_velocity_body = Some(omega_body);
-                            // `last_update` already covers both
-                            // reports — they arrive on the same data
-                            // channel at the same cadence, so a single
-                            // staleness clock is sufficient for the
-                            // attitude widget. `gyro_last_update` is the
-                            // gyro-specific clock the policy runner reads
-                            // to decide `gyro_live`.
-                            g.last_update = Some(now);
-                            g.gyro_last_update = Some(now);
-                            g.report_period_ms = period_ms;
-                        }
-                        if !gyro_ever_seen {
-                            info!(
-                                target: "bebop_linux::imu",
-                                "IMU: first calibrated-gyro (0x02) sample received; \
-                                 base_ang_vel is now live"
-                            );
-                            gyro_ever_seen = true;
-                        }
+                    let omega_body = rotate_vec_by_quat_xyzw(omega_sensor, mount_quat);
+                    if let Ok(mut g) = shared.lock() {
+                        g.angular_velocity_body = Some(omega_body);
+                        g.last_update = Some(now);
+                        g.report_period_ms = period_ms;
                     }
                 }
                 Err(e) => warn!(
@@ -785,25 +709,6 @@ pub fn spawn_imu_thread(
                     ?e,
                     "calibrated gyroscope read"
                 ),
-            }
-
-            // Watchdog: if we've been streaming the rotation vector for a
-            // while but no gyro sample has *ever* landed, the 0x02
-            // subscription is effectively dead. Warn periodically — this
-            // is the exact condition that leaves the policy with a zero
-            // `base_ang_vel` while everything else looks healthy.
-            if !gyro_ever_seen
-                && now.duration_since(stream_started) > GYRO_WATCHDOG_PERIOD
-                && last_gyro_warn.is_none_or(|t| now.duration_since(t) > GYRO_WATCHDOG_PERIOD)
-            {
-                warn!(
-                    target: "bebop_linux::imu",
-                    elapsed_s = now.duration_since(stream_started).as_secs(),
-                    "IMU: rotation vector is streaming but NO calibrated-gyro (0x02) sample \
-                     has arrived. base_ang_vel will be zeroed and any balance policy will run \
-                     without rate feedback. Check the BNO085 0x02 subscription / wiring."
-                );
-                last_gyro_warn = Some(now);
             }
 
             // 1 ms poll cadence. At the default 200 Hz report rate the chip

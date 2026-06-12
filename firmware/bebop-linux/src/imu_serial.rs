@@ -213,7 +213,6 @@ pub fn spawn_imu_serial_thread(
             let mut frames_ok: u64 = 0;
             let mut crc_errs: u64 = 0;
             let mut last_seen = Instant::now();
-            let mut gyro_ever_seen = false;
             let mut last_stats = Instant::now();
 
             while !shutdown.load(Ordering::SeqCst) {
@@ -265,29 +264,14 @@ pub fn spawn_imu_serial_thread(
                                 quat_normalize_xyzw(quat_mul_xyzw(q_world_sensor, mount_quat))
                             };
 
-                            let [wx, wy, wz] = frame.gyro_xyz;
-                            let gyro_mag_sq = wx * wx + wy * wy + wz * wz;
+                            let omega_body =
+                                rotate_vec_by_quat_xyzw(frame.gyro_xyz, mount_quat);
 
                             if let Ok(mut g) = shared.lock() {
                                 g.quaternion = Some(q_world_body);
+                                g.angular_velocity_body = Some(omega_body);
                                 g.last_update = Some(now);
                                 g.report_period_ms = period_ms;
-                                // Match the SPI path: only surface a gyro once
-                                // a real (non-zero) sample lands, so the policy
-                                // can tell "no gyro yet" from "perfectly still".
-                                if gyro_mag_sq > 1e-9 {
-                                    let omega_body =
-                                        rotate_vec_by_quat_xyzw(frame.gyro_xyz, mount_quat);
-                                    g.angular_velocity_body = Some(omega_body);
-                                    g.gyro_last_update = Some(now);
-                                }
-                            }
-                            if gyro_mag_sq > 1e-9 && !gyro_ever_seen {
-                                info!(
-                                    target: "bebop_linux::imu_serial",
-                                    "IMU(serial): first gyro sample received; base_ang_vel is live"
-                                );
-                                gyro_ever_seen = true;
                             }
                             i += FRAME_SIZE;
                         }

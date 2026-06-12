@@ -8,6 +8,7 @@ import { getOrCreateRuntimeTransport } from "../runtime";
 import type {
   ImuView,
   MotorView,
+  PolicyIoView,
   PowerView,
   RuntimeMode,
   RuntimeSnapshot,
@@ -199,6 +200,30 @@ export function MotorBenchScreen({
         await t.setMode("RUN_POLICY");
         await t.setAllMotorsEnabled(true);
       }),
+    [refreshAfter],
+  );
+
+  // Dry-run toggle: layered on top of RUN_POLICY. Persistent across mode
+  // changes — the firmware does not auto-clear it, so the operator is in
+  // charge of remembering to disable it before a real driven run. The
+  // PolicyIoCard surfaces an unmissable "Dry run" pill while it's on.
+  const setDryRun = useCallback(
+    (enabled: boolean) =>
+      refreshAfter(`dry-run:${enabled}`, () =>
+        transportRef.current!.setPolicyDryRun(enabled),
+      ),
+    [refreshAfter],
+  );
+
+  // MCAP capture toggle. `label` gets folded into the timestamped
+  // filename on the robot (sanitized to [A-Za-z0-9_-]). Toggling off
+  // closes the current file; toggling on opens a fresh one (so changing
+  // the label requires a stop -> start cycle).
+  const setCapture = useCallback(
+    (enabled: boolean, label: string) =>
+      refreshAfter(`capture:${enabled}`, () =>
+        transportRef.current!.setPolicyCapture(enabled, label),
+      ),
     [refreshAfter],
   );
 
@@ -543,6 +568,21 @@ export function MotorBenchScreen({
         />
       ) : null}
 
+      {/* Policy capture + dry-run controls. Render whenever a policy is
+          loaded so the operator can start an obs-only DialIn capture
+          before ever switching to RUN_POLICY. The component is fully
+          decoupled from the policy lifecycle (it just edits firmware
+          flags); the PolicyIoCard above renders the live state. */}
+      {policyIo?.present ? (
+        <PolicyCaptureControls
+          policyIo={policyIo}
+          busyDryRun={busy === "dry-run:true" || busy === "dry-run:false"}
+          busyCapture={busy === "capture:true" || busy === "capture:false"}
+          onSetDryRun={setDryRun}
+          onSetCapture={setCapture}
+        />
+      ) : null}
+
       {/* Policy I/O visualization. Render whenever a policy is loaded so
           the operator can screenshot a frozen history after stopping
           RunPolicy — the card itself handles the inactive state. */}
@@ -868,6 +908,203 @@ function PolicyBanner({
       >
         Stop
       </Button>
+    </div>
+  );
+}
+
+/// Two operator knobs that govern bench-side policy I/O capture and
+/// dry-run inference. Independent of mode (the firmware honors both in
+/// IDLE / DIAL_IN / RUN_POLICY), but mounted here next to the policy
+/// banner because the workflows are conceptually paired:
+///
+///  - `Capture` toggles an MCAP writer thread on the robot. DialIn
+///    captures observation-only samples (no actions); RunPolicy
+///    captures the full obs + raw_action + decoded triple. Use it for
+///    noise review (Foxglove plots) and sim playback.
+///  - `Dry run` keeps RUN_POLICY inferring + capturing but skips every
+///    motor command. Pair with capture to record what the policy would
+///    have done against a known-quiet bench pose without the robot
+///    actually moving.
+function PolicyCaptureControls({
+  policyIo,
+  busyDryRun,
+  busyCapture,
+  onSetDryRun,
+  onSetCapture,
+}: {
+  policyIo: PolicyIoView;
+  busyDryRun: boolean;
+  busyCapture: boolean;
+  onSetDryRun: (enabled: boolean) => void;
+  onSetCapture: (enabled: boolean, label: string) => void;
+}) {
+  // Local-only label input. We don't push the label up to the firmware
+  // until the operator hits Start; mid-capture label edits don't rename
+  // the open file (the firmware doesn't reopen on label change).
+  const [label, setLabel] = useState("");
+
+  const capturing = policyIo.captureActive;
+  const dryRun = policyIo.dryRun;
+
+  return (
+    <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev px-3.5 py-3 space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-wider text-text-dim">
+            Policy bench tools
+          </div>
+          <div className="text-[13px] text-text font-semibold mt-0.5">
+            Dry run &amp; observation capture
+          </div>
+          <p className="text-[12px] text-text-dim mt-1 leading-relaxed max-w-prose">
+            <span className="text-text font-medium">Dry run</span> keeps
+            the policy inferring + publishing telemetry but does NOT
+            apply its actions — instead the supervisor sends a
+            hold-gains keepalive so the robot freezes in its current
+            posture (and the feedback watchdog stays alive).{" "}
+            <span className="text-text font-medium">Capture</span> writes
+            one MCAP sample per 100&nbsp;Hz tick to a dedicated writer
+            thread on the robot (DialIn = obs only; RunPolicy = obs + raw
+            + decoded action) under{" "}
+            <code className="text-text">~/bebop-captures/</code>. Open the
+            file in Foxglove for replay / plotting.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+              dryRun
+                ? "border-yellow-500/40 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300"
+                : "border-border bg-bg-elev-2 text-text-dim"
+            }`}
+          >
+            <span
+              className={`inline-block w-1.5 h-1.5 rounded-full ${
+                dryRun ? "bg-yellow-500" : "bg-text-dim/60"
+              }`}
+              aria-hidden
+            />
+            {dryRun ? "Dry run ON" : "Dry run off"}
+          </span>
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+              capturing
+                ? "border-success/40 bg-success/10 text-success"
+                : "border-border bg-bg-elev-2 text-text-dim"
+            }`}
+          >
+            <span
+              className={`inline-block w-1.5 h-1.5 rounded-full ${
+                capturing ? "bg-success animate-pulse" : "bg-text-dim/60"
+              }`}
+              aria-hidden
+            />
+            {capturing
+              ? `Recording ${policyIo.captureRows.toLocaleString()} samples`
+              : "Not recording"}
+          </span>
+          {policyIo.captureDropped > 0 ? (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full border border-yellow-500/40 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300 px-2 py-0.5 text-[10px] font-medium"
+              title="Tick thread tried to enqueue more samples than the writer could drain — capture has gaps."
+            >
+              Dropped {policyIo.captureDropped.toLocaleString()}
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {/* Dry-run toggle. Renders as a labeled switch so the on/off
+            state is obvious even when the segmented mode picker isn't
+            in focus. */}
+        <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev-2/40 px-3 py-2.5 flex items-start gap-3">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={dryRun}
+            aria-label="Toggle policy dry-run"
+            onClick={() => onSetDryRun(!dryRun)}
+            disabled={busyDryRun}
+            className={`relative shrink-0 mt-0.5 w-9 h-5 rounded-full border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+              dryRun
+                ? "bg-yellow-500/80 border-yellow-500"
+                : "bg-bg-elev border-border"
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-white shadow transition-transform ${
+                dryRun ? "translate-x-4" : "translate-x-0"
+              }`}
+              aria-hidden
+            />
+          </button>
+          <div className="min-w-0">
+            <div className="text-[12px] text-text font-medium">
+              Dry run (hold posture)
+            </div>
+            <div className="text-[11px] text-text-dim mt-0.5">
+              {dryRun
+                ? "Policy actions are NOT applied — armed motors hold their current pose at hold_gains."
+                : "Off — RUN_POLICY commands armed joints normally."}
+            </div>
+          </div>
+        </div>
+
+        {/* Capture start/stop with optional label. When capturing, the
+            label input + start button disable; Stop replaces them. */}
+        <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev-2/40 px-3 py-2.5 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[12px] text-text font-medium">
+              MCAP capture
+            </div>
+            {capturing && policyIo.capturePath ? (
+              <span
+                className="text-[10px] text-text-dim font-mono truncate max-w-[55%]"
+                title={policyIo.capturePath}
+              >
+                {policyIo.capturePath}
+              </span>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              disabled={capturing || busyCapture}
+              placeholder="optional label (e.g. noise_floor)"
+              maxLength={32}
+              className="flex-1 min-w-[140px] rounded-[var(--radius-input)] border border-border bg-bg px-2 py-1.5 text-[12px] text-text placeholder:text-text-dim focus:outline-none focus:border-accent disabled:opacity-50 disabled:cursor-not-allowed"
+            />
+            {capturing ? (
+              <Button
+                variant="secondary"
+                onClick={() => onSetCapture(false, label)}
+                loading={busyCapture}
+                disabled={busyCapture}
+                className="py-1.5! text-[12px]! shrink-0"
+              >
+                Stop
+              </Button>
+            ) : (
+              <Button
+                onClick={() => onSetCapture(true, label.trim())}
+                loading={busyCapture}
+                disabled={busyCapture}
+                className="bg-accent! text-white! hover:brightness-110! py-1.5! text-[12px]! shrink-0"
+              >
+                Start
+              </Button>
+            )}
+          </div>
+          <div className="text-[11px] text-text-dim leading-snug">
+            {capturing
+              ? "Toggle Stop to flush and close the file. Start a new capture to begin a fresh file."
+              : "Start writes a new timestamped .mcap; the file lives on the Jetson under the configured capture dir. Open it in Foxglove for replay."}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

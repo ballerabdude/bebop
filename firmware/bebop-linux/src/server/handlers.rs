@@ -5,6 +5,7 @@
 //! write back to the WS sink.
 
 use crate::imu::ImuShared;
+use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
 use crate::mode::Mode;
 use crate::safety::limits::BreachReason;
@@ -32,6 +33,7 @@ pub fn handle_client_message(
     imu: &ImuShared,
     imu_present: bool,
     policy_io: &PolicyIoShared,
+    policy_control: &PolicyControlShared,
     bytes: &[u8],
 ) -> proto::ServerRuntimeMessage {
     let req = match proto::ClientRuntimeMessage::decode(bytes) {
@@ -144,6 +146,45 @@ pub fn handle_client_message(
             ),
             Err(e) => error_response(request_id, fmt_err(&e)),
         },
+        P::SetPolicyDryRun(req) => {
+            // Flip the flag here; PolicyRunner reads it on the next tick
+            // (≤10 ms). We deliberately don't try to validate "is the
+            // policy currently running" — toggling in IDLE is fine and
+            // takes effect when the operator next enters RUN_POLICY.
+            match policy_control.lock() {
+                Ok(mut g) => {
+                    g.dry_run = req.enabled;
+                    ack(
+                        request_id,
+                        format!(
+                            "policy dry-run {}",
+                            if req.enabled { "ENABLED" } else { "disabled" }
+                        ),
+                    )
+                }
+                Err(_) => error_response(request_id, "policy_control mutex poisoned".into()),
+            }
+        }
+        P::SetPolicyCapture(req) => {
+            // File open/close is owned by PolicyRunner (next tick). We
+            // only stash the operator's intent here so the runner thread
+            // is the sole owner of the file handle.
+            match policy_control.lock() {
+                Ok(mut g) => {
+                    g.capture_requested = req.enabled;
+                    g.capture_label = req.label.clone();
+                    ack(
+                        request_id,
+                        format!(
+                            "policy capture {} (label = {:?})",
+                            if req.enabled { "REQUESTED" } else { "disabled" },
+                            req.label
+                        ),
+                    )
+                }
+                Err(_) => error_response(request_id, "policy_control mutex poisoned".into()),
+            }
+        }
     }
 }
 

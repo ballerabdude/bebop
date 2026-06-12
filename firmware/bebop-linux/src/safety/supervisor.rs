@@ -803,9 +803,29 @@ impl Supervisor {
 
     /// Periodic hold-gain TX for every armed motor in DialIn mode. Keeps
     /// the motor's own watchdog alive and re-asserts our slew-limited
-    /// setpoint each cycle.
+    /// setpoint each cycle. Thin mode-gated wrapper around
+    /// [`Self::tick_hold_armed`].
     pub fn tick_dial_in_hold(&self) {
         if self.estop_active() || self.mode() != Mode::DialIn {
+            return;
+        }
+        self.tick_hold_armed();
+    }
+
+    /// Send the hold-gains keepalive frame to every currently-armed
+    /// motor, regardless of mode. Used as the per-tick TX for both the
+    /// DialIn hold cycle and the RunPolicy *dry-run* path — dry-run
+    /// inferences are captured + telemetry-published but never reach
+    /// the motors, so we still need *something* on the wire each cycle
+    /// or the Robstride feedback frames stop and the supervisor's
+    /// 100 ms feedback watchdog trips. Each call uses the motor's own
+    /// `last_target_pos` (initialized to the current physical pose at
+    /// arm time and stable across dry-run ticks because `safe_send_ctrl`
+    /// only advances it when called with a different target), so the
+    /// robot holds whatever posture it was in when we entered the
+    /// keepalive state.
+    pub fn tick_hold_armed(&self) {
+        if self.estop_active() {
             return;
         }
         for idx in 0..self.motors.len() {

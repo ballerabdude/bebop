@@ -22,7 +22,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file bebop_runtime.proto.
  */
 export const file_bebop_runtime: GenFile = /*@__PURE__*/
-  fileDesc("ChNiZWJvcF9ydW50aW1lLnByb3RvEhBiZWJvcC5ydW50aW1lLnYxIqQFChRDbGllbnRSdW50aW1lTWVzc2FnZRISCgpyZXF1ZXN0X2lkGGQgASgNEkMKE3N1YnNjcmliZV90ZWxlbWV0cnkYASABKAsyJC5iZWJvcC5ydW50aW1lLnYxLlN1YnNjcmliZVRlbGVtZXRyeUgAEkcKFXVuc3Vic2NyaWJlX3RlbGVtZXRyeRgCIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVUZWxlbWV0cnlIABI1CgxnZXRfc25hcHNob3QYAyABKAsyHS5iZWJvcC5ydW50aW1lLnYxLkdldFNuYXBzaG90SAASPgoRc2V0X21vdG9yX2VuYWJsZWQYBCABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldE1vdG9yRW5hYmxlZEgAEkcKFnNldF9hbGxfbW90b3JzX2VuYWJsZWQYBSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbE1vdG9yc0VuYWJsZWRIABItCghzZXRfbW9kZRgGIAEoCzIZLmJlYm9wLnJ1bnRpbWUudjEuU2V0TW9kZUgAEjkKDmVtZXJnZW5jeV9zdG9wGAcgASgLMh8uYmVib3AucnVudGltZS52MS5FbWVyZ2VuY3lTdG9wSAASMwoLcmVzZXRfZXN0b3AYCCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlJlc2V0RVN0b3BIABI8ChBzZXRfbW90b3JfdGFyZ2V0GAkgASgLMiAuYmVib3AucnVudGltZS52MS5TZXRNb3RvclRhcmdldEgAEkIKE3NldF9tZWNoYW5pY2FsX3plcm8YCiABKAsyIy5iZWJvcC5ydW50aW1lLnYxLlNldE1lY2hhbmljYWxaZXJvSABCCQoHcGF5bG9hZCKVAwoUU2VydmVyUnVudGltZU1lc3NhZ2USEgoKcmVxdWVzdF9pZBhkIAEoDRIkCgNhY2sYASABKAsyFS5iZWJvcC5ydW50aW1lLnYxLkFja0gAEigKBWVycm9yGAIgASgLMhcuYmVib3AucnVudGltZS52MS5FcnJvckgAEi4KCHNuYXBzaG90GAMgASgLMhouYmVib3AucnVudGltZS52MS5TbmFwc2hvdEgAEjUKCXRlbGVtZXRyeRgEIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuVGVsZW1ldHJ5RnJhbWVIABI1Cgxtb2RlX2NoYW5nZWQYBSABKAsyHS5iZWJvcC5ydW50aW1lLnYxLk1vZGVDaGFuZ2VkSAASNwoNZXN0b3BfbGF0Y2hlZBgGIAEoCzIeLmJlYm9wLnJ1bnRpbWUudjEuRVN0b3BMYXRjaGVkSAASNwoKYnVzX3N0YXR1cxgHIAEoCzIhLmJlYm9wLnJ1bnRpbWUudjEuQnVzU3RhdHVzVXBkYXRlSABCCQoHcGF5bG9hZCLmAgoKTW90b3JTdGF0ZRISCgpqb2ludF9uYW1lGAEgASgJEhUKDWNhbl9pbnRlcmZhY2UYAiABKAkSEAoIbW90b3JfaWQYAyABKA0SDQoFbW9kZWwYBCABKAkSDQoFYXJtZWQYBSABKAgSFgoOZmVlZGJhY2tfc3RhbGUYBiABKAgSEgoKZmF1bHRfYml0cxgHIAEoDRIUCgxwb3NpdGlvbl9yYWQYCiABKAISFgoOdmVsb2NpdHlfcmFkX3MYCyABKAISEQoJdG9ycXVlX25tGAwgASgCEhUKDXRlbXBlcmF0dXJlX2MYDSABKAISGwoTdGFyZ2V0X3Bvc2l0aW9uX3JhZBgOIAEoAhITCgtwb3NfbWluX3JhZBgUIAEoAhITCgtwb3NfbWF4X3JhZBgVIAEoAhIPCgd2ZWxfbWF4GBYgASgCEg8KB3RhdV9tYXgYFyABKAISEAoIdGVtcF9tYXgYGCABKAIiQQoIQnVzRW50cnkSFQoNY2FuX2ludGVyZmFjZRgBIAEoCRINCgVzdGF0ZRgCIAEoCRIPCgdoZWFsdGh5GAMgASgIIukECgpQb3dlclN0YXRzEg8KB3ByZXNlbnQYASABKAgSFQoNY2FuX2ludGVyZmFjZRgCIAEoCRIQCghwb3dlcl9pZBgDIAEoDRIYChBmaXJtd2FyZV92ZXJzaW9uGAQgASgJEhcKD3N0YXR1c19yZWNlaXZlZBgKIAEoCBIUCgxzdGF0dXNfc3RhbGUYCyABKAgSGgoSbGFzdF9zdGF0dXNfYWdlX21zGAwgASgNEhkKEWJhdHRlcnlfdm9sdGFnZV92GBQgASgCEhcKD21vdG9yX3ZvbHRhZ2VfdhgVIAEoAhIbChNib2FyZF90ZW1wZXJhdHVyZV9jGBYgASgCEhIKCmZhdWx0X2JpdHMYHiABKA0SGQoRZmF1bHRfZGVzY3JpcHRpb24YHyABKAkSEwoLcmFpbF8xMnZfb24YICABKAgSFQoNc29mdF9zdGFydF9vbhghIAEoCBIVCg1tb3Rvcl9yYWlsX29uGCIgASgIEhMKC3JhaWxfMjR2X29uGCMgASgIEhQKDGN1cnJlbnRfYWxfYRgoIAEoAhIUCgxjdXJyZW50X2FyX2EYKSABKAISFAoMY3VycmVudF9sbF9hGCogASgCEhQKDGN1cnJlbnRfbHJfYRgrIAEoAhIdChV0b3RhbF9tb3Rvcl9jdXJyZW50X2EYLCABKAISFQoNYmF0dGVyeV9jZWxscxgyIAEoDRIbChNwYWNrX2Z1bGxfdm9sdGFnZV92GDMgASgCEhwKFHBhY2tfZW1wdHlfdm9sdGFnZV92GDQgASgCEhsKE3N0YXRlX29mX2NoYXJnZV9wY3QYNSABKAIi3AIKDlRlbGVtZXRyeUZyYW1lEhQKDGhvc3RfdW5peF9tcxgBIAEoBBIkCgRtb2RlGAIgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlEhUKDWVzdG9wX2xhdGNoZWQYAyABKAgSFAoMZXN0b3BfcmVhc29uGAQgASgJEiwKBm1vdG9ycxgKIAMoCzIcLmJlYm9wLnJ1bnRpbWUudjEuTW90b3JTdGF0ZRIpCgVidXNlcxgLIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkSKwoFcG93ZXIYDCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlBvd2VyU3RhdHMSJwoDaW11GA0gASgLMhouYmVib3AucnVudGltZS52MS5JbXVTdGF0cxIyCglwb2xpY3lfaW8YDiABKAsyHy5iZWJvcC5ydW50aW1lLnYxLlBvbGljeUlvU3RhdHMi1gIKCFNuYXBzaG90EhQKDGhvc3RfdW5peF9tcxgBIAEoBBIkCgRtb2RlGAIgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlEhUKDWVzdG9wX2xhdGNoZWQYAyABKAgSFAoMZXN0b3BfcmVhc29uGAQgASgJEiwKBm1vdG9ycxgKIAMoCzIcLmJlYm9wLnJ1bnRpbWUudjEuTW90b3JTdGF0ZRIpCgVidXNlcxgLIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkSKwoFcG93ZXIYDCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlBvd2VyU3RhdHMSJwoDaW11GA0gASgLMhouYmVib3AucnVudGltZS52MS5JbXVTdGF0cxIyCglwb2xpY3lfaW8YDiABKAsyHy5iZWJvcC5ydW50aW1lLnYxLlBvbGljeUlvU3RhdHMiPAoPQnVzU3RhdHVzVXBkYXRlEikKBWJ1c2VzGAEgAygLMhouYmVib3AucnVudGltZS52MS5CdXNFbnRyeSIlChJTdWJzY3JpYmVUZWxlbWV0cnkSDwoHcmF0ZV9oehgBIAEoDSIWChRVbnN1YnNjcmliZVRlbGVtZXRyeSINCgtHZXRTbmFwc2hvdCI2Cg9TZXRNb3RvckVuYWJsZWQSEgoKam9pbnRfbmFtZRgBIAEoCRIPCgdlbmFibGVkGAIgASgIIiYKE1NldEFsbE1vdG9yc0VuYWJsZWQSDwoHZW5hYmxlZBgBIAEoCCIvCgdTZXRNb2RlEiQKBG1vZGUYASABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUiHwoNRW1lcmdlbmN5U3RvcBIOCgZyZWFzb24YASABKAkiDAoKUmVzZXRFU3RvcCI6Cg5TZXRNb3RvclRhcmdldBISCgpqb2ludF9uYW1lGAEgASgJEhQKDHBvc2l0aW9uX3JhZBgCIAEoAiInChFTZXRNZWNoYW5pY2FsWmVybxISCgpqb2ludF9uYW1lGAEgASgJIiIKA0FjaxIKCgJvaxgBIAEoCBIPCgdtZXNzYWdlGAIgASgJIhgKBUVycm9yEg8KB21lc3NhZ2UYASABKAkiMwoLTW9kZUNoYW5nZWQSJAoEbW9kZRgBIAEoDjIWLmJlYm9wLnJ1bnRpbWUudjEuTW9kZSIeCgxFU3RvcExhdGNoZWQSDgoGcmVhc29uGAEgASgJIs4BCghJbXVTdGF0cxIPCgdwcmVzZW50GAEgASgIEhAKCHJlY2VpdmVkGAogASgIEg0KBXN0YWxlGAsgASgIEhoKEmxhc3RfdXBkYXRlX2FnZV9tcxgMIAEoDRIUCgxxdWF0ZXJuaW9uX3gYFCABKAISFAoMcXVhdGVybmlvbl95GBUgASgCEhQKDHF1YXRlcm5pb25fehgWIAEoAhIUCgxxdWF0ZXJuaW9uX3cYFyABKAISHAoUaGVhZGluZ19hY2N1cmFjeV9yYWQYGCABKAIiyQEKDVBvbGljeUlvU3RhdHMSDwoHcHJlc2VudBgBIAEoCBIOCgZhY3RpdmUYAiABKAgSEAoIaW11X2xpdmUYAyABKAgSEQoJZ3lyb19saXZlGAQgASgIEhMKC29ic2VydmF0aW9uGAogAygCEhIKCnJhd19hY3Rpb24YCyADKAISHAoUcG9zaXRpb25fdGFyZ2V0c19yYWQYFCADKAISCgoCa3AYFSADKAISCgoCa2QYFiADKAISEwoLam9pbnRfbmFtZXMYHiADKAkqUgoETW9kZRIUChBNT0RFX1VOU1BFQ0lGSUVEEAASDQoJTU9ERV9JRExFEAESEAoMTU9ERV9ESUFMX0lOEAISEwoPTU9ERV9SVU5fUE9MSUNZEANiBnByb3RvMw");
+  fileDesc("ChNiZWJvcF9ydW50aW1lLnByb3RvEhBiZWJvcC5ydW50aW1lLnYxIqcGChRDbGllbnRSdW50aW1lTWVzc2FnZRISCgpyZXF1ZXN0X2lkGGQgASgNEkMKE3N1YnNjcmliZV90ZWxlbWV0cnkYASABKAsyJC5iZWJvcC5ydW50aW1lLnYxLlN1YnNjcmliZVRlbGVtZXRyeUgAEkcKFXVuc3Vic2NyaWJlX3RlbGVtZXRyeRgCIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVUZWxlbWV0cnlIABI1CgxnZXRfc25hcHNob3QYAyABKAsyHS5iZWJvcC5ydW50aW1lLnYxLkdldFNuYXBzaG90SAASPgoRc2V0X21vdG9yX2VuYWJsZWQYBCABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldE1vdG9yRW5hYmxlZEgAEkcKFnNldF9hbGxfbW90b3JzX2VuYWJsZWQYBSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbE1vdG9yc0VuYWJsZWRIABItCghzZXRfbW9kZRgGIAEoCzIZLmJlYm9wLnJ1bnRpbWUudjEuU2V0TW9kZUgAEjkKDmVtZXJnZW5jeV9zdG9wGAcgASgLMh8uYmVib3AucnVudGltZS52MS5FbWVyZ2VuY3lTdG9wSAASMwoLcmVzZXRfZXN0b3AYCCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlJlc2V0RVN0b3BIABI8ChBzZXRfbW90b3JfdGFyZ2V0GAkgASgLMiAuYmVib3AucnVudGltZS52MS5TZXRNb3RvclRhcmdldEgAEkIKE3NldF9tZWNoYW5pY2FsX3plcm8YCiABKAsyIy5iZWJvcC5ydW50aW1lLnYxLlNldE1lY2hhbmljYWxaZXJvSAASPwoSc2V0X3BvbGljeV9kcnlfcnVuGAsgASgLMiEuYmVib3AucnVudGltZS52MS5TZXRQb2xpY3lEcnlSdW5IABJAChJzZXRfcG9saWN5X2NhcHR1cmUYDCABKAsyIi5iZWJvcC5ydW50aW1lLnYxLlNldFBvbGljeUNhcHR1cmVIAEIJCgdwYXlsb2FkIpUDChRTZXJ2ZXJSdW50aW1lTWVzc2FnZRISCgpyZXF1ZXN0X2lkGGQgASgNEiQKA2FjaxgBIAEoCzIVLmJlYm9wLnJ1bnRpbWUudjEuQWNrSAASKAoFZXJyb3IYAiABKAsyFy5iZWJvcC5ydW50aW1lLnYxLkVycm9ySAASLgoIc25hcHNob3QYAyABKAsyGi5iZWJvcC5ydW50aW1lLnYxLlNuYXBzaG90SAASNQoJdGVsZW1ldHJ5GAQgASgLMiAuYmVib3AucnVudGltZS52MS5UZWxlbWV0cnlGcmFtZUgAEjUKDG1vZGVfY2hhbmdlZBgFIAEoCzIdLmJlYm9wLnJ1bnRpbWUudjEuTW9kZUNoYW5nZWRIABI3Cg1lc3RvcF9sYXRjaGVkGAYgASgLMh4uYmVib3AucnVudGltZS52MS5FU3RvcExhdGNoZWRIABI3CgpidXNfc3RhdHVzGAcgASgLMiEuYmVib3AucnVudGltZS52MS5CdXNTdGF0dXNVcGRhdGVIAEIJCgdwYXlsb2FkIuYCCgpNb3RvclN0YXRlEhIKCmpvaW50X25hbWUYASABKAkSFQoNY2FuX2ludGVyZmFjZRgCIAEoCRIQCghtb3Rvcl9pZBgDIAEoDRINCgVtb2RlbBgEIAEoCRINCgVhcm1lZBgFIAEoCBIWCg5mZWVkYmFja19zdGFsZRgGIAEoCBISCgpmYXVsdF9iaXRzGAcgASgNEhQKDHBvc2l0aW9uX3JhZBgKIAEoAhIWCg52ZWxvY2l0eV9yYWRfcxgLIAEoAhIRCgl0b3JxdWVfbm0YDCABKAISFQoNdGVtcGVyYXR1cmVfYxgNIAEoAhIbChN0YXJnZXRfcG9zaXRpb25fcmFkGA4gASgCEhMKC3Bvc19taW5fcmFkGBQgASgCEhMKC3Bvc19tYXhfcmFkGBUgASgCEg8KB3ZlbF9tYXgYFiABKAISDwoHdGF1X21heBgXIAEoAhIQCgh0ZW1wX21heBgYIAEoAiJBCghCdXNFbnRyeRIVCg1jYW5faW50ZXJmYWNlGAEgASgJEg0KBXN0YXRlGAIgASgJEg8KB2hlYWx0aHkYAyABKAgi6QQKClBvd2VyU3RhdHMSDwoHcHJlc2VudBgBIAEoCBIVCg1jYW5faW50ZXJmYWNlGAIgASgJEhAKCHBvd2VyX2lkGAMgASgNEhgKEGZpcm13YXJlX3ZlcnNpb24YBCABKAkSFwoPc3RhdHVzX3JlY2VpdmVkGAogASgIEhQKDHN0YXR1c19zdGFsZRgLIAEoCBIaChJsYXN0X3N0YXR1c19hZ2VfbXMYDCABKA0SGQoRYmF0dGVyeV92b2x0YWdlX3YYFCABKAISFwoPbW90b3Jfdm9sdGFnZV92GBUgASgCEhsKE2JvYXJkX3RlbXBlcmF0dXJlX2MYFiABKAISEgoKZmF1bHRfYml0cxgeIAEoDRIZChFmYXVsdF9kZXNjcmlwdGlvbhgfIAEoCRITCgtyYWlsXzEydl9vbhggIAEoCBIVCg1zb2Z0X3N0YXJ0X29uGCEgASgIEhUKDW1vdG9yX3JhaWxfb24YIiABKAgSEwoLcmFpbF8yNHZfb24YIyABKAgSFAoMY3VycmVudF9hbF9hGCggASgCEhQKDGN1cnJlbnRfYXJfYRgpIAEoAhIUCgxjdXJyZW50X2xsX2EYKiABKAISFAoMY3VycmVudF9scl9hGCsgASgCEh0KFXRvdGFsX21vdG9yX2N1cnJlbnRfYRgsIAEoAhIVCg1iYXR0ZXJ5X2NlbGxzGDIgASgNEhsKE3BhY2tfZnVsbF92b2x0YWdlX3YYMyABKAISHAoUcGFja19lbXB0eV92b2x0YWdlX3YYNCABKAISGwoTc3RhdGVfb2ZfY2hhcmdlX3BjdBg1IAEoAiLcAgoOVGVsZW1ldHJ5RnJhbWUSFAoMaG9zdF91bml4X21zGAEgASgEEiQKBG1vZGUYAiABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUSFQoNZXN0b3BfbGF0Y2hlZBgDIAEoCBIUCgxlc3RvcF9yZWFzb24YBCABKAkSLAoGbW90b3JzGAogAygLMhwuYmVib3AucnVudGltZS52MS5Nb3RvclN0YXRlEikKBWJ1c2VzGAsgAygLMhouYmVib3AucnVudGltZS52MS5CdXNFbnRyeRIrCgVwb3dlchgMIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuUG93ZXJTdGF0cxInCgNpbXUYDSABKAsyGi5iZWJvcC5ydW50aW1lLnYxLkltdVN0YXRzEjIKCXBvbGljeV9pbxgOIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUG9saWN5SW9TdGF0cyLWAgoIU25hcHNob3QSFAoMaG9zdF91bml4X21zGAEgASgEEiQKBG1vZGUYAiABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUSFQoNZXN0b3BfbGF0Y2hlZBgDIAEoCBIUCgxlc3RvcF9yZWFzb24YBCABKAkSLAoGbW90b3JzGAogAygLMhwuYmVib3AucnVudGltZS52MS5Nb3RvclN0YXRlEikKBWJ1c2VzGAsgAygLMhouYmVib3AucnVudGltZS52MS5CdXNFbnRyeRIrCgVwb3dlchgMIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuUG93ZXJTdGF0cxInCgNpbXUYDSABKAsyGi5iZWJvcC5ydW50aW1lLnYxLkltdVN0YXRzEjIKCXBvbGljeV9pbxgOIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUG9saWN5SW9TdGF0cyI8Cg9CdXNTdGF0dXNVcGRhdGUSKQoFYnVzZXMYASADKAsyGi5iZWJvcC5ydW50aW1lLnYxLkJ1c0VudHJ5IiUKElN1YnNjcmliZVRlbGVtZXRyeRIPCgdyYXRlX2h6GAEgASgNIhYKFFVuc3Vic2NyaWJlVGVsZW1ldHJ5Ig0KC0dldFNuYXBzaG90IjYKD1NldE1vdG9yRW5hYmxlZBISCgpqb2ludF9uYW1lGAEgASgJEg8KB2VuYWJsZWQYAiABKAgiJgoTU2V0QWxsTW90b3JzRW5hYmxlZBIPCgdlbmFibGVkGAEgASgIIi8KB1NldE1vZGUSJAoEbW9kZRgBIAEoDjIWLmJlYm9wLnJ1bnRpbWUudjEuTW9kZSIfCg1FbWVyZ2VuY3lTdG9wEg4KBnJlYXNvbhgBIAEoCSIMCgpSZXNldEVTdG9wIjoKDlNldE1vdG9yVGFyZ2V0EhIKCmpvaW50X25hbWUYASABKAkSFAoMcG9zaXRpb25fcmFkGAIgASgCIicKEVNldE1lY2hhbmljYWxaZXJvEhIKCmpvaW50X25hbWUYASABKAkiIgoPU2V0UG9saWN5RHJ5UnVuEg8KB2VuYWJsZWQYASABKAgiMgoQU2V0UG9saWN5Q2FwdHVyZRIPCgdlbmFibGVkGAEgASgIEg0KBWxhYmVsGAIgASgJIiIKA0FjaxIKCgJvaxgBIAEoCBIPCgdtZXNzYWdlGAIgASgJIhgKBUVycm9yEg8KB21lc3NhZ2UYASABKAkiMwoLTW9kZUNoYW5nZWQSJAoEbW9kZRgBIAEoDjIWLmJlYm9wLnJ1bnRpbWUudjEuTW9kZSIeCgxFU3RvcExhdGNoZWQSDgoGcmVhc29uGAEgASgJIs4BCghJbXVTdGF0cxIPCgdwcmVzZW50GAEgASgIEhAKCHJlY2VpdmVkGAogASgIEg0KBXN0YWxlGAsgASgIEhoKEmxhc3RfdXBkYXRlX2FnZV9tcxgMIAEoDRIUCgxxdWF0ZXJuaW9uX3gYFCABKAISFAoMcXVhdGVybmlvbl95GBUgASgCEhQKDHF1YXRlcm5pb25fehgWIAEoAhIUCgxxdWF0ZXJuaW9uX3cYFyABKAISHAoUaGVhZGluZ19hY2N1cmFjeV9yYWQYGCABKAIitQIKDVBvbGljeUlvU3RhdHMSDwoHcHJlc2VudBgBIAEoCBIOCgZhY3RpdmUYAiABKAgSEAoIaW11X2xpdmUYAyABKAgSDwoHZHJ5X3J1bhgFIAEoCBIWCg5jYXB0dXJlX2FjdGl2ZRgGIAEoCBIUCgxjYXB0dXJlX3BhdGgYByABKAkSFAoMY2FwdHVyZV9yb3dzGAggASgEEhcKD2NhcHR1cmVfZHJvcHBlZBgJIAEoBBITCgtvYnNlcnZhdGlvbhgKIAMoAhISCgpyYXdfYWN0aW9uGAsgAygCEhwKFHBvc2l0aW9uX3RhcmdldHNfcmFkGBQgAygCEgoKAmtwGBUgAygCEgoKAmtkGBYgAygCEhMKC2pvaW50X25hbWVzGB4gAygJSgQIBBAFUglneXJvX2xpdmUqUgoETW9kZRIUChBNT0RFX1VOU1BFQ0lGSUVEEAASDQoJTU9ERV9JRExFEAESEAoMTU9ERV9ESUFMX0lOEAISEwoPTU9ERV9SVU5fUE9MSUNZEANiBnByb3RvMw");
 
 /**
  * Client (operator app) -> server (bebop-linux) on the robot.
@@ -113,6 +113,37 @@ export type ClientRuntimeMessage = Message<"bebop.runtime.v1.ClientRuntimeMessag
      */
     value: SetMechanicalZero;
     case: "setMechanicalZero";
+  } | {
+    /**
+     * Toggle the policy "dry run" flag. When enabled, RUN_POLICY still
+     * builds observations, runs ONNX inference, publishes telemetry, and
+     * captures samples — but instead of applying the policy's PD command
+     * the supervisor sends a hold-gains keepalive each tick (same shape
+     * as DialIn's hold cycle). The robot freezes in its current posture
+     * and the Robstride feedback watchdog stays alive. Used for bench
+     * observation / noise capture without physically driving the
+     * actuators. The flag persists across mode transitions; clear it
+     * explicitly when you want the policy to drive motors again.
+     *
+     * @generated from field: bebop.runtime.v1.SetPolicyDryRun set_policy_dry_run = 11;
+     */
+    value: SetPolicyDryRun;
+    case: "setPolicyDryRun";
+  } | {
+    /**
+     * Toggle observation/action MCAP capture on the robot. While enabled,
+     * every 100 Hz tick in DIAL_IN (observation-only) or RUN_POLICY
+     * (observation + raw action + decoded action) submits a sample to a
+     * dedicated writer thread that appends to an MCAP file under the
+     * firmware's configured capture directory (CLI `--capture-dir`,
+     * default `~/bebop-captures`). Disabling flushes and closes the
+     * file. `label` is an optional operator-supplied tag folded into the
+     * timestamped filename for later identification.
+     *
+     * @generated from field: bebop.runtime.v1.SetPolicyCapture set_policy_capture = 12;
+     */
+    value: SetPolicyCapture;
+    case: "setPolicyCapture";
   } | { case: undefined; value?: undefined };
 };
 
@@ -881,6 +912,56 @@ export const SetMechanicalZeroSchema: GenMessage<SetMechanicalZero> = /*@__PURE_
   messageDesc(file_bebop_runtime, 17);
 
 /**
+ * Toggle the policy dry-run flag. See `ClientRuntimeMessage.set_policy_dry_run`
+ * for semantics. The firmware acks the request immediately; the new value
+ * is honored on the next 100 Hz `PolicyRunner` tick.
+ *
+ * @generated from message bebop.runtime.v1.SetPolicyDryRun
+ */
+export type SetPolicyDryRun = Message<"bebop.runtime.v1.SetPolicyDryRun"> & {
+  /**
+   * @generated from field: bool enabled = 1;
+   */
+  enabled: boolean;
+};
+
+/**
+ * Describes the message bebop.runtime.v1.SetPolicyDryRun.
+ * Use `create(SetPolicyDryRunSchema)` to create a new message.
+ */
+export const SetPolicyDryRunSchema: GenMessage<SetPolicyDryRun> = /*@__PURE__*/
+  messageDesc(file_bebop_runtime, 18);
+
+/**
+ * Toggle observation/action MCAP capture. See
+ * `ClientRuntimeMessage.set_policy_capture` for semantics. The firmware
+ * acks the request immediately; the file open/close happens on the
+ * dedicated capture writer thread shortly afterward. `label` (optional,
+ * alphanumerics + `-_`) is folded into the timestamped filename to make
+ * later identification easier; the firmware sanitizes it.
+ *
+ * @generated from message bebop.runtime.v1.SetPolicyCapture
+ */
+export type SetPolicyCapture = Message<"bebop.runtime.v1.SetPolicyCapture"> & {
+  /**
+   * @generated from field: bool enabled = 1;
+   */
+  enabled: boolean;
+
+  /**
+   * @generated from field: string label = 2;
+   */
+  label: string;
+};
+
+/**
+ * Describes the message bebop.runtime.v1.SetPolicyCapture.
+ * Use `create(SetPolicyCaptureSchema)` to create a new message.
+ */
+export const SetPolicyCaptureSchema: GenMessage<SetPolicyCapture> = /*@__PURE__*/
+  messageDesc(file_bebop_runtime, 19);
+
+/**
  * @generated from message bebop.runtime.v1.Ack
  */
 export type Ack = Message<"bebop.runtime.v1.Ack"> & {
@@ -900,7 +981,7 @@ export type Ack = Message<"bebop.runtime.v1.Ack"> & {
  * Use `create(AckSchema)` to create a new message.
  */
 export const AckSchema: GenMessage<Ack> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 18);
+  messageDesc(file_bebop_runtime, 20);
 
 /**
  * @generated from message bebop.runtime.v1.Error
@@ -917,7 +998,7 @@ export type Error = Message<"bebop.runtime.v1.Error"> & {
  * Use `create(ErrorSchema)` to create a new message.
  */
 export const ErrorSchema: GenMessage<Error> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 19);
+  messageDesc(file_bebop_runtime, 21);
 
 /**
  * @generated from message bebop.runtime.v1.ModeChanged
@@ -934,7 +1015,7 @@ export type ModeChanged = Message<"bebop.runtime.v1.ModeChanged"> & {
  * Use `create(ModeChangedSchema)` to create a new message.
  */
 export const ModeChangedSchema: GenMessage<ModeChanged> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 20);
+  messageDesc(file_bebop_runtime, 22);
 
 /**
  * @generated from message bebop.runtime.v1.EStopLatched
@@ -951,7 +1032,7 @@ export type EStopLatched = Message<"bebop.runtime.v1.EStopLatched"> & {
  * Use `create(EStopLatchedSchema)` to create a new message.
  */
 export const EStopLatchedSchema: GenMessage<EStopLatched> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 21);
+  messageDesc(file_bebop_runtime, 23);
 
 /**
  * Latest fused orientation reading from the optional BNO080/BNO085 IMU.
@@ -1049,7 +1130,7 @@ export type ImuStats = Message<"bebop.runtime.v1.ImuStats"> & {
  * Use `create(ImuStatsSchema)` to create a new message.
  */
 export const ImuStatsSchema: GenMessage<ImuStats> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 22);
+  messageDesc(file_bebop_runtime, 24);
 
 /**
  * Latest observation/action snapshot from [`PolicyRunner`]. Published at
@@ -1098,22 +1179,60 @@ export type PolicyIoStats = Message<"bebop.runtime.v1.PolicyIoStats"> & {
   /**
    * Whether the observation builder is consuming live BNO085 readings
    * (`true`) or the synthetic upright fallback (`false`). Driven by the
-   * rotation-vector (0x28) freshness clock.
+   * rotation-vector freshness clock; if this is true the gyro / `base_ang_vel`
+   * channel is treated as live too.
    *
    * @generated from field: bool imu_live = 3;
    */
   imuLive: boolean;
 
   /**
-   * Whether `base_ang_vel` is sourced from a live calibrated-gyro (0x02)
-   * report. Tracked separately from `imu_live`: the gyro subscription can
-   * be dead while the attitude quaternion is fresh, which silently zeros
-   * the policy's primary rate-feedback channel. UIs should flag
-   * `imu_live && !gyro_live` as a degraded/unsafe state.
+   * True when the operator has enabled policy "dry run" (`SetPolicyDryRun`).
+   * In this state RUN_POLICY still infers, publishes telemetry, and writes
+   * capture rows, but the per-tick `safe_send_ctrl` motor command is
+   * skipped — armed motors receive no PD command from the policy.
    *
-   * @generated from field: bool gyro_live = 4;
+   * @generated from field: bool dry_run = 5;
    */
-  gyroLive: boolean;
+  dryRun: boolean;
+
+  /**
+   * True while an MCAP capture file is currently open and being
+   * appended to on the robot (the operator sent
+   * `SetPolicyCapture{enabled=true}` and the writer thread has opened
+   * the file).
+   *
+   * @generated from field: bool capture_active = 6;
+   */
+  captureActive: boolean;
+
+  /**
+   * Absolute filesystem path of the active capture file on the robot, or
+   * empty when no capture is open. Useful to surface in the operator UI
+   * so the user knows which file to scp later. `.mcap` extension.
+   *
+   * @generated from field: string capture_path = 7;
+   */
+  capturePath: string;
+
+  /**
+   * Number of samples appended to the current capture file. Resets to 0
+   * each time a new capture is opened.
+   *
+   * @generated from field: uint64 capture_rows = 8;
+   */
+  captureRows: bigint;
+
+  /**
+   * Cumulative samples the tick thread tried to enqueue but the writer
+   * thread's bounded channel was full for. Monotonic across the process
+   * lifetime. `0` means the writer is keeping up; sustained growth means
+   * the disk / compression can't drain at 100 Hz and the capture has
+   * gaps. UIs should flag non-zero values.
+   *
+   * @generated from field: uint64 capture_dropped = 9;
+   */
+  captureDropped: bigint;
 
   /**
    * Full 49-element observation fed to ONNX on the most recent tick.
@@ -1159,7 +1278,7 @@ export type PolicyIoStats = Message<"bebop.runtime.v1.PolicyIoStats"> & {
  * Use `create(PolicyIoStatsSchema)` to create a new message.
  */
 export const PolicyIoStatsSchema: GenMessage<PolicyIoStats> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 23);
+  messageDesc(file_bebop_runtime, 25);
 
 /**
  * @generated from enum bebop.runtime.v1.Mode

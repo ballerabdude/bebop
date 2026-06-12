@@ -17,6 +17,7 @@
 //! All three feed a shared mpsc to the WS sink writer.
 
 use crate::imu::ImuShared;
+use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
 use crate::safety::{Supervisor, SupervisorEvent};
 use crate::server::handlers::{encode, handle_client_message};
@@ -46,6 +47,9 @@ pub struct AppState {
     pub imu_present: bool,
     /// Latest policy observation/action snapshot from the inference loop.
     pub policy_io: PolicyIoShared,
+    /// Operator-toggled dry-run + MCAP capture flags. Written here from
+    /// the WS handler; read by [`crate::policy_runner::PolicyRunner`].
+    pub policy_control: PolicyControlShared,
 }
 
 pub async fn run_server(
@@ -53,6 +57,7 @@ pub async fn run_server(
     imu: ImuShared,
     imu_present: bool,
     policy_io: PolicyIoShared,
+    policy_control: PolicyControlShared,
     bind_addr: &str,
 ) -> Result<()> {
     let state = AppState {
@@ -60,6 +65,7 @@ pub async fn run_server(
         imu,
         imu_present,
         policy_io,
+        policy_control,
     };
     // Permissive CORS: the operator app is served from a different origin
     // (e.g. tauri://localhost or a dev http://localhost:1420), and we're
@@ -92,6 +98,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         imu,
         imu_present,
         policy_io,
+        policy_control,
     } = state;
     info!("ws client connected");
     let (mut sink, mut stream) = socket.split();
@@ -179,8 +186,14 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     while let Some(frame) = stream.next().await {
         match frame {
             Ok(Message::Binary(bytes)) => {
-                let response =
-                    handle_client_message(&sup, &imu, imu_present, &policy_io, &bytes);
+                let response = handle_client_message(
+                    &sup,
+                    &imu,
+                    imu_present,
+                    &policy_io,
+                    &policy_control,
+                    &bytes,
+                );
 
                 // Side effects for messages that affect telemetry state: do this
                 // after dispatch so the response is consistent with the new state.

@@ -29,6 +29,8 @@ import {
   SetModeSchema,
   SetMotorEnabledSchema,
   SetMotorTargetSchema,
+  SetPolicyCaptureSchema,
+  SetPolicyDryRunSchema,
   SubscribeTelemetrySchema,
   UnsubscribeTelemetrySchema,
   type ClientRuntimeMessage,
@@ -278,6 +280,32 @@ export class RuntimeTransport {
     });
   }
 
+  /// Toggle the policy dry-run flag. While enabled, RUN_POLICY still
+  /// infers, publishes telemetry, and writes MCAP captures, but no PD
+  /// commands reach the motors. Persists across mode transitions; the
+  /// UI is responsible for showing the operator that it's on.
+  async setPolicyDryRun(enabled: boolean): Promise<void> {
+    await this.requestAck({
+      case: "setPolicyDryRun",
+      value: create(SetPolicyDryRunSchema, { enabled }),
+    });
+  }
+
+  /// Start (or stop) appending observation / action samples to an MCAP
+  /// file on the robot. `label` is an optional operator tag that gets
+  /// folded into the timestamped filename for later identification; the
+  /// firmware sanitizes it to `[A-Za-z0-9_-]`. The actual file open /
+  /// close runs on the dedicated capture writer thread; the snapshot's
+  /// `policyIo.captureActive` flag reflects the live file state,
+  /// distinct from "operator requested capture". Open the resulting
+  /// `.mcap` file in Foxglove for replay / plotting.
+  async setPolicyCapture(enabled: boolean, label = ""): Promise<void> {
+    await this.requestAck({
+      case: "setPolicyCapture",
+      value: create(SetPolicyCaptureSchema, { enabled, label }),
+    });
+  }
+
   // -------------------------------------------------------------- internals
   private async requestAck(payload: ClientPayload): Promise<void> {
     const reply = await this.request(payload);
@@ -404,7 +432,11 @@ function policyIoFromProto(p: ProtoPolicyIoStats | undefined): PolicyIoView {
     present: p.present,
     active: p.active,
     imuLive: p.imuLive,
-    gyroLive: p.gyroLive,
+    dryRun: p.dryRun,
+    captureActive: p.captureActive,
+    capturePath: p.capturePath,
+    captureRows: Number(p.captureRows),
+    captureDropped: Number(p.captureDropped),
     observation: [...p.observation],
     rawAction: [...p.rawAction],
     positionTargetsRad: [...p.positionTargetsRad],
@@ -418,7 +450,11 @@ const EMPTY_POLICY_IO_VIEW: PolicyIoView = {
   present: false,
   active: false,
   imuLive: false,
-  gyroLive: false,
+  dryRun: false,
+  captureActive: false,
+  capturePath: "",
+  captureRows: 0,
+  captureDropped: 0,
   observation: [],
   rawAction: [],
   positionTargetsRad: [],

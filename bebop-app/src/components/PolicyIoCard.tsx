@@ -423,13 +423,21 @@ export function PolicyIoCard({ policyIo }: { policyIo: PolicyIoView }) {
   return (
     <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev px-3.5 py-3 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
+        <div className="min-w-0">
           <div className="text-[11px] uppercase tracking-wider text-text-dim">
             Policy I/O
           </div>
           <div className="text-[13px] text-text font-semibold mt-0.5">
             ONNX observation → action (history)
           </div>
+          {policyIo.captureActive && policyIo.capturePath ? (
+            <div
+              className="text-[10px] text-text-dim mt-1 truncate font-mono"
+              title={policyIo.capturePath}
+            >
+              {policyIo.capturePath}
+            </div>
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <StatusPill
@@ -451,10 +459,29 @@ export function PolicyIoCard({ policyIo }: { policyIo: PolicyIoView }) {
               tone={policyIo.imuLive ? "success" : "warn"}
             />
           ) : null}
-          {policyIo.active ? (
+          {/* Dry-run is meaningful whenever the operator has it on,
+              even outside RUN_POLICY — it persists across mode changes
+              so it's worth surfacing as a "be aware" pill. */}
+          {policyIo.dryRun ? (
+            <StatusPill label="Dry run" tone="warn" />
+          ) : null}
+          {/* Capture is independent of RUN_POLICY: DialIn obs-only
+              captures keep this on too. Show the sample count so the
+              operator can confirm samples are landing on disk. */}
+          {policyIo.captureActive ? (
             <StatusPill
-              label={policyIo.gyroLive ? "Gyro live" : "Gyro DEAD"}
-              tone={policyIo.gyroLive ? "success" : "warn"}
+              label={`Recording ${policyIo.captureRows.toLocaleString()} samples`}
+              tone="success"
+              pulse
+            />
+          ) : null}
+          {/* MCAP writer thread fell behind and dropped samples — this
+              is a data-loss condition; flag it loudly so the operator
+              knows the file has gaps. */}
+          {policyIo.captureDropped > 0 ? (
+            <StatusPill
+              label={`Dropped ${policyIo.captureDropped.toLocaleString()}`}
+              tone="warn"
             />
           ) : null}
           <div

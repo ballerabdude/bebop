@@ -43,6 +43,25 @@ message ClientRuntimeMessage {
     // ended up outside the safety envelope so the supervisor refuses to
     // arm). Persisted in the motor's flash; effective immediately.
     SetMechanicalZero   set_mechanical_zero    = 10;
+    // Toggle the policy "dry run" flag. When enabled, RUN_POLICY still
+    // builds observations, runs ONNX inference, publishes telemetry, and
+    // captures samples — but instead of applying the policy's PD command
+    // the supervisor sends a hold-gains keepalive each tick (same shape
+    // as DialIn's hold cycle). The robot freezes in its current posture
+    // and the Robstride feedback watchdog stays alive. Used for bench
+    // observation / noise capture without physically driving the
+    // actuators. The flag persists across mode transitions; clear it
+    // explicitly when you want the policy to drive motors again.
+    SetPolicyDryRun     set_policy_dry_run     = 11;
+    // Toggle observation/action MCAP capture on the robot. While enabled,
+    // every 100 Hz tick in DIAL_IN (observation-only) or RUN_POLICY
+    // (observation + raw action + decoded action) submits a sample to a
+    // dedicated writer thread that appends to an MCAP file under the
+    // firmware's configured capture directory (CLI `--capture-dir`,
+    // default `~/bebop-captures`). Disabling flushes and closes the
+    // file. `label` is an optional operator-supplied tag folded into the
+    // timestamped filename for later identification.
+    SetPolicyCapture    set_policy_capture     = 12;
   }
 }
 
@@ -309,6 +328,24 @@ message SetMechanicalZero {
   string joint_name = 1;
 }
 
+// Toggle the policy dry-run flag. See `ClientRuntimeMessage.set_policy_dry_run`
+// for semantics. The firmware acks the request immediately; the new value
+// is honored on the next 100 Hz `PolicyRunner` tick.
+message SetPolicyDryRun {
+  bool enabled = 1;
+}
+
+// Toggle observation/action MCAP capture. See
+// `ClientRuntimeMessage.set_policy_capture` for semantics. The firmware
+// acks the request immediately; the file open/close happens on the
+// dedicated capture writer thread shortly afterward. `label` (optional,
+// alphanumerics + `-_`) is folded into the timestamped filename to make
+// later identification easier; the firmware sanitizes it.
+message SetPolicyCapture {
+  bool enabled = 1;
+  string label = 2;
+}
+
 // ---------------------------------------------------------------------------
 // Server responses / async events
 // ---------------------------------------------------------------------------
@@ -417,14 +454,39 @@ message PolicyIoStats {
   bool   active                 = 2;
   // Whether the observation builder is consuming live BNO085 readings
   // (`true`) or the synthetic upright fallback (`false`). Driven by the
-  // rotation-vector (0x28) freshness clock.
+  // rotation-vector freshness clock; if this is true the gyro / `base_ang_vel`
+  // channel is treated as live too.
   bool   imu_live               = 3;
-  // Whether `base_ang_vel` is sourced from a live calibrated-gyro (0x02)
-  // report. Tracked separately from `imu_live`: the gyro subscription can
-  // be dead while the attitude quaternion is fresh, which silently zeros
-  // the policy's primary rate-feedback channel. UIs should flag
-  // `imu_live && !gyro_live` as a degraded/unsafe state.
-  bool   gyro_live              = 4;
+  // Tag 4 was the historical `gyro_live` flag that surfaced a separate
+  // freshness clock for the BNO085 calibrated-gyro (0x02) subscription.
+  // Removed once the SPI / Teensy bridge bring-up was stable enough that
+  // a fresh rotation vector implies a fresh gyro in every observed
+  // failure mode; reserved so we don't accidentally re-use the field.
+  reserved 4;
+  reserved "gyro_live";
+  // True when the operator has enabled policy "dry run" (`SetPolicyDryRun`).
+  // In this state RUN_POLICY still infers, publishes telemetry, and writes
+  // capture rows, but the per-tick `safe_send_ctrl` motor command is
+  // skipped — armed motors receive no PD command from the policy.
+  bool   dry_run                = 5;
+  // True while an MCAP capture file is currently open and being
+  // appended to on the robot (the operator sent
+  // `SetPolicyCapture{enabled=true}` and the writer thread has opened
+  // the file).
+  bool   capture_active         = 6;
+  // Absolute filesystem path of the active capture file on the robot, or
+  // empty when no capture is open. Useful to surface in the operator UI
+  // so the user knows which file to scp later. `.mcap` extension.
+  string capture_path           = 7;
+  // Number of samples appended to the current capture file. Resets to 0
+  // each time a new capture is opened.
+  uint64 capture_rows           = 8;
+  // Cumulative samples the tick thread tried to enqueue but the writer
+  // thread's bounded channel was full for. Monotonic across the process
+  // lifetime. `0` means the writer is keeping up; sustained growth means
+  // the disk / compression can't drain at 100 Hz and the capture has
+  // gaps. UIs should flag non-zero values.
+  uint64 capture_dropped        = 9;
 
   // Full 49-element observation fed to ONNX on the most recent tick.
   repeated float observation    = 10;

@@ -115,11 +115,27 @@ export interface RuntimeSnapshot {
 export interface PolicyIoView {
   present: boolean;
   active: boolean;
+  /** Whether observations use live BNO085 readings vs synthetic fallback.
+   *  Rotation vector and gyro share one SH-2 data channel, so this single
+   *  flag covers both. */
   imuLive: boolean;
-  /** Whether `base_ang_vel` is sourced from a live calibrated gyro (0x02).
-   *  Distinct from `imuLive`: a dead gyro zeros the policy's rate-feedback
-   *  channel even while the attitude quaternion stays fresh. */
-  gyroLive: boolean;
+  /** Operator has enabled dry-run: RUN_POLICY still infers + publishes +
+   *  captures, but no PD commands reach the motors. */
+  dryRun: boolean;
+  /** Robot is currently writing MCAP capture samples. Distinct from
+   *  "operator requested capture" — only `true` once the writer thread
+   *  has actually opened the file on disk. */
+  captureActive: boolean;
+  /** Absolute path of the active capture file on the robot, or "" when
+   *  no capture is open. `.mcap` extension. */
+  capturePath: string;
+  /** Sample count appended to the active capture file (0 when none). */
+  captureRows: number;
+  /** Cumulative samples the tick thread tried to enqueue but the writer
+   *  thread's bounded channel was full for. Monotonic across the process
+   *  lifetime; 0 means the writer is keeping up. UIs should flag a
+   *  non-zero value as data loss. */
+  captureDropped: number;
   /** Full 49-dim observation vector (see layout in proto docs). */
   observation: number[];
   /** Full 24-dim raw NN output. */

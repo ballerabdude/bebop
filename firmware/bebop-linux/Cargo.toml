@@ -92,10 +92,27 @@ toml = "0.8"
 # Time handling
 chrono = "0.4"
 
+# Low-level POSIX scheduling + clocks for the real-time control loop
+# (`src/realtime.rs`): SCHED_FIFO and absolute-deadline `clock_nanosleep`
+# on CLOCK_MONOTONIC. Already present transitively (socketcan, mcap, ...);
+# pinned here as a direct dependency since `main.rs` calls it explicitly.
+libc = "0.2"
+
 # Wire protocol shared with the Tauri app and the Jetson agent.
 bebop-proto = { path = "../../jetson-agent/bebop-proto" }
 prost = "0.13"
 bytes = "1.7"
+
+# MCAP capture format for the operator-toggled observation/action
+# recordings (see `src/policy_capture.rs`). MCAP gives us:
+#   * a single self-describing binary file (embedded protobuf FDS) that
+#     Foxglove / `mcap-cli` / any robotics tooling reads out of the box;
+#   * built-in chunked LZ4/Zstd compression so the on-disk size of a
+#     100 Hz × ~100-float capture stays manageable across long runs;
+#   * stable per-message timestamps so we can scrub through a session
+#     visually in Foxglove without our own parser.
+# Default features pull in zstd + lz4 chunk compression, which we want.
+mcap = "0.25"
 
 # BNO080/BNO085 over Linux SPI (`spidev` + `gpiod`). Used by both the
 # `imu-probe` diagnostic bin and the production `imu.rs` path.
