@@ -71,14 +71,14 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="silver"/>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
       </geometry>
     </collision>
   </link>
@@ -91,14 +91,14 @@
     <visual>
       <origin rpy="0 0 0" xyz="-0.063261 -0.1782 0.420902"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/knee_flexion_left_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/knee_flexion_left_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="silver"/>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="-0.063261 -0.1782 0.420902"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/knee_flexion_left_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/knee_flexion_left_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
     </collision>
   </link>
@@ -111,14 +111,14 @@
     <visual>
       <origin rpy="0 0 0" xyz="-0.063523 0.178 0.421034"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/knee_flexion_right_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/knee_flexion_right_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="silver"/>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="-0.063523 0.178 0.421034"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/knee_flexion_right_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/knee_flexion_right_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
     </collision>
   </link>
@@ -131,14 +131,14 @@
     <visual>
       <origin rpy="0 0 0" xyz="-0.063265 -0.1782 0.674402"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/foot_left_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/foot_left_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="silver"/>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="-0.063265 -0.1782 0.674402"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/foot_left_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/foot_left_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
     </collision>
   </link>
@@ -151,14 +151,14 @@
     <visual>
       <origin rpy="0 0 0" xyz="-0.059094 0.178 0.674495"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/foot_right_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/foot_right_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="silver"/>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="-0.059094 0.178 0.674495"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/foot_right_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/foot_right_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
     </collision>
   </link>
@@ -171,14 +171,14 @@
     <visual>
       <origin rpy="0 0 0" xyz="0.003527 0.1503 -0.013"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/hip_flexion_right_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/hip_flexion_right_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="silver"/>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0.003527 0.1503 -0.013"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/hip_flexion_right_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/hip_flexion_right_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
     </collision>
   </link>
@@ -191,14 +191,14 @@
     <visual>
       <origin rpy="0 0 0" xyz="0.003789 -0.1505 -0.013132"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/hip_flexion_left_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/hip_flexion_left_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="silver"/>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0.003789 -0.1505 -0.013132"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/hip_flexion_left_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/hip_flexion_left_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
     </collision>
   </link>
@@ -211,14 +211,14 @@
     <visual>
       <origin rpy="0 0 0" xyz="-0.026023 0.1503 0.127"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/hip_abduction_right_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/hip_abduction_right_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="silver"/>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="-0.026023 0.1503 0.127"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/hip_abduction_right_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/hip_abduction_right_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
     </collision>
   </link>
@@ -231,14 +231,14 @@
     <visual>
       <origin rpy="0 0 0" xyz="-0.025761 -0.1505 0.126868"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/hip_abduction_left_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/hip_abduction_left_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="silver"/>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="-0.025761 -0.1505 0.126868"/>
       <geometry>
-        <mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/hip_abduction_left_1.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="package://bebopv2_description/meshes/hip_abduction_left_1.stl" scale="0.001 0.001 0.001"/>
       </geometry>
     </collision>
   </link>
