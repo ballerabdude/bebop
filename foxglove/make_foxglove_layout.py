@@ -10,11 +10,12 @@ Usage:
 """
 import argparse, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import layout_noise, layout_robot
+import layout_noise, layout_policy, layout_robot
 
 LAYOUTS = {
     layout_robot.NAME: (layout_robot.OUTPUT, layout_robot.build),
     layout_noise.NAME: (layout_noise.OUTPUT, layout_noise.build),
+    layout_policy.NAME: (layout_policy.OUTPUT, layout_policy.build),
 }
 
 def write_layout(name, out, *, force):

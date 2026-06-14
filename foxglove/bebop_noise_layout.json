@@ -1,7 +1,7 @@
 {
   "configById": {
     "Plot!gyro": {
-      "title": "IMU angular velocity (rad/s) - gyro noise",
+      "foxglovePanelTitle": "IMU angular velocity (rad/s) - gyro noise",
       "paths": [
         {
           "value": "/imu.angular_velocity.x",
@@ -32,7 +32,7 @@
       "sidebarDimension": 240
     },
     "Plot!jvel": {
-      "title": "Joint velocity (rad/s) - noisiest channel",
+      "foxglovePanelTitle": "Joint velocity (rad/s) - noisiest channel",
       "paths": [
         {
           "value": "/joint_states.velocity[0]",
@@ -93,7 +93,7 @@
       "sidebarDimension": 240
     },
     "Plot!quat": {
-      "title": "IMU orientation quaternion (XYZW) - drift",
+      "foxglovePanelTitle": "IMU orientation quaternion (XYZW) - drift",
       "paths": [
         {
           "value": "/imu.orientation.x",
@@ -130,7 +130,7 @@
       "sidebarDimension": 240
     },
     "Plot!jpos": {
-      "title": "Joint position (rad) - encoder noise",
+      "foxglovePanelTitle": "Joint position (rad) - encoder noise",
       "paths": [
         {
           "value": "/joint_states.position[0]",

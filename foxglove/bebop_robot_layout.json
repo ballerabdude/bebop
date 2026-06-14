@@ -1,7 +1,7 @@
 {
   "configById": {
     "3D!robot": {
-      "title": "Bebop robot - URDF",
+      "foxglovePanelTitle": "Bebop robot - URDF",
       "fixedFrame": "base_link",
       "followTf": "base_link",
       "followMode": "follow-none",
@@ -56,7 +56,7 @@
       }
     },
     "Plot!jpos": {
-      "title": "Joint positions (rad)",
+      "foxglovePanelTitle": "Joint positions (rad)",
       "paths": [
         {
           "value": "/joint_states.position[0]",
@@ -117,7 +117,7 @@
       "sidebarDimension": 240
     },
     "Plot!jvel": {
-      "title": "Joint velocities (rad/s)",
+      "foxglovePanelTitle": "Joint velocities (rad/s)",
       "paths": [
         {
           "value": "/joint_states.velocity[0]",
@@ -178,7 +178,7 @@
       "sidebarDimension": 240
     },
     "Plot!quat": {
-      "title": "IMU orientation quaternion (XYZW)",
+      "foxglovePanelTitle": "IMU orientation quaternion (XYZW)",
       "paths": [
         {
           "value": "/imu.orientation.x",
@@ -215,7 +215,7 @@
       "sidebarDimension": 240
     },
     "Plot!gyro": {
-      "title": "IMU angular velocity (rad/s)",
+      "foxglovePanelTitle": "IMU angular velocity (rad/s)",
       "paths": [
         {
           "value": "/imu.angular_velocity.x",

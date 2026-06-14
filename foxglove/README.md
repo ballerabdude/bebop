@@ -41,6 +41,20 @@ The ROS2 MCAP file contains 5 channels:
 - **Plot panels** read from `/joint_states.position[]` / `.velocity[]`,
   `/imu.orientation` / `.angular_velocity`, with X axis `/policy/status.sim_time_s`
 
+### Policy debug (`bebop_policy_layout.json`)
+
+Same animated URDF **3D panel** as the robot layout, plus two plot columns
+for debugging policy behavior tick by tick:
+
+- **Inputs** (`/policy/observation.data[]`): base angular velocity,
+  projected gravity, joint pos/vel (relative, scaled), and velocity
+  commands — the exact 49-element vector fed to the network.
+- **Outputs** (`/policy/action.*`): decoded position targets (rad), `kp`,
+  and `kd`.
+
+See `firmware/bebop-linux/src/observation.rs::build` for the observation
+index layout.
+
 ### Noise (`bebop_noise_layout.json`)
 
 2x2 mosaic for static-capture noise review.

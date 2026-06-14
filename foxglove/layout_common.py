@@ -78,9 +78,38 @@ def status_path(field, label):
     }
 
 
+def obs_path(index, label):
+    """Plot path for one element of the policy observation vector.
+
+    /policy/observation is bebop_msgs/Float32Stamped with a flat data[]
+    array; see firmware/bebop-linux/src/observation.rs::build for the
+    index layout (OBS_DIM = 49).
+    """
+    return {
+        "value": f"/policy/observation.data[{index}]",
+        "enabled": True,
+        "label": label,
+        "timestampMethod": "receiveTime",
+    }
+
+
+def action_path(field, index, label):
+    """Plot path for one element of a /policy/action float array field.
+
+    /policy/action is bebop_msgs/PolicyAction with float32[] fields:
+    raw_action (24), position_targets_rad (8), kp (8), kd (8).
+    """
+    return {
+        "value": f"/policy/action.{field}[{index}]",
+        "enabled": True,
+        "label": label,
+        "timestampMethod": "receiveTime",
+    }
+
+
 def plot(paths, *, title):
     return {
-        "title": title,
+        "foxglovePanelTitle": title,
         "paths": paths,
         "showLegend": True,
         "legendDisplay": "top",

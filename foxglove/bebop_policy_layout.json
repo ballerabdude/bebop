@@ -1,0 +1,503 @@
+{
+  "configById": {
+    "3D!robot": {
+      "foxglovePanelTitle": "Bebop robot - URDF",
+      "fixedFrame": "base_link",
+      "followTf": "base_link",
+      "followMode": "follow-none",
+      "scene": {
+        "meshUpAxis": "z_up"
+      },
+      "transforms": {
+        "base_link": {
+          "visible": true,
+          "showLabel": true,
+          "axisScale": 0.15,
+          "lineWidth": 1
+        }
+      },
+      "layers": {
+        "grid": {
+          "instanceId": "grid",
+          "layerId": "foxglove.Grid",
+          "label": "Ground grid",
+          "visible": true,
+          "size": 1,
+          "divisions": 10,
+          "lineWidth": 1,
+          "color": "#64748b",
+          "position": [
+            0,
+            0,
+            -0.68
+          ]
+        },
+        "bebop_urdf": {
+          "instanceId": "bebop_urdf",
+          "layerId": "foxglove.Urdf",
+          "label": "Bebop V2 URDF",
+          "visible": true,
+          "sourceType": "filePath",
+          "filePath": "/Users/ahagi/Documents/projects/bebop/ros2/src/bebopv2_description/urdf/bebopv2.urdf",
+          "controlMode": "jointStates",
+          "jointStatesTopic": "/joint_states",
+          "displayMode": "visual",
+          "fallbackColor": "#94a3b8",
+          "opacity": 1,
+          "showOutlines": true,
+          "showAxis": false,
+          "axisScale": 0.1
+        }
+      },
+      "topics": {
+        "/joint_states": {
+          "visible": true
+        }
+      }
+    },
+    "Plot!obs_angvel": {
+      "foxglovePanelTitle": "IN: base angular velocity (obs[0:3], scaled)",
+      "paths": [
+        {
+          "value": "/policy/observation.data[0]",
+          "enabled": true,
+          "label": "x",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[1]",
+          "enabled": true,
+          "label": "y",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[2]",
+          "enabled": true,
+          "label": "z",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240
+    },
+    "Plot!obs_gravity": {
+      "foxglovePanelTitle": "IN: projected gravity (obs[3:6])",
+      "paths": [
+        {
+          "value": "/policy/observation.data[3]",
+          "enabled": true,
+          "label": "x",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[4]",
+          "enabled": true,
+          "label": "y",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[5]",
+          "enabled": true,
+          "label": "z",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240
+    },
+    "Plot!obs_jpos": {
+      "foxglovePanelTitle": "IN: joint pos rel (obs[6:14], scaled)",
+      "paths": [
+        {
+          "value": "/policy/observation.data[6]",
+          "enabled": true,
+          "label": "hip_flex_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[7]",
+          "enabled": true,
+          "label": "hip_flex_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[8]",
+          "enabled": true,
+          "label": "hip_abd_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[9]",
+          "enabled": true,
+          "label": "hip_abd_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[10]",
+          "enabled": true,
+          "label": "knee_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[11]",
+          "enabled": true,
+          "label": "knee_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[12]",
+          "enabled": true,
+          "label": "foot_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[13]",
+          "enabled": true,
+          "label": "foot_R",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240
+    },
+    "Plot!obs_jvel": {
+      "foxglovePanelTitle": "IN: joint vel (obs[14:22], scaled)",
+      "paths": [
+        {
+          "value": "/policy/observation.data[14]",
+          "enabled": true,
+          "label": "hip_flex_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[15]",
+          "enabled": true,
+          "label": "hip_flex_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[16]",
+          "enabled": true,
+          "label": "hip_abd_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[17]",
+          "enabled": true,
+          "label": "hip_abd_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[18]",
+          "enabled": true,
+          "label": "knee_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[19]",
+          "enabled": true,
+          "label": "knee_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[20]",
+          "enabled": true,
+          "label": "foot_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[21]",
+          "enabled": true,
+          "label": "foot_R",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240
+    },
+    "Plot!obs_cmd": {
+      "foxglovePanelTitle": "IN: velocity commands (obs[46:49])",
+      "paths": [
+        {
+          "value": "/policy/observation.data[46]",
+          "enabled": true,
+          "label": "vx",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[47]",
+          "enabled": true,
+          "label": "vy",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/observation.data[48]",
+          "enabled": true,
+          "label": "wz",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240
+    },
+    "Plot!act_target": {
+      "foxglovePanelTitle": "OUT: position targets (rad)",
+      "paths": [
+        {
+          "value": "/policy/action.position_targets_rad[0]",
+          "enabled": true,
+          "label": "hip_flex_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.position_targets_rad[1]",
+          "enabled": true,
+          "label": "hip_flex_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.position_targets_rad[2]",
+          "enabled": true,
+          "label": "hip_abd_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.position_targets_rad[3]",
+          "enabled": true,
+          "label": "hip_abd_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.position_targets_rad[4]",
+          "enabled": true,
+          "label": "knee_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.position_targets_rad[5]",
+          "enabled": true,
+          "label": "knee_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.position_targets_rad[6]",
+          "enabled": true,
+          "label": "foot_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.position_targets_rad[7]",
+          "enabled": true,
+          "label": "foot_R",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240
+    },
+    "Plot!act_kp": {
+      "foxglovePanelTitle": "OUT: kp (decoded, clamped)",
+      "paths": [
+        {
+          "value": "/policy/action.kp[0]",
+          "enabled": true,
+          "label": "hip_flex_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kp[1]",
+          "enabled": true,
+          "label": "hip_flex_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kp[2]",
+          "enabled": true,
+          "label": "hip_abd_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kp[3]",
+          "enabled": true,
+          "label": "hip_abd_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kp[4]",
+          "enabled": true,
+          "label": "knee_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kp[5]",
+          "enabled": true,
+          "label": "knee_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kp[6]",
+          "enabled": true,
+          "label": "foot_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kp[7]",
+          "enabled": true,
+          "label": "foot_R",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240
+    },
+    "Plot!act_kd": {
+      "foxglovePanelTitle": "OUT: kd (decoded, clamped)",
+      "paths": [
+        {
+          "value": "/policy/action.kd[0]",
+          "enabled": true,
+          "label": "hip_flex_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kd[1]",
+          "enabled": true,
+          "label": "hip_flex_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kd[2]",
+          "enabled": true,
+          "label": "hip_abd_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kd[3]",
+          "enabled": true,
+          "label": "hip_abd_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kd[4]",
+          "enabled": true,
+          "label": "knee_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kd[5]",
+          "enabled": true,
+          "label": "knee_R",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kd[6]",
+          "enabled": true,
+          "label": "foot_L",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/policy/action.kd[7]",
+          "enabled": true,
+          "label": "foot_R",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "direction": "row",
+    "first": "3D!robot",
+    "second": {
+      "direction": "row",
+      "first": {
+        "direction": "column",
+        "first": "Plot!obs_angvel",
+        "second": {
+          "direction": "column",
+          "first": "Plot!obs_gravity",
+          "second": {
+            "direction": "column",
+            "first": "Plot!obs_jpos",
+            "second": {
+              "direction": "column",
+              "first": "Plot!obs_jvel",
+              "second": "Plot!obs_cmd",
+              "splitPercentage": 50.0
+            },
+            "splitPercentage": 33.333333333333336
+          },
+          "splitPercentage": 25.0
+        },
+        "splitPercentage": 20.0
+      },
+      "second": {
+        "direction": "column",
+        "first": "Plot!act_target",
+        "second": {
+          "direction": "column",
+          "first": "Plot!act_kp",
+          "second": "Plot!act_kd",
+          "splitPercentage": 50.0
+        },
+        "splitPercentage": 33.333333333333336
+      },
+      "splitPercentage": 50
+    },
+    "splitPercentage": 34
+  }
+}

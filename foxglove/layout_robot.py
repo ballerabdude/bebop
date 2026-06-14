@@ -18,7 +18,7 @@ JOINT_STATES_TOPIC = "/joint_states"
 
 def _robot_3d_panel():
     return {
-        "title": "Bebop robot - URDF",
+        "foxglovePanelTitle": "Bebop robot - URDF",
         "fixedFrame": "base_link",
         "followTf": "base_link",
         "followMode": "follow-none",
