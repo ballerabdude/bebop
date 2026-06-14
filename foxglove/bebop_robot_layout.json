@@ -5,7 +5,9 @@
       "fixedFrame": "base_link",
       "followTf": "base_link",
       "followMode": "follow-none",
-      "scene": {},
+      "scene": {
+        "meshUpAxis": "z_up"
+      },
       "transforms": {
         "base_link": {
           "visible": true,
@@ -53,56 +55,53 @@
         }
       }
     },
-    "Markdown!notes": {
-      "markdown": "# Bebop MCAP Review\n\nOpen MCAP: `/Users/ahagi/Downloads/policy_capture_20260612_032423.mcap`\n\nURDF: `/Users/ahagi/Documents/projects/bebop/ros2/src/bebopv2_description/urdf/bebopv2.urdf`\n\nPolicy capture topic: `/policy_capture`\n\nThe plots read joint positions directly from `/policy_capture.joint_pos_rad[]`.\n\nThe 3D URDF layer is configured for `/joint_states`. If this MCAP does not include that topic, the robot will render in its default pose while the position plots show the recorded motion."
-    },
     "Plot!jpos": {
-      "title": "Recorded joint position (rad)",
+      "title": "Joint positions (rad)",
       "paths": [
         {
-          "value": "/policy_capture.joint_pos_rad[0]",
+          "value": "/joint_states.position[0]",
           "enabled": true,
           "label": "hip_flexion_left_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[1]",
+          "value": "/joint_states.position[1]",
           "enabled": true,
           "label": "hip_flexion_right_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[2]",
+          "value": "/joint_states.position[2]",
           "enabled": true,
           "label": "hip_abduction_left_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[3]",
+          "value": "/joint_states.position[3]",
           "enabled": true,
           "label": "hip_abduction_right_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[4]",
+          "value": "/joint_states.position[4]",
           "enabled": true,
           "label": "knee_flexion_left_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[5]",
+          "value": "/joint_states.position[5]",
           "enabled": true,
           "label": "knee_flexion_right_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[6]",
+          "value": "/joint_states.position[6]",
           "enabled": true,
           "label": "foot_left_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[7]",
+          "value": "/joint_states.position[7]",
           "enabled": true,
           "label": "foot_right_joint",
           "timestampMethod": "receiveTime"
@@ -114,61 +113,56 @@
       "showXAxisLabels": true,
       "showYAxisLabels": true,
       "isSynced": true,
-      "xAxisVal": "custom",
-      "xAxisPath": {
-        "value": "/policy_capture.sim_time_s",
-        "enabled": true,
-        "timestampMethod": "receiveTime"
-      },
+      "xAxisVal": "timestamp",
       "sidebarDimension": 240
     },
     "Plot!jvel": {
-      "title": "Recorded joint velocity (rad/s)",
+      "title": "Joint velocities (rad/s)",
       "paths": [
         {
-          "value": "/policy_capture.joint_vel_rad_s[0]",
+          "value": "/joint_states.velocity[0]",
           "enabled": true,
           "label": "hip_flexion_left_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[1]",
+          "value": "/joint_states.velocity[1]",
           "enabled": true,
           "label": "hip_flexion_right_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[2]",
+          "value": "/joint_states.velocity[2]",
           "enabled": true,
           "label": "hip_abduction_left_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[3]",
+          "value": "/joint_states.velocity[3]",
           "enabled": true,
           "label": "hip_abduction_right_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[4]",
+          "value": "/joint_states.velocity[4]",
           "enabled": true,
           "label": "knee_flexion_left_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[5]",
+          "value": "/joint_states.velocity[5]",
           "enabled": true,
           "label": "knee_flexion_right_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[6]",
+          "value": "/joint_states.velocity[6]",
           "enabled": true,
           "label": "foot_left_joint",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[7]",
+          "value": "/joint_states.velocity[7]",
           "enabled": true,
           "label": "foot_right_joint",
           "timestampMethod": "receiveTime"
@@ -180,37 +174,32 @@
       "showXAxisLabels": true,
       "showYAxisLabels": true,
       "isSynced": true,
-      "xAxisVal": "custom",
-      "xAxisPath": {
-        "value": "/policy_capture.sim_time_s",
-        "enabled": true,
-        "timestampMethod": "receiveTime"
-      },
+      "xAxisVal": "timestamp",
       "sidebarDimension": 240
     },
     "Plot!quat": {
       "title": "IMU orientation quaternion (XYZW)",
       "paths": [
         {
-          "value": "/policy_capture.quat_x",
+          "value": "/imu.orientation.x",
           "enabled": true,
           "label": "qx",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.quat_y",
+          "value": "/imu.orientation.y",
           "enabled": true,
           "label": "qy",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.quat_z",
+          "value": "/imu.orientation.z",
           "enabled": true,
           "label": "qz",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.quat_w",
+          "value": "/imu.orientation.w",
           "enabled": true,
           "label": "qw",
           "timestampMethod": "receiveTime"
@@ -222,31 +211,26 @@
       "showXAxisLabels": true,
       "showYAxisLabels": true,
       "isSynced": true,
-      "xAxisVal": "custom",
-      "xAxisPath": {
-        "value": "/policy_capture.sim_time_s",
-        "enabled": true,
-        "timestampMethod": "receiveTime"
-      },
+      "xAxisVal": "timestamp",
       "sidebarDimension": 240
     },
     "Plot!gyro": {
       "title": "IMU angular velocity (rad/s)",
       "paths": [
         {
-          "value": "/policy_capture.ang_vel_x",
+          "value": "/imu.angular_velocity.x",
           "enabled": true,
           "label": "wx (roll rate)",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.ang_vel_y",
+          "value": "/imu.angular_velocity.y",
           "enabled": true,
           "label": "wy (pitch rate)",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.ang_vel_z",
+          "value": "/imu.angular_velocity.z",
           "enabled": true,
           "label": "wz (yaw rate)",
           "timestampMethod": "receiveTime"
@@ -258,12 +242,7 @@
       "showXAxisLabels": true,
       "showYAxisLabels": true,
       "isSynced": true,
-      "xAxisVal": "custom",
-      "xAxisPath": {
-        "value": "/policy_capture.sim_time_s",
-        "enabled": true,
-        "timestampMethod": "receiveTime"
-      },
+      "xAxisVal": "timestamp",
       "sidebarDimension": 240
     }
   },
@@ -273,29 +252,24 @@
     "speed": 1
   },
   "layout": {
-    "direction": "column",
-    "first": {
-      "direction": "row",
-      "first": "3D!robot",
-      "second": "Markdown!notes",
-      "splitPercentage": 72
-    },
+    "direction": "row",
+    "first": "3D!robot",
     "second": {
-      "direction": "row",
-      "first": {
-        "direction": "column",
-        "first": "Plot!jpos",
-        "second": "Plot!jvel",
-        "splitPercentage": 55
-      },
+      "direction": "column",
+      "first": "Plot!jpos",
       "second": {
         "direction": "column",
-        "first": "Plot!quat",
-        "second": "Plot!gyro",
-        "splitPercentage": 50
+        "first": "Plot!jvel",
+        "second": {
+          "direction": "column",
+          "first": "Plot!quat",
+          "second": "Plot!gyro",
+          "splitPercentage": 50
+        },
+        "splitPercentage": 33.333333333333336
       },
-      "splitPercentage": 50
+      "splitPercentage": 25
     },
-    "splitPercentage": 58
+    "splitPercentage": 55
   }
 }

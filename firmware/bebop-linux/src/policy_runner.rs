@@ -61,7 +61,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
-use bebop_proto::capture::v1::PolicyCaptureSample;
+use crate::policy_capture::{CaptureHandle, TickSample};
 
 use crate::config::{dims, PolicyGainClamps};
 use crate::imu::ImuShared;
@@ -71,7 +71,7 @@ use crate::observation::{
     JOINT_NAMES, NUM_JOINTS,
 };
 use crate::policy::PolicyController;
-use crate::policy_capture::{self, CaptureHandle};
+use crate::policy_capture::{self};
 use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
 use crate::safety::{BreachReason, Supervisor};
@@ -127,13 +127,12 @@ pub struct PolicyRunner {
     /// Monotonic per-capture sample counter. Reset to 0 each time a new
     /// capture file opens (detected via the `capture_was_active` edge in
     /// `reconcile_capture`) and written into
-    /// [`PolicyCaptureSample::tick`]. Independent of the MCAP `sequence`
-    /// header so readers that decode the proto payload alone (without
-    /// parsing MCAP records) still get a usable tick axis.
+    /// [`TickSample::tick`]. Independent of the MCAP `sequence`
+    /// header so readers still get a usable tick axis.
     capture_tick: u64,
     /// Wall/monotonic origin of the current capture file, set lazily on
     /// the first sample after a file opens. Drives
-    /// [`PolicyCaptureSample::sim_time_s`] so a single file plots against
+    /// `TickSample::sim_time_s` so a single file plots against
     /// a self-contained, 0-based time axis. `None` between captures.
     capture_started_at: Option<Instant>,
     /// Last time we asked the writer thread to open a capture file
@@ -679,7 +678,7 @@ impl PolicyRunner {
         self.capture.send_sample(sample);
     }
 
-    /// Build a [`PolicyCaptureSample`] from the current tick's state.
+    /// Build a [`TickSample`] from the current tick's state.
     /// Hot path — keep it allocation-light (a few small `Vec`s for the
     /// `repeated` fields, no formatting).
     #[allow(clippy::too_many_arguments)]
@@ -694,16 +693,10 @@ impl PolicyRunner {
         armed: &[bool; NUM_JOINTS],
         observation: &[f32],
         action: Option<(&[f32], &DecodedAction)>,
-    ) -> PolicyCaptureSample {
-        // Anchor `sim_time_s` to the first sample of the current capture
-        // file (the origin is cleared on the open edge in
-        // `reconcile_capture`). This gives each file a self-contained,
-        // 0-based time axis; `wall_time_ns` still carries absolute time.
+    ) -> TickSample {
         let origin = *self.capture_started_at.get_or_insert(now);
         let (wall_time_ns, sim_time_s) = policy_capture::timestamps(now, Some(origin));
 
-        // Per-capture monotonic sample counter (distinct from the MCAP
-        // `sequence` header so the proto payload alone is self-describing).
         let tick = self.capture_tick;
         self.capture_tick += 1;
 
@@ -727,20 +720,15 @@ impl PolicyRunner {
             None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
         };
 
-        PolicyCaptureSample {
+        TickSample {
             tick,
             wall_time_ns,
             sim_time_s,
             mode: mode_str,
             dry_run,
             imu_live,
-            quat_x: quat[0],
-            quat_y: quat[1],
-            quat_z: quat[2],
-            quat_w: quat[3],
-            ang_vel_x: ang_vel[0],
-            ang_vel_y: ang_vel[1],
-            ang_vel_z: ang_vel[2],
+            quaternion: quat,
+            angular_velocity: ang_vel,
             joint_pos_rad: joint_pos.to_vec(),
             joint_vel_rad_s: joint_vel.to_vec(),
             joint_armed: armed.to_vec(),

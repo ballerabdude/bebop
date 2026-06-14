@@ -4,19 +4,19 @@
       "title": "IMU angular velocity (rad/s) - gyro noise",
       "paths": [
         {
-          "value": "/policy_capture.ang_vel_x",
+          "value": "/imu.angular_velocity.x",
           "enabled": true,
           "label": "wx (roll rate)",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.ang_vel_y",
+          "value": "/imu.angular_velocity.y",
           "enabled": true,
           "label": "wy (pitch rate)",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.ang_vel_z",
+          "value": "/imu.angular_velocity.z",
           "enabled": true,
           "label": "wz (yaw rate)",
           "timestampMethod": "receiveTime"
@@ -28,63 +28,58 @@
       "showXAxisLabels": true,
       "showYAxisLabels": true,
       "isSynced": true,
-      "xAxisVal": "custom",
-      "xAxisPath": {
-        "value": "/policy_capture.sim_time_s",
-        "enabled": true,
-        "timestampMethod": "receiveTime"
-      },
+      "xAxisVal": "timestamp",
       "sidebarDimension": 240
     },
     "Plot!jvel": {
       "title": "Joint velocity (rad/s) - noisiest channel",
       "paths": [
         {
-          "value": "/policy_capture.joint_vel_rad_s[0]",
+          "value": "/joint_states.velocity[0]",
           "enabled": true,
-          "label": "hip_flex_L vel",
+          "label": "hip_flex_L",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[1]",
+          "value": "/joint_states.velocity[1]",
           "enabled": true,
-          "label": "hip_flex_R vel",
+          "label": "hip_flex_R",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[2]",
+          "value": "/joint_states.velocity[2]",
           "enabled": true,
-          "label": "hip_abd_L vel",
+          "label": "hip_abd_L",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[3]",
+          "value": "/joint_states.velocity[3]",
           "enabled": true,
-          "label": "hip_abd_R vel",
+          "label": "hip_abd_R",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[4]",
+          "value": "/joint_states.velocity[4]",
           "enabled": true,
-          "label": "knee_L vel",
+          "label": "knee_L",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[5]",
+          "value": "/joint_states.velocity[5]",
           "enabled": true,
-          "label": "knee_R vel",
+          "label": "knee_R",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[6]",
+          "value": "/joint_states.velocity[6]",
           "enabled": true,
-          "label": "foot_L vel",
+          "label": "foot_L",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_vel_rad_s[7]",
+          "value": "/joint_states.velocity[7]",
           "enabled": true,
-          "label": "foot_R vel",
+          "label": "foot_R",
           "timestampMethod": "receiveTime"
         }
       ],
@@ -94,37 +89,32 @@
       "showXAxisLabels": true,
       "showYAxisLabels": true,
       "isSynced": true,
-      "xAxisVal": "custom",
-      "xAxisPath": {
-        "value": "/policy_capture.sim_time_s",
-        "enabled": true,
-        "timestampMethod": "receiveTime"
-      },
+      "xAxisVal": "timestamp",
       "sidebarDimension": 240
     },
     "Plot!quat": {
       "title": "IMU orientation quaternion (XYZW) - drift",
       "paths": [
         {
-          "value": "/policy_capture.quat_x",
+          "value": "/imu.orientation.x",
           "enabled": true,
           "label": "qx",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.quat_y",
+          "value": "/imu.orientation.y",
           "enabled": true,
           "label": "qy",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.quat_z",
+          "value": "/imu.orientation.z",
           "enabled": true,
           "label": "qz",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.quat_w",
+          "value": "/imu.orientation.w",
           "enabled": true,
           "label": "qw",
           "timestampMethod": "receiveTime"
@@ -136,63 +126,58 @@
       "showXAxisLabels": true,
       "showYAxisLabels": true,
       "isSynced": true,
-      "xAxisVal": "custom",
-      "xAxisPath": {
-        "value": "/policy_capture.sim_time_s",
-        "enabled": true,
-        "timestampMethod": "receiveTime"
-      },
+      "xAxisVal": "timestamp",
       "sidebarDimension": 240
     },
     "Plot!jpos": {
       "title": "Joint position (rad) - encoder noise",
       "paths": [
         {
-          "value": "/policy_capture.joint_pos_rad[0]",
+          "value": "/joint_states.position[0]",
           "enabled": true,
-          "label": "hip_flex_L pos",
+          "label": "hip_flex_L",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[1]",
+          "value": "/joint_states.position[1]",
           "enabled": true,
-          "label": "hip_flex_R pos",
+          "label": "hip_flex_R",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[2]",
+          "value": "/joint_states.position[2]",
           "enabled": true,
-          "label": "hip_abd_L pos",
+          "label": "hip_abd_L",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[3]",
+          "value": "/joint_states.position[3]",
           "enabled": true,
-          "label": "hip_abd_R pos",
+          "label": "hip_abd_R",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[4]",
+          "value": "/joint_states.position[4]",
           "enabled": true,
-          "label": "knee_L pos",
+          "label": "knee_L",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[5]",
+          "value": "/joint_states.position[5]",
           "enabled": true,
-          "label": "knee_R pos",
+          "label": "knee_R",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[6]",
+          "value": "/joint_states.position[6]",
           "enabled": true,
-          "label": "foot_L pos",
+          "label": "foot_L",
           "timestampMethod": "receiveTime"
         },
         {
-          "value": "/policy_capture.joint_pos_rad[7]",
+          "value": "/joint_states.position[7]",
           "enabled": true,
-          "label": "foot_R pos",
+          "label": "foot_R",
           "timestampMethod": "receiveTime"
         }
       ],
@@ -202,12 +187,7 @@
       "showXAxisLabels": true,
       "showYAxisLabels": true,
       "isSynced": true,
-      "xAxisVal": "custom",
-      "xAxisPath": {
-        "value": "/policy_capture.sim_time_s",
-        "enabled": true,
-        "timestampMethod": "receiveTime"
-      },
+      "xAxisVal": "timestamp",
       "sidebarDimension": 240
     }
   },
