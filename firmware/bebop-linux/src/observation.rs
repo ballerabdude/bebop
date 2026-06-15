@@ -10,10 +10,18 @@
 //!
 //! All 8-slot joint groups in both observations and actions use this
 //! order, matching `JOINT_NAMES_ALL` in
-//! `sim/bebop_training/envs/bebop_v2_base_cfg.py`. It is the
-//! left/right-interleaved BFS-from-root order Newton physics produces from
-//! the URDF. The 24-dim MIT-mode action stacks three of these 8-slot
-//! groups in the order: positions, kp, kd.
+//! `sim/bebop_training/experiments/exp_standing.py`. This is a
+//! left-before-right pair order (hip_flex_L, hip_flex_R, hip_abd_L, ...).
+//!
+//! IMPORTANT: this is NOT the order the Newton/PhysX articulation resolves
+//! the joints in — Newton produces RIGHT-before-LEFT per pair. The sim pins
+//! the policy I/O to the order below via `preserve_order=True` on the action
+//! term and the joint_pos/joint_vel observation terms (and asserts it in
+//! `VariableImpedanceJointAction.__init__`). If you ever change this table,
+//! you MUST keep it identical to the sim's `JOINT_NAMES_ALL` or the deployed
+//! policy will be permuted (notably L<->R mirror-swapped) relative to training.
+//! The 24-dim MIT-mode action stacks three of these 8-slot groups in the
+//! order: positions, kp, kd.
 //!
 //! | idx | joint                          |
 //! |-----|--------------------------------|

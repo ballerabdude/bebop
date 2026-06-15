@@ -85,6 +85,36 @@ class VariableImpedanceJointAction(JointPositionAction):
     def __init__(self, cfg: VariableImpedanceJointActionCfg, env: ManagerBasedEnv):
         super().__init__(cfg, env)
 
+        # Sim-to-real joint-order guard. The deployed firmware
+        # (firmware/bebop-linux/src/observation.rs::JOINT_NAMES) builds the
+        # observation and decodes the 24-dim action in EXACTLY
+        # ``cfg.joint_names`` order (left-before-right per pair). The Newton
+        # articulation, however, resolves joints in RIGHT-before-LEFT pair order,
+        # so with ``preserve_order=False`` the policy trains in articulation
+        # order and would deploy mirror-swapped (legs L<->R) against firmware.
+        # The fix (see ActionsCfg in exp_standing.py) is ``preserve_order=True``
+        # on BOTH this action term AND the joint_pos / joint_vel observation
+        # terms, which forces all policy I/O into firmware order. This assertion
+        # verifies the action side resolved correctly and fails fast if a future
+        # USD/URDF re-import or a dropped ``preserve_order`` silently reshuffles
+        # the layout (which would balance in sim but ring / fall on hardware).
+        resolved_names = list(self._joint_names)
+        requested_names = list(cfg.joint_names)
+        if resolved_names != requested_names:
+            raise ValueError(
+                "VariableImpedanceJointAction: the resolved joint order does not "
+                "match the requested joint_names order, so the observation/action "
+                "layout would be PERMUTED relative to the firmware contract "
+                "(observation.rs::JOINT_NAMES).\n"
+                f"  requested (firmware order): {requested_names}\n"
+                f"  resolved  (actual order):   {resolved_names}\n"
+                "Set preserve_order=True on this action term AND on the "
+                "joint_pos / joint_vel observation terms (asset_cfg with "
+                "joint_names=JOINT_NAMES_ALL, preserve_order=True) so sim obs + "
+                "action both match firmware order; or re-export the USD with the "
+                "joints in the requested order."
+            )
+
         if cfg.max_pos_step_per_tick <= 0.0:
             raise ValueError(
                 "VariableImpedanceJointActionCfg.max_pos_step_per_tick must be > 0; "
@@ -164,11 +194,29 @@ class VariableImpedanceJointAction(JointPositionAction):
         # default joint positions are populated.
         self._last_pos_target: torch.Tensor | None = None
 
-        # Action-delay ring buffer: list of length (delay_steps + 1) of
-        # tensors shaped (num_envs, 3 * num_joints). Index 0 is the
-        # oldest entry. We delay the *decoded* (post-affine, post-slew)
-        # full 24-vec so position and gains land on physics together.
-        self._delay_len = cfg.action_delay_steps + 1
+        # Action-delay buffer. Supports a FIXED delay (``action_delay_steps``)
+        # or a per-episode RANDOMIZED delay (``action_delay_range = (min, max)``).
+        # Randomizing the transport delay the policy trains against is the key
+        # robustness knob against latency-induced limit cycles on hardware: a
+        # high-gain stand that is stable at exactly one delay can ring when the
+        # real CAN/motor round-trip differs. The buffer is always sized to the
+        # MAX delay; each tick we gather the per-env-delayed frame. We delay the
+        # *decoded* (post-affine, post-slew) full 24-vec so position and gains
+        # land on physics together.
+        if cfg.action_delay_range is not None:
+            d_min, d_max = int(cfg.action_delay_range[0]), int(cfg.action_delay_range[1])
+            if d_min < 0 or d_max < d_min:
+                raise ValueError(
+                    "VariableImpedanceJointActionCfg.action_delay_range must be "
+                    f"(min, max) with 0 <= min <= max; got {cfg.action_delay_range}."
+                )
+            self._delay_min, self._delay_max = d_min, d_max
+        else:
+            self._delay_min = self._delay_max = cfg.action_delay_steps
+        self._randomize_delay = self._delay_min != self._delay_max
+        self._delay_len = self._delay_max + 1
+        self._delay_steps_per_env: torch.Tensor | None = None
+        self._env_arange: torch.Tensor | None = None
         self._delay_buffer: list[torch.Tensor] | None = None
 
         # Map each Articulation actuator to the column indices in our
@@ -269,6 +317,17 @@ class VariableImpedanceJointAction(JointPositionAction):
             seed_kd = kd_mid.unsqueeze(0).expand(num_envs, -1).clone()
             seed_vec = torch.cat([seed_pos, seed_kp, seed_kd], dim=-1)
             self._delay_buffer = [seed_vec.clone() for _ in range(self._delay_len)]
+            self._env_arange = torch.arange(num_envs, device=device)
+            self._delay_steps_per_env = self._sample_delays(num_envs, device)
+
+    def _sample_delays(self, num: int, device: torch.device) -> torch.Tensor:
+        """Per-env action-delay (in ticks). Uniform in [min, max] when
+        randomizing, else a constant ``max`` (the fixed-delay behavior)."""
+        if self._randomize_delay:
+            return torch.randint(
+                self._delay_min, self._delay_max + 1, (num,), device=device, dtype=torch.long
+            )
+        return torch.full((num,), self._delay_max, dtype=torch.long, device=device)
 
     def process_actions(self, actions: torch.Tensor) -> None:
         n = self._num_joints
@@ -329,10 +388,20 @@ class VariableImpedanceJointAction(JointPositionAction):
         pos_slewed = self._last_pos_target + pos_delta
         self._last_pos_target = pos_slewed.clone()
 
-        # 1-tick action delay on the full decoded 24-vec.
+        # Action delay on the full decoded 24-vec. Keep the buffer at a fixed
+        # length (max_delay + 1): index 0 is the oldest (= max delay), the last
+        # entry is the freshest (delay 0). With a randomized delay we gather the
+        # per-env-delayed frame; with a fixed delay we just take the oldest.
         full = torch.cat([pos_slewed, kp, kd], dim=-1)
         self._delay_buffer.append(full)
-        applied = self._delay_buffer.pop(0)
+        if len(self._delay_buffer) > self._delay_len:
+            self._delay_buffer.pop(0)
+        if self._randomize_delay:
+            stack = torch.stack(self._delay_buffer, dim=0)  # (L, num_envs, 3n)
+            sel = (stack.shape[0] - 1 - self._delay_steps_per_env).clamp_(min=0)
+            applied = stack[sel, self._env_arange]
+        else:
+            applied = self._delay_buffer[0]
 
         # Stash decoded outputs for apply_actions.
         self._processed_actions = applied
@@ -406,6 +475,22 @@ class VariableImpedanceJointAction(JointPositionAction):
                 buf[env_ids, n : 2 * n] = seed_kp
                 buf[env_ids, 2 * n : 3 * n] = seed_kd
 
+        # Re-sample the per-episode action delay for the reset envs so each
+        # episode trains against a fresh latency draw.
+        if self._randomize_delay and self._delay_steps_per_env is not None:
+            dev = self._delay_steps_per_env.device
+            if env_ids is None:
+                self._delay_steps_per_env.copy_(
+                    self._sample_delays(self._delay_steps_per_env.shape[0], dev)
+                )
+            else:
+                ids = (
+                    env_ids
+                    if isinstance(env_ids, torch.Tensor)
+                    else torch.as_tensor(env_ids, device=dev, dtype=torch.long)
+                )
+                self._delay_steps_per_env[ids] = self._sample_delays(int(ids.numel()), dev)
+
 
 @configclass
 class VariableImpedanceJointActionCfg(JointPositionActionCfg):
@@ -435,7 +520,16 @@ class VariableImpedanceJointActionCfg(JointPositionActionCfg):
     action_delay_steps: int = 0
     """Number of policy ticks of pure transport delay applied to the
     full decoded 24-vec before physics sees it. ``1`` ≈ one CAN
-    round-trip @ 100 Hz."""
+    round-trip @ 100 Hz. Ignored when ``action_delay_range`` is set."""
+
+    action_delay_range: tuple[int, int] | None = None
+    """Optional ``(min, max)`` per-episode randomized transport delay, in
+    policy ticks. When set it OVERRIDES the fixed ``action_delay_steps``: each
+    env samples a delay uniformly in ``[min, max]`` on reset and the decoded
+    24-vec is delayed by that many ticks before physics. Randomizing latency is
+    the main robustness knob against latency-induced limit cycles on hardware (a
+    stand tuned for one exact delay can ring when the real CAN/motor round-trip
+    differs). ``None`` keeps the fixed ``action_delay_steps`` behavior."""
 
     kp_min: list[float] = field(default_factory=list)
     """Per-joint lower bound on the decoded kp value, in JOINT_NAMES

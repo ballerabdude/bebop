@@ -62,10 +62,14 @@ defaults:
   # `firmware/bebop-linux/src/config.rs`).
   # Defaults are the hip_flexion (RS04) values; the four motor groups
   # have per-joint overrides below.
+  # Jun 2026 sim-to-real NARROWING (mirror of POLICY_KP/KD_* in
+  # exp_standing.py): kp ceilings lowered + bands tightened + kd floors lifted
+  # to cut loop gain and per-tick gain-noise so the stand stops ringing on
+  # hardware. If you retune one side, retune BOTH and retrain.
   policy_gain_clamps:
     kp_min: 20.0
-    kp_max: 100.0
-    kd_min: 1.5
+    kp_max: 120.0
+    kd_min: 2.0
     kd_max: 5.0
 
 # ============================================================================
@@ -103,7 +107,10 @@ joints:
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 40.0,  kd: 3.0 }
     # v0.15: kp_min raised 5 -> 20, kd_min 0.5 -> 1.5 (basal stance stiffness)
-    policy_gain_clamps: { kp_min: 20.0, kp_max: 100.0, kd_min: 1.5, kd_max: 5.0 }
+    # Jun 2026 sim2real: kp_max 100 -> 80, kd_min 1.5 -> 2.0 (lower gain, more damping)
+    # Jun 14: kp_max 80 -> 120 — narrowing starved hip-flexion (pegged at ceiling,
+    # torso toppling); rate penalties now handle oscillation. Mirror exp_standing.py.
+    policy_gain_clamps: { kp_min: 20.0, kp_max: 120.0, kd_min: 2.0, kd_max: 5.0 }
 
   hip_flexion_right_joint:
     can_interface: can1
@@ -111,7 +118,9 @@ joints:
     model: RS04
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 40.0,  kd: 3.0 }
-    policy_gain_clamps: { kp_min: 20.0, kp_max: 100.0, kd_min: 1.5, kd_max: 5.0 }
+    # Jun 2026 sim2real: kp_max 100 -> 80, kd_min 1.5 -> 2.0 (mirror hip_flexion_left)
+    # Jun 14: kp_max 80 -> 120 (mirror hip_flexion_left)
+    policy_gain_clamps: { kp_min: 20.0, kp_max: 120.0, kd_min: 2.0, kd_max: 5.0 }
 
   # ----- Hip abduction (RS03) -----------------------------------------------
   # X-axis roll, between the hip_flexion and knee_flexion links.
@@ -123,7 +132,8 @@ joints:
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
     # v0.15: kp_min raised 20 -> 40, kd_min 1.0 -> 2.0
-    policy_gain_clamps: { kp_min: 40.0, kp_max: 300.0, kd_min: 2.0, kd_max: 8.0 }
+    # Jun 2026 sim2real: kp_max 300 -> 150, kd_min 2.0 -> 3.0 (cut wide gain band)
+    policy_gain_clamps: { kp_min: 40.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
 
   hip_abduction_right_joint:
     can_interface: can1
@@ -131,7 +141,8 @@ joints:
     model: RS03
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
-    policy_gain_clamps: { kp_min: 40.0, kp_max: 300.0, kd_min: 2.0, kd_max: 8.0 }
+    # Jun 2026 sim2real: kp_max 300 -> 150, kd_min 2.0 -> 3.0 (mirror hip_abduction_left)
+    policy_gain_clamps: { kp_min: 40.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
 
   # ----- Knee flexion (RS04) ------------------------------------------------
   # Knee pitch. Renamed from shin_*_joint (motor IDs 34 / 44 unchanged).
@@ -142,7 +153,8 @@ joints:
     hard_limits: { pos_min: -1.570796, pos_max: 1.570796, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 120.0, kd: 4.0 }
     # v0.15: kp_min raised 10 -> 30, kd_min 1.0 -> 2.0
-    policy_gain_clamps: { kp_min: 30.0, kp_max: 250.0, kd_min: 2.0, kd_max: 8.0 }
+    # Jun 2026 sim2real: kp_max 250 -> 150, kd_min 2.0 -> 3.0 (cut wide gain band)
+    policy_gain_clamps: { kp_min: 30.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
 
   knee_flexion_right_joint:
     can_interface: can1
@@ -150,7 +162,8 @@ joints:
     model: RS04
     hard_limits: { pos_min: -1.570796, pos_max: 1.570796, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 120.0, kd: 4.0 }
-    policy_gain_clamps: { kp_min: 30.0, kp_max: 250.0, kd_min: 2.0, kd_max: 8.0 }
+    # Jun 2026 sim2real: kp_max 250 -> 150, kd_min 2.0 -> 3.0 (mirror knee_flexion_left)
+    policy_gain_clamps: { kp_min: 30.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
 
   # ----- Foot / ankle (RS02) ------------------------------------------------
   foot_left_joint:
@@ -171,7 +184,11 @@ joints:
     # rewards stiffness, so the floor was lifted to force a firmer, better-
     # damped ankle. kd_max stays 5.0 (RS02 encoder ceiling). MUST mirror
     # POLICY_KP_MIN/POLICY_KD_MIN[6,7] in sim exp_standing.py.
-    policy_gain_clamps: { kp_min: 80.0, kp_max: 250.0, kd_min: 3.0, kd_max: 5.0 }
+    # Jun 2026 sim2real: kp_max 250 -> 180 (lower loop gain, anti-ring).
+    # Jun 14 ANKLE RESTORE: kp_max 180 -> 250, kp_min 80 -> 100. The 180 cap
+    # starved the ankle (pegged at ceiling, robot couldn't hold the torso up);
+    # rate penalties now handle oscillation. Hard 17 N·m torque limit unchanged.
+    policy_gain_clamps: { kp_min: 100.0, kp_max: 250.0, kd_min: 3.0, kd_max: 5.0 }
 
   foot_right_joint:
     can_interface: can1
@@ -181,7 +198,9 @@ joints:
     hold_gains:  { kp: 375.0, kd: 5.0 }
     # Jun 2026: kp_min 30 -> 80, kd_min 1.0 -> 3.0 (mirror of foot_left_joint
     # and POLICY_KP_MIN/POLICY_KD_MIN[6,7] in sim exp_standing.py).
-    policy_gain_clamps: { kp_min: 80.0, kp_max: 250.0, kd_min: 3.0, kd_max: 5.0 }
+    # Jun 2026 sim2real: kp_max 250 -> 180 (mirror foot_left_joint).
+    # Jun 14 ANKLE RESTORE: kp_max 180 -> 250, kp_min 80 -> 100 (mirror foot_left_joint).
+    policy_gain_clamps: { kp_min: 100.0, kp_max: 250.0, kd_min: 3.0, kd_max: 5.0 }
 
 # ============================================================================
 # IMU (Adafruit BNO085 breakout on SPI) — optional

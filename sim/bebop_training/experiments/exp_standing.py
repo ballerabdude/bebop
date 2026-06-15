@@ -29,7 +29,7 @@ Kept because the real robot needs them:
   * IMU sample rate (200 Hz) and action delay (20 ms) matching the real
     loop (``bebop_v2.yaml`` ``rotation_vector_period_ms = 5``).
 
-Reward set (clean-slate minimum — three terms only):
+Reward set (pitch-imbalance quiet stand):
   * ``alive``               — +1/tick while the episode has not terminated;
                               the positive survival carrot.
   * ``termination_penalty`` — one-shot ``is_terminated`` penalty on a *fall*
@@ -55,25 +55,43 @@ Reward set (clean-slate minimum — three terms only):
                               bonus drove Loss/entropy to grow unbounded (worst
                               in fixed-gain, where the 16 inert kp/kd channels
                               have no other gradient).
-  * ``gain_rate``           — THIRD knob: tick-to-tick change penalty on the
+  * ``gain_l2``             — THIRD knob: raw kp/kd magnitude penalty, centered
+                              on midpoint gains. This keeps variable impedance
+                              away from rails unless balance really needs it.
+  * ``gain_rate``           — FOURTH knob: tick-to-tick change penalty on the
                               16 kp/kd channels (smooth, slowly-varying
                               impedance).
-  * ``position_rate``       — FOURTH knob: tick-to-tick change penalty on the
+  * ``position_rate``       — FIFTH knob: tick-to-tick change penalty on the
                               8 position channels. Playback of the converged
                               entropy-0.001 run showed a ~5-6 Hz pos-target
                               limit cycle riding the 0.020 rad/tick slew
                               limiter; action_l2 (level) and gain_rate
                               ([8:24] only) leave that direction unpenalized.
-  * ``stationary_pose``     — FIFTH knob: bounded positive reward for near-zero
+  * ``stationary_pose``     — SIXTH knob: bounded positive reward for near-zero
                               joint velocity. The position-rate run removed the
                               violent target limit cycle but still learned a
                               moving hip/knee balance; this biases the optimum
                               toward a quiet locked stand without an unbounded
                               penalty during recovery.
+  * ``default_joint_pose``  — SEVENTH knob: bounded positive reward for actual
+                              joint positions near the configured default
+                              posture, so the learned equilibrium is tied to
+                              the standing standard used by the action decoder.
+  * ``forward_lean``        — EIGHTH knob: non-privileged IMU penalty for
+                              parking the heavy torso forward over the toes,
+                              the real-world fall mode that sim can otherwise
+                              hide with a rigid-foot contact patch.
+  * ``base_ang_vel_xy``     — NINTH knob: torso roll/pitch angular-velocity
+                              penalty (``ang_vel_xy_l2``). Damps the ~1 Hz
+                              body sway that appeared once the ankle/hipflex
+                              stiffness was restored (underdamped natural
+                              inverted-pendulum mode; the RS02 ankle kd ceiling
+                              limits joint-level damping). Uses the IMU gyro the
+                              policy already observes, so it is non-privileged.
   All other shaping / regularization terms (joint_pos_limits, joint_effort,
   joint_motion, feet_ankle_motion, track_lin_vel_xy / track_ang_vel_z,
-  lin_vel_z_l2 / ang_vel_xy_l2, action_rate_l2 / joint_acc_l2, and the
-  variable-impedance gain_center) remain REMOVED for the clean slate —
+  lin_vel_z_l2, action_rate_l2 / joint_acc_l2) remain REMOVED
+  for this quiet-stand task —
   re-add one at a time and validate each.
 
 Terminations:
@@ -96,11 +114,12 @@ Reset randomization:
     widen it gradually once the robot reliably stands. Watch
     ``mean_episode_length`` and the ``base_link_ground_contact``
     termination rate when changing it.
-  * Base pitch symmetric ±8°, well inside the ±30° fall limit so resets
-    measure balance rather than terminating on the cliff. Roll and yaw
-    are pinned to zero — the real robot is never dropped sideways or
+  * Base pitch symmetric ±15°, inside the ±30° fall limit so resets measure
+    heavy-torso pitch recovery rather than terminating on the cliff. Roll and
+    yaw are pinned to zero — the real robot is never dropped sideways or
     upside-down; it starts upright with the feet an inch off the ground.
-  * Initial angular velocity perturbed by ±0.3 rad/s on all three axes.
+  * Initial angular velocity perturbed only in pitch by ±0.6 rad/s, keeping the
+    task focused on fore/aft torso imbalance instead of general tumbling.
 
 Domain randomization (kept):
   * ``randomize_actuator_params`` — per-episode scaling of joint
@@ -120,10 +139,15 @@ Deliberately off (add back one at a time after hardware validation):
   * Explicit air-time / foot-placement stepping rewards; pose-lock
     (``stationary_pose_exp``) shaping.
 
-Observation noise (ON): per-term sensor-scale noise on the IMU + encoder
-observations (see ObservationsCfg) damps the learned actuator limit-cycle
-jitter and closes a sim-to-real gap. ``enable_corruption=True`` on the policy
-obs group applies it.
+Observation noise (ON): small hardware-noise corruption on every measured
+channel — BNO gyro (base_ang_vel), motor-reported joint velocity, and (added
+Jun 2026 for sim-to-real robustness) projected gravity and joint position.
+The position/gravity channels were previously kept clean because the still
+capture shows them ~constant, but a policy that keys on perfectly clean,
+zero-latency gravity/encoder signals learns a razor-sharp high-gain reaction
+that rings against the real (noisy, slightly laggy) IMU + encoders; small noise
+forces a lower-gain, transfer-robust stand. last_action and cmd_vel are exact
+policy/command outputs, so they get no noise.
 
 Deployment checklist (every run):
   1. Export ONNX from the training run.
@@ -163,8 +187,11 @@ from ..envs.bebop_v2_events import (
     torso_com_curriculum,
 )
 from ..envs.bebop_v2_rewards import (
+    action_gain_l2,
     action_gain_rate_l2,
     action_position_rate_l2,
+    default_joint_pose_exp,
+    forward_lean_penalty,
     stationary_pose_exp,
 )
 from ..envs.bebop_v2_terminations import (
@@ -197,11 +224,17 @@ PITCH_FALL_LIMIT_GX = math.sin(math.radians(PITCH_FALL_LIMIT_DEG))
 ROLL_FALL_LIMIT_DEG = 30.0
 ROLL_FALL_LIMIT_GY = math.sin(math.radians(ROLL_FALL_LIMIT_DEG))
 
-# Initial-pose pitch range (radians, for reset_root_state_uniform's
+# Initial torso pitch imbalance (radians, for reset_root_state_uniform's
 # pose_range["pitch"], an Euler angle in rad — NOT a projected gravity
-# component). Symmetric ±8° spawn, comfortably inside the ±30° fall limit
-# so resets measure balance rather than terminating on the cliff.
-PITCH_INIT_RAD = math.radians(8.0)
+# component). Symmetric ±15° spawn, still inside the ±30° fall envelope, trains
+# the policy on the heavy-torso pitch failure mode instead of only a near-level
+# static stand.
+PITCH_INIT_RAD = math.radians(15.0)
+
+# Initial torso pitch-rate imbalance (rad/s). The heavy torso falls through
+# pitch, so inject pitch angular velocity on reset and keep roll/yaw rates
+# pinned to avoid diluting this quiet-stand task into general tumbling recovery.
+PITCH_RATE_INIT_RAD_S = 0.6
 
 # Fraction of each joint's soft range (measured from the default pose to
 # each limit) used when sampling reset poses. 1.0 = full configuration
@@ -243,6 +276,29 @@ TORSO_COM_RANGE = {
 TORSO_COM_START_FRACTION = 0.25
 TORSO_COM_CURRICULUM_STEPS = 100_000
 
+# Observation corruption matched to the current hanging/still hardware capture.
+# Keep this much smaller than generic locomotion defaults: the standing task
+# first needs a clean equilibrium, then robustness to the real noise floor.
+GYRO_NOISE_RAD_S = 0.01
+JOINT_VEL_NOISE_RAD_S = 0.12
+# Jun 2026 sim-to-real: also corrupt projected gravity and joint position.
+# These were kept clean (the still capture shows them ~constant), but a policy
+# that keys on a perfectly clean, zero-latency gravity / encoder signal learns a
+# razor-sharp high-gain reaction that rings against the real (noisy, slightly
+# laggy) IMU + encoders. Small noise forces a more robust, lower-gain stand.
+#   * projected_gravity: ±0.02 (unit-vector component ≈ ±1.1° tilt)
+#   * joint_pos:         ±0.01 rad (encoder quantization / jitter)
+PROJ_GRAV_NOISE = 0.02
+JOINT_POS_NOISE_RAD = 0.01
+
+# Per-episode randomized action transport delay, in 100 Hz policy ticks
+# (1 tick = 10 ms). The deployed loop's true latency (CAN round-trip + motor PD
+# + feedback) is not a single fixed value, and a stand tuned for exactly one
+# delay can limit-cycle when the real delay differs. Training across 10-40 ms
+# forces a latency-robust (more damped) policy. Replaces the old fixed 20 ms
+# (``action_delay_steps=2``).
+ACTION_DELAY_RANGE = (1, 4)
+
 # Joint order must match firmware/bebop-linux/src/observation.rs::JOINT_NAMES.
 JOINT_NAMES_ALL = [
     "hip_flexion_left_joint",
@@ -255,21 +311,36 @@ JOINT_NAMES_ALL = [
     "foot_right_joint",
 ]
 
-# Per-joint kp/kd clamps for the 24-dim MIT action. Must mirror
-# POLICY_KP_MIN/MAX and POLICY_KD_MIN/MAX in bebop_v2_base_cfg.py and
+# Per-joint kp/kd clamps for the 24-dim MIT action. Must mirror the per-joint
 # policy_gain_clamps in firmware/bebop-linux/config/bebop_v2.yaml.
-# Foot/ankle (RS02, indices 6,7) gain FLOORS raised so the policy can't park
-# the ankle soft: hardware showed it balancing but buzzing near the setpoint
-# (under-damped) and feeling compliant. Because action_l2 + gain_rate pull the
-# raw gain channels toward 0 = band midpoint, the only way to get a stiffer,
-# better-damped ankle is to lift the band floor (the policy will re-converge to
-# the new midpoint). kd_min 1.0 -> 3.0 (kd_max stays 5.0 — the RS02 encoder
-# ceiling, can't go higher) raises parked damping ~3.0 -> ~4.0; kp_min 30 -> 80
-# raises parked stiffness ~140 -> ~165. MUST stay mirrored with the foot_*
-# policy_gain_clamps in firmware/bebop-linux/config/bebop_v2.yaml.
-POLICY_KP_MIN = [20.0, 20.0, 40.0, 40.0, 30.0, 30.0, 80.0, 80.0]
-POLICY_KP_MAX = [100.0, 100.0, 300.0, 300.0, 250.0, 250.0, 250.0, 250.0]
-POLICY_KD_MIN = [1.5, 1.5, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0]
+#
+# Jun 2026 sim-to-real NARROWING: the previous wide bands (hip_abd 40-300,
+# knee 30-250, foot 80-250) let the policy run very high stiffness AND let the
+# under-determined raw gain channels inject large physical kp/kd swings every
+# tick (a raw-channel noise of std ~0.35 mapped to ±45 kp on hip_abd). A
+# quiet-in-sim stand then rang on hardware: high loop gain has little stability
+# margin against the real latency / torque-ripple / sensor noise the DCMotor
+# sim model doesn't capture. Lowering the kp CEILINGS cuts loop gain (bigger
+# margin), tightening the RANGES cuts the per-tick gain-noise the policy feeds
+# back through last_action + physics, and lifting the kd FLOORS adds damping.
+# This is still variable impedance — just not stiff enough to ring. MUST stay
+# mirrored with the per-joint policy_gain_clamps in bebop_v2.yaml.
+#   order: [hipflexL, hipflexR, hipabdL, hipabdR, kneeL, kneeR, footL, footR]
+#
+# Jun 14 ANKLE/HIPFLEX RESTORE: the Jun 2026 narrowing helped kill the
+# oscillation, but the deployed smoothed policy then could not hold the heavy
+# torso up — the hardware capture showed the FOOT kp pegged at its 180 ceiling
+# (mean 138, raw_kp positive = asking for more) and HIPFLEX kp pegged at 80,
+# and the torso slowly toppling. Those are the load-bearing fore/aft balance
+# joints. Now that the rate penalties (position_rate / gain_rate) handle
+# oscillation, we don't need the gain CAP to do it too, so the ankle + hipflex
+# ceilings are restored (foot kp_max 180->250, kp_min 80->100 so the ankle is
+# never soft; hipflex kp_max 80->120). Knee / hip_abd are unchanged — they had
+# headroom (not pegged). NOTE: the RS02 ankle still has a hard 17 N·m torque
+# limit, so kp lets it use that authority firmly but cannot exceed it.
+POLICY_KP_MIN = [20.0, 20.0, 40.0, 40.0, 30.0, 30.0, 100.0, 100.0]
+POLICY_KP_MAX = [120.0, 120.0, 150.0, 150.0, 150.0, 150.0, 250.0, 250.0]
+POLICY_KD_MIN = [2.0, 2.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
 POLICY_KD_MAX = [5.0, 5.0, 8.0, 8.0, 8.0, 8.0, 5.0, 5.0]
 
 # Robstride motor friction / armature and T-N curve corners.
@@ -402,10 +473,22 @@ class ActionsCfg:
     joint_pos = VariableImpedanceJointActionCfg(
         asset_name="robot",
         joint_names=JOINT_NAMES_ALL,
+        # CRITICAL sim-to-real: force the action's joint order to EXACTLY
+        # JOINT_NAMES_ALL (= firmware observation.rs::JOINT_NAMES). The Newton
+        # articulation resolves joints in RIGHT-before-LEFT pair order
+        # ([hipflex_R, hipflex_L, ...]) while the firmware contract is
+        # LEFT-before-RIGHT ([hipflex_L, hipflex_R, ...]). With the default
+        # preserve_order=False the policy would train on the articulation order
+        # and deploy mirror-swapped (legs L<->R) against firmware. The matching
+        # joint_pos/joint_vel observation terms below ALSO pin preserve_order so
+        # the whole policy I/O is in firmware order. (The action-term assertion
+        # in VariableImpedanceJointAction.__init__ guards this.)
+        preserve_order=True,
         pos_scale=0.5,
         use_default_offset=True,
         max_pos_step_per_tick=0.020,
         action_delay_steps=2,
+        action_delay_range=ACTION_DELAY_RANGE,
         kp_min=POLICY_KP_MIN,
         kp_max=POLICY_KP_MAX,
         kd_min=POLICY_KD_MIN,
@@ -417,23 +500,18 @@ class ActionsCfg:
 class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
-        # Per-term observation noise (applied because enable_corruption=True
-        # below). The deterministic policy was buzzing the joints in a learned
-        # limit cycle: with perfectly clean sim feedback PPO has no reason to
-        # be smooth, so it builds a razor-sharp feedback loop that turns into
-        # high-frequency chatter. Injecting sensor-scale noise forces the
-        # policy to stop reacting to fluctuations it cannot trust, which damps
-        # the jitter AND closes a sim-to-real gap (the real BNO085 + encoders
-        # are noisy, so a noise-free policy transfers poorly). Magnitudes are
-        # the standard Isaac Lab locomotion levels; tune toward measured
-        # BNO085 / encoder noise once characterized.
-        #   * base_ang_vel (gyro)        : ±0.2 rad/s
-        #   * projected_gravity (tilt)   : ±0.05 (≈ ±3° of gravity direction)
-        #   * joint_pos (encoders)       : ±0.01 rad
-        #   * joint_vel (encoder deriv.) : ±1.5 rad/s (noisiest — a differenced
-        #                                  signal)
-        # last_action and velocity_commands are exact (policy/command outputs,
-        # not sensors), so they get no noise.
+        # Observation noise (applied because enable_corruption=True below).
+        # Every measured channel is corrupted; only the exact policy/command
+        # echoes (last_action, velocity_commands) stay clean:
+        #   * base_ang_vel (BNO gyro)        : ±0.01 rad/s
+        #   * projected_gravity (IMU fusion) : ±0.02  (≈ ±1.1° tilt)
+        #   * joint_pos (encoder)            : ±0.01 rad
+        #   * joint_vel (motor feedback)     : ±0.12 rad/s
+        # Jun 2026 sim-to-real: projected_gravity / joint_pos used to be clean
+        # (the still capture shows them ~constant), but that let the policy
+        # learn a razor-sharp high-gain reaction on a perfect signal which rang
+        # on the real, noisy/laggy IMU + encoders. Small noise forces a more
+        # robust, lower-gain stand.
         #
         # NOTE: base_lin_vel is intentionally NOT an observation. Bebop V2
         # has no wheel odometry or VIO estimator, so the real robot can only
@@ -445,20 +523,38 @@ class ObservationsCfg:
         base_ang_vel = ObsTerm(
             func=mdp.imu_ang_vel,
             params={"asset_cfg": SceneEntityCfg("imu")},
-            noise=Unoise(n_min=-0.2, n_max=0.2),
+            noise=Unoise(n_min=-GYRO_NOISE_RAD_S, n_max=GYRO_NOISE_RAD_S),
         )
         projected_gravity = ObsTerm(
             func=mdp.imu_projected_gravity,
             params={"asset_cfg": SceneEntityCfg("imu")},
-            noise=Unoise(n_min=-0.05, n_max=0.05),
+            noise=Unoise(n_min=-PROJ_GRAV_NOISE, n_max=PROJ_GRAV_NOISE),
         )
+        # joint_pos / joint_vel MUST be emitted in JOINT_NAMES_ALL order (=
+        # firmware observation.rs::JOINT_NAMES), NOT the Newton articulation
+        # order (which is right-before-left per pair). Pinning joint_names +
+        # preserve_order=True here keeps these observations in lock-step with
+        # the action term (which also sets preserve_order=True) and with the
+        # firmware obs builder. Without this the policy's joint sensing would be
+        # L<->R mirror-swapped on hardware. (default_offset for joint_pos_rel is
+        # the per-joint default pose, looked up by id, so reordering is safe.)
         joint_pos = ObsTerm(
             func=mdp.joint_pos_rel,
-            noise=Unoise(n_min=-0.01, n_max=0.01),
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot", joint_names=JOINT_NAMES_ALL, preserve_order=True
+                )
+            },
+            noise=Unoise(n_min=-JOINT_POS_NOISE_RAD, n_max=JOINT_POS_NOISE_RAD),
         )
         joint_vel = ObsTerm(
             func=mdp.joint_vel_rel,
-            noise=Unoise(n_min=-1.5, n_max=1.5),
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot", joint_names=JOINT_NAMES_ALL, preserve_order=True
+                )
+            },
+            noise=Unoise(n_min=-JOINT_VEL_NOISE_RAD_S, n_max=JOINT_VEL_NOISE_RAD_S),
         )
         actions = ObsTerm(func=mdp.last_action)
         velocity_commands = ObsTerm(
@@ -469,7 +565,7 @@ class ObservationsCfg:
         def __post_init__(self):
             # Apply the per-term noise models above. Without this the noise=
             # configs are silently ignored.
-            self.enable_corruption = False
+            self.enable_corruption = True
 
     def __post_init__(self):
         self.policy = self.PolicyCfg()
@@ -495,11 +591,10 @@ class EventCfg:
             "range_fraction": RESET_JOINT_RANGE_FRACTION,
         },
     )
-    # Base-orientation randomization. Only torso pitch is perturbed:
-    # roll and yaw are pinned to zero because the real deployment never
-    # drops the robot sideways or upside-down — it starts upright with
-    # the feet an inch off the ground, so a pitch-only spawn matches
-    # hardware and keeps every reset recoverable.
+    # Base-orientation randomization. Only torso pitch is perturbed: the real
+    # failure starts with the heavy torso falling fore/aft, not with a sideways
+    # or yawed drop. The wider pitch and pitch-rate reset forces the policy to
+    # catch that imbalance instead of only learning an almost-level static pose.
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
@@ -509,8 +604,9 @@ class EventCfg:
                 "y": (0.0, 0.0),
                 "z": (0.0, 0.0),
                 "roll": (0.0, 0.0),
-                # Symmetric ±8° pitch spawn, inside the ±30° fall limit so
-                # resets measure balance rather than terminating on the cliff.
+                # Symmetric ±15° pitch spawn, inside the ±30° fall limit so
+                # resets measure pitch recovery rather than terminating on the
+                # cliff.
                 "pitch": (-PITCH_INIT_RAD, PITCH_INIT_RAD),
                 "yaw": (0.0, 0.0),
             },
@@ -518,9 +614,9 @@ class EventCfg:
                 "x": (0.0, 0.0),
                 "y": (0.0, 0.0),
                 "z": (0.0, 0.0),
-                "roll": (-0.3, 0.3),
-                "pitch": (-0.3, 0.3),
-                "yaw": (-0.3, 0.3),
+                "roll": (0.0, 0.0),
+                "pitch": (-PITCH_RATE_INIT_RAD_S, PITCH_RATE_INIT_RAD_S),
+                "yaw": (0.0, 0.0),
             },
         },
     )
@@ -530,16 +626,20 @@ class EventCfg:
     # side and unit-to-unit / thermal / wear variation are unmodeled. Re-sample
     # each episode (scale about the measured nominal) so the policy is robust to
     # the spread instead of overfitting one bench measurement:
-    #   - friction: x[0.7, 1.4]  (assembly-dependent; widest empirical spread)
-    #   - armature: x[0.9, 1.1]  (motor-rotor property; tight, ~0.4% across the
-    #                             two RS04 joints, so only a small band)
+    #   - friction: x[0.5, 1.6]  (assembly-dependent; widest empirical spread)
+    #   - armature: x[0.8, 1.25] (motor-rotor property; tighter, but widened for
+    #                             sim-to-real margin on the unmeasured left side)
+    # Jun 2026 sim-to-real: widened from x[0.7,1.4] / x[0.9,1.1]. The hardware
+    # ring is a transfer/robustness failure, so the policy needs to see a wider
+    # actuator-dynamics spread (not just one bench measurement) to learn a stand
+    # that survives the real motor response rather than overfitting the sim one.
     randomize_actuator_params = EventTerm(
         func=mdp.randomize_joint_parameters,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=JOINT_NAMES_ALL),
-            "friction_distribution_params": (0.7, 1.4),
-            "armature_distribution_params": (0.9, 1.1),
+            "friction_distribution_params": (0.5, 1.6),
+            "armature_distribution_params": (0.8, 1.25),
             "operation": "scale",
             "distribution": "uniform",
         },
@@ -563,24 +663,12 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Clean-slate minimal standing reward: stay alive, don't fall, stay upright.
+    """Standing reward: stay alive and recover heavy-torso pitch imbalance.
 
-    Deliberately stripped to the bare minimum so we can add ONE shaping/
-    regularization term at a time and read its effect cleanly. Only three terms:
-
-      * ``alive`` / ``termination_penalty`` — the structural "stay standing"
-        objective (NOT shaping). ``alive`` is the +1/tick survival carrot;
-        ``termination_penalty`` is the one-shot fall cost. Together they make
-        not-falling the goal; without a positive carrot a lone tilt penalty
-        gives PPO a thin, gradient-poor signal and invites degenerate solutions.
-      * ``torso_upright`` — the SINGLE shaping term: ``flat_orientation_l2``
-        penalizes the squared xy projected-gravity components (any torso tilt,
-        symmetric), rewarding the policy for keeping the torso vertical.
-
-    Everything else (joint-limit / effort / motion / feet-straight / ankle /
-    velocity-tracking / off-command / action-rate / position-rate / joint-acc /
-    action-magnitude / variable-impedance gain conditioning) was REMOVED. Re-add
-    them one at a time, validating each, once this baseline stands.
+    The hardware failure is dominated by the heavy torso pitching forward/back,
+    so this task now emphasizes uprightness and forward-lean avoidance over a
+    base-stillness target. Smoothness and joint-velocity terms still discourage
+    chatter, but the policy is allowed to move the base/joints to catch pitch.
     """
 
     # +1/tick while the episode has not terminated — the positive survival
@@ -600,9 +688,24 @@ class RewardsCfg:
     # The single balance shaping term. ``flat_orientation_l2`` penalizes the
     # squared xy components of projected gravity, i.e. any torso tilt (forward,
     # back, or sideways) symmetrically — no hardcoded target lean, just "stay
-    # upright." Weight kept high (-2.0): with a heavy, high-CoM torso, staying
-    # upright is the priority.
-    torso_upright = RewTerm(func=mdp.flat_orientation_l2, weight=-2.0)
+    # upright." Weight tightened (-2.0 -> -4.0): the hardware target is a
+    # straighter, more level torso, so even small persistent pitch/roll offsets
+    # should lose to the zero-tilt equilibrium.
+    torso_upright = RewTerm(func=mdp.flat_orientation_l2, weight=-4.0)
+
+    # Jun 15 knob (kills the ~1 Hz body sway): penalize torso roll/pitch
+    # ANGULAR VELOCITY. After the ankle/hipflex stiffness was restored the
+    # robot finally held itself upright on hardware, but it swayed ±~9.5° at
+    # ~1 Hz (the natural inverted-pendulum mode) — the balance loop is
+    # underdamped, partly because the RS02 ankle kd is hard-capped at 5. Every
+    # other reward only penalizes torso tilt *position* (torso_upright /
+    # forward_lean) or *joint* velocity (stationary_pose / joint_vel), so the
+    # torso could swing THROUGH upright at speed for free. ``ang_vel_xy_l2``
+    # taxes Σ(ω_x² + ω_y²) of the base — the same gyro signal the IMU measures
+    # and the policy already observes (base_ang_vel), so it is non-privileged
+    # and transfers. This directly damps the sway. Raise if it still wobbles on
+    # hardware; lower if it becomes too stiff to catch the pitch resets.
+    base_ang_vel_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.10)
 
     # FIRST knob added back (fixes an observed cheat): hip-abduction deviation
     # penalty. With nothing pinning the hip-abduction joints, the policy learned
@@ -647,11 +750,18 @@ class RewardsCfg:
     # penalizes Σ raw² over all 24 channels, so large std -> large expected
     # sampled magnitude -> penalty -> the gradient pushes std back down,
     # anchoring the distribution (and pulling raw toward 0 = default pose +
-    # midpoint gains, a sane prior). Raise toward -0.02 if entropy still climbs;
-    # lower if the policy goes limp / under-actuates.
-    action_l2 = RewTerm(func=mdp.action_l2, weight=-0.01)
+    # midpoint gains, a sane prior). Strengthened after variable-impedance
+    # playback still showed large position outputs and gain drift.
+    action_l2 = RewTerm(func=mdp.action_l2, weight=-0.02)
 
-    # THIRD knob added back (smoothness): tick-to-tick CHANGE penalty on the 16
+    # THIRD knob (variable-impedance center): raw kp/kd magnitude penalty only.
+    # ``action_l2`` spreads its gradient over all 24 channels; this isolates the
+    # 16 gain channels so the quiet-stand optimum is midpoint gains unless the
+    # policy earns enough balance reward to move a gain away from zero. This is
+    # the main anti-rail term for variable impedance.
+    gain_l2 = RewTerm(func=action_gain_l2, weight=-0.03)
+
+    # FOURTH knob added back (smoothness): tick-to-tick CHANGE penalty on the 16
     # variable-impedance kp/kd channels only. ``action_l2`` above is a *level*
     # penalty (Σ raw² over all 24 channels) — it pulls the action toward the
     # neutral pose + midpoint gains but says nothing about how fast a channel
@@ -661,11 +771,14 @@ class RewardsCfg:
     # *rate* penalty (Σ (gain_t - gain_{t-1})² over channels [8:24]) that taxes
     # only the change, leaving the level free — so it enforces smooth,
     # slowly-varying impedance without fighting action_l2's mid-stiffness prior.
-    # Start mild (-0.01); raise toward -0.05 if playback still shows the gains
-    # buzzing. Watch the term's value in TensorBoard to size the weight.
-    gain_rate = RewTerm(func=action_gain_rate_l2, weight=-0.01)
+    # Strengthened substantially after playback showed gain channels still
+    # changing while projected gravity was nearly constant. Watch the term's
+    # value in TensorBoard; lower if the policy cannot catch pitch resets.
+    # Jun 14 smoothing: -0.10 -> -0.20 to suppress residual gain chatter that
+    # rode along with the position bang-bang in the first robust-transfer run.
+    gain_rate = RewTerm(func=action_gain_rate_l2, weight=-0.20)
 
-    # FOURTH knob added back (kills the position limit cycle): tick-to-tick
+    # FIFTH knob added back (kills the position limit cycle): tick-to-tick
     # CHANGE penalty on the 8 POSITION channels. Deterministic playback of the
     # entropy-0.001 run showed the pos targets oscillating at ~5-6 Hz with
     # ~0.1 rad commanded swing (e.g. foot_right raw -0.665 -> -0.473 -> -0.434
@@ -677,20 +790,65 @@ class RewardsCfg:
     # kp/kd channels [8:24] — after it smoothed the gains, the chatter migrated
     # to the one unpenalized direction left, the pos-channel rate.
     # ``action_position_rate_l2`` taxes Σ (pos_t - pos_{t-1})² over channels
-    # [0:8] only. Start mild (-0.01, same as gain_rate); raise toward -0.05 if
-    # playback still shows the setpoints buzzing, lower if the policy goes
-    # sluggish and stops catching tilts.
-    position_rate = RewTerm(func=action_position_rate_l2, weight=-0.01)
+    # [0:8] only. Strengthened because the policy was still changing raw
+    # position targets by several hundredths per tick around an already-level
+    # torso. Lower if the policy becomes too sluggish to catch pitch.
+    # Jun 14 smoothing: -0.05 -> -0.30. The first robust-transfer policy stood
+    # upright with tame gains but the deployed capture showed the position
+    # targets STILL exceeding the 0.020 rad/tick slew limit on 50-78% of ticks
+    # (a ~1.8 Hz leg limit cycle from bang-banging the setpoint). This is the
+    # primary anti-bang-bang lever; raise further if the hardware still hunts,
+    # back off if mean_episode_length drops (can't catch the pitch resets).
+    position_rate = RewTerm(func=action_position_rate_l2, weight=-0.30)
 
-    # FIFTH knob added back (quiet stand): bounded positive reward for low joint
+    # SIXTH knob added back (quiet stand): bounded positive reward for low joint
     # velocity. The position-rate run removed the violent setpoint limit cycle,
     # but playback still showed a dynamic hip/knee balance with persistent torso
     # angular velocity instead of a settled stance. ``stationary_pose_exp`` is
     # exp(-Σ joint_vel² / std²), bounded in [0, 1], so it strongly prefers a
     # still, locked pose without adding an unbounded cost during a legitimate
-    # recovery transient. Start modest (+0.5); raise toward +1.0 if the robot
-    # still dances, lower if it freezes and loses tilt recovery.
-    stationary_pose = RewTerm(func=stationary_pose_exp, weight=0.5)
+    # recovery transient. Tightened after playback showed a level torso with
+    # persistent hip motion; lower the weight or widen std if pitch recovery
+    # becomes too stiff.
+    stationary_pose = RewTerm(
+        func=stationary_pose_exp,
+        weight=1.0,
+        params={"std": 0.75},
+    )
+
+    # SIXTH-b knob (Jun 14 smoothing): unbounded joint-velocity penalty. The
+    # bounded ``stationary_pose_exp`` above SATURATES toward 0 once the legs
+    # hunt (its exp tail is flat), so it provides almost no gradient at the
+    # ~0.5 rad/s, ~1.8 Hz limit cycle seen in the first robust-transfer
+    # deployment. ``joint_vel_l2`` (Σ joint_vel²) has its LARGEST gradient
+    # exactly there, so it actively damps the residual oscillation that the
+    # saturated exp reward can't see. Kept small so it doesn't punish the
+    # legitimate pitch-recovery transient from the ±15° reset; raise if the
+    # hardware still hunts, lower if recovery becomes sluggish.
+    # Jun 15: -0.005 -> -0.015. Joint velocities rose (std 0.7-1.3 rad/s) when
+    # the gain ceilings were restored, so the joint-level damping is bumped in
+    # step with the new base_ang_vel_xy torso-sway penalty.
+    joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-0.015)
+
+    # SEVENTH knob (configured standing posture): bounded positive reward for
+    # actual joint positions near ``asset.data.default_joint_pos``. That default
+    # is the same nominal stand used by ``VariableImpedanceJointAction`` as the
+    # center of the raw position action mapping, so this ties the learned
+    # equilibrium to the configured standing standard instead of whatever
+    # crouched/asymmetric pose happens to survive. Keep bounded so pitch
+    # recovery can still leave the posture temporarily.
+    default_joint_pose = RewTerm(
+        func=default_joint_pose_exp,
+        weight=0.75,
+        params={"std": 0.35},
+    )
+
+    # EIGHTH knob (heavy-torso forward fall): non-privileged IMU penalty for
+    # parking the torso forward over the toes. The real robot's heavy torso and
+    # weak ankle cannot hold the sim-only toe-balance strategy, so this shapes
+    # the policy away from that fall basin while still allowing brief forward
+    # excursions during recovery.
+    forward_lean = RewTerm(func=forward_lean_penalty, weight=-3.0)
 
     # NOTE: ``feet_load_symmetry`` (the privileged contact-force anti-one-foot-
     # lean penalty) was REMOVED. It reads per-foot contact forces the robot

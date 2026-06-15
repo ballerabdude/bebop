@@ -15,9 +15,16 @@ use std::path::Path;
 // ===========================================================================
 
 /// Control loop timing configuration.
+///
+/// NOTE: the authoritative policy/control-loop rate is `main.rs`'s
+/// `TICK_PERIOD` (10 ms = 100 Hz), which is what actually drives
+/// `PolicyRunner::tick`. It MUST match the sim control rate
+/// (`exp_standing.py`: `sim.dt 0.005 × decimation 2 = 100 Hz`). A stale
+/// `POLICY_RATE_HZ = 50` constant used to live here and was never wired to
+/// the real loop; it was removed so nothing can silently re-introduce a
+/// half-rate control loop (which would desync the slew limit + action delay
+/// the policy was trained against).
 pub mod timing {
-    pub const POLICY_RATE_HZ: u64 = 50;
-    pub const POLICY_INTERVAL_MS: u64 = 1000 / POLICY_RATE_HZ;
     pub const FEEDBACK_PUBLISH_HZ: u64 = 100;
     pub const WATCHDOG_TIMEOUT_MS: u64 = 500;
     pub const UDP_PORT: u16 = 10000;

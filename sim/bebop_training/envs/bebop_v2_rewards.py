@@ -146,6 +146,32 @@ def stationary_pose_exp(
     return torch.exp(-err / (std * std))
 
 
+def default_joint_pose_exp(
+    env,
+    std: float = 0.35,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Bounded reward for settling near the configured default joint posture.
+
+    This uses the articulation's ``default_joint_pos`` rather than a duplicated
+    hardcoded pose. In the standing task that default is the nominal zero pose
+    used by ``VariableImpedanceJointAction`` as the center of the position
+    action mapping, so it is the same standing standard the policy commands
+    around. The exponential stays bounded: recovery excursions simply earn less
+    reward instead of receiving an unbounded penalty.
+    """
+    device = getattr(env, "device", None)
+    asset = env.scene[asset_cfg.name]
+    joint_pos = _ensure_tensor(asset.data.joint_pos, env_device=device)
+    default_joint_pos = _ensure_tensor(asset.data.default_joint_pos, env_device=device)
+    if asset_cfg.joint_ids is not None:
+        joint_pos = joint_pos[:, asset_cfg.joint_ids]
+        default_joint_pos = default_joint_pos[:, asset_cfg.joint_ids]
+
+    err = torch.sum(torch.square(joint_pos - default_joint_pos), dim=1)
+    return torch.exp(-err / (std * std))
+
+
 def feet_slide(
     env,
     sensor_names: list[str],
