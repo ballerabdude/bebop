@@ -623,10 +623,15 @@ impl Supervisor {
             None => return Err(anyhow!("no bus pool entry for {}", cfg.can_bus)),
         };
 
+        // `clamped` / `vel_ff` / `tau_ff` are in the robot (URDF) frame —
+        // the same frame the slew tracker and hard limits live in. Convert
+        // back to the motor/encoder frame for the wire. `kp` / `kd` are
+        // frame-independent gains and pass through unchanged.
+        let dir = cfg.direction;
         let cmd = JointCommand {
-            position: clamped,
-            velocity: vel_ff,
-            torque: tau_ff,
+            position: dir * clamped,
+            velocity: dir * vel_ff,
+            torque: dir * tau_ff,
             kp,
             kd,
         };
@@ -667,6 +672,7 @@ impl Supervisor {
         let Some(idx) = self.motor_index(can_iface, fb.motor_id) else {
             return;
         };
+        let dir = self.cfg.joints[idx].direction;
         let now = Instant::now();
         {
             let mut g = match self.motors[idx].lock() {
@@ -674,6 +680,17 @@ impl Supervisor {
                 Err(p) => p.into_inner(),
             };
             g.motor.process_feedback(fb);
+            // Convert the motor/encoder frame into the robot (URDF / sim)
+            // convention once, here at the RX boundary, so every consumer
+            // above the driver (policy observation, /joint_states, telemetry,
+            // DialIn, limit checks) sees URDF-frame signs. `dir` is +1 for
+            // the common case; only joints whose motor is mounted/zeroed with
+            // reversed polarity carry -1 (see JointConfig::direction).
+            if dir != 1.0 {
+                g.motor.state.position *= dir;
+                g.motor.state.velocity *= dir;
+                g.motor.state.torque *= dir;
+            }
             g.last_rx = Some(now);
         }
         // Run limit checks while we hold our own snapshot.
@@ -743,7 +760,10 @@ impl Supervisor {
             });
             return;
         }
-        if let Some(reason) = check_pos(&cfg.name, fb.position, h) {
+        // Limits are expressed in the robot frame, so check the
+        // direction-corrected position (velocity / torque checks below are
+        // magnitude-only, so the sign doesn't matter there).
+        if let Some(reason) = check_pos(&cfg.name, cfg.direction * fb.position, h) {
             self.trigger_estop(reason);
             return;
         }

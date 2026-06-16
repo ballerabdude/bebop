@@ -95,6 +95,17 @@ joints:
   # `defaults.policy_gain_clamps` block when omitted) bounds the
   # decoded kp / kd emitted by the policy. MUST mirror `POLICY_KP_MIN/MAX`
   # and `POLICY_KD_MIN/MAX` in the sim config.
+  #
+  # `direction` (per-joint, optional, +1 / -1; default +1) flips the
+  # motor's encoder rotation polarity into the robot's URDF/sim
+  # convention. The supervisor applies it at the motor⇄robot boundary, so
+  # ALL feedback (policy observation, /joint_states, telemetry, DialIn,
+  # limit checks) and ALL outgoing setpoints speak the URDF sign. Use -1
+  # only when a motor is physically mounted/zeroed with reversed polarity
+  # relative to the URDF joint axis — verify with a passive back-drive
+  # capture (policy off): move the joint by hand and confirm the logged
+  # sign matches the URDF/Foxglove direction. Position hard_limits are then
+  # interpreted in the robot frame.
 
   # ----- Hip flexion (RS04) -------------------------------------------------
   # Top joint off base_link, Y-axis pitch. Renamed from
@@ -134,6 +145,13 @@ joints:
     # v0.15: kp_min raised 20 -> 40, kd_min 1.0 -> 2.0
     # Jun 2026 sim2real: kp_max 300 -> 150, kd_min 2.0 -> 3.0 (cut wide gain band)
     policy_gain_clamps: { kp_min: 40.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
+    # Jun 16: encoder polarity is reversed vs the URDF/sim. A passive
+    # back-drive capture (policy off) showed manual INWARD adduction reading
+    # as POSITIVE (= URDF OUTWARD splay), confirmed against the matching USD
+    # abduction axis. The RS03 abduction motor is mounted/zeroed with opposite
+    # polarity, so flip the sign at the motor⇄robot boundary so the policy
+    # sees the same joint signs it trained on. (Mirror on the right.)
+    direction: -1
 
   hip_abduction_right_joint:
     can_interface: can1
@@ -143,6 +161,8 @@ joints:
     hold_gains:  { kp: 160.0, kd: 6.0 }
     # Jun 2026 sim2real: kp_max 300 -> 150, kd_min 2.0 -> 3.0 (mirror hip_abduction_left)
     policy_gain_clamps: { kp_min: 40.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
+    # Jun 16: reversed encoder polarity vs URDF/sim (mirror hip_abduction_left).
+    direction: -1
 
   # ----- Knee flexion (RS04) ------------------------------------------------
   # Knee pitch. Renamed from shin_*_joint (motor IDs 34 / 44 unchanged).

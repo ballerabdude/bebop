@@ -279,6 +279,27 @@ pub struct JointConfig {
     /// policy emits raw kp / kd in [-1, 1]; the decode path maps each
     /// to this joint's range before TX.
     pub policy_gain_clamps: PolicyGainClamps,
+    /// Sign that converts the motor/encoder rotation direction into the
+    /// robot (URDF / sim) joint convention. Either `+1.0` (motor and
+    /// URDF agree, the default) or `-1.0` (the motor is mounted / zeroed
+    /// with the opposite polarity, so its positive rotation is the URDF's
+    /// negative rotation).
+    ///
+    /// The supervisor applies this at the motor⇄robot boundary: every
+    /// incoming feedback `position` / `velocity` / `torque` is multiplied
+    /// by `direction` before it reaches any consumer (policy observation,
+    /// `/joint_states` log, telemetry, DialIn, limit checks), and every
+    /// outgoing position / velocity / torque setpoint is multiplied by it
+    /// again on the way back to the wire. So everything above
+    /// [`crate::robstride`] speaks the URDF convention and the trained
+    /// policy sees the same joint signs it did in sim.
+    ///
+    /// NOTE: `hard_limits.pos_min` / `pos_max` are interpreted in the
+    /// robot frame. They're symmetric for the joints we currently flip
+    /// (hip abduction, ±1.0), so the sign is harmless there; if you ever
+    /// flip a joint with an *asymmetric* position envelope, express that
+    /// envelope in robot-frame coordinates.
+    pub direction: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -556,6 +577,12 @@ impl RobotConfig {
             );
             validate_policy_gain_clamps(&name, &model, &policy_gain_clamps)?;
 
+            let direction = raw_joint
+                .direction
+                .or(defaults.direction)
+                .unwrap_or(1.0);
+            validate_direction(&name, direction)?;
+
             let index = joints.len();
             joints.push(JointConfig {
                 name,
@@ -569,6 +596,7 @@ impl RobotConfig {
                 slew,
                 default_position: 0.0,
                 policy_gain_clamps,
+                direction,
             });
         }
 
@@ -818,6 +846,7 @@ struct RawDefaults {
     test_gains: Option<RawGains>,
     slew: Option<RawSlew>,
     policy_gain_clamps: Option<RawPolicyGainClamps>,
+    direction: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -830,6 +859,10 @@ struct RawJoint {
     test_gains: Option<RawGains>,
     slew: Option<RawSlew>,
     policy_gain_clamps: Option<RawPolicyGainClamps>,
+    /// Motor→robot direction sign (`+1` / `-1`). See
+    /// [`JointConfig::direction`]. Omitted ⇒ `+1` (default, motor agrees
+    /// with the URDF). Inherits the `defaults.direction` block.
+    direction: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1036,6 +1069,18 @@ fn merge_policy_gain_clamps(
     }
 }
 
+/// Reject a `direction` that isn't exactly `+1` or `-1`. The sign is a
+/// pure rotation-polarity flip; any other value would silently rescale
+/// every position / velocity / torque crossing the motor⇄robot boundary.
+fn validate_direction(joint_name: &str, direction: f32) -> Result<()> {
+    if (direction - 1.0).abs() > 1e-6 && (direction + 1.0).abs() > 1e-6 {
+        return Err(anyhow!(
+            "joint {joint_name:?}: direction must be +1 or -1 (got {direction})"
+        ));
+    }
+    Ok(())
+}
+
 /// Reject clamps that don't form a valid range or that exceed the
 /// motor model's electrical envelope. The supervisor uses the wire
 /// scaler's full encoder range when packing the CAN frame, so writing
@@ -1103,6 +1148,116 @@ fn validate_policy_gain_clamps(
 // ===========================================================================
 // Tests
 // ===========================================================================
+
+#[cfg(test)]
+mod direction_tests {
+    use super::*;
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    fn write_temp_config(body: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let unique = format!(
+            "bebop_dir_test_{}_{}.yaml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        path.push(unique);
+        let mut f = std::fs::File::create(&path).expect("create temp config");
+        f.write_all(body.as_bytes()).expect("write temp config");
+        path
+    }
+
+    const TWO_JOINTS: &str = r#"
+joints:
+  a_joint:
+    can_interface: can0
+    motor_id: 1
+    model: RS03
+    direction: -1
+  b_joint:
+    can_interface: can0
+    motor_id: 2
+    model: RS03
+"#;
+
+    #[test]
+    fn direction_defaults_to_plus_one_and_parses_minus_one() {
+        let path = write_temp_config(TWO_JOINTS);
+        let cfg = RobotConfig::from_yaml(&path).expect("load config");
+        let a = cfg.get_joint("a_joint").unwrap();
+        let b = cfg.get_joint("b_joint").unwrap();
+        assert_eq!(a.direction, -1.0, "explicit direction: -1 should parse");
+        assert_eq!(b.direction, 1.0, "omitted direction should default to +1");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn invalid_direction_is_rejected() {
+        let body = r#"
+joints:
+  a_joint:
+    can_interface: can0
+    motor_id: 1
+    model: RS03
+    direction: -2
+"#;
+        let path = write_temp_config(body);
+        let err = RobotConfig::from_yaml(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("direction must be +1 or -1")
+                || format!("{err:#}").contains("direction must be +1 or -1"),
+            "unexpected error: {err:#}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn defaults_block_direction_is_inherited_and_overridden() {
+        let body = r#"
+defaults:
+  direction: -1
+joints:
+  inherits_joint:
+    can_interface: can0
+    motor_id: 1
+    model: RS03
+  overrides_joint:
+    can_interface: can0
+    motor_id: 2
+    model: RS03
+    direction: 1
+"#;
+        let path = write_temp_config(body);
+        let cfg = RobotConfig::from_yaml(&path).expect("load config");
+        assert_eq!(cfg.get_joint("inherits_joint").unwrap().direction, -1.0);
+        assert_eq!(cfg.get_joint("overrides_joint").unwrap().direction, 1.0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn shipped_bebop_v2_yaml_flips_only_hip_abduction() {
+        // Guards the actual deployed config: the two RS03 hip-abduction
+        // joints carry the reversed-encoder fix, everything else is +1.
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/bebop_v2.yaml");
+        let cfg = RobotConfig::from_yaml(&path).expect("load shipped bebop_v2.yaml");
+        for joint in &cfg.joints {
+            let expected = if joint.name.starts_with("hip_abduction_") {
+                -1.0
+            } else {
+                1.0
+            };
+            assert_eq!(
+                joint.direction, expected,
+                "joint {} has unexpected direction {}",
+                joint.name, joint.direction
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod imu_mount_tests {
