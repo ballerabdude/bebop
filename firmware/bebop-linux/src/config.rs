@@ -1239,17 +1239,19 @@ joints:
     }
 
     #[test]
-    fn shipped_bebop_v2_yaml_flips_only_hip_abduction() {
-        // Guards the actual deployed config: the two RS03 hip-abduction
-        // joints carry the reversed-encoder fix, everything else is +1.
+    fn shipped_bebop_v2_yaml_flips_reversed_polarity_joints() {
+        // Guards the actual deployed config: the hip-abduction, hip-flexion,
+        // and knee-flexion motors are mounted/zeroed with reversed encoder
+        // polarity vs the URDF/sim (confirmed by passive back-drive captures),
+        // so they carry direction -1. Only the foot/ankle joints agree with
+        // the URDF (direction +1).
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/bebop_v2.yaml");
         let cfg = RobotConfig::from_yaml(&path).expect("load shipped bebop_v2.yaml");
         for joint in &cfg.joints {
-            let expected = if joint.name.starts_with("hip_abduction_") {
-                -1.0
-            } else {
-                1.0
-            };
+            let reversed = joint.name.starts_with("hip_abduction_")
+                || joint.name.starts_with("hip_flexion_")
+                || joint.name.starts_with("knee_flexion_");
+            let expected = if reversed { -1.0 } else { 1.0 };
             assert_eq!(
                 joint.direction, expected,
                 "joint {} has unexpected direction {}",

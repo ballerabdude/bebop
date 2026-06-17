@@ -122,6 +122,11 @@ joints:
     # Jun 14: kp_max 80 -> 120 — narrowing starved hip-flexion (pegged at ceiling,
     # torso toppling); rate penalties now handle oscillation. Mirror exp_standing.py.
     policy_gain_clamps: { kp_min: 20.0, kp_max: 120.0, kd_min: 2.0, kd_max: 5.0 }
+    # Jun 16: reversed encoder polarity vs URDF/sim. Passive back-drive capture
+    # (policy off) showed legs bent BACK by hand reading as URDF FORWARD; FK on
+    # the logged signs confirmed. RS04 hip-flexion motor is mounted/zeroed with
+    # opposite polarity, so flip at the motor⇄robot boundary. (Mirror on right.)
+    direction: -1
 
   hip_flexion_right_joint:
     can_interface: can1
@@ -132,6 +137,8 @@ joints:
     # Jun 2026 sim2real: kp_max 100 -> 80, kd_min 1.5 -> 2.0 (mirror hip_flexion_left)
     # Jun 14: kp_max 80 -> 120 (mirror hip_flexion_left)
     policy_gain_clamps: { kp_min: 20.0, kp_max: 120.0, kd_min: 2.0, kd_max: 5.0 }
+    # Jun 16: reversed encoder polarity vs URDF/sim (mirror hip_flexion_left).
+    direction: -1
 
   # ----- Hip abduction (RS03) -----------------------------------------------
   # X-axis roll, between the hip_flexion and knee_flexion links.
@@ -175,6 +182,11 @@ joints:
     # v0.15: kp_min raised 10 -> 30, kd_min 1.0 -> 2.0
     # Jun 2026 sim2real: kp_max 250 -> 150, kd_min 2.0 -> 3.0 (cut wide gain band)
     policy_gain_clamps: { kp_min: 30.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
+    # Jun 16: reversed encoder polarity vs URDF/sim. Passive back-drive capture
+    # (policy off) showed knee bent FORWARD by hand reading as URDF BACKWARD; FK
+    # on the logged signs confirmed. Flip at the motor⇄robot boundary. (Mirror
+    # on right.) Knee hard_limits are symmetric (±π/2), so the flip is limit-safe.
+    direction: -1
 
   knee_flexion_right_joint:
     can_interface: can1
@@ -184,6 +196,8 @@ joints:
     hold_gains:  { kp: 120.0, kd: 4.0 }
     # Jun 2026 sim2real: kp_max 250 -> 150, kd_min 2.0 -> 3.0 (mirror knee_flexion_left)
     policy_gain_clamps: { kp_min: 30.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
+    # Jun 16: reversed encoder polarity vs URDF/sim (mirror knee_flexion_left).
+    direction: -1
 
   # ----- Foot / ankle (RS02) ------------------------------------------------
   foot_left_joint:
