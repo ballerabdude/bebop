@@ -111,14 +111,13 @@ export interface RuntimeSnapshot {
   policyIo: PolicyIoView;
 }
 
-/// Policy I/O view. Mirrors the firmware's `PolicyIoStats` proto.
+/// Policy I/O view. Mirrors the scalar capture/lifecycle fields of the
+/// firmware's `PolicyIoStats` proto. The live observation/action/kp/kd
+/// vectors are intentionally NOT surfaced here anymore — operators
+/// inspect those post-hoc in Foxglove via the downloaded MCAP, so
+/// carrying them per-frame through the view layer was pure overhead.
 export interface PolicyIoView {
   present: boolean;
-  active: boolean;
-  /** Whether observations use live BNO085 readings vs synthetic fallback.
-   *  Rotation vector and gyro share one SH-2 data channel, so this single
-   *  flag covers both. */
-  imuLive: boolean;
   /** Operator has enabled dry-run: RUN_POLICY still infers + publishes +
    *  captures, but no PD commands reach the motors. */
   dryRun: boolean;
@@ -136,12 +135,4 @@ export interface PolicyIoView {
    *  lifetime; 0 means the writer is keeping up. UIs should flag a
    *  non-zero value as data loss. */
   captureDropped: number;
-  /** Full 49-dim observation vector (see layout in proto docs). */
-  observation: number[];
-  /** Full 24-dim raw NN output. */
-  rawAction: number[];
-  positionTargetsRad: number[];
-  kp: number[];
-  kd: number[];
-  jointNames: string[];
 }

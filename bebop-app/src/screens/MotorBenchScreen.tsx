@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 
 import { GamepadDriver } from "../components/GamepadDriver";
-import { PolicyIoCard } from "../components/PolicyIoCard";
 import { Banner, Button, Spinner } from "../components/ui";
 import { getOrCreateRuntimeTransport } from "../runtime";
 import type {
@@ -90,14 +89,30 @@ export function MotorBenchScreen({
     transportRef.current = transport;
     const offCallbacks: Array<() => void> = [];
 
+    // Coalesce telemetry-driven re-renders to one per animation frame.
+    // The firmware pumps ~30 Hz and each frame re-renders this whole
+    // screen; without coalescing, a slow paint (or a burst of frames
+    // arriving together after a brief stall) cascades into a multi-frame
+    // catch-up freeze. Stash the latest snapshot in a ref and let rAF
+    // flush it — matches the GamepadDriver / useGamepad precedent.
+    let pendingSnapshot: RuntimeSnapshot | null = null;
+    let rafId: number | null = null;
+    const flush = () => {
+      rafId = null;
+      if (cancelled) return;
+      const s = pendingSnapshot;
+      pendingSnapshot = null;
+      if (s) setSnapshot(s);
+    };
+    const scheduleFlush = (s: RuntimeSnapshot) => {
+      pendingSnapshot = s;
+      if (rafId === null) rafId = requestAnimationFrame(flush);
+    };
+
     // Register the push-event listeners FIRST, before kicking off the
     // initial connect, so a fast "connected" edge or an auto-reconnect
     // after a failed first attempt is never missed.
-    offCallbacks.push(
-      transport.onTelemetry((s) => {
-        if (!cancelled) setSnapshot(s);
-      }),
-    );
+    offCallbacks.push(transport.onTelemetry(scheduleFlush));
     offCallbacks.push(
       transport.onEStopLatched(() => {
         if (!cancelled) {
@@ -159,6 +174,9 @@ export function MotorBenchScreen({
 
     return () => {
       cancelled = true;
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      rafId = null;
+      pendingSnapshot = null;
       for (const off of offCallbacks) off();
       // Best-effort: stop telemetry pump on unmount so the firmware isn't
       // serving frames into the void. If there's no consumer left after
@@ -238,8 +256,7 @@ export function MotorBenchScreen({
 
   // Dry-run toggle: layered on top of RUN_POLICY. Persistent across mode
   // changes — the firmware does not auto-clear it, so the operator is in
-  // charge of remembering to disable it before a real driven run. The
-  // PolicyIoCard surfaces an unmissable "Dry run" pill while it's on.
+  // charge of remembering to disable it before a real driven run.
   const setDryRun = useCallback(
     (enabled: boolean) =>
       refreshAfter(`dry-run:${enabled}`, () =>
@@ -641,11 +658,6 @@ export function MotorBenchScreen({
           presence) since DialIn captures are useful even on a robot
           without a loaded policy. Hits the firmware's HTTP server. */}
       <CaptureDownloads robotIp={robotIp} runtimePort={runtimePort} />
-
-      {/* Policy I/O visualization. Render whenever a policy is loaded so
-          the operator can screenshot a frozen history after stopping
-          RunPolicy — the card itself handles the inactive state. */}
-      {policyIo?.present ? <PolicyIoCard policyIo={policyIo} /> : null}
 
       {/* Bluetooth-gamepad bridge. Renders nothing when no pad is
           connected, so it doesn't take up space in the layout for
@@ -1189,6 +1201,13 @@ function CaptureDownloads({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  /// Page size for the segments table. The list is newest-first and a
+  /// robot can accumulate dozens of segments over a long session, so we
+  /// cap the visible rows to keep the card from growing unbounded and
+  /// pushing the rest of the dashboard off-screen.
+  const PAGE_SIZE = 8;
+  const [page, setPage] = useState(0);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -1210,6 +1229,16 @@ function CaptureDownloads({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  /// Clamp the page back into range whenever the file list shrinks
+  /// (e.g. after a refresh that returns fewer segments, or after the
+  /// operator deleted captures out of band). Without this the user
+  /// could be stranded on a page that has no rows.
+  const pageCount = files ? Math.max(1, Math.ceil(files.length / PAGE_SIZE)) : 1;
+  const safePage = Math.min(page, pageCount - 1);
+  if (safePage !== page) setPage(safePage);
+  const pageStart = safePage * PAGE_SIZE;
+  const pageFiles = files ? files.slice(pageStart, pageStart + PAGE_SIZE) : [];
 
   /// Build the direct download URL for a segment. We deliberately do
   /// NOT fetch + create a Blob for the download:
@@ -1274,48 +1303,82 @@ function CaptureDownloads({
           enters DIAL_IN or RUN_POLICY.
         </div>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-[12px] tabular-nums">
-            <thead className="text-[10px] uppercase tracking-wider text-text-dim">
-              <tr className="border-b border-border">
-                <th className="text-left font-medium py-1.5 pr-3">File</th>
-                <th className="text-right font-medium py-1.5 px-3">Size</th>
-                <th className="text-left font-medium py-1.5 px-3 hidden sm:table-cell">
-                  Modified
-                </th>
-                <th className="text-right font-medium py-1.5 pl-3">Download</th>
-              </tr>
-            </thead>
-            <tbody>
-              {files.map((f) => (
-                <tr key={f.name} className="border-b border-border/40 last:border-b-0">
-                  <td className="py-1.5 pr-3 font-mono text-[11px] break-all text-text">
-                    {f.name}
-                  </td>
-                  <td className="py-1.5 px-3 text-right text-text-dim">
-                    {formatBytes(f.sizeBytes)}
-                  </td>
-                  <td className="py-1.5 px-3 text-text-dim hidden sm:table-cell">
-                    {formatModified(f.modifiedMs)}
-                  </td>
-                  <td className="py-1.5 pl-3 text-right">
-                    {/* Native anchor download: lets the browser
-                        stream the file to disk and avoids the
-                        fetch→blob→object-URL dance that broke on
-                        repeat clicks (304 Not Modified) and produced
-                        an insecure-blob warning on HTTP pages. */}
-                    <a
-                      href={downloadUrl(f.name)}
-                      download={f.name}
-                      className="inline-flex items-center justify-center rounded-[var(--radius-input)] border border-border bg-bg-elev-2 px-2 py-1 text-[11px] font-medium text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors no-underline"
-                    >
-                      Download
-                    </a>
-                  </td>
+        <div className="space-y-2">
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12px] tabular-nums">
+              <thead className="text-[10px] uppercase tracking-wider text-text-dim">
+                <tr className="border-b border-border">
+                  <th className="text-left font-medium py-1.5 pr-3">File</th>
+                  <th className="text-right font-medium py-1.5 px-3">Size</th>
+                  <th className="text-left font-medium py-1.5 px-3 hidden sm:table-cell">
+                    Modified
+                  </th>
+                  <th className="text-right font-medium py-1.5 pl-3">Download</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {pageFiles.map((f) => (
+                  <tr key={f.name} className="border-b border-border/40 last:border-b-0">
+                    <td className="py-1.5 pr-3 font-mono text-[11px] break-all text-text">
+                      {f.name}
+                    </td>
+                    <td className="py-1.5 px-3 text-right text-text-dim">
+                      {formatBytes(f.sizeBytes)}
+                    </td>
+                    <td className="py-1.5 px-3 text-text-dim hidden sm:table-cell">
+                      {formatModified(f.modifiedMs)}
+                    </td>
+                    <td className="py-1.5 pl-3 text-right">
+                      {/* Native anchor download: lets the browser
+                          stream the file to disk and avoids the
+                          fetch→blob→object-URL dance that broke on
+                          repeat clicks (304 Not Modified) and produced
+                          an insecure-blob warning on HTTP pages. */}
+                      <a
+                        href={downloadUrl(f.name)}
+                        download={f.name}
+                        className="inline-flex items-center justify-center rounded-[var(--radius-input)] border border-border bg-bg-elev-2 px-2 py-1 text-[11px] font-medium text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors no-underline"
+                      >
+                        Download
+                      </a>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination row: only shown when there's more than one
+              page. Prev/Next are disabled at the ends; the indicator
+              uses 1-based numbering for human readability. */}
+          {pageCount > 1 ? (
+            <div className="flex items-center justify-between gap-2 pt-1">
+              <span className="text-[11px] text-text-dim tabular-nums">
+                Showing {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, files.length)} of {files.length}
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setPage((p) => Math.max(0, p - 1))}
+                  disabled={safePage === 0}
+                  className="inline-flex items-center justify-center rounded-[var(--radius-input)] border border-border bg-bg-elev-2 px-2.5 py-1 text-[11px] font-medium text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  Prev
+                </button>
+                <span className="text-[11px] text-text-dim tabular-nums px-1">
+                  {safePage + 1} / {pageCount}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+                  disabled={safePage >= pageCount - 1}
+                  className="inline-flex items-center justify-center rounded-[var(--radius-input)] border border-border bg-bg-elev-2 px-2.5 py-1 text-[11px] font-medium text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
       )}
     </div>

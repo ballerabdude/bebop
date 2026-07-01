@@ -485,7 +485,16 @@ export class RuntimeTransport {
   private onMessage(ev: MessageEvent): void {
     if (!(ev.data instanceof ArrayBuffer)) return;
     const bytes = new Uint8Array(ev.data);
-    const msg = fromBinary(ServerRuntimeMessageSchema, bytes);
+    // A corrupt/partial frame decoding off the wire shouldn't tear down
+    // the whole WS receive path. Drop quietly and let the next frame
+    // recover — mirrors the wsAgentTransport's handling. The firmware's
+    // telemetry pump is resilient to a missed frame.
+    let msg: ServerRuntimeMessage;
+    try {
+      msg = fromBinary(ServerRuntimeMessageSchema, bytes);
+    } catch {
+      return;
+    }
     const id = msg.requestId;
 
     // Solicited responses.
@@ -566,39 +575,27 @@ function policyIoFromProto(p: ProtoPolicyIoStats | undefined): PolicyIoView {
   if (!p) {
     return EMPTY_POLICY_IO_VIEW;
   }
+  // Only the scalar capture/lifecycle fields are surfaced to the view
+  // layer — the observation/action/kp/kd vectors are inspected post-hoc
+  // in Foxglove via the downloaded MCAP, so we intentionally don't copy
+  // them per-frame here.
   return {
     present: p.present,
-    active: p.active,
-    imuLive: p.imuLive,
     dryRun: p.dryRun,
     captureActive: p.captureActive,
     capturePath: p.capturePath,
     captureRows: Number(p.captureRows),
     captureDropped: Number(p.captureDropped),
-    observation: [...p.observation],
-    rawAction: [...p.rawAction],
-    positionTargetsRad: [...p.positionTargetsRad],
-    kp: [...p.kp],
-    kd: [...p.kd],
-    jointNames: [...p.jointNames],
   };
 }
 
 const EMPTY_POLICY_IO_VIEW: PolicyIoView = {
   present: false,
-  active: false,
-  imuLive: false,
   dryRun: false,
   captureActive: false,
   capturePath: "",
   captureRows: 0,
   captureDropped: 0,
-  observation: [],
-  rawAction: [],
-  positionTargetsRad: [],
-  kp: [],
-  kd: [],
-  jointNames: [],
 };
 
 function powerFromProto(p: ProtoPowerStats | undefined): PowerView {
