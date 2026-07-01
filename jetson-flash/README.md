@@ -1,7 +1,10 @@
 # jetson-flash/
 
 One-time, **host-side** provisioning of a fresh Jetson Orin Nano Super
-Developer Kit with Jetson Linux (L4T 36.4.4 / JetPack 6.x, Ubuntu 22.04).
+Developer Kit with Jetson Linux. Defaults to the latest release
+**L4T 39.2.0 / JetPack 7.2** (Ubuntu 24.04, kernel 6.8), which now supports
+the Orin Nano series. The older **L4T 36.4.4 / JetPack 6.2.1** (Ubuntu 22.04,
+kernel 5.15) is still selectable.
 
 This sits at the very start of the Jetson lifecycle:
 
@@ -37,13 +40,21 @@ For day-to-day work on a *flashed* Jetson, you don't need anything in here.
 ## Step 1: Download and prepare the L4T environment
 
 `setup_env.sh` automates the NVIDIA download dance:
-fetch the L4T Driver Package + Ubuntu sample rootfs, extract them, and run
-`apply_binaries.sh` to install NVIDIA's proprietary drivers into the rootfs.
+fetch the L4T Driver Package + Ubuntu sample rootfs, extract them, install the
+host flashing prerequisites, and run `apply_binaries.sh` to install NVIDIA's
+proprietary drivers into the rootfs.
 
 ```bash
 cd jetson-flash
 chmod +x setup_env.sh
-./setup_env.sh
+./setup_env.sh            # defaults to L4T 39.2.0 (JetPack 7.2)
+```
+
+To pin a specific release, pass the version as an argument (or via the
+`L4T_VERSION` env var). Supported values are `39.2.0` and `36.4.4`:
+
+```bash
+./setup_env.sh 36.4.4    # legacy JetPack 6.2.1
 ```
 
 You will be prompted for your `sudo` password during the extraction phase.
@@ -82,8 +93,43 @@ sudo ./tools/l4t_create_default_user.sh -u bebop -p <password> -a -n jetson-nano
 
 ## Step 4: Flash the Jetson
 
-To flash the **Jetson Orin Nano Super Developer Kit** to an NVMe drive,
-use the `l4t_initrd_flash.sh` tool from `Linux_for_Tegra/`:
+### L4T 39.2.0 / JetPack 7.2 (default)
+
+The 39.2 flow simplifies the command considerably. This flashes the
+**Jetson Orin Nano Super Developer Kit** over the USB-C cable (the
+host↔device flashing link) and installs the OS onto the on-board NVMe.
+Run `l4t_initrd_flash.sh` from `Linux_for_Tegra/`:
+
+```bash
+cd jetson-flash/Linux_for_Tegra
+sudo ./tools/kernel_flash/l4t_initrd_flash.sh \
+    --erase-all \
+    --showlogs \
+    --network usb0 \
+    jetson-orin-nano-devkit-super internal
+```
+
+The partition layout and QSPI bootloader configs are now resolved
+automatically from the board config, so the explicit `-c`/`-p` XML flags
+are no longer required.
+
+| Flag / argument                  | What it does                                                       |
+|----------------------------------|--------------------------------------------------------------------|
+| `--erase-all`                    | Erase all data on the target boot media before flashing.           |
+| `--showlogs`                     | Stream detailed flash logs.                                        |
+| `--network usb0`                 | Use the USB-network interface for the initrd flashing handshake.   |
+| `jetson-orin-nano-devkit-super`  | Board config for the Super Developer Kit.                          |
+| `internal`                       | Install the OS to the device's on-board NVMe.                       |
+
+Note: `internal` selects the NVMe target; the USB-C cable is only the
+flashing connection. (If you ever needed to install onto USB-stick or
+SD-card storage instead, you'd add `--external-device sda1` or
+`--external-device mmcblk0p1` before the board config — not your case here.)
+
+### L4T 36.4.4 / JetPack 6.2.1 (legacy)
+
+If you provisioned with `./setup_env.sh 36.4.4`, use the older,
+more explicit invocation:
 
 ```bash
 cd jetson-flash/Linux_for_Tegra
@@ -95,18 +141,6 @@ sudo ./tools/kernel_flash/l4t_initrd_flash.sh \
     --network usb0 \
     jetson-orin-nano-devkit-super nvme0n1p1
 ```
-
-### Command breakdown
-
-| Flag                                                          | What it does                                                       |
-|---------------------------------------------------------------|--------------------------------------------------------------------|
-| `--external-device nvme0n1p1`                                 | Target rootfs on the NVMe drive.                                   |
-| `-c .../flash_l4t_t234_nvme.xml`                              | Partition layout for the NVMe.                                     |
-| `-p "-c .../flash_t234_qspi.xml"`                             | Bootloader config for the on-board QSPI memory.                    |
-| `--showlogs`                                                  | Stream detailed flash logs.                                        |
-| `--network usb0`                                              | Use the USB-network interface for the initrd flashing handshake.   |
-| `jetson-orin-nano-devkit-super`                               | Board config for the Super Developer Kit.                          |
-| `nvme0n1p1`                                                   | Target boot partition.                                             |
 
 ## Step 5: Boot up
 
