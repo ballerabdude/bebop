@@ -106,7 +106,27 @@ class BebopPPOBaseCfg(RslRlOnPolicyRunnerCfg):
         # entropy still won't come down, lower further (~0.0005); if the policy
         # goes deterministic too early and ignores the obs, raise it. Re-raise
         # in step when penalty/shaping terms are added back.
-        entropy_coef=0.002,
+        #
+        # KEEP THIS LOW (~0.001-0.005). This quiet-stand task REQUIRES the action
+        # std to collapse so the policy can emit a precise, still pose — the
+        # ``stationary_pose`` reward only pays out at near-zero joint velocity, so
+        # a larger entropy bonus keeps injecting action noise, keeps joint_vel up,
+        # and the still-pose objective never converges (the documented runaway:
+        # Loss/entropy ~57, per-dim std ~2.6). Empirically anything higher than
+        # ~0.005 has failed to converge here. So when a harder reward landscape
+        # (e.g. the ``leg_posture`` anchor) won't converge, fix it on the REWARD
+        # side (soften/curriculum the penalty), NOT by raising entropy.
+        #
+        # 0.001 -> 0.003 (2026-06-20): the bilateral_symmetry and foot_deviation
+        # terms are restored to force a symmetric, flat-foot stance (the hardware
+        # foot motor can't hold the asymmetric ankle positions the policy finds).
+        # At 0.001 these terms caused std to collapse to ~0.04 before balance was
+        # found. 0.003 holds the std floor at ~0.06-0.08, giving the policy
+        # enough exploration to find the symmetric stand before locking in. If
+        # std still collapses below 0.05 with eplen < 95%, raise to 0.005. If std
+        # refuses to come below 0.12 and stationary_pose won't pay out, drop to
+        # 0.002. NOTE: a --entropy_coef CLI flag overrides this default.
+        entropy_coef=0.003,
         
         # Training Updates
         num_learning_epochs=5,   # How many times to reuse the collected data

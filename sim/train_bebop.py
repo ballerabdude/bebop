@@ -44,6 +44,18 @@ parser.add_argument(
         "collapse to a near-deterministic policy that ignores observations."
     ),
 )
+parser.add_argument(
+    "--learning_rate",
+    type=float,
+    default=None,
+    help=(
+        "Override PPO learning_rate (cfg default is 5e-4). The adaptive "
+        "schedule can only lower this from the base value, so this sets the "
+        "ceiling. Try 1e-4 or 2.5e-4 if the policy converges too fast and "
+        "collapses std before finding balance; raise toward 1e-3 if learning "
+        "is too slow."
+    ),
+)
 parser.add_argument("--seed", type=int, default=None, help="Random seed.")
 parser.add_argument(
     "--max_iterations",
@@ -82,9 +94,29 @@ parser.add_argument(
         "policy on a new task."
     ),
 )
+parser.add_argument(
+    "--video_interval",
+    type=int,
+    default=None,
+    help=(
+        "Record a video clip of env 0 every N iterations. Defaults to None "
+        "(off). Set equal to --save_interval to clip on every checkpoint. "
+        "Forces --enable_cameras when set."
+    ),
+)
+parser.add_argument(
+    "--video_length_steps",
+    type=int,
+    default=64,
+    help="Number of env steps to record per video clip (default 64).",
+)
 
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+
+# Video recording needs offscreen rendering even when --headless is set.
+if args.video_interval:
+    args.enable_cameras = True
 
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
@@ -133,6 +165,9 @@ def main():
     if args.entropy_coef is not None:
         agent_cfg.algorithm.entropy_coef = args.entropy_coef
         print(f"[INFO] Override PPO entropy_coef -> {args.entropy_coef}")
+    if args.learning_rate is not None:
+        agent_cfg.algorithm.learning_rate = args.learning_rate
+        print(f"[INFO] Override PPO learning_rate -> {args.learning_rate}")
     if args.max_iterations is not None:
         agent_cfg.max_iterations = args.max_iterations
         print(f"[INFO] Override max_iterations -> {args.max_iterations}")
@@ -143,6 +178,27 @@ def main():
     # 4. Create Environment (Only Once)
     print(f"[INFO] Creating environment for task: {args.task}")
     env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array" if args.headless else None)
+
+    # 4a. Optional video recording on a per-iteration cadence. RecordVideo's
+    #     step_trigger fires on env-step count, so we convert iterations to
+    #     steps via num_steps_per_env. Setting --video_interval equal to
+    #     --save_interval lands a clip right at each checkpoint write.
+    if args.video_interval:
+        steps_per_iter = agent_cfg.num_steps_per_env
+        clip_every_steps = max(1, args.video_interval) * steps_per_iter
+        video_dir = os.path.join(log_dir, "videos", "train")
+        print(
+            f"[INFO] Recording video every {clip_every_steps} env steps "
+            f"(= {args.video_interval} iter * {steps_per_iter} steps/iter), "
+            f"{args.video_length_steps} steps per clip -> {video_dir}"
+        )
+        env = gym.wrappers.RecordVideo(
+            env,
+            video_dir,
+            step_trigger=lambda step: step > 0 and step % clip_every_steps == 0,
+            video_length=args.video_length_steps,
+            disable_logger=True,
+        )
 
     # 5. Wrap for RSL-RL
     env = RslRlVecEnvWrapper(env)

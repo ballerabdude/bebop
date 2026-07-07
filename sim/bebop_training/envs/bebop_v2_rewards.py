@@ -146,32 +146,6 @@ def stationary_pose_exp(
     return torch.exp(-err / (std * std))
 
 
-def default_joint_pose_exp(
-    env,
-    std: float = 0.35,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Bounded reward for settling near the configured default joint posture.
-
-    This uses the articulation's ``default_joint_pos`` rather than a duplicated
-    hardcoded pose. In the standing task that default is the nominal zero pose
-    used by ``VariableImpedanceJointAction`` as the center of the position
-    action mapping, so it is the same standing standard the policy commands
-    around. The exponential stays bounded: recovery excursions simply earn less
-    reward instead of receiving an unbounded penalty.
-    """
-    device = getattr(env, "device", None)
-    asset = env.scene[asset_cfg.name]
-    joint_pos = _ensure_tensor(asset.data.joint_pos, env_device=device)
-    default_joint_pos = _ensure_tensor(asset.data.default_joint_pos, env_device=device)
-    if asset_cfg.joint_ids is not None:
-        joint_pos = joint_pos[:, asset_cfg.joint_ids]
-        default_joint_pos = default_joint_pos[:, asset_cfg.joint_ids]
-
-    err = torch.sum(torch.square(joint_pos - default_joint_pos), dim=1)
-    return torch.exp(-err / (std * std))
-
-
 def feet_slide(
     env,
     sensor_names: list[str],
@@ -324,6 +298,140 @@ def forward_lean_penalty(
     g_x = proj_grav[:, 0]
     overshoot = torch.relu(g_x - deadband)
     return overshoot * overshoot
+
+
+def bilateral_joint_symmetry_l2(
+    env,
+    pairs: list[tuple[str, str]],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    stillness_std: float = 1.5,
+) -> torch.Tensor:
+    """Penalize asymmetry between left/right joint pairs (sagittal plane).
+
+    Returns ``Σ (q_left - q_right)²`` over the listed joint name pairs, gated
+    by a *stillness* multiplier so the penalty only fires when the robot is
+    holding a pose — NOT during recovery transients when the policy needs
+    asymmetric motions to catch a fall. Always ``>= 0``; use with a negative
+    weight.
+
+    The stillness gate is ``exp(-Σv²/σ²)`` over all joint velocities, where
+    ``σ = stillness_std``. This is ``1.0`` when the robot is perfectly still
+    (the penalty fires at full strength) and decays toward ``0`` when joints
+    are moving fast (the penalty is suppressed so the policy is free to use
+    whatever asymmetric catch/recovery motion it needs). This directly
+    addresses the failure mode where the symmetry penalty was fighting the
+    policy during recovery: every time the robot tipped and the policy tried
+    an asymmetric catch, it got penalized, pushing it back toward falling.
+
+    Args:
+        pairs: list of ``(left_joint_name, right_joint_name)`` tuples. Names
+            are resolved to articulation joint indices, so the caller does not
+            need to know the USD joint order.
+        asset_cfg: the robot articulation.
+        stillness_std: velocity scale for the stillness gate. ``1.5`` means the
+            gate is ~1/e once the summed squared joint velocity reaches 1.5².
+            Larger = more lenient (penalty fires even with some motion);
+            smaller = stricter (penalty only fires when nearly motionless).
+    """
+    asset = env.scene[asset_cfg.name]
+    joint_pos = _ensure_tensor(
+        asset.data.joint_pos, env_device=getattr(env, "device", None)
+    )
+    joint_vel = _ensure_tensor(
+        asset.data.joint_vel, env_device=getattr(env, "device", None)
+    )
+
+    err = None
+    for left_name, right_name in pairs:
+        li = asset.data.joint_names.index(left_name)
+        ri = asset.data.joint_names.index(right_name)
+        d = joint_pos[:, li] - joint_pos[:, ri]
+        sq = d * d
+        err = sq if err is None else err + sq
+
+    # Stillness gate: 1.0 when still, -> 0 when moving. Only penalize
+    # asymmetry when the policy is trying to HOLD a pose, not when it's
+    # recovering from a perturbation.
+    vel_sq = torch.sum(torch.square(joint_vel), dim=1)
+    gate = torch.exp(-vel_sq / (stillness_std * stillness_std))
+    return err * gate
+
+
+def joint_deviation_l1_stillness_gated(
+    env,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    stillness_std: float = 1.5,
+) -> torch.Tensor:
+    """Like ``mdp.joint_deviation_l1`` but gated by a stillness multiplier.
+
+    Returns ``Σ |q|`` over the selected joints, multiplied by a stillness gate
+    ``exp(-Σv²/σ²)`` over ALL joint velocities. The penalty only fires when the
+    robot is holding a pose — NOT during recovery transients when the policy
+    needs freedom to move the joints to catch a fall. Always ``>= 0``; use with
+    a negative weight.
+
+    Used for the foot (ankle) deviation penalty: the RS02 foot motor (17 N·m)
+    can't hold the extreme ankle positions the policy cranks to compensate
+    for hardware asymmetry, but the policy needs to be free to use the ankle
+    during recovery. The gate ensures the penalty only bites when the policy
+    is *trying to hold a pose*, not when it's catching a fall.
+
+    Args:
+        asset_cfg: which articulation / joints to score the deviation on.
+        stillness_std: velocity scale for the gate (see
+            :func:`bilateral_joint_symmetry_l2`).
+    """
+    asset = env.scene[asset_cfg.name]
+    joint_pos = _ensure_tensor(
+        asset.data.joint_pos, env_device=getattr(env, "device", None)
+    )
+    joint_vel = _ensure_tensor(
+        asset.data.joint_vel, env_device=getattr(env, "device", None)
+    )
+
+    if asset_cfg.joint_ids is not None:
+        joint_pos = joint_pos[:, asset_cfg.joint_ids]
+
+    dev = torch.sum(torch.abs(joint_pos), dim=1)
+
+    vel_sq = torch.sum(torch.square(joint_vel), dim=1)
+    gate = torch.exp(-vel_sq / (stillness_std * stillness_std))
+    return dev * gate
+
+
+def upright_pose_exp(
+    env,
+    imu_name: str = "imu",
+    std: float = 0.25,
+) -> torch.Tensor:
+    """Bounded reward for holding the torso upright (gravity ∥ body z).
+
+    Returns ``exp(-(g_x² + g_y²) / σ²)`` over the horizontal components of the
+    IMU ``projected_gravity_b``. This is ``1.0`` when the torso is perfectly
+    upright (gravity points straight down through the body z-axis) and decays
+    smoothly as the torso tilts in any direction. Bounded in ``[0, 1]`` so it
+    can carry a firm positive weight without runaway risk, and unlike a
+    deviation penalty it provides a smooth positive gradient *all the way to
+    vertical* — the policy earns more by being MORE upright, not just by being
+    less tilted than last tick.
+
+    Symmetric in pitch and roll (both ``g_x`` and ``g_y``), so it does not bias
+    the policy toward a forward or back lean — pair with
+    :func:`forward_lean_penalty` for the asymmetric anti-toe-lean term.
+    Non-privileged: uses the same IMU ``projected_gravity_b`` the policy
+    observes and the firmware ships, so it creates no sim-to-real gap.
+
+    Args:
+        imu_name: scene key of the IMU sensor.
+        std: gravity-component scale. ``0.25`` ≈ 14° half-angle at 1/e; smaller
+            demands a more precise upright hold.
+    """
+    imu = env.scene[imu_name]
+    proj_grav = _ensure_tensor(
+        imu.data.projected_gravity_b, env_device=getattr(env, "device", None)
+    )
+    g_xy_sq = torch.square(proj_grav[:, 0]) + torch.square(proj_grav[:, 1])
+    return torch.exp(-g_xy_sq / (std * std))
 
 
 def torso_pitch_asymmetric_reward(

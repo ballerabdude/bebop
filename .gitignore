@@ -65,3 +65,11 @@ jetson-flash/Linux_for_Tegra/
 jetson-flash/*.tbz2
 jetson-flash/*.tar.gz
 jetson-flash/*.tar.bz2
+.todos/
+.sidecar/
+.sidecar-agent
+.sidecar-task
+.sidecar-pr
+.sidecar-start.sh
+.sidecar-base
+.td-root
