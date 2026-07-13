@@ -21,7 +21,7 @@ use crate::safety::limits::{BreachReason, MotorRuntimeState, MotorSnapshot};
 use crate::safety::power_monitor::{PowerBoardSnapshot, PowerMonitor};
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -56,6 +56,11 @@ pub struct Supervisor {
     estop: Arc<AtomicBool>,
     estop_reason: Arc<Mutex<Option<BreachReason>>>,
     events: tokio::sync::broadcast::Sender<SupervisorEvent>,
+    /// Number of WS clients currently subscribed to telemetry. When >0 the
+    /// supervisor probes disarmed motors for passive feedback (active
+    /// reporting) so joint positions stream in Idle without arming.
+    telemetry_subscribers: Arc<AtomicU32>,
+    telemetry_probe_counter: Arc<AtomicU32>,
 }
 
 impl Supervisor {
@@ -84,7 +89,39 @@ impl Supervisor {
             estop: Arc::new(AtomicBool::new(false)),
             estop_reason: Arc::new(Mutex::new(None)),
             events,
+            telemetry_subscribers: Arc::new(AtomicU32::new(0)),
+            telemetry_probe_counter: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// A WS client subscribed to telemetry. When the first subscriber
+    /// connects we immediately probe all disarmed motors for feedback.
+    pub fn inc_telemetry_subscribers(&self) -> u32 {
+        let prev = self
+            .telemetry_subscribers
+            .fetch_add(1, Ordering::SeqCst);
+        if prev == 0 {
+            for idx in 0..self.motors.len() {
+                self.refresh_one_telemetry_probe(idx);
+            }
+        }
+        prev + 1
+    }
+
+    /// A WS client unsubscribed or disconnected.
+    pub fn dec_telemetry_subscribers(&self) -> u32 {
+        let remaining = self
+            .telemetry_subscribers
+            .fetch_sub(1, Ordering::SeqCst)
+            .saturating_sub(1);
+        if remaining == 0 {
+            self.teardown_telemetry_probes();
+        }
+        remaining
+    }
+
+    pub fn telemetry_subscribers(&self) -> u32 {
+        self.telemetry_subscribers.load(Ordering::SeqCst)
     }
 
     pub fn cfg(&self) -> &RobotConfig {
@@ -299,6 +336,7 @@ impl Supervisor {
             let mut g = entry.lock().unwrap();
             g.last_target_pos = g.motor.state.position;
             g.armed = true;
+            g.telemetry_probe_active = false;
         }
         info!(joint, "armed");
         let _ = self.events.send(SupervisorEvent::MotorArmed {
@@ -324,6 +362,7 @@ impl Supervisor {
         }
         if let Ok(mut g) = entry.lock() {
             g.armed = false;
+            g.telemetry_probe_active = false;
         }
         info!(joint, "disarmed");
         let _ = self.events.send(SupervisorEvent::MotorDisarmed {
@@ -745,6 +784,20 @@ impl Supervisor {
     }
 
     fn check_feedback(&self, idx: usize, fb: &crate::can_interface::RobstrideFeedback) {
+        let armed = {
+            let g = match self.motors[idx].lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            g.armed
+        };
+        // Passive telemetry for disarmed joints (mirror mode): refresh
+        // cached position/velocity but do not latch E-STOP on limit
+        // excursions — the operator may be moving joints by hand while
+        // the sim mirror is subscribed.
+        if !armed {
+            return;
+        }
         let cfg = &self.cfg.joints[idx];
         let h = cfg.hard_limits;
         // Velocity and torque are model-scaled; resolve the per-model
@@ -866,6 +919,143 @@ impl Supervisor {
             }
             if let Err(e) = self.safe_send_ctrl(idx, target, kp, kd, 0.0, 0.0) {
                 debug!(joint = %self.cfg.joints[idx].name, error = %e, "hold TX failed");
+            }
+        }
+    }
+
+    /// Keep passive joint feedback alive for mirror / operator UIs while
+    /// WS telemetry is subscribed. Armed motors already receive 100 Hz
+    /// hold-gain TX in DialIn / RunPolicy; this path covers Idle (and any
+    /// disarmed joint) by sending zero-gain hold commands at 100 Hz so
+    /// the motors reply with feedback frames every tick.
+    pub fn tick_telemetry_probe(&self) {
+        if self.telemetry_subscribers() == 0 || self.estop_active() {
+            return;
+        }
+        let n = self
+            .telemetry_probe_counter
+            .fetch_add(1, Ordering::Relaxed);
+        // Re-assert enable + active reporting for ONE motor per tick (round-
+        // robin). The old code hit all 8 disarmed motors in a single tick
+        // once per second, which occasionally blocked ~24 ms on the CAN
+        // socket and blew the 10 ms deadline. Spreading the re-assert across
+        // 8 ticks keeps each tick's worst-case at one CAN write.
+        if n % 100 < self.motors.len() as u32 {
+            let idx = (n % 100) as usize;
+            self.refresh_one_telemetry_probe(idx);
+        }
+        // Every tick: send zero-gain holds to probe-active joints so the
+        // motors keep streaming feedback at 100 Hz (Robstride replies to
+        // every MOTOR_CTRL frame).
+        self.tick_telemetry_hold();
+    }
+
+    fn refresh_one_telemetry_probe(&self, idx: usize) {
+        if idx >= self.motors.len() {
+            return;
+        }
+        let cfg = &self.cfg.joints[idx];
+        let (armed, can_bus, can_id) = {
+            let g = match self.motors[idx].lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            (g.armed, g.joint_cfg.can_bus.clone(), g.joint_cfg.can_id)
+        };
+        if armed {
+            return;
+        }
+        if !self.bus_pool.is_healthy(&can_bus) {
+            return;
+        }
+        let can = match self.bus_pool.get(&can_bus) {
+            Some(c) => c.clone(),
+            None => return,
+        };
+
+        let probe_pos = {
+            let mut g = match self.motors[idx].lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if !g.telemetry_probe_active {
+                if let Err(e) = g.motor.enable(&can) {
+                    debug!(
+                        joint = %cfg.name,
+                        motor_id = can_id,
+                        error = %e,
+                        "telemetry probe enable failed"
+                    );
+                    return;
+                }
+                g.telemetry_probe_active = true;
+                g.last_target_pos = g.motor.state.position;
+            }
+            if let Err(e) = g.motor.enable_active_reporting(&can, 10) {
+                debug!(
+                    joint = %cfg.name,
+                    motor_id = can_id,
+                    error = %e,
+                    "telemetry active-report probe failed"
+                );
+            }
+            g.motor.state.position
+        };
+
+        if let Err(e) = self.safe_send_ctrl(idx, probe_pos, 0.0, 0.0, 0.0, 0.0) {
+            debug!(
+                joint = %cfg.name,
+                error = %e,
+                "telemetry probe hold TX failed"
+            );
+        }
+    }
+
+    fn tick_telemetry_hold(&self) {
+        for idx in 0..self.motors.len() {
+            let (probe_active, target) = {
+                let g = match self.motors[idx].lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                (g.telemetry_probe_active && !g.armed, g.last_target_pos)
+            };
+            if !probe_active {
+                continue;
+            }
+            if let Err(e) = self.safe_send_ctrl(idx, target, 0.0, 0.0, 0.0, 0.0) {
+                debug!(
+                    joint = %self.cfg.joints[idx].name,
+                    error = %e,
+                    "telemetry probe hold TX failed"
+                );
+            }
+        }
+    }
+
+    fn teardown_telemetry_probes(&self) {
+        for idx in 0..self.motors.len() {
+            let (probe_active, armed, can_bus) = {
+                let g = match self.motors[idx].lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                (
+                    g.telemetry_probe_active,
+                    g.armed,
+                    g.joint_cfg.can_bus.clone(),
+                )
+            };
+            if !probe_active || armed {
+                continue;
+            }
+            if let Some(can) = self.bus_pool.get(&can_bus) {
+                if let Ok(g) = self.motors[idx].lock() {
+                    let _ = g.motor.disable(can);
+                }
+            }
+            if let Ok(mut g) = self.motors[idx].lock() {
+                g.telemetry_probe_active = false;
             }
         }
     }

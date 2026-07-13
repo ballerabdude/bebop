@@ -10,6 +10,7 @@
 
 import gymnasium as gym
 
+from .experiments.exp_mirror import BebopV2MirrorCfg
 from .experiments.exp_standing import (
     BebopV2StandingCfg,
     BebopV2StandingFixedGainCfg,
@@ -60,5 +61,16 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": BebopV2StandingPushCfg,
         "rsl_rl_cfg_entry_point": BebopPPOPushCfg,
+    },
+)
+
+# Visual hardware duplicate: teleports sim joints from bebop-linux WebSocket
+# telemetry. Not for RL training — run via ``mirror_bebop.py``.
+gym.register(
+    id="Isaac-BebopV2-Mirror-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": BebopV2MirrorCfg,
     },
 )

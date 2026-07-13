@@ -3,7 +3,8 @@
 //! `bebop-linux` is a single binary that operates the robot in one of three
 //! [`mode::Mode`]s:
 //!
-//! - [`mode::Mode::Idle`]      — motors disabled, telemetry streams.
+//! - [`mode::Mode::Idle`]      — motors disabled, telemetry streams; WS
+//!   subscribers trigger passive joint feedback on disarmed motors.
 //! - [`mode::Mode::DialIn`]    — per-motor enable/disable, slew-limited
 //!   hold commands, watchdog. Used during bench bring-up.
 //! - [`mode::Mode::RunPolicy`] — ONNX policy drives the joints (legacy

@@ -339,6 +339,7 @@ async fn main() -> Result<()> {
                 last_wake = Some(wake);
 
                 sup_tick.run_watchdog();
+                sup_tick.tick_telemetry_probe();
                 if sup_tick.mode() == Mode::DialIn {
                     sup_tick.tick_dial_in_hold();
                 }

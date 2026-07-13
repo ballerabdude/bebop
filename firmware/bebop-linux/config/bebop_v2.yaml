@@ -402,8 +402,8 @@ imu:
 # ============================================================================
 server:
   bind_addr: "0.0.0.0:9090"   # listen on all interfaces, port 9090
-  telemetry_default_hz: 30
-  telemetry_max_hz: 100
+  telemetry_default_hz: 100
+  telemetry_max_hz: 200
 
 # ============================================================================
 # Power board (Robstride PowerBoard) — battery / rail telemetry

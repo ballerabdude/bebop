@@ -122,6 +122,11 @@ message MotorState {
   float  torque_nm         = 12;
   float  temperature_c     = 13;
 
+  // True once at least one feedback frame (0x02 or 0x18) has been parsed
+  // for this joint. Mirror consumers should gate on this the same way they
+  // gate IMU orientation on ``ImuStats.received``.
+  bool   position_received = 15;
+
   // Most recent commanded position target, post-clamp and post-slew. In
   // DialIn mode this is what the supervisor's hold cycle is asking the
   // motor to track. When the motor is disarmed this is meaningless;

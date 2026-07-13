@@ -137,7 +137,7 @@ impl RobstrideMotor {
         data[0] = 1; // Enable
         data[1] = interval_ms;
         can.send_extended(can_id, &data)?;
-        debug!(
+        trace!(
             "Enabled active reporting for Robstride motor {} at {}ms",
             self.can_id, interval_ms
         );

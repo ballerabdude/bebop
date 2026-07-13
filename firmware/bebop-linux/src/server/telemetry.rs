@@ -20,6 +20,7 @@ fn motor_state_to_proto(m: &MotorSnapshot) -> proto::MotorState {
         armed: m.armed,
         feedback_stale: m.feedback_stale,
         fault_bits: m.fault_bits as u32,
+        position_received: m.position_received,
         position_rad: m.position,
         velocity_rad_s: m.velocity,
         torque_nm: m.torque,

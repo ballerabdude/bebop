@@ -227,6 +227,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let imu_tele = imu.clone();
     let policy_io_tele = policy_io.clone();
     let tele_state_tele = telemetry_state.clone();
+    let mut client_telemetry_subscribed = false;
     let telemetry_task = tokio::spawn(async move {
         loop {
             let (subscribed, rate_hz) = {
@@ -319,10 +320,18 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                 } else {
                                     s.rate_hz.min(max_rate_hz)
                                 };
+                                if !client_telemetry_subscribed {
+                                    sup.inc_telemetry_subscribers();
+                                    client_telemetry_subscribed = true;
+                                }
                             }
                             proto::client_runtime_message::Payload::UnsubscribeTelemetry(_) => {
                                 let mut g = telemetry_state.write().await;
                                 g.subscribed = false;
+                                if client_telemetry_subscribed {
+                                    sup.dec_telemetry_subscribers();
+                                    client_telemetry_subscribed = false;
+                                }
                             }
                             _ => {}
                         }
@@ -355,6 +364,9 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let _ = writer_task.await;
     telemetry_task.abort();
     event_task.abort();
+    if client_telemetry_subscribed {
+        sup.dec_telemetry_subscribers();
+    }
     info!("ws client disconnected");
 }
 

@@ -201,6 +201,57 @@ runner ([`bebop_pilot/policy_runner`](../ros2/src/bebop_pilot/)):
 The resulting `policy.onnx` is what `bebop_pilot bringup.launch.py`
 consumes via the `model_path:=...` launch argument on the Jetson.
 
+## Hardware pose mirror
+
+`mirror_bebop.py` spawns a single Isaac Lab robot and teleports its joints
+(and base orientation from the IMU) to match live hardware telemetry from
+`bebop-linux` over the runtime WebSocket API (`bebop_runtime.proto` on
+`ws://<robot-ip>:9090/ws`). Base XY stays fixed at the spawn pose — the
+real robot has no odometry.
+
+1. Start `bebop-linux` on the robot (or locally) with motors reporting
+   (Idle or DialIn).
+2. In the Isaac Lab container (Kit viewport is the default; use ``--viz newton``
+   for the Newton renderer instead):
+
+```sh
+/workspace/isaaclab/isaaclab.sh -p /workspace/bebop_bot/sim/mirror_bebop.py \
+    --robot-host 192.168.0.69 \
+    --telemetry-hz 30
+
+# Or with Newton:
+/workspace/isaaclab/isaaclab.sh -p /workspace/bebop_bot/sim/mirror_bebop.py \
+    --robot-host 192.168.0.69 \
+    --viz newton
+```
+
+Use the robot's LAN IP when the runtime is not on the same host. With
+compose host networking, `127.0.0.1:9090` works when `bebop-linux` runs on
+the workstation.
+
+**Note:** mDNS hostnames like `bebop.local` usually do not resolve inside
+the Isaac Lab container even with host networking. Use the robot IP from
+`getent hosts bebop.local` on the host if needed.
+
+Move a joint on hardware (e.g. DialIn to 0.8 rad) and confirm the sim
+joint matches the same angle and sign.
+
+**Firmware note:** joint positions only stream over CAN when motors are
+reporting feedback. As of the telemetry-probe change, subscribing to WS
+telemetry in Idle enables Robstride active reporting on disarmed joints
+(same idea as the always-on IMU stream). Redeploy `bebop-linux` after
+pulling firmware changes for mirror mode in Idle; in DialIn with motors
+armed, positions already update via the hold cycle.
+
+Regenerate Python protobuf bindings after editing
+`jetson-agent/bebop-proto/proto/bebop_runtime.proto`:
+
+```sh
+protoc --python_out=sim/bebop_training/proto \
+  --proto_path=jetson-agent/bebop-proto/proto \
+  jetson-agent/bebop-proto/proto/bebop_runtime.proto
+```
+
 ## DDS / ROS 2 bridge
 
 Both Isaac containers and the ROS 2 dev container share

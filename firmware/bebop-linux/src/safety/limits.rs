@@ -136,6 +136,9 @@ pub struct MotorRuntimeState {
     /// Wall-clock timestamp of the last feedback frame parsed for this
     /// motor. `None` until the first frame arrives.
     pub last_rx: Option<Instant>,
+    /// True when this motor was electrically enabled solely for passive
+    /// WS telemetry (mirror mode) while `armed == false`.
+    pub telemetry_probe_active: bool,
 }
 
 /// Read-only snapshot of motor state, suitable for telemetry. Cheap to
@@ -148,6 +151,7 @@ pub struct MotorSnapshot {
     pub model: &'static str,
     pub armed: bool,
     pub feedback_stale: bool,
+    pub position_received: bool,
     pub fault_bits: u8,
     pub position: f32,
     pub velocity: f32,
@@ -172,6 +176,7 @@ impl MotorRuntimeState {
             armed: false,
             last_target_pos: 0.0,
             last_rx: None,
+            telemetry_probe_active: false,
         }
     }
 
@@ -198,6 +203,7 @@ impl MotorRuntimeState {
             model: self.joint_cfg.model.as_str(),
             armed: self.armed,
             feedback_stale: self.feedback_stale(now),
+            position_received: self.last_rx.is_some(),
             fault_bits: self.motor.state.error_code as u8,
             position: self.motor.state.position,
             velocity: self.motor.state.velocity,

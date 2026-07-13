@@ -7,7 +7,9 @@ name = "bebop_training"
 version = "0.1.0"
 description = "Bebop Robot RL Extension"
 dependencies = [
-    "isaaclab"
+    "isaaclab",
+    "protobuf>=3.21",
+    "websocket-client>=1.6",
 ]
 
 [tool.setuptools]
