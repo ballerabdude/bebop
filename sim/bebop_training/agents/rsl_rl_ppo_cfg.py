@@ -1,6 +1,6 @@
 # bebop_lab/agents/rsl_rl_ppo_cfg.py
 
-from isaaclab.utils import configclass
+from isaaclab.utils.configclass import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
 

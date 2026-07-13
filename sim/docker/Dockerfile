@@ -16,9 +16,13 @@ RUN apt-get update && apt-get install -y sudo git vim && \
 
 # Setup user and group matching the host
 # 1. Remove existing user/group if they use the same UID/GID to avoid conflicts
-# 2. Create the new user
-RUN if getent passwd ${UID}; then userdel -f $(getent passwd ${UID} | cut -d: -f1); fi && \
-    if getent group ${GID}; then groupdel $(getent group ${GID} | cut -d: -f1); fi && \
+#    The beta2 Lab image ships an `isaaclab` user whose primary group is GID 1000,
+#    and the base Ubuntu layer ships `ubuntu` at UID 1000. `groupdel` refuses to
+#    remove a group that is still a user's primary group, so every user that
+#    conflicts with the target UID/GID must be deleted before the group can go.
+RUN for u in $(getent passwd ${UID} | cut -d: -f1); do userdel -f "$u" 2>/dev/null || true; done && \
+    if getent passwd isaaclab >/dev/null 2>&1; then userdel -f isaaclab 2>/dev/null || true; fi && \
+    for g in $(getent group ${GID} | cut -d: -f1); do groupdel "$g" 2>/dev/null || true; done && \
     groupadd -g ${GID} ${USER_NAME} && \
     useradd -u ${UID} -g ${GID} -m -s /bin/bash ${USER_NAME} && \
     echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USER_NAME} && \

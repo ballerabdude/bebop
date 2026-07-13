@@ -95,14 +95,15 @@ def feet_both_airborne(
 
 def imu_pitch_out_of_bounds(
     env,
-    imu_name: str = "imu",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     pitch_forward_gx_max: float = 0.342,
     pitch_back_gx_min: float = -0.342,
 ) -> torch.Tensor:
     """Terminate when torso pitch exceeds the hardware fall envelope.
 
-    Uses IMU ``projected_gravity_b[0]`` (same convention as policy obs /
-    ``firmware/bebop-linux``). For small angles, ``g_x ≈ sin(pitch)``:
+    Uses the articulation root ``projected_gravity_b[0]`` (same convention as
+    policy obs / ``firmware/bebop-linux``). For small angles,
+    ``g_x ≈ sin(pitch)``:
 
     * ``g_x > pitch_forward_gx_max`` — pitched forward past the limit
       (default ``sin(20°) ≈ 0.342``).
@@ -111,10 +112,17 @@ def imu_pitch_out_of_bounds(
 
     Ends episodes before the slow ``base_link_on_ground`` check when the
     torso is already in a pose that falls on the real robot.
+
+    Args:
+        asset_cfg: articulation whose root ``projected_gravity_b`` to read.
+            Defaults to the ``"robot"`` scene entity; the IMU sensor's
+            ``projected_gravity_b`` was removed in Isaac Lab 3.0 beta2, so we
+            read the articulation root (``base_link``) gravity projection
+            instead — equivalent for an IMU mounted with identity orientation.
     """
-    imu = env.scene[imu_name]
+    asset = env.scene[asset_cfg.name]
     proj_grav = _ensure_tensor(
-        imu.data.projected_gravity_b, env_device=getattr(env, "device", None)
+        asset.data.projected_gravity_b, env_device=getattr(env, "device", None)
     )
     g_x = proj_grav[:, 0]
     return (g_x > pitch_forward_gx_max) | (g_x < pitch_back_gx_min)
@@ -122,16 +130,17 @@ def imu_pitch_out_of_bounds(
 
 def imu_roll_out_of_bounds(
     env,
-    imu_name: str = "imu",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     roll_gy_limit: float = 0.342,
 ) -> torch.Tensor:
     """Terminate when torso *roll* (sideways tilt) exceeds the fall envelope.
 
-    Uses IMU ``projected_gravity_b[1]`` — the body-frame +y (left) gravity
-    component, same convention as the policy obs / firmware. For small angles
-    ``g_y ≈ sin(roll)``, so ``|g_y| > roll_gy_limit`` means the torso has
-    tipped sideways past the limit (default ``sin(20°) ≈ 0.342``). Symmetric:
-    a left or right tip is treated identically.
+    Uses the articulation root ``projected_gravity_b[1]`` — the body-frame +y
+    (left) gravity component, same convention as the policy obs / firmware.
+    For small angles ``g_y ≈ sin(roll)``, so ``|g_y| > roll_gy_limit`` means
+    the torso has tipped sideways past the limit (default
+    ``sin(20°) ≈ 0.342``). Symmetric: a left or right tip is treated
+    identically.
 
     Why this exists: ``imu_pitch_out_of_bounds`` only watches the fore/aft
     (``g_x``) axis, so a purely sideways topple never fired an early
@@ -142,10 +151,17 @@ def imu_roll_out_of_bounds(
     term provides the symmetric lateral counterpart to the pitch envelope so a
     sideways lean past ``roll_gy_limit`` ends the episode promptly, the same
     way a fore/aft lean does.
+
+    Args:
+        asset_cfg: articulation whose root ``projected_gravity_b`` to read.
+            Defaults to the ``"robot"`` scene entity; the IMU sensor's
+            ``projected_gravity_b`` was removed in Isaac Lab 3.0 beta2, so we
+            read the articulation root (``base_link``) gravity projection
+            instead — equivalent for an IMU mounted with identity orientation.
     """
-    imu = env.scene[imu_name]
+    asset = env.scene[asset_cfg.name]
     proj_grav = _ensure_tensor(
-        imu.data.projected_gravity_b, env_device=getattr(env, "device", None)
+        asset.data.projected_gravity_b, env_device=getattr(env, "device", None)
     )
     g_y = proj_grav[:, 1]
     return (g_y > roll_gy_limit) | (g_y < -roll_gy_limit)

@@ -102,6 +102,144 @@ sim-launch:
 lab-shell:
     docker exec -it bebop_isaac_lab bash
 
+# Launch a training run DETACHED inside the lab container so Ctrl+C in your
+# shell doesn't fight Isaac Sim's SIGINT handler (which swallows the first
+# interrupt during a 10-60s graceful teardown and looks like a hang).
+#
+# The run's stdout/stderr go to /tmp/train_<timestamp>.log inside the
+# container. Run `just lab-train-ps` to see live PIDs + log paths, and
+# `just lab-train-kill <pid>` to stop a specific run without touching the
+# container or any sibling runs.
+#
+# Examples:
+#   just lab-train                                      # defaults
+#   just lab-train --num_envs 4096 --max_iterations 5000
+#   just lab-train --task Isaac-BebopV2-Standing-Push-v0 --resume <ckpt>
+lab-train *ARGS:
+    #!/usr/bin/env bash
+    set -e
+    TS="$(date +%Y%m%d_%H%M%S)"
+    LOG="/tmp/train_${TS}.log"
+    echo "[lab-train] starting; log: ${LOG}"
+    echo "[lab-train] tail with:  just lab-train-log ${LOG}"
+    echo "[lab-train] list runs:  just lab-train-ps"
+    docker exec -d -w /workspace/bebop_bot/sim bebop_isaac_lab bash -lc \
+        "/workspace/isaaclab/isaaclab.sh -p train_bebop.py --task Isaac-BebopV2-Standing-v0 {{ARGS}} > ${LOG} 2>&1"
+    # print the PID so the user can kill it directly if needed
+    sleep 1
+    docker exec bebop_isaac_lab bash -lc \
+        'pgrep -af "train_bebop.py" | grep -v pgrep | tail -1' || true
+
+# List live training runs inside the lab container (PID, elapsed, log path).
+# Shows only the leaf python3 process per run (each run spawns a 5-deep
+# wrapper chain via isaaclab.sh -> python.sh -> python3 -> python.sh ->
+# python3; the leaf is the actual training process, the rest are wrappers
+# that exit automatically when the leaf dies). The log path is read from
+# the process's stdout fd (/proc/<pid>/fd/1), which is the redirect target
+# set by `just lab-train`.
+lab-train-ps:
+    #!/usr/bin/env bash
+    PIDS=$(docker exec bebop_isaac_lab pgrep -f "python3 train_bebop.py")
+    if [ -z "$PIDS" ]; then echo "no training runs active"; exit 0; fi
+    printf "%-7s %-9s %-32s %s\n" "PID" "ELAPSED" "LOG" "CMD"
+    for pid in $PIDS; do
+        etime=$(docker exec bebop_isaac_lab ps -o etime= -p "$pid" | tr -d ' ')
+        log=$(docker exec bebop_isaac_lab readlink "/proc/$pid/fd/1" 2>/dev/null || echo "?")
+        cmd=$(docker exec bebop_isaac_lab ps -o cmd= -p "$pid" | sed 's|.*python3 train_bebop.py|train_bebop.py|')
+        printf "%-7s %-9s %-32s %s\n" "$pid" "$etime" "$log" "$cmd"
+    done
+
+# Tail a training run's log (pass the path from `just lab-train-ps`, or
+# omit to tail the most recent /tmp/train_*.log).
+lab-train-log LOG="":
+    #!/usr/bin/env bash
+    if [ -z "{{LOG}}" ]; then
+        LOG=$(docker exec bebop_isaac_lab bash -c 'ls -t /tmp/train_*.log 2>/dev/null | head -1')
+    else
+        LOG="{{LOG}}"
+    fi
+    if [ -z "$LOG" ]; then echo "no train logs found in /tmp"; exit 1; fi
+    echo "tailing $LOG"
+    docker exec bebop_isaac_lab tail -f "$LOG"
+
+# Kill a specific training run by PID without affecting the container or
+# sibling runs. Use `just lab-train-kill latest` for the most recent run,
+# or `just lab-train-kill all` to stop every active run. Sends SIGTERM
+# first (lets Isaac Sim flush logs), then SIGKILL after 5s if still alive.
+#
+# Targets only the leaf `python3 train_bebop.py` process — the 4 wrapper
+# processes above it (isaaclab.sh / python.sh / the CLI bootstrap) exit
+# automatically once the leaf dies.
+lab-train-kill TARGET="latest":
+    #!/usr/bin/env bash
+    set -e
+    if [ "{{TARGET}}" = "latest" ]; then
+        PIDS=$(docker exec bebop_isaac_lab pgrep -f "python3 train_bebop.py" | tail -1)
+    elif [ "{{TARGET}}" = "all" ]; then
+        PIDS=$(docker exec bebop_isaac_lab pgrep -f "python3 train_bebop.py")
+    else
+        PIDS="{{TARGET}}"
+    fi
+    if [ -z "$PIDS" ]; then echo "no training runs to kill"; exit 0; fi
+    echo "sending SIGTERM to: $PIDS"
+    docker exec bebop_isaac_lab kill $PIDS 2>/dev/null || true
+    sleep 5
+    for p in $PIDS; do
+        if docker exec bebop_isaac_lab kill -0 "$p" 2>/dev/null; then
+            echo "still alive; sending SIGKILL to $p"
+            docker exec bebop_isaac_lab kill -9 "$p" 2>/dev/null || true
+        fi
+    done
+    echo "done"
+
+# Export a trained RSL-RL checkpoint to ONNX (the artefact deployed on the
+# robot). Runs export_bebop_model.py inside the lab container; the ONNX is
+# written next to the checkpoint by default.
+#
+# CHECKPOINT may be:
+#   - omitted            -> latest run's latest model_*.pt
+#   - "latest"           -> same as omitted
+#   - a run directory    -> latest model_*.pt inside it
+#   - a full .pt path    -> used as-is
+#
+# Examples:
+#   just lab-export                                       # latest run, latest ckpt
+#   just lab-export latest                                # same
+#   just lab-export logs/rsl_rl/Isaac-BebopV2-Standing-v0/2026-07-07_12-37-23/model_500.pt
+#   just lab-export logs/rsl_rl/Isaac-BebopV2-Standing-v0/2026-07-07_12-37-23   # latest ckpt in run
+lab-export *ARGS:
+    #!/usr/bin/env bash
+    set -e
+    # If the first ARG is a checkpoint path or run dir, pop it off; else use "latest".
+    CKPT="latest"
+    PASS_ARGS=()
+    if [ ${#ARGS[@]} -gt 0 ]; then
+        case "${ARGS[0]}" in
+            --*) ;;                    # flag -> keep CKPT=latest, pass all ARGS through
+            *)  CKPT="${ARGS[0]}"; PASS_ARGS=("${ARGS[@]:1}") ;;
+        esac
+    fi
+    # Resolve the checkpoint path inside the container.
+    if [ "$CKPT" = "latest" ]; then
+        CKPT=$(docker exec -w /workspace/bebop_bot/sim bebop_isaac_lab bash -c \
+            'ls -t logs/rsl_rl/*/*/model_*.pt 2>/dev/null | head -1')
+        if [ -z "$CKPT" ]; then echo "no checkpoints found under sim/logs/rsl_rl"; exit 1; fi
+        echo "[lab-export] latest checkpoint: $CKPT"
+    elif echo "$CKPT" | grep -qv '\.pt$'; then
+        # Treat as a run directory -> pick the latest model_*.pt inside it.
+        DIR="${CKPT%/}"
+        RESOLVED=$(docker exec -w /workspace/bebop_bot/sim bebop_isaac_lab bash -c \
+            "ls -t '${DIR}'/model_*.pt 2>/dev/null | head -1")
+        if [ -z "$RESOLVED" ]; then
+            echo "no model_*.pt found in $DIR"; exit 1
+        fi
+        CKPT="$RESOLVED"
+        echo "[lab-export] latest checkpoint in run: $CKPT"
+    fi
+    echo "[lab-export] exporting to ONNX..."
+    docker exec -w /workspace/bebop_bot/sim bebop_isaac_lab bash -lc \
+        "/workspace/isaaclab/isaaclab.sh -p bebop_training/export_bebop_model.py --checkpoint $CKPT ${PASS_ARGS[*]}"
+
 # Play a trained policy with the interactive torso-push controller wired up.
 # Defaults to the standing task and the most recent run under
 # sim/logs/rsl_rl/Isaac-BebopV2-Standing-v0. Override with TASK / RESUME.

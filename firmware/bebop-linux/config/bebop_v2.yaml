@@ -121,7 +121,15 @@ joints:
     # Jun 2026 sim2real: kp_max 100 -> 80, kd_min 1.5 -> 2.0 (lower gain, more damping)
     # Jun 14: kp_max 80 -> 120 — narrowing starved hip-flexion (pegged at ceiling,
     # torso toppling); rate penalties now handle oscillation. Mirror exp_standing.py.
-    policy_gain_clamps: { kp_min: 20.0, kp_max: 120.0, kd_min: 2.0, kd_max: 5.0 }
+    # Jul 11 2026 GAIN PIN (fixed-gain deploys): clamps pinned to a ±0.5/±0.05
+    # band around the sim training midpoint (kp 70 = mid of [20,120], kd 3.5 =
+    # mid of [2,5]) so ANY policy gain output decodes to the gains sim froze
+    # (config loader rejects min==max, hence the epsilon band). Two captures
+    # proved reward regularization cannot lock a network's gain outputs
+    # (20260711_013801, 20260711_163155: kp wandered ±10-20 tracking body
+    # motion). Restore the wide band { kp 20..120, kd 2..5 } for
+    # variable-impedance policies.
+    policy_gain_clamps: { kp_min: 69.5, kp_max: 70.5, kd_min: 3.45, kd_max: 3.55 }
     # Jun 16: reversed encoder polarity vs URDF/sim. Passive back-drive capture
     # (policy off) showed legs bent BACK by hand reading as URDF FORWARD; FK on
     # the logged signs confirmed. RS04 hip-flexion motor is mounted/zeroed with
@@ -136,7 +144,8 @@ joints:
     hold_gains:  { kp: 40.0,  kd: 3.0 }
     # Jun 2026 sim2real: kp_max 100 -> 80, kd_min 1.5 -> 2.0 (mirror hip_flexion_left)
     # Jun 14: kp_max 80 -> 120 (mirror hip_flexion_left)
-    policy_gain_clamps: { kp_min: 20.0, kp_max: 120.0, kd_min: 2.0, kd_max: 5.0 }
+    # Jul 11 2026 GAIN PIN: mirror hip_flexion_left (kp 70, kd 3.5 epsilon band).
+    policy_gain_clamps: { kp_min: 69.5, kp_max: 70.5, kd_min: 3.45, kd_max: 3.55 }
     # Jun 16: reversed encoder polarity vs URDF/sim (mirror hip_flexion_left).
     direction: -1
 
@@ -151,7 +160,9 @@ joints:
     hold_gains:  { kp: 160.0, kd: 6.0 }
     # v0.15: kp_min raised 20 -> 40, kd_min 1.0 -> 2.0
     # Jun 2026 sim2real: kp_max 300 -> 150, kd_min 2.0 -> 3.0 (cut wide gain band)
-    policy_gain_clamps: { kp_min: 40.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
+    # Jul 11 2026 GAIN PIN (see hip_flexion_left): kp 95 = mid of [40,150],
+    # kd 5.5 = mid of [3,8]; epsilon band because the loader rejects min==max.
+    policy_gain_clamps: { kp_min: 94.5, kp_max: 95.5, kd_min: 5.45, kd_max: 5.55 }
     # Jun 16: encoder polarity is reversed vs the URDF/sim. A passive
     # back-drive capture (policy off) showed manual INWARD adduction reading
     # as POSITIVE (= URDF OUTWARD splay), confirmed against the matching USD
@@ -167,7 +178,8 @@ joints:
     hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
     # Jun 2026 sim2real: kp_max 300 -> 150, kd_min 2.0 -> 3.0 (mirror hip_abduction_left)
-    policy_gain_clamps: { kp_min: 40.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
+    # Jul 11 2026 GAIN PIN: mirror hip_abduction_left (kp 95, kd 5.5 epsilon band).
+    policy_gain_clamps: { kp_min: 94.5, kp_max: 95.5, kd_min: 5.45, kd_max: 5.55 }
     # Jun 16: reversed encoder polarity vs URDF/sim (mirror hip_abduction_left).
     direction: -1
 
@@ -181,7 +193,9 @@ joints:
     hold_gains:  { kp: 120.0, kd: 4.0 }
     # v0.15: kp_min raised 10 -> 30, kd_min 1.0 -> 2.0
     # Jun 2026 sim2real: kp_max 250 -> 150, kd_min 2.0 -> 3.0 (cut wide gain band)
-    policy_gain_clamps: { kp_min: 30.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
+    # Jul 11 2026 GAIN PIN (see hip_flexion_left): kp 90 = mid of [30,150],
+    # kd 5.5 = mid of [3,8]; epsilon band because the loader rejects min==max.
+    policy_gain_clamps: { kp_min: 89.5, kp_max: 90.5, kd_min: 5.45, kd_max: 5.55 }
     # Jun 16: reversed encoder polarity vs URDF/sim. Passive back-drive capture
     # (policy off) showed knee bent FORWARD by hand reading as URDF BACKWARD; FK
     # on the logged signs confirmed. Flip at the motor⇄robot boundary. (Mirror
@@ -195,7 +209,8 @@ joints:
     hard_limits: { pos_min: -1.570796, pos_max: 1.570796, vel_max: 12.0, tau_max: 84.0, temp_max: 70.0 }
     hold_gains:  { kp: 120.0, kd: 4.0 }
     # Jun 2026 sim2real: kp_max 250 -> 150, kd_min 2.0 -> 3.0 (mirror knee_flexion_left)
-    policy_gain_clamps: { kp_min: 30.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
+    # Jul 11 2026 GAIN PIN: mirror knee_flexion_left (kp 90, kd 5.5 epsilon band).
+    policy_gain_clamps: { kp_min: 89.5, kp_max: 90.5, kd_min: 5.45, kd_max: 5.55 }
     # Jun 16: reversed encoder polarity vs URDF/sim (mirror knee_flexion_left).
     direction: -1
 
@@ -205,7 +220,12 @@ joints:
     motor_id: 35
     model: RS02
     # RS02 datasheet: rated 6 Nm @ 100 rpm, peak 17 Nm (stall, T-N curve at 36 V).
-    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 17.0, temp_max: 65.0 }
+    # Jul 11 2026: tau_max 17 -> 6 to mirror sim effort_limit_sim (exp_standing.py
+    # MOTOR_CONT_TORQUE_RS02). Sim trains against a 6 Nm ankle; letting hardware
+    # deliver up to 17 Nm gave the real ankle ~3x the trained loop gain (captures
+    # 20260711_013801 / _163155 both commanded >6 Nm on 60-90% of ticks and rang
+    # at 3-7 Hz). 6 Nm is also the thermally sustainable rating.
+    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 6.0, temp_max: 65.0 }
     hold_gains:  { kp: 375.0, kd: 5.0 }
     # v0.15: kp_min raised 5 -> 20, kd_min 0.2 -> 0.8 — was the joint the
     # v0.14 trained policy left fully soft on deployment (operator could
@@ -222,19 +242,31 @@ joints:
     # Jun 14 ANKLE RESTORE: kp_max 180 -> 250, kp_min 80 -> 100. The 180 cap
     # starved the ankle (pegged at ceiling, robot couldn't hold the torso up);
     # rate penalties now handle oscillation. Hard 17 N·m torque limit unchanged.
-    policy_gain_clamps: { kp_min: 100.0, kp_max: 250.0, kd_min: 3.0, kd_max: 5.0 }
+    # Jul 9 2026: kp_min 100 -> 212.5 (75% of the band). Capture of run
+    # 2026-07-08_03-55-34 ckpt-4500 showed foot kp parked at ~111, right at
+    # the old floor — the RS02 was being commanded the softest setting
+    # available and the ankle got pushed around when the robot tried to
+    # stand. Raising the floor forces the policy to keep ankle authority
+    # high; the policy can still tune kp within [212.5, 250] but can't go
+    # soft. Mirror POLICY_KP_MIN[6] in sim exp_standing.py.
+    # Jul 11 2026 GAIN PIN (see hip_flexion_left): kp 231.25 = mid of
+    # [212.5,250], kd 4.0 = mid of [3,5]; epsilon band (loader rejects min==max).
+    policy_gain_clamps: { kp_min: 230.75, kp_max: 231.75, kd_min: 3.95, kd_max: 4.05 }
 
   foot_right_joint:
     can_interface: can1
     motor_id: 45
     model: RS02
-    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 17.0, temp_max: 65.0 }
+    # Jul 11 2026: tau_max 17 -> 6 (mirror foot_left_joint / sim MOTOR_CONT_TORQUE_RS02).
+    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 6.0, temp_max: 65.0 }
     hold_gains:  { kp: 375.0, kd: 5.0 }
     # Jun 2026: kp_min 30 -> 80, kd_min 1.0 -> 3.0 (mirror of foot_left_joint
     # and POLICY_KP_MIN/POLICY_KD_MIN[6,7] in sim exp_standing.py).
     # Jun 2026 sim2real: kp_max 250 -> 180 (mirror foot_left_joint).
     # Jun 14 ANKLE RESTORE: kp_max 180 -> 250, kp_min 80 -> 100 (mirror foot_left_joint).
-    policy_gain_clamps: { kp_min: 100.0, kp_max: 250.0, kd_min: 3.0, kd_max: 5.0 }
+    # Jul 9 2026: kp_min 100 -> 212.5 (mirror foot_left_joint).
+    # Jul 11 2026 GAIN PIN: mirror foot_left_joint (kp 231.25, kd 4.0 epsilon band).
+    policy_gain_clamps: { kp_min: 230.75, kp_max: 231.75, kd_min: 3.95, kd_max: 4.05 }
 
 # ============================================================================
 # IMU (Adafruit BNO085 breakout on SPI) — optional

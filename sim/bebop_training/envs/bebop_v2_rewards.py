@@ -113,6 +113,29 @@ def action_gain_l2(
     return torch.sum(torch.square(gain), dim=1)
 
 
+def joint_vel_l2(
+    env,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize any joint motion — the sharpest ``be absolutely still`` signal.
+
+    Returns ``Σ v²`` over the selected joint velocities; always ``>= 0``, use
+    with a negative weight. Unlike :func:`stationary_pose_exp` (a bounded
+    ``exp(-Σv²/σ²)`` kernel whose gradient vanishes as ``v → 0``), this is an
+    unbounded quadratic that keeps a strong, linear-in-``v`` gradient all the
+    way down to zero velocity — which is what actually kills small limit-cycle
+    oscillations. Pair with the action-rate terms; this is the plant-side
+    counterpart (penalize the *result* of the chatter, not just the chatter).
+    """
+    asset = env.scene[asset_cfg.name]
+    joint_vel = _ensure_tensor(
+        asset.data.joint_vel, env_device=getattr(env, "device", None)
+    )
+    if asset_cfg.joint_ids is not None:
+        joint_vel = joint_vel[:, asset_cfg.joint_ids]
+    return torch.sum(torch.square(joint_vel), dim=1)
+
+
 def stationary_pose_exp(
     env,
     std: float = 1.5,
@@ -261,7 +284,7 @@ def feet_load_symmetry(
 
 def forward_lean_penalty(
     env,
-    imu_name: str = "imu",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     deadband: float = 0.05,
 ) -> torch.Tensor:
     """Penalize parking the torso pitched *forward* (COM over the toes).
@@ -290,10 +313,18 @@ def forward_lean_penalty(
     COM approaches the toes. Raise the weight (more negative) if play mode
     still shows a forward toe-lean stand; lower it / widen the deadband if the
     robot becomes reluctant to pitch forward at all during a recovery step.
+
+    Args:
+        asset_cfg: articulation whose root ``projected_gravity_b`` to read.
+            Defaults to the ``"robot"`` scene entity; the IMU sensor's
+            ``projected_gravity_b`` was removed in Isaac Lab 3.0 beta2, so we
+            read the articulation root (``base_link``) gravity projection
+            instead — equivalent for an IMU mounted with identity orientation.
+        deadband: forward-lean deadband in ``g_x`` units.
     """
-    imu = env.scene[imu_name]
+    asset = env.scene[asset_cfg.name]
     proj_grav = _ensure_tensor(
-        imu.data.projected_gravity_b, env_device=getattr(env, "device", None)
+        asset.data.projected_gravity_b, env_device=getattr(env, "device", None)
     )
     g_x = proj_grav[:, 0]
     overshoot = torch.relu(g_x - deadband)
@@ -308,11 +339,27 @@ def bilateral_joint_symmetry_l2(
 ) -> torch.Tensor:
     """Penalize asymmetry between left/right joint pairs (sagittal plane).
 
-    Returns ``Σ (q_left - q_right)²`` over the listed joint name pairs, gated
+    Returns ``Σ (q_left + q_right)²`` over the listed joint name pairs, gated
     by a *stillness* multiplier so the penalty only fires when the robot is
     holding a pose — NOT during recovery transients when the policy needs
     asymmetric motions to catch a fall. Always ``>= 0``; use with a negative
     weight.
+
+    SIGN CONVENTION — why the *sum*, not the difference: every L/R joint
+    pair on this robot is sign-MIRRORED. The right-side pitch joints
+    (hip_flexion, knee_flexion, foot) use a flipped ``-Y`` axis in the
+    URDF/USD, and the abduction rolls physically mirror across the sagittal
+    plane (URDF limits: left ``[-10°, +20°]`` vs right ``[-20°, +10°]``;
+    knee: left ``[-45°, +90°]`` vs right ``[-90°, +45°]``). The same
+    physical "both knees flexed the same way" pose therefore reads
+    ``q_left = -q_right``, so the mirrored stance is ``q_L + q_R = 0``.
+    Penalizing ``(q_L - q_R)²`` (the pre-Jul-2026 version of this term)
+    rewarded ``q_L = q_R`` — one leg pitched forward and the other back,
+    both hips rolled the same way — i.e. it actively TRAINED the
+    twisted-hip contortion it was meant to prevent, and raising its weight
+    only pushed harder in the wrong direction (observed on hardware run
+    2026-07-09_04-16-40: hip_flexion L-R driven to ~0.01 while the robot
+    stood visibly twisted).
 
     The stillness gate is ``exp(-Σv²/σ²)`` over all joint velocities, where
     ``σ = stillness_std``. This is ``1.0`` when the robot is perfectly still
@@ -345,7 +392,9 @@ def bilateral_joint_symmetry_l2(
     for left_name, right_name in pairs:
         li = asset.data.joint_names.index(left_name)
         ri = asset.data.joint_names.index(right_name)
-        d = joint_pos[:, li] - joint_pos[:, ri]
+        # Mirrored sign convention: a symmetric stance is q_L == -q_R,
+        # so the asymmetry residual is the SUM (see docstring).
+        d = joint_pos[:, li] + joint_pos[:, ri]
         sq = d * d
         err = sq if err is None else err + sq
 
@@ -401,34 +450,39 @@ def joint_deviation_l1_stillness_gated(
 
 def upright_pose_exp(
     env,
-    imu_name: str = "imu",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     std: float = 0.25,
 ) -> torch.Tensor:
     """Bounded reward for holding the torso upright (gravity ∥ body z).
 
     Returns ``exp(-(g_x² + g_y²) / σ²)`` over the horizontal components of the
-    IMU ``projected_gravity_b``. This is ``1.0`` when the torso is perfectly
-    upright (gravity points straight down through the body z-axis) and decays
-    smoothly as the torso tilts in any direction. Bounded in ``[0, 1]`` so it
-    can carry a firm positive weight without runaway risk, and unlike a
-    deviation penalty it provides a smooth positive gradient *all the way to
-    vertical* — the policy earns more by being MORE upright, not just by being
-    less tilted than last tick.
+    articulation root ``projected_gravity_b``. This is ``1.0`` when the torso
+    is perfectly upright (gravity points straight down through the body
+    z-axis) and decays smoothly as the torso tilts in any direction. Bounded
+    in ``[0, 1]`` so it can carry a firm positive weight without runaway
+    risk, and unlike a deviation penalty it provides a smooth positive
+    gradient *all the way to vertical* — the policy earns more by being MORE
+    upright, not just by being less tilted than last tick.
 
-    Symmetric in pitch and roll (both ``g_x`` and ``g_y``), so it does not bias
-    the policy toward a forward or back lean — pair with
+    Symmetric in pitch and roll (both ``g_x`` and ``g_y``), so it does not
+    bias the policy toward a forward or back lean — pair with
     :func:`forward_lean_penalty` for the asymmetric anti-toe-lean term.
-    Non-privileged: uses the same IMU ``projected_gravity_b`` the policy
-    observes and the firmware ships, so it creates no sim-to-real gap.
+    Non-privileged: uses the same root ``projected_gravity_b`` the policy
+    observes (via ``mdp.projected_gravity``) and the firmware ships, so it
+    creates no sim-to-real gap.
 
     Args:
-        imu_name: scene key of the IMU sensor.
-        std: gravity-component scale. ``0.25`` ≈ 14° half-angle at 1/e; smaller
-            demands a more precise upright hold.
+        asset_cfg: articulation whose root ``projected_gravity_b`` to read.
+            Defaults to the ``"robot"`` scene entity; the IMU sensor's
+            ``projected_gravity_b`` was removed in Isaac Lab 3.0 beta2, so we
+            read the articulation root (``base_link``) gravity projection
+            instead — equivalent for an IMU mounted with identity orientation.
+        std: gravity-component scale. ``0.25`` ≈ 14° half-angle at 1/e;
+            smaller demands a more precise upright hold.
     """
-    imu = env.scene[imu_name]
+    asset = env.scene[asset_cfg.name]
     proj_grav = _ensure_tensor(
-        imu.data.projected_gravity_b, env_device=getattr(env, "device", None)
+        asset.data.projected_gravity_b, env_device=getattr(env, "device", None)
     )
     g_xy_sq = torch.square(proj_grav[:, 0]) + torch.square(proj_grav[:, 1])
     return torch.exp(-g_xy_sq / (std * std))
@@ -436,7 +490,7 @@ def upright_pose_exp(
 
 def torso_pitch_asymmetric_reward(
     env,
-    imu_name: str = "imu",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     band_gx_min: float = -0.30,
     band_gx_max: float = -0.17,
     edge_std: float = 0.12,
@@ -446,8 +500,8 @@ def torso_pitch_asymmetric_reward(
 ) -> torch.Tensor:
     """Reward balancing anywhere in a back-lean *band*; penalize forward pitch.
 
-    Uses the same IMU ``projected_gravity_b`` signal as
-    ``mdp.imu_projected_gravity`` and the firmware observation builder.
+    Uses the same articulation root ``projected_gravity_b`` signal as
+    ``mdp.projected_gravity`` and the firmware observation builder.
     In body FLU:
 
     * ``proj_grav[:, 0] < 0`` — torso pitched **back** (stable on hardware)
@@ -470,6 +524,11 @@ def torso_pitch_asymmetric_reward(
     termination cliff.
 
     Args:
+        asset_cfg: articulation whose root ``projected_gravity_b`` to read.
+            Defaults to the ``"robot"`` scene entity; the IMU sensor's
+            ``projected_gravity_b`` was removed in Isaac Lab 3.0 beta2, so we
+            read the articulation root (``base_link``) gravity projection
+            instead — equivalent for an IMU mounted with identity orientation.
         band_gx_min: deep-lean edge of the plateau (most negative ``g_x``).
         band_gx_max: shallow-lean edge of the plateau (least negative
             ``g_x``); should still be a back lean (``< 0``) so the plateau
@@ -482,9 +541,9 @@ def torso_pitch_asymmetric_reward(
         forward_deadband: only penalize forward tilt above this ``g_x``.
             ``0.0`` penalizes any forward component.
     """
-    imu = env.scene[imu_name]
+    asset = env.scene[asset_cfg.name]
     proj_grav = _ensure_tensor(
-        imu.data.projected_gravity_b, env_device=getattr(env, "device", None)
+        asset.data.projected_gravity_b, env_device=getattr(env, "device", None)
     )
     g_x = proj_grav[:, 0]
     g_y = proj_grav[:, 1]

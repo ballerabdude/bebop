@@ -112,7 +112,7 @@ services:
       context: ./sim/docker
       dockerfile: Dockerfile
       args:
-        BASE_IMAGE: nvcr.io/nvidia/isaac-lab:3.0.0-beta1
+        BASE_IMAGE: nvcr.io/nvidia/isaac-lab:3.0.0-beta2-post1
         USER_NAME: "${USER}"
         UID: "${UID:-1000}"
         GID: "${GID:-1000}"
@@ -144,7 +144,7 @@ services:
       - ~/.isaac_sim/logs:/home/${USER}/.nvidia-omniverse/logs:rw
       - ~/.isaac_sim/data:/home/${USER}/.local/share/ov/data:rw
       - .:/workspace/bebop_bot:rw
-      - /mnt/synology-home-files:/home-files:rw
+      # - /mnt/synology-home-files:/home-files:rw
       # NOTE: Do NOT add an explicit `./sim/logs:...` bind mount here.
       # The repo-root mount above already exposes `sim/logs` inside the
       # container. Adding a separate bind mount causes the Docker daemon

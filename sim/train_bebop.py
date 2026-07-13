@@ -95,27 +95,40 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-    "--video_interval",
-    type=int,
-    default=None,
+    "--video",
+    action="store_true",
+    default=False,
     help=(
-        "Record a video clip of env 0 every N iterations. Defaults to None "
-        "(off). Set equal to --save_interval to clip on every checkpoint. "
-        "Forces --enable_cameras when set."
+        "Record video clips of env 0 during training (beta2 convention). "
+        "Forces --enable_cameras and rgb_array render mode. Clips land in "
+        "<log_dir>/videos/train/. Pair with --video_interval and --video_length."
     ),
 )
 parser.add_argument(
-    "--video_length_steps",
+    "--video_interval",
     type=int,
-    default=64,
-    help="Number of env steps to record per video clip (default 64).",
+    default=2000,
+    help=(
+        "Interval between video recordings in ENV STEPS (not iterations). "
+        "To record every N iterations, pass N * num_steps_per_env "
+        "(num_steps_per_env defaults to 32, so --video_interval 1600 = "
+        "every 50 iterations). Default 2000."
+    ),
+)
+parser.add_argument(
+    "--video_length",
+    type=int,
+    default=200,
+    help="Number of env steps to record per video clip (default 200).",
 )
 
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
-# Video recording needs offscreen rendering even when --headless is set.
-if args.video_interval:
+# Video recording needs offscreen rendering (rgb_array) even in headless/no-viz
+# runs. beta2's VideoRecorder resolves the capture backend from the active
+# visualizer or the physics/renderer stack; PhysX selects the Kit camera path.
+if args.video:
     args.enable_cameras = True
 
 app_launcher = AppLauncher(args)
@@ -177,28 +190,43 @@ def main():
 
     # 4. Create Environment (Only Once)
     print(f"[INFO] Creating environment for task: {args.task}")
-    env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array" if args.headless else None)
+    env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array" if args.video else None)
 
-    # 4a. Optional video recording on a per-iteration cadence. RecordVideo's
-    #     step_trigger fires on env-step count, so we convert iterations to
-    #     steps via num_steps_per_env. Setting --video_interval equal to
-    #     --save_interval lands a clip right at each checkpoint write.
-    if args.video_interval:
-        steps_per_iter = agent_cfg.num_steps_per_env
-        clip_every_steps = max(1, args.video_interval) * steps_per_iter
+    # 4a. Optional video recording on a per-step cadence (beta2 convention).
+    #     RecordVideo's step_trigger fires on env-step count; --video_interval
+    #     is in steps. To land a clip at every checkpoint, set
+    #     --video_interval = save_interval * num_steps_per_env.
+    #
+    #     Filenames use the iteration count (matching the rsl_rl checkpoint
+    #     `model_<iter>.pt` convention) so a clip and its checkpoint line up:
+    #       model_100.pt  <->  rl-video-iter-100.mp4
+    if args.video:
         video_dir = os.path.join(log_dir, "videos", "train")
-        print(
-            f"[INFO] Recording video every {clip_every_steps} env steps "
-            f"(= {args.video_interval} iter * {steps_per_iter} steps/iter), "
-            f"{args.video_length_steps} steps per clip -> {video_dir}"
-        )
-        env = gym.wrappers.RecordVideo(
-            env,
-            video_dir,
-            step_trigger=lambda step: step > 0 and step % clip_every_steps == 0,
-            video_length=args.video_length_steps,
-            disable_logger=True,
-        )
+        steps_per_iter = agent_cfg.num_steps_per_env
+
+        class _IterNamedRecordVideo(gym.wrappers.RecordVideo):
+            """RecordVideo subclass naming clips by iteration, not step.
+
+            rsl_rl checkpoints are ``model_<iter>.pt``; this names clips
+            ``rl-video-iter-<iter>.mp4`` so a clip and its matching checkpoint
+            share the same suffix and sort together.
+            """
+
+            def start_recording(self, video_name: str):
+                # self.step_id is the env-step count at trigger time; convert
+                # to the iteration count (0-indexed steps_per_iter).
+                iter_num = self.step_id // steps_per_iter
+                super().start_recording(f"rl-video-iter-{iter_num}")
+
+        video_kwargs = {
+            "video_folder": video_dir,
+            "step_trigger": lambda step: step > 0 and step % args.video_interval == 0,
+            "video_length": args.video_length,
+        }
+        print(f"[INFO] Recording videos: every {args.video_interval} steps "
+              f"({args.video_interval // steps_per_iter} iter), "
+              f"{args.video_length} steps/clip -> {video_dir}")
+        env = _IterNamedRecordVideo(env, **video_kwargs)
 
     # 5. Wrap for RSL-RL
     env = RslRlVecEnvWrapper(env)
