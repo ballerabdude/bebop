@@ -100,11 +100,19 @@ BACK_LEAN_FWD_PENALTY_GAIN = 5.0
 # Center of the back-lean band in g_x units — the balance target the movement
 # penalties gate on. ~= -0.174 (10° back lean), the midpoint of the band.
 BACK_LEAN_BAND_GX_CENTER = 0.5 * (BACK_LEAN_BAND_GX[0] + BACK_LEAN_BAND_GX[1])
-# Width of the balance gate Gaussian (in g_x units; ~0.15 ≈ 8.6° at 1/e).
-# Chosen so the gate is ~1.0 inside the band (full anti-chatter penalty) and
-# ~0.08 at the capture's failure tilt (g_x ≈ +0.065, 12° off the band) — i.e.
-# the movement penalties vanish exactly where the policy needs to recover.
-BALANCE_GATE_STD = 0.15
+# Width of the balance gate Gaussian (in g_x units; ~0.10 ≈ 5.7° at 1/e).
+# Tightened 0.15 -> 0.10 (Jul 15 2026) after capture 20260715_122500 showed
+# the 0.15 gate opened too early (at moderate tilt where the policy should
+# still be smooth), enabling a flailing limit cycle. At 0.10 the gate only
+# relaxes the movement penalties at genuinely dangerous tilt (>6°), keeping
+# the anti-chatter pressure on through the normal recovery regime.
+BALANCE_GATE_STD = 0.10
+# Floor for the balance gate (0..1). Prevents the movement penalties from
+# vanishing entirely at tilt, which the policy otherwise exploits by
+# manufacturing tilt to unlock chatter (capture 20260715_122500: vel_std
+# 0.69-1.34, slew-exceedance 56.9%). At gate_floor=0.2 the -10.0 position_rate
+# still contributes -2.0·rate at full tilt — enough to keep recovery smooth.
+BALANCE_GATE_FLOOR = 0.20
 
 # Fraction of each joint's soft range used when sampling reset poses. A small
 # value keeps resets near the nominal pose so most episodes survive; widen
@@ -559,6 +567,7 @@ class RewardsCfg:
             ),
             "gate_band_gx_center": BACK_LEAN_BAND_GX_CENTER,
             "gate_std": BALANCE_GATE_STD,
+            "gate_floor": BALANCE_GATE_FLOOR,
         },
     )
 
@@ -591,6 +600,7 @@ class RewardsCfg:
             "balance_gate": True,
             "gate_band_gx_center": BACK_LEAN_BAND_GX_CENTER,
             "gate_std": BALANCE_GATE_STD,
+            "gate_floor": BALANCE_GATE_FLOOR,
         },
     )
 
@@ -631,20 +641,22 @@ class RewardsCfg:
             "balance_gate": True,
             "gate_band_gx_center": BACK_LEAN_BAND_GX_CENTER,
             "gate_std": BALANCE_GATE_STD,
+            "gate_floor": BALANCE_GATE_FLOOR,
         },
     )
 
     # CoM-over-support — bounded [0,1] reward for keeping the torso CoM
-    # (approximated by base_link xy) over the midpoint between the two feet.
-    # This is the positive carrot that complements the balance gates: the
-    # gates remove the penalty that blocked recovery, and this term adds a
-    # positive gradient *toward* the balanced pose. Scaled by
-    # (1 + 4*tilt²) so it's small at balance (``torso_posture`` owns the
-    # steady state) and grows when tilted (the recovery incentive must
-    # dominate). Non-privileged: base_link + foot positions are derivable
-    # from joint encoders + FK on hardware. Added Jul 15 2026 after the
-    # gantry capture showed the policy had no incentive to actively shift
-    # its CoM back over the feet — only penalties blocking it from moving.
+    # (approximated by base_link xy) over the midpoint between the two feet,
+    # AND holding still while doing it. The stillness gate is essential:
+    # without it the policy can earn the full carrot by SWINGING the CoM
+    # through the target on every oscillation (the reward fires on position,
+    # not velocity). Capture 20260715_122500 showed this exploit: the term
+    # climbed to +0.39 while the robot thrashed (vel_std 0.69-1.34). The gate
+    # makes the carrot pay out only when the CoM is over the feet AND the
+    # robot is settling — turning it from a swing-enabler into a hold-enforcer.
+    # The previous ``tilt_boost_gain`` is removed: it made the flailing
+    # exploit MORE profitable at tilt, exactly when the movement-penalty gates
+    # were most relaxed. Non-privileged (FK from joint encoders).
     com_over_support = RewTerm(
         func=com_over_support_reward,
         weight=0.4,
@@ -652,7 +664,7 @@ class RewardsCfg:
             "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
             "foot_body_names": ("foot_left_1", "foot_right_1"),
             "max_lateral_dist": 0.12,
-            "tilt_boost_gain": 4.0,
+            "stillness_std": 2.0,
         },
     )
 
