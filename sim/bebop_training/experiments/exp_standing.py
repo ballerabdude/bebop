@@ -40,6 +40,8 @@ from ..envs.bebop_v2_events import (
 from ..envs.bebop_v2_rewards import (
     action_gain_rate_l2,
     action_position_rate_l2,
+    com_over_support_reward,
+    joint_deviation_l1_balance_gated,
     joint_vel_l2,
     torso_pitch_asymmetric_reward,
 )
@@ -94,6 +96,15 @@ BACK_LEAN_ROLL_STD = 0.15
 # Forward-pitch penalty inside the reward (g_x > 0 is the hardware-fatal
 # forward lean; penalize any forward component, no deadband).
 BACK_LEAN_FWD_PENALTY_GAIN = 5.0
+
+# Center of the back-lean band in g_x units — the balance target the movement
+# penalties gate on. ~= -0.174 (10° back lean), the midpoint of the band.
+BACK_LEAN_BAND_GX_CENTER = 0.5 * (BACK_LEAN_BAND_GX[0] + BACK_LEAN_BAND_GX[1])
+# Width of the balance gate Gaussian (in g_x units; ~0.15 ≈ 8.6° at 1/e).
+# Chosen so the gate is ~1.0 inside the band (full anti-chatter penalty) and
+# ~0.08 at the capture's failure tilt (g_x ≈ +0.065, 12° off the band) — i.e.
+# the movement penalties vanish exactly where the policy needs to recover.
+BALANCE_GATE_STD = 0.15
 
 # Fraction of each joint's soft range used when sampling reset poses. A small
 # value keeps resets near the nominal pose so most episodes survive; widen
@@ -431,50 +442,55 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """SIMPLIFIED standing reward (Jul 10 2026): survive, hold a back-lean
-    posture, keep the hips straight, move smoothly.
+    """Active-balancing standing reward (Jul 15 2026): survive, hold a
+    back-lean posture, keep the CoM over the feet, and MOVE to recover.
 
-    History: the previous design (upright + bilateral symmetry + three
-    rate/velocity penalties) grew term-by-term, each patching a hack the
-    last one opened. After the symmetry sign fix, run 2026-07-09_13-07-14
-    exposed the remaining hole: nothing anchored the POSTURE, so the
-    optimum was a deep crouch with the hips parked on the ±0.5 rad action
-    rail (raw hip action clipped 97%/74% of ticks) and the whole robot
-    held up by the ankle (est. 37 Nm commanded at the right foot vs the
-    RS02's 6 Nm continuous rating) — un-transferable to hardware.
+    History: the previous design (Jul 10-14 2026) was a *statue* — survive,
+    hold a back-lean posture, keep the hips straight, move smoothly. The
+    smoothing worked (capture 20260715_041834: slew-exceedance 40-55% -> 6.3%)
+    but the robot could not balance: on a gantry test it hung at g_x mean
+    +0.065 (12° FORWARD of the back-lean band [-0.208, -0.139]) instead of
+    correcting, because the movement penalties (position_rate -10.0,
+    joint_vel -0.5, hip_flexion_anchor -0.6) made every recovery motion
+    unaffordable. A 0.1 rad hip flexion cost -0.4/tick while ``torso_posture``
+    only earned +0.028/tick at that tilt — the policy correctly chose not to
+    move and was caught by the gantry.
 
-    The simplification replaces indirect shaping with direct anchors:
+    The fix inverts the gate pattern already used by
+    :func:`bilateral_joint_symmetry_l2` (a stillness gate that suppresses a
+    penalty during motion): the movement penalties now carry a *balance gate*
+    that suppresses them during tilt. The gate is a Gaussian on how far the
+    torso tilt is from the back-lean band center:
 
-    * ``torso_posture`` (``torso_pitch_asymmetric_reward``) — a flat-top
-      back-lean band (8-12°, centered on the 10° target) replaces the old
-      ``upright_pose`` Gaussian. The Gaussian was centered on perfect
-      vertical (g_x = g_y = 0) with its steepest gradient AT vertical,
-      which pulled the policy to a posture that is not hardware-stable
-      (CoM over the ankle pivot, load on the weak RS02 foot motor). The
-      flat-top band lets the torso settle anywhere in [8°, 12°] of back
-      lean and shifts the CoM behind the ankle pivot so the leg stacks
-      load through the hip/knee. Forward pitch is penalized inside the
-      same term.
-    * ``hip_flexion_anchor`` — Σ|q| over ONLY the two hip flexion joints.
-      The natural compensation when the torso leans back is to
-      counter-rotate by flexing the hips forward (keeping CoM over the
-      feet via joint angles); we want the ankle strategy instead (entire
-      body leans together, hips stay straight). Scoped to hip_flexion so
-      the knees/feet can still bend for recovery.
-    * ``joint_pos_anchor`` (``mdp.joint_deviation_l1``) over all joints
-      — general posture regularizer: prevents the crouch-at-the-rail
-      optimum, keeps the stance bilaterally symmetric, and gives the
-      policy a home pose to return to after recovery. Weight is modest so
-      ``hip_flexion_anchor`` can dominate hip flexion specifically.
-    * The ankle-support hack is fixed in PHYSICS, not reward: the foot
-      ``effort_limit_sim`` is capped at the RS02 continuous rating (6 Nm),
-      so leaning on the ankle simply stops working in sim.
-    * Anti-oscillation is down to two terms: ``position_rate`` (smooth
-      setpoints, the cause) and ``joint_vel`` (still plant, the effect),
-      plus ``gain_rate`` for the 16 live gain channels in the
-      variable-impedance config. The FixedGain variant pins the gains
-      structurally (sim freeze + firmware clamp pin) and drops
-      ``gain_rate`` entirely (see ``BebopV2StandingFixedGainCfg``).
+        gate = exp(-((g_x - center)² + g_y²) / gate_std²)
+
+    At balance the gate is 1.0 — the anti-chatter penalties fire at full
+    strength (their actual job: kill steady-state wobble). At the capture's
+    failure tilt (12° off band) the gate is ~0.08 — the penalties vanish and
+    the policy is free to swing the legs to catch the fall.
+
+    * ``torso_posture`` (``torso_pitch_asymmetric_reward``) — unchanged: the
+      flat-top back-lean band (8-12°) is still the balance target. The change
+      is removing the penalties that *blocked* reaching it, not changing the
+      target.
+    * ``com_over_support`` (NEW) — bounded [0,1] reward for keeping the CoM
+      (base_link xy) over the foot midpoint. The positive carrot that
+      complements the gates: gives a gradient *toward* balance, growing
+      stronger when tilted. This is what makes active leg-lifting the
+      *rewarded* recovery strategy, not just a tolerated one.
+    * ``hip_flexion_anchor`` — now balance-gated. Holds hips straight at
+      steady state (the ankle strategy) but frees them to flex for recovery.
+    * ``joint_vel`` — now balance-gated. Kills wobble at balance, frees the
+      legs to move when tilted.
+    * ``position_rate`` — now balance-gated. Kills chatter at balance (-10.0
+      full strength), frees the setpoints to move rapidly when tilted.
+    * ``joint_pos_anchor`` (``mdp.joint_deviation_l1``) over all joints —
+      general posture regularizer, NOT gated (the home pose should always be
+      the quiet attractor; the L1 pull is cheap and the gate machinery is
+      only needed where the weight is high enough to block recovery).
+
+    The ankle-support hack stays fixed in PHYSICS, not reward: the foot
+    ``effort_limit_sim`` is capped at the RS02 continuous rating (6 Nm).
     """
 
     alive = RewTerm(func=mdp.is_alive, weight=1.0)
@@ -508,18 +524,29 @@ class RewardsCfg:
         },
     )
 
-    # Hip-flexion anchor — Σ|q| over ONLY the two hip flexion joints. The
-    # whole-joint ``joint_pos_anchor`` below is too weak to hold hip flexion
-    # at zero once the torso is leaning back: the natural compensation for a
-    # back-leaning torso is to counter-rotate by flexing the hips forward
-    # (keeping CoM over the feet via joint angles). We want the ankle strategy
-    # instead — the entire body leans together, hips stay straight — so the
-    # hip flexion joints get their own stronger, scoped anchor. Restricted to
-    # hip_flexion (not knee/foot) so the legs can still bend at the knee and
-    # ankle for recovery. Not stillness-gated: an L1 pull toward zero is cheap
-    # during transients and we want the hips straight at all times.
+    # Hip-flexion anchor — Σ|q| over ONLY the two hip flexion joints, gated
+    # by how close the torso is to the balance band. The whole-joint
+    # ``joint_pos_anchor`` below is too weak to hold hip flexion at zero once
+    # the torso is leaning back: the natural compensation for a back-leaning
+    # torso is to counter-rotate by flexing the hips forward (keeping CoM
+    # over the feet via joint angles). We want the ankle strategy instead —
+    # the entire body leans together, hips stay straight — so the hip flexion
+    # joints get their own stronger, scoped anchor. Restricted to hip_flexion
+    # (not knee/foot) so the knees/feet can still bend for recovery.
+    #
+    # BALANCE-GATED (Jul 15 2026): the anchor was non-gated at -0.6, which
+    # made the primary balance-recovery motion (swinging the legs to put a
+    # foot under the falling CoM) unaffordable. Capture 20260715_041834
+    # (gantry-supported, on-policy) showed the robot hanging at g_x mean
+    # +0.065 — 12° FORWARD of the back-lean band — instead of correcting,
+    # because a 0.1 rad hip flexion cost -0.4/tick at -0.6 while
+    # ``torso_posture`` only earned +0.028/tick at that tilt. The gate
+    # (``exp(-tilt_err/gate_std²)``) fires at full strength when balanced
+    # (holds hips straight at steady state) and vanishes when tilted (frees
+    # the hips to recover). At the capture's failure tilt the gate is ~0.08,
+    # so the same recovery costs only -0.031/tick — finally affordable.
     hip_flexion_anchor = RewTerm(
-        func=mdp.joint_deviation_l1,
+        func=joint_deviation_l1_balance_gated,
         weight=-0.6,
         params={
             "asset_cfg": SceneEntityCfg(
@@ -529,7 +556,9 @@ class RewardsCfg:
                     "hip_flexion_right_joint",
                 ],
                 preserve_order=True,
-            )
+            ),
+            "gate_band_gx_center": BACK_LEAN_BAND_GX_CENTER,
+            "gate_std": BALANCE_GATE_STD,
         },
     )
 
@@ -546,13 +575,22 @@ class RewardsCfg:
     # policy chatters the setpoints to chase posture. Raising joint_vel
     # further would freeze recovery without fixing the chatter; the lever
     # is position_rate, not joint_vel.
+    #
+    # BALANCE-GATED (Jul 15 2026): the gate fires at full strength when
+    # balanced (kills residual wobble, the term's job) and vanishes when
+    # tilted (frees the policy to swing the legs to catch a fall). Without
+    # the gate the -0.5 weight makes recovery unaffordable at tilt — see
+    # the ``hip_flexion_anchor`` comment for the capture evidence.
     joint_vel = RewTerm(
         func=joint_vel_l2,
         weight=-0.5,
         params={
             "asset_cfg": SceneEntityCfg(
                 "robot", joint_names=JOINT_NAMES_ALL, preserve_order=True
-            )
+            ),
+            "balance_gate": True,
+            "gate_band_gx_center": BACK_LEAN_BAND_GX_CENTER,
+            "gate_std": BALANCE_GATE_STD,
         },
     )
 
@@ -576,7 +614,47 @@ class RewardsCfg:
     # at -10 the steady-state cost of legitimate slow drift (raw Δa ~0.01
     # per tick) is only -0.0025/tick, so normal tracking is still cheap;
     # only the rapid chatter (raw Δa ~0.05+ per tick) gets taxed hard.
-    position_rate = RewTerm(func=action_position_rate_l2, weight=-10.00)
+    #
+    # BALANCE-GATED (Jul 15 2026): same gate as ``joint_vel`` and
+    # ``hip_flexion_anchor``. The -10.0 weight is essential for killing
+    # steady-state chatter (capture 20260715_041834 confirmed it worked:
+    # slew-exceedance dropped 40-55% -> 6.3%), but ungated it made
+    # recovery unaffordable — at 12° off the band a 0.1 rad recovery
+    # across 4 joints cost -0.4/tick while ``torso_posture`` earned only
+    # +0.028/tick, so the policy hung forward on the gantry instead of
+    # correcting. The gate keeps -10.0 at balance (chatter still killed)
+    # and drops it to ~-0.78 at the failure tilt (recovery affordable).
+    position_rate = RewTerm(
+        func=action_position_rate_l2,
+        weight=-10.00,
+        params={
+            "balance_gate": True,
+            "gate_band_gx_center": BACK_LEAN_BAND_GX_CENTER,
+            "gate_std": BALANCE_GATE_STD,
+        },
+    )
+
+    # CoM-over-support — bounded [0,1] reward for keeping the torso CoM
+    # (approximated by base_link xy) over the midpoint between the two feet.
+    # This is the positive carrot that complements the balance gates: the
+    # gates remove the penalty that blocked recovery, and this term adds a
+    # positive gradient *toward* the balanced pose. Scaled by
+    # (1 + 4*tilt²) so it's small at balance (``torso_posture`` owns the
+    # steady state) and grows when tilted (the recovery incentive must
+    # dominate). Non-privileged: base_link + foot positions are derivable
+    # from joint encoders + FK on hardware. Added Jul 15 2026 after the
+    # gantry capture showed the policy had no incentive to actively shift
+    # its CoM back over the feet — only penalties blocking it from moving.
+    com_over_support = RewTerm(
+        func=com_over_support_reward,
+        weight=0.4,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+            "foot_body_names": ("foot_left_1", "foot_right_1"),
+            "max_lateral_dist": 0.12,
+            "tilt_boost_gain": 4.0,
+        },
+    )
 
     # Default-pose anchor — Σ|q| over all joints (the default pose is all
     # zeros: straight-leg symmetric stand). The general posture regularizer:

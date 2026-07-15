@@ -60,6 +60,10 @@ def action_gain_rate_l2(
 def action_position_rate_l2(
     env,
     num_position_channels: int = 8,
+    balance_gate: bool = False,
+    gate_band_gx_center: float = -0.17,
+    gate_std: float = 0.15,
+    asset_cfg: SceneEntityCfg | None = None,
 ) -> torch.Tensor:
     """Penalize tick-to-tick change of the 8 *position* action channels.
 
@@ -79,13 +83,46 @@ def action_position_rate_l2(
 
     Returns ``Σ (pos_t - pos_{t-1})²`` over the position channels; always
     ``>= 0``, use with a negative weight.
+
+    **Balance gate** (``balance_gate=True``): multiplies the penalty by
+    ``exp(-((g_x - center)² + g_y²) / gate_std²)``, a Gaussian on how far the
+    torso tilt is from the balance target. The penalty fires at FULL strength
+    when the robot is balanced (kills steady-state chatter, the term's actual
+    job) and vanishes when the robot is tilted (frees the policy to move the
+    setpoints rapidly to catch a fall). Without this gate a high weight (-10)
+    makes recovery unaffordable: at 12° off the band, a 0.1 rad recovery across
+    4 joints costs -0.4/tick while ``torso_posture`` only earns +0.028/tick —
+    the policy correctly chooses not to move and hangs forward (capture
+    20260715_041834, gantry-supported: g_x mean +0.065 vs band [-0.208,-0.139]).
+    The gate makes the same recovery cost -0.031/tick at tilt, restoring the
+    incentive to actively correct. At balance the gate is 1.0, so the anti-
+    chatter job is unchanged.
+
+    Args:
+        balance_gate: if True, apply the tilt-distance Gaussian gate.
+        gate_band_gx_center: ``g_x`` center of the gate (the balance target).
+        gate_std: Gaussian width; ~0.15 means the gate is ~1/e at ~8.6° off.
+        asset_cfg: articulation for the gate's ``projected_gravity_b``.
     """
     device = getattr(env, "device", None)
     action = _ensure_tensor(env.action_manager.action, env_device=device)
     prev_action = _ensure_tensor(env.action_manager.prev_action, env_device=device)
     pos = action[:, :num_position_channels]
     pos_prev = prev_action[:, :num_position_channels]
-    return torch.sum(torch.square(pos - pos_prev), dim=1)
+    rate = torch.sum(torch.square(pos - pos_prev), dim=1)
+
+    if not balance_gate:
+        return rate
+
+    asset = env.scene[asset_cfg.name if asset_cfg is not None else "robot"]
+    proj_grav = _ensure_tensor(
+        asset.data.projected_gravity_b, env_device=device
+    )
+    g_x = proj_grav[:, 0]
+    g_y = proj_grav[:, 1]
+    tilt_err = torch.square(g_x - gate_band_gx_center) + torch.square(g_y)
+    gate = torch.exp(-tilt_err / (gate_std * gate_std))
+    return rate * gate
 
 
 def action_gain_l2(
@@ -116,6 +153,9 @@ def action_gain_l2(
 def joint_vel_l2(
     env,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    balance_gate: bool = False,
+    gate_band_gx_center: float = -0.17,
+    gate_std: float = 0.15,
 ) -> torch.Tensor:
     """Penalize any joint motion — the sharpest ``be absolutely still`` signal.
 
@@ -126,14 +166,31 @@ def joint_vel_l2(
     way down to zero velocity — which is what actually kills small limit-cycle
     oscillations. Pair with the action-rate terms; this is the plant-side
     counterpart (penalize the *result* of the chatter, not just the chatter).
+
+    **Balance gate** (``balance_gate=True``): multiplies the penalty by
+    ``exp(-((g_x - center)² + g_y²) / gate_std²)`` (same gate as
+    :func:`action_position_rate_l2`). At full strength when balanced (kills
+    residual wobble, the term's job) and vanishes when tilted (frees the policy
+    to swing the legs to catch a fall). Without the gate the -0.5 weight makes
+    recovery unaffordable at tilt — see :func:`action_position_rate_l2` for the
+    full rationale.
     """
     asset = env.scene[asset_cfg.name]
-    joint_vel = _ensure_tensor(
-        asset.data.joint_vel, env_device=getattr(env, "device", None)
-    )
+    device = getattr(env, "device", None)
+    joint_vel = _ensure_tensor(asset.data.joint_vel, env_device=device)
     if asset_cfg.joint_ids is not None:
         joint_vel = joint_vel[:, asset_cfg.joint_ids]
-    return torch.sum(torch.square(joint_vel), dim=1)
+    vel_sq = torch.sum(torch.square(joint_vel), dim=1)
+
+    if not balance_gate:
+        return vel_sq
+
+    proj_grav = _ensure_tensor(asset.data.projected_gravity_b, env_device=device)
+    g_x = proj_grav[:, 0]
+    g_y = proj_grav[:, 1]
+    tilt_err = torch.square(g_x - gate_band_gx_center) + torch.square(g_y)
+    gate = torch.exp(-tilt_err / (gate_std * gate_std))
+    return vel_sq * gate
 
 
 def stationary_pose_exp(
@@ -446,6 +503,125 @@ def joint_deviation_l1_stillness_gated(
     vel_sq = torch.sum(torch.square(joint_vel), dim=1)
     gate = torch.exp(-vel_sq / (stillness_std * stillness_std))
     return dev * gate
+
+
+def joint_deviation_l1_balance_gated(
+    env,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    gate_band_gx_center: float = -0.17,
+    gate_std: float = 0.15,
+) -> torch.Tensor:
+    """``Σ |q|`` over selected joints, gated by how close to balance the torso is.
+
+    The balance-gate counterpart to :func:`joint_deviation_l1_stillness_gated`.
+    Multiplies ``Σ |q|`` by ``exp(-((g_x - center)² + g_y²) / gate_std²)``: the
+    penalty fires at full strength when the robot is balanced (holds the
+    anchored joints at their home pose) and vanishes when tilted (frees those
+    joints to move for active recovery). Always ``>= 0``; use with a negative
+    weight.
+
+    Used for the hip-flexion anchor in the active-balance reward: the hips
+    must stay straight when balanced (the ankle strategy — entire body leans
+    together) but MUST be free to flex when the torso is falling, because
+    swinging the legs to put a foot under the falling CoM is the primary
+    balance-recovery motion. A non-gated hip-flexion anchor at -0.6 made that
+    recovery motion unaffordable and the policy learned to hang forward instead
+    of correcting (capture 20260715_041834: g_x mean +0.065, 12° off the
+    back-lean band, on a gantry that caught the fall).
+
+    Args:
+        asset_cfg: which articulation / joints to score the deviation on.
+        gate_band_gx_center: ``g_x`` center of the balance gate.
+        gate_std: Gaussian width; ~0.15 ≈ 8.6° at 1/e.
+    """
+    asset = env.scene[asset_cfg.name]
+    device = getattr(env, "device", None)
+    joint_pos = _ensure_tensor(asset.data.joint_pos, env_device=device)
+    if asset_cfg.joint_ids is not None:
+        joint_pos = joint_pos[:, asset_cfg.joint_ids]
+    dev = torch.sum(torch.abs(joint_pos), dim=1)
+
+    proj_grav = _ensure_tensor(asset.data.projected_gravity_b, env_device=device)
+    g_x = proj_grav[:, 0]
+    g_y = proj_grav[:, 1]
+    tilt_err = torch.square(g_x - gate_band_gx_center) + torch.square(g_y)
+    gate = torch.exp(-tilt_err / (gate_std * gate_std))
+    return dev * gate
+
+
+def com_over_support_reward(
+    env,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    foot_body_names: tuple[str, str] = ("foot_left_1", "foot_right_1"),
+    max_lateral_dist: float = 0.12,
+    tilt_boost_gain: float = 4.0,
+) -> torch.Tensor:
+    """Reward keeping the torso CoM horizontally over the foot support polygon.
+
+    Approximates the CoM by the ``base_link`` world xy position and the support
+    polygon by the midpoint between the two foot bodies' world xy positions.
+    Returns a bounded reward in ``[0, 1]`` that is 1.0 when the CoM is directly
+    over the support midpoint and falls off as a Gaussian in the horizontal
+    distance. This is the positive carrot that complements the balance gates:
+    the gates (on ``position_rate`` / ``joint_vel`` / ``hip_flexion_anchor``)
+    remove the penalty that blocked recovery, and this term adds a positive
+    gradient *toward* the balanced pose, growing stronger the more tilted the
+    robot is (so a falling robot has the largest incentive to step/catch).
+
+    Sign convention / why lateral distance: a falling robot is one whose CoM
+    has moved outside the support polygon (over the edge of the foot). The
+    most direct non-privileged signal for "get the CoM back over the feet" is
+    the horizontal distance from the torso to the foot midpoint. Penalizing
+    that distance (or rewarding its negation) gives the policy a clean target
+    that is independent of the ankle motor's weakness: even when the RS02
+    can't hold a torque, the policy can shift the CoM by flexing the hips and
+    stepping. This term is what makes active leg-lifting the rewarded
+    recovery strategy rather than just a tolerated one.
+
+    The reward is also scaled by ``1 + tilt_boost_gain * (g_x² + g_y²)`` so it
+    is small when balanced (letting ``torso_posture`` own the steady-state
+    shape) and grows when tilted (where the recovery incentive must dominate).
+    At ``tilt_boost_gain = 4.0`` and 12° off-band (g_x ≈ 0.21), the boost is
+    ~1.18x — a mild carrot at the capture's failure tilt, growing for deeper
+    falls.
+
+    Non-privileged: uses only ``body_pos_w`` (root link + foot bodies), which
+    the firmware can reconstruct from joint encoders + forward kinematics.
+    No contact sensing required — the midpoint is taken unconditionally, which
+    is correct for a two-foot stand and degrades gracefully during a step
+    (the midpoint just tracks the lifted foot's horizontal position).
+
+    Args:
+        asset_cfg: the robot articulation.
+        foot_body_names: ``(left, right)`` foot body names whose midpoint
+            approximates the support polygon center.
+        max_lateral_dist: distance (m) at which the reward is ~1/e. ~0.12 m
+            matches half a foot length — beyond that the CoM is over the edge.
+        tilt_boost_gain: scales how much the reward grows with tilt. 0 makes
+            the term tilt-invariant (pure CoM tracking); 4.0 gives a mild
+            recovery emphasis.
+    """
+    asset = env.scene[asset_cfg.name]
+    device = getattr(env, "device", None)
+    body_pos_w = _ensure_tensor(asset.data.body_pos_w, env_device=device)
+
+    base_xy = body_pos_w[:, asset_cfg.body_ids[0], :2]
+
+    foot_ids = [asset.body_names.index(name) for name in foot_body_names]
+    foot_mid_xy = 0.5 * (
+        body_pos_w[:, foot_ids[0], :2] + body_pos_w[:, foot_ids[1], :2]
+    )
+
+    lateral_dist = (base_xy - foot_mid_xy).norm(dim=-1)
+    base_reward = torch.exp(
+        -torch.square(lateral_dist) / (max_lateral_dist * max_lateral_dist)
+    )
+
+    proj_grav = _ensure_tensor(asset.data.projected_gravity_b, env_device=device)
+    tilt_sq = torch.square(proj_grav[:, 0]) + torch.square(proj_grav[:, 1])
+    boost = 1.0 + tilt_boost_gain * tilt_sq
+
+    return base_reward * boost
 
 
 def upright_pose_exp(
