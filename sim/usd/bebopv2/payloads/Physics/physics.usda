@@ -266,8 +266,9 @@ over "bebopv2"
             point3f physics:localPos1 = (0, 0, 0)
             quatf physics:localRot0 = (1, 0, 0, 0)
             quatf physics:localRot1 = (1, 0, 0, 0)
-            float physics:lowerLimit = -20.000008
-            float physics:upperLimit = 10.000004
+            # -0.20 rad / +0.07 rad (mirror of left). Was -20°/+10° (~-0.349/+0.175 rad).
+            float physics:lowerLimit = -11.459156
+            float physics:upperLimit = 4.010705
             custom float urdf:limit:effort = 100
             custom float urdf:limit:velocity = 100
         }
@@ -286,8 +287,9 @@ over "bebopv2"
             point3f physics:localPos1 = (0, 0, 0)
             quatf physics:localRot0 = (1, 0, 0, 0)
             quatf physics:localRot1 = (1, 0, 0, 0)
-            float physics:lowerLimit = -10.000004
-            float physics:upperLimit = 20.000008
+            # -0.07 rad / +0.20 rad. Was -10°/+20° (~-0.175/+0.349 rad).
+            float physics:lowerLimit = -4.010705
+            float physics:upperLimit = 11.459156
             custom float urdf:limit:effort = 100
             custom float urdf:limit:velocity = 100
         }

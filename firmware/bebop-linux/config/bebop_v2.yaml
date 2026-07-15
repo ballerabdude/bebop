@@ -156,7 +156,10 @@ joints:
     can_interface: can0
     motor_id: 32
     model: RS03
-    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
+    # Jul 13 2026: pos range tightened ±1 -> -0.07/+0.20 rad to mirror the
+    # USD hip_abduction limits (sim/usd/bebopv2/.../physics.usda). Old ±1 rad
+    # far exceeded the mechanical envelope; this matches the URDF/USD range.
+    hard_limits: { pos_min: -0.30, pos_max: 0.50, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
     # v0.15: kp_min raised 20 -> 40, kd_min 1.0 -> 2.0
     # Jun 2026 sim2real: kp_max 300 -> 150, kd_min 2.0 -> 3.0 (cut wide gain band)
@@ -175,7 +178,10 @@ joints:
     can_interface: can1
     motor_id: 42
     model: RS03
-    hard_limits: { pos_min: -1, pos_max: 1, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
+    # Jul 13 2026: pos range tightened ±1 -> -0.20/+0.07 rad to mirror the
+    # USD hip_abduction limits (sim/usd/bebopv2/.../physics.usda). Old ±1 rad
+    # far exceeded the mechanical envelope; this matches the URDF/USD range.
+    hard_limits: { pos_min: -0.50, pos_max: 0.30, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
     # Jun 2026 sim2real: kp_max 300 -> 150, kd_min 2.0 -> 3.0 (mirror hip_abduction_left)
     # Jul 11 2026 GAIN PIN: mirror hip_abduction_left (kp 95, kd 5.5 epsilon band).
@@ -225,7 +231,7 @@ joints:
     # deliver up to 17 Nm gave the real ankle ~3x the trained loop gain (captures
     # 20260711_013801 / _163155 both commanded >6 Nm on 60-90% of ticks and rang
     # at 3-7 Hz). 6 Nm is also the thermally sustainable rating.
-    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 6.0, temp_max: 65.0 }
+    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 17.0, temp_max: 65.0 }
     hold_gains:  { kp: 375.0, kd: 5.0 }
     # v0.15: kp_min raised 5 -> 20, kd_min 0.2 -> 0.8 — was the joint the
     # v0.14 trained policy left fully soft on deployment (operator could
@@ -258,7 +264,7 @@ joints:
     motor_id: 45
     model: RS02
     # Jul 11 2026: tau_max 17 -> 6 (mirror foot_left_joint / sim MOTOR_CONT_TORQUE_RS02).
-    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 6.0, temp_max: 65.0 }
+    hard_limits: { pos_min: -0.8, pos_max: 0.8, vel_max: 20.0, tau_max: 17.0, temp_max: 65.0 }
     hold_gains:  { kp: 375.0, kd: 5.0 }
     # Jun 2026: kp_min 30 -> 80, kd_min 1.0 -> 3.0 (mirror of foot_left_joint
     # and POLICY_KP_MIN/POLICY_KD_MIN[6,7] in sim exp_standing.py).

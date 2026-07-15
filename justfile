@@ -1,6 +1,11 @@
 # Common dev commands. Install `just` from https://github.com/casey/just
 # then run `just` to see this list, or `just <name>` to execute one.
 
+# Pass recipe args to shebang scripts as $1, $2, … (just 1.0+). Without this,
+# `lab-export <ckpt>` silently ignored its argument and always fell back to the
+# latest checkpoint, because shebang recipes don't expose "$@" by default.
+set positional-arguments := true
+
 default:
     @just --list
 
@@ -120,11 +125,18 @@ lab-train *ARGS:
     set -e
     TS="$(date +%Y%m%d_%H%M%S)"
     LOG="/tmp/train_${TS}.log"
+    # Default to the Standing task only if the caller didn't already pass --task.
+    # just interpolates {{ARGS}} as a single string into the bash script, so we
+    # match against that literal string.
+    case " {{ARGS}} " in
+        *" --task "*) TASK="" ;;
+        *) TASK="--task Isaac-BebopV2-Standing-v0" ;;
+    esac
     echo "[lab-train] starting; log: ${LOG}"
     echo "[lab-train] tail with:  just lab-train-log ${LOG}"
     echo "[lab-train] list runs:  just lab-train-ps"
     docker exec -d -w /workspace/bebop_bot/sim bebop_isaac_lab bash -lc \
-        "/workspace/isaaclab/isaaclab.sh -p train_bebop.py --task Isaac-BebopV2-Standing-v0 {{ARGS}} > ${LOG} 2>&1"
+        "/workspace/isaaclab/isaaclab.sh -p train_bebop.py ${TASK} {{ARGS}} > ${LOG} 2>&1"
     # print the PID so the user can kill it directly if needed
     sleep 1
     docker exec bebop_isaac_lab bash -lc \
@@ -210,6 +222,13 @@ lab-train-kill TARGET="latest":
 lab-export *ARGS:
     #!/usr/bin/env bash
     set -e
+    # `just` does NOT pass recipe args to shebang scripts via "$@" by default
+    # — the global `set positional-arguments := true` at the top of this
+    # justfile makes ARGS populate $1, $2, … so we can use the bash "$@" /
+    # array machinery normally. Without it, "$@" is always empty and the
+    # script silently falls back to "latest", ignoring an explicit
+    # checkpoint path.
+    ARGS=("$@")
     # If the first ARG is a checkpoint path or run dir, pop it off; else use "latest".
     CKPT="latest"
     PASS_ARGS=()
@@ -235,14 +254,22 @@ lab-export *ARGS:
         fi
         CKPT="$RESOLVED"
         echo "[lab-export] latest checkpoint in run: $CKPT"
+    else
+        echo "[lab-export] checkpoint: $CKPT"
     fi
     echo "[lab-export] exporting to ONNX..."
     docker exec -w /workspace/bebop_bot/sim bebop_isaac_lab bash -lc \
         "/workspace/isaaclab/isaaclab.sh -p bebop_training/export_bebop_model.py --checkpoint $CKPT ${PASS_ARGS[*]}"
 
 # Play a trained policy with the interactive torso-push controller wired up.
-# Defaults to the standing task and the most recent run under
-# sim/logs/rsl_rl/Isaac-BebopV2-Standing-v0. Override with TASK / RESUME.
+# All flags are forwarded to play_bebop.py. If --task or --resume are omitted,
+# sensible defaults are inserted (latest Standing-v0 run).
+#
+# Examples:
+#     just lab-play                                               # defaults
+#     just lab-play --resume sim/logs/rsl_rl/Isaac-BebopV2-Standing-v0/2026-07-13_22-30-37/model_4000.pt
+#     just lab-play --task Isaac-BebopV2-Standing-FixedGain-v0 --resume <run_dir> --num_envs 1
+#     just lab-play --resume <ckpt> --print_obs_actions
 #
 # Once the Isaac Sim window opens, CLICK INSIDE THE VIEWPORT so it receives
 # keyboard focus, then use:
@@ -251,13 +278,41 @@ lab-export *ARGS:
 #     W/S = push forward / backward    A/D = push left / right
 #     +/- = scale impulse 1.25x        R = reset env  H = help  0 = print scale
 # See sim/play_bebop.py module docstring for the full reference.
-lab-play TASK="Isaac-BebopV2-Standing-v0" RESUME="logs/rsl_rl/Isaac-BebopV2-Standing-v0":
+lab-play *ARGS:
+    #!/usr/bin/env bash
+    set -e
+    # Default --task / --resume only if the caller didn't already pass them.
+    # just interpolates {{ARGS}} as a single string, so we match against it.
+    case " {{ARGS}} " in
+        *" --task "*)   TASK_FLAG="" ;;
+        *)              TASK_FLAG="--task Isaac-BebopV2-Standing-v0" ;;
+    esac
+    case " {{ARGS}} " in
+        *" --resume "*) RESUME_FLAG="" ;;
+        *)              RESUME_FLAG="--resume logs/rsl_rl/Isaac-BebopV2-Standing-v0" ;;
+    esac
+    xhost +local:docker >/dev/null 2>&1 || true
+    docker exec -it bebop_isaac_lab bash -lc \
+        "cd /workspace/bebop_bot/sim && \
+         /workspace/isaaclab/isaaclab.sh -p play_bebop.py \
+            ${TASK_FLAG} ${RESUME_FLAG} {{ARGS}}"
+
+# Mirror live hardware joint + IMU pose in Isaac Lab. Streams telemetry from
+# bebop-linux over WebSocket (default 9090). Requires the lab container to be
+# up (`just lab-up`) and bebop-linux running on the robot.
+#
+# Examples:
+#   just lab-mirror 192.168.0.69                        # default host
+#   just lab-mirror 192.168.0.69 --telemetry-hz 30      # custom rate
+#   just lab-mirror 192.168.0.69 --viz newton           # Newton renderer
+lab-mirror HOST *ARGS:
     @xhost +local:docker >/dev/null 2>&1 || true
     docker exec -it bebop_isaac_lab bash -lc \
         'cd /workspace/bebop_bot/sim && \
-         /workspace/isaaclab/isaaclab.sh -p play_bebop.py \
-            --task {{TASK}} \
-            --resume {{RESUME}}'
+         /workspace/isaaclab/isaaclab.sh -p mirror_bebop.py \
+            --robot-host {{HOST}} \
+            --telemetry-hz 100 \
+            {{ARGS}}'
 
 # --- ROS 2 dev container ---------------------------------------------------
 

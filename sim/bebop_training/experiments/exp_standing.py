@@ -41,7 +41,7 @@ from ..envs.bebop_v2_rewards import (
     action_gain_rate_l2,
     action_position_rate_l2,
     joint_vel_l2,
-    upright_pose_exp,
+    torso_pitch_asymmetric_reward,
 )
 from ..envs.bebop_v2_terminations import (
     base_link_on_ground,
@@ -63,6 +63,37 @@ ROLL_FALL_LIMIT_GY = math.sin(math.radians(ROLL_FALL_LIMIT_DEG))
 # perturbations (and later the Push variant), NOT from extra reward terms.
 PITCH_INIT_RAD = math.radians(15.0)
 PITCH_RATE_INIT_RAD_S = 0.6
+
+# Resting torso posture: a slight BACK lean held as a band (not a point).
+# Why a band, not a single upright target: the previous ``upright_pose``
+# Gaussian was centered on g_x = g_y = 0 (perfect vertical) with its steepest
+# gradient AT vertical, so the policy was pulled hard to a perfectly upright
+# posture that is NOT hardware-stable — the CoM ends up over the toes / ankle
+# pivot and the weak RS02 ankle motor can't hold it (run 2026-07-14_04-09-59:
+# 70% of episodes ended in base_link_ground_contact while upright_pose was the
+# second-largest positive shaping term). A flat-top plateau over a back-lean
+# band lets the policy settle anywhere in the band rather than being collapsed
+# onto one point, and the deeper back lean shifts the CoM behind the ankle
+# pivot so the leg stacks load through the hip/knee instead of leaning on the
+# foot. See ``torso_pitch_asymmetric_reward`` in bebop_v2_rewards.py.
+#
+# Sign convention (body FLU): g_x = -sin(pitch); back lean is g_x < 0.
+#   BACK_LEAN_DEEP_DEG  = 12  -> g_x = -0.208 (deep edge of the plateau)
+#   BACK_LEAN_SHALLOW_DEG = 8  -> g_x = -0.139 (shallow edge; still a back lean)
+# 10° sits in the middle of the band (g_x ≈ -0.174), the user-requested target.
+BACK_LEAN_DEEP_DEG = 12.0
+BACK_LEAN_SHALLOW_DEG = 8.0
+BACK_LEAN_BAND_GX = (
+    -math.sin(math.radians(BACK_LEAN_DEEP_DEG)),     # band_gx_min (deep edge)
+    -math.sin(math.radians(BACK_LEAN_SHALLOW_DEG)),   # band_gx_max (shallow edge)
+)
+# Gaussian falloff width outside the band (in g_x units; ~0.12 ≈ 7° shoulder).
+BACK_LEAN_EDGE_STD = 0.12
+# Roll tolerance inside the band (g_y; ~0.15 ≈ 8.6° at 1/e).
+BACK_LEAN_ROLL_STD = 0.15
+# Forward-pitch penalty inside the reward (g_x > 0 is the hardware-fatal
+# forward lean; penalize any forward component, no deadband).
+BACK_LEAN_FWD_PENALTY_GAIN = 5.0
 
 # Fraction of each joint's soft range used when sampling reset poses. A small
 # value keeps resets near the nominal pose so most episodes survive; widen
@@ -86,12 +117,29 @@ TORSO_COM_RANGE = {
 TORSO_COM_START_FRACTION = 0.25
 TORSO_COM_CURRICULUM_STEPS = 100_000
 
-# Observation noise matched to the hardware noise floor. Small noise forces a
-# lower-gain, transfer-robust stand; last_action and cmd_vel stay clean.
-GYRO_NOISE_RAD_S = 0.01
-JOINT_VEL_NOISE_RAD_S = 0.12
-PROJ_GRAV_NOISE = 0.02
-JOINT_POS_NOISE_RAD = 0.01
+# Observation noise calibrated to the real hardware noise floor (capture
+# 20260714_031815, DIAL_IN mode, motors armed, robot still). The previous
+# values were 4-100x too high (worst on projected_gravity and joint_pos),
+# which over-regularized the policy — it learned to discount the very tilt
+# signal it needs on hardware. Projected_gravity is the policy's primary
+# balance cue; over-noising it trained a half-blind-to-tilt policy that then
+# leaned 7.7 deg sideways on hardware without correcting.
+#
+# Real still-state stds (rad or rad/s):
+#   gyro wx/wy         0.0023-0.0028  -> sim   0.01   (4x high, mild)
+#   joint_pos          0.0001-0.0007  -> sim   0.01   (15-100x high, severe)
+#   joint_vel          0.036-0.072    -> sim   0.12   (1.7-3.3x high, mild)
+#   proj_grav gx/gy    0.0003-0.0004  -> sim   0.02   (50-65x high, severe)
+#
+# Calibrated values: 2-3x the still-state std to cover the policy-active
+# vibration regime (capture 20260714_030338 RUN_POLICY: gyro std ~0.2 rad/s,
+# ~50x the still state, so the active floor is what the policy must weather).
+# The bigger numbers reflect what the sensors actually look like when the
+# robot is balancing, not the desk-still floor.
+GYRO_NOISE_RAD_S = 0.006
+JOINT_VEL_NOISE_RAD_S = 0.10
+PROJ_GRAV_NOISE = 0.005
+JOINT_POS_NOISE_RAD = 0.003
 
 # Per-episode randomized action transport delay in 100 Hz policy ticks.
 # Training across 10-40 ms forces a latency-robust (more damped) policy.
@@ -383,8 +431,8 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """SIMPLIFIED standing reward (Jul 10 2026): survive, stay upright,
-    stay near the default pose, move smoothly.
+    """SIMPLIFIED standing reward (Jul 10 2026): survive, hold a back-lean
+    posture, keep the hips straight, move smoothly.
 
     History: the previous design (upright + bilateral symmetry + three
     rate/velocity penalties) grew term-by-term, each patching a hack the
@@ -395,16 +443,29 @@ class RewardsCfg:
     held up by the ankle (est. 37 Nm commanded at the right foot vs the
     RS02's 6 Nm continuous rating) — un-transferable to hardware.
 
-    The simplification replaces indirect shaping with one direct anchor:
+    The simplification replaces indirect shaping with direct anchors:
 
-    * ``joint_pos_anchor`` (``mdp.joint_deviation_l1``) pulls every joint
-      toward the default pose (all zeros — the straight-leg symmetric
-      stand). One term now covers what crouch-prevention, rail-riding
-      prevention, AND bilateral symmetry (the default pose is symmetric)
-      each needed separate terms for. The old ``joint_symmetry`` term is
-      deleted. The weight is deliberately modest so recovery transients
-      can still move the legs; when locomotion training starts, lower it
-      or restrict it to the joints that shouldn't wander (hip abduction).
+    * ``torso_posture`` (``torso_pitch_asymmetric_reward``) — a flat-top
+      back-lean band (8-12°, centered on the 10° target) replaces the old
+      ``upright_pose`` Gaussian. The Gaussian was centered on perfect
+      vertical (g_x = g_y = 0) with its steepest gradient AT vertical,
+      which pulled the policy to a posture that is not hardware-stable
+      (CoM over the ankle pivot, load on the weak RS02 foot motor). The
+      flat-top band lets the torso settle anywhere in [8°, 12°] of back
+      lean and shifts the CoM behind the ankle pivot so the leg stacks
+      load through the hip/knee. Forward pitch is penalized inside the
+      same term.
+    * ``hip_flexion_anchor`` — Σ|q| over ONLY the two hip flexion joints.
+      The natural compensation when the torso leans back is to
+      counter-rotate by flexing the hips forward (keeping CoM over the
+      feet via joint angles); we want the ankle strategy instead (entire
+      body leans together, hips stay straight). Scoped to hip_flexion so
+      the knees/feet can still bend for recovery.
+    * ``joint_pos_anchor`` (``mdp.joint_deviation_l1``) over all joints
+      — general posture regularizer: prevents the crouch-at-the-rail
+      optimum, keeps the stance bilaterally symmetric, and gives the
+      policy a home pose to return to after recovery. Weight is modest so
+      ``hip_flexion_anchor`` can dominate hip flexion specifically.
     * The ankle-support hack is fixed in PHYSICS, not reward: the foot
       ``effort_limit_sim`` is capped at the RS02 continuous rating (6 Nm),
       so leaning on the ankle simply stops working in sim.
@@ -419,21 +480,72 @@ class RewardsCfg:
     alive = RewTerm(func=mdp.is_alive, weight=1.0)
     termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
 
-    # Gentle upright attractor — nudges toward a flat torso pitch. Loosened
-    # from std=0.10 to std=0.20 (1/e half-angle ~11.5° instead of ~5.7°) so
-    # the gradient is smooth rather than a cliff; weight dropped 1.5 → 0.5
-    # so alive (1.0) stays the dominant positive signal and the policy
-    # optimizes "stay alive AND roughly upright" rather than "park vertical
-    # by any means". Bounded in [0,1]; symmetric in pitch and roll.
-    upright_pose = RewTerm(
-        func=upright_pose_exp, weight=0.5, params={"std": 0.20}
+    # Torso posture: a flat-top back-lean BAND (8-12°, centered on the
+    # user-requested 10° back lean) — NOT a single-target Gaussian on vertical.
+    # The previous ``upright_pose`` Gaussian was centered on g_x = g_y = 0
+    # (perfect vertical) with its steepest gradient AT vertical, which pulled
+    # the policy to a posture that is not hardware-stable: CoM over the ankle
+    # pivot, load carried by the weak RS02 foot motor. Run 2026-07-14_04-09-59
+    # showed the failure — 70% of episodes ended in base_link_ground_contact
+    # while upright_pose was the second-largest positive shaping term,
+    # steering the policy away from active balance. The flat-top band lets the
+    # torso settle anywhere in [8°, 12°] of back lean (g_x ∈ [-0.208, -0.139])
+    # without being collapsed onto one point, and the deeper back lean shifts
+    # the CoM behind the ankle pivot so the leg stacks load through the
+    # hip/knee instead of the foot. Forward pitch (g_x > 0) is penalized
+    # inside the same term — the hardware-fatal direction.
+    # See ``torso_pitch_asymmetric_reward`` and the BACK_LEAN_* constants.
+    torso_posture = RewTerm(
+        func=torso_pitch_asymmetric_reward,
+        weight=0.5,
+        params={
+            "band_gx_min": BACK_LEAN_BAND_GX[0],
+            "band_gx_max": BACK_LEAN_BAND_GX[1],
+            "edge_std": BACK_LEAN_EDGE_STD,
+            "roll_std": BACK_LEAN_ROLL_STD,
+            "forward_penalty_gain": BACK_LEAN_FWD_PENALTY_GAIN,
+            "forward_deadband": 0.0,
+        },
+    )
+
+    # Hip-flexion anchor — Σ|q| over ONLY the two hip flexion joints. The
+    # whole-joint ``joint_pos_anchor`` below is too weak to hold hip flexion
+    # at zero once the torso is leaning back: the natural compensation for a
+    # back-leaning torso is to counter-rotate by flexing the hips forward
+    # (keeping CoM over the feet via joint angles). We want the ankle strategy
+    # instead — the entire body leans together, hips stay straight — so the
+    # hip flexion joints get their own stronger, scoped anchor. Restricted to
+    # hip_flexion (not knee/foot) so the legs can still bend at the knee and
+    # ankle for recovery. Not stillness-gated: an L1 pull toward zero is cheap
+    # during transients and we want the hips straight at all times.
+    hip_flexion_anchor = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-0.6,
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=[
+                    "hip_flexion_left_joint",
+                    "hip_flexion_right_joint",
+                ],
+                preserve_order=True,
+            )
+        },
     )
 
     # Direct "hold absolutely still" signal — unbounded quadratic on joint
     # velocity. This is the main anti-oscillation term: linear gradient in v
     # all the way to zero (a bounded exp kernel's gradient vanishes at v=0
-    # and won't damp the residual wobble). Weight tuned to be firm but not
-    # so strong it fights legitimate recovery transients.
+    # and won't damp the residual wobble). Weight stays at -0.5 (Jul 14
+    # 2026): capture 20260715_011517 of run 2026-07-14_12-51-25 ckpt-4000
+    # showed joint vel_std 0.45-0.81 rad/s on hardware, but this term was
+    # already contributing -1.31/tick at -0.5 (raw sum(v²)=2.62) — LARGER
+    # than alive (+1.0). The chatter persists NOT because joint_vel is too
+    # weak (it's already the biggest single penalty) but because the
+    # posture reward (+0.21/tick) earns more than position_rate pays, so the
+    # policy chatters the setpoints to chase posture. Raising joint_vel
+    # further would freeze recovery without fixing the chatter; the lever
+    # is position_rate, not joint_vel.
     joint_vel = RewTerm(
         func=joint_vel_l2,
         weight=-0.5,
@@ -451,19 +563,30 @@ class RewardsCfg:
 
     # Tick-to-tick change penalty on the 8 position channels — kills the
     # setpoint limit cycle that rides the 0.020 rad/tick slew limiter.
-    position_rate = RewTerm(func=action_position_rate_l2, weight=-1.20)
+    # Weight bumped -1.2 → -10.0 (Jul 14 2026) after capture 20260715_011517
+    # of run 2026-07-14_12-51-25 ckpt-4000 showed the policy commanding
+    # 0.03-0.06 rad setpoint steps 40-55% of ticks on hips/knees. At -1.2
+    # this term only contributed -0.030/tick (raw sum(Δa²)=0.025) while
+    # torso_posture earned +0.21/tick — the chatter was essentially free.
+    # At -10.0 the chatter cost rises to -0.25/tick, finally exceeding the
+    # posture reward and forcing the policy to find a steady setpoint
+    # rather than ride the slew limiter. The raw-action penalty is on the
+    # pre-slew-limiter command, so this bites at the source (the network
+    # output), not on the already-clamped plant target. Why not higher:
+    # at -10 the steady-state cost of legitimate slow drift (raw Δa ~0.01
+    # per tick) is only -0.0025/tick, so normal tracking is still cheap;
+    # only the rapid chatter (raw Δa ~0.05+ per tick) gets taxed hard.
+    position_rate = RewTerm(func=action_position_rate_l2, weight=-10.00)
 
     # Default-pose anchor — Σ|q| over all joints (the default pose is all
-    # zeros: straight-leg symmetric stand). The single posture term: it
-    # prevents the crouch-at-the-action-rail optimum, keeps the stance
+    # zeros: straight-leg symmetric stand). The general posture regularizer:
+    # it prevents the crouch-at-the-action-rail optimum, keeps the stance
     # bilaterally symmetric (the anchor pose is symmetric), and gives the
-    # policy a home pose to return to after a recovery. Standard regularizer
-    # in locomotion configs too — velocity-tracking rewards dominate it when
-    # stepping is trained, so it shapes gait style rather than preventing
-    # gait. Weight is modest so recovery transients can still move the legs;
-    # NOT stillness-gated (unlike the old symmetry term) because an L1 pull
-    # toward default is cheap during transients and the gate machinery was
-    # part of the complexity being removed.
+    # policy a home pose to return to after a recovery. Weight is deliberately
+    # modest so the dedicated ``hip_flexion_anchor`` above can dominate hip
+    # flexion specifically without this term diluting the gradient across all
+    # 8 joints. NOT stillness-gated (unlike the old symmetry term) because an
+    # L1 pull toward default is cheap during transients.
     joint_pos_anchor = RewTerm(
         func=mdp.joint_deviation_l1,
         weight=-0.3,
