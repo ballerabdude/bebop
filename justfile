@@ -240,14 +240,14 @@ lab-export *ARGS:
     fi
     # Resolve the checkpoint path inside the container.
     if [ "$CKPT" = "latest" ]; then
-        CKPT=$(docker exec -w /workspace/bebop_bot/sim bebop_isaac_lab bash -c \
-            'ls -t logs/rsl_rl/*/*/model_*.pt 2>/dev/null | head -1')
+        CKPT=$(docker exec -w /workspace/bebop_bot bebop_isaac_lab bash -c \
+            'ls -t sim/logs/rsl_rl/*/*/model_*.pt 2>/dev/null | head -1')
         if [ -z "$CKPT" ]; then echo "no checkpoints found under sim/logs/rsl_rl"; exit 1; fi
         echo "[lab-export] latest checkpoint: $CKPT"
     elif echo "$CKPT" | grep -qv '\.pt$'; then
         # Treat as a run directory -> pick the latest model_*.pt inside it.
         DIR="${CKPT%/}"
-        RESOLVED=$(docker exec -w /workspace/bebop_bot/sim bebop_isaac_lab bash -c \
+        RESOLVED=$(docker exec -w /workspace/bebop_bot bebop_isaac_lab bash -c \
             "ls -t '${DIR}'/model_*.pt 2>/dev/null | head -1")
         if [ -z "$RESOLVED" ]; then
             echo "no model_*.pt found in $DIR"; exit 1
@@ -258,8 +258,8 @@ lab-export *ARGS:
         echo "[lab-export] checkpoint: $CKPT"
     fi
     echo "[lab-export] exporting to ONNX..."
-    docker exec -w /workspace/bebop_bot/sim bebop_isaac_lab bash -lc \
-        "/workspace/isaaclab/isaaclab.sh -p bebop_training/export_bebop_model.py --checkpoint $CKPT ${PASS_ARGS[*]}"
+    docker exec -w /workspace/bebop_bot bebop_isaac_lab bash -lc \
+        "/workspace/isaaclab/isaaclab.sh -p sim/bebop_training/export_bebop_model.py --checkpoint $CKPT ${PASS_ARGS[*]}"
 
 # Play a trained policy with the interactive torso-push controller wired up.
 # All flags are forwarded to play_bebop.py. If --task or --resume are omitted,
