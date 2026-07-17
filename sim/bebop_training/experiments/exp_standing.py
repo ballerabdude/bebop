@@ -40,7 +40,9 @@ from ..envs.bebop_v2_events import (
 from ..envs.bebop_v2_rewards import (
     action_gain_rate_l2,
     action_position_rate_l2,
+    bilateral_joint_symmetry_l2,
     com_over_support_reward,
+    feet_flat_orientation_l2,
     joint_deviation_l1_balance_gated,
     joint_vel_l2,
     torso_pitch_asymmetric_reward,
@@ -113,6 +115,38 @@ BALANCE_GATE_STD = 0.10
 # 0.69-1.34, slew-exceedance 56.9%). At gate_floor=0.2 the -10.0 position_rate
 # still contributes -2.0·rate at full tilt — enough to keep recovery smooth.
 BALANCE_GATE_FLOOR = 0.20
+
+# Bilateral joint pairs for the symmetry reward. Every L/R pair on this robot
+# is sign-MIRRORED in the URDF (right-side flexion joints use a flipped -Y
+# axis; hip_abduction uses the same +X axis but mirrored limits). A symmetric
+# stance therefore reads q_L = -q_R for ALL four pairs, and the asymmetry
+# residual is the SUM (q_L + q_R), not the difference. See the per-pair axis
+# table in ``bilateral_joint_symmetry_l2``'s docstring and the verification
+# against ``ros2/src/bebopv2_description/urdf/bebopv2.urdf``.
+BILATERAL_SYMMETRY_PAIRS = [
+    ("hip_flexion_left_joint", "hip_flexion_right_joint"),
+    ("hip_abduction_left_joint", "hip_abduction_right_joint"),
+    ("knee_flexion_left_joint", "knee_flexion_right_joint"),
+    ("foot_left_joint", "foot_right_joint"),
+]
+# Weight on the bilateral-symmetry penalty (Jul 15 2026). Capture
+# 20260715_214224 of run 2026-07-15_12-35-39 ckpt-4000 showed severe
+# bilateral asymmetry on hardware despite the (correct, sum-convention)
+# symmetry term existing in the code: hip_flexion L+R=-0.82, foot L+R=+0.49
+# (both far from the symmetric 0). Root cause: the symmetry term was NOT
+# in the active RewardsCfg — the only symmetry enforcement was the weak
+# -0.3 all-joint joint_pos_anchor, whose gradient is diluted 8 ways and
+# cannot enforce per-pair mirroring. This dedicated term is heavily
+# weighted (-2.0) and balance-gated so it fires at full strength when the
+# robot is balanced (the stance we want symmetric) and relaxes toward
+# gate_floor when tilted (the policy is free to use an asymmetric catch).
+# Why -2.0: at the capture's mean asymmetry (Σ(q_L+q_R)² ≈ 0.82²+0.49²
+# ≈ 0.91 for the two worst pairs alone) this contributes ≈ -1.8/tick,
+# comparable to the alive reward (+1.0) — finally enough to make an
+# asymmetric stance expensive relative to the survival gradient. The
+# gate_floor=0.2 keeps a -0.36/tick floor at full tilt so the policy
+# can't manufacture tilt to suppress the constraint.
+BILATERAL_SYMMETRY_WEIGHT = -2.0
 
 # Fraction of each joint's soft range used when sampling reset poses. A small
 # value keeps resets near the nominal pose so most episodes survive; widen
@@ -496,6 +530,27 @@ class RewardsCfg:
       general posture regularizer, NOT gated (the home pose should always be
       the quiet attractor; the L1 pull is cheap and the gate machinery is
       only needed where the weight is high enough to block recovery).
+    * ``bilateral_symmetry`` (NEW Jul 15 2026) — Σ(q_L + q_R)² over all 4
+      L/R joint pairs, stillness-gated. The HEAVY symmetry enforcer:
+      capture 20260715_214224 showed the prior reward had NO active symmetry
+      term (only the diluted -0.3 all-joint anchor), so the policy stood with
+      hip_flexion L+R=-0.82 and foot L+R=+0.49. Heavily weighted (-2.0) so
+      an asymmetric stance costs more than the alive reward earns. Uses the
+      SUM (q_L + q_R) because every L/R pair on this robot is sign-mirrored
+      in the URDF — see ``bilateral_joint_symmetry_l2`` for the per-pair
+      axis audit. Stillness-gated (NOT balance-gated — symmetry is a posture
+      constraint that should fire whenever the robot is holding any pose,
+      not only when balanced; the balance gate suppressed it to -0.03/tick
+      during the tilted-exploration phase of training).
+    * ``feet_flat`` (NEW Jul 16 2026) — Σ_feet sin²(sole tilt from
+      horizontal), stillness-gated. Forces both soles parallel to the ground
+      while standing, so the policy cannot ride the toe/heel edge of the
+      rigid sim foot (a non-transferable contact cheat that leans on the
+      weak RS02 ankle). Foot-side counterpart to ``hip_flexion_anchor``:
+      hips straight + soles flat = the ankle strategy over a full contact
+      patch. NOT a foot-joint position anchor — under the 8-12° back lean a
+      flat sole needs q_foot ≈ ±10°, so the term targets the sole
+      *orientation* (FK from encoders) and lets the ankle pick the angle.
 
     The ankle-support hack stays fixed in PHYSICS, not reward: the foot
     ``effort_limit_sim`` is capped at the RS02 continuous rating (6 Nm).
@@ -684,6 +739,110 @@ class RewardsCfg:
             "asset_cfg": SceneEntityCfg(
                 "robot", joint_names=JOINT_NAMES_ALL, preserve_order=True
             )
+        },
+    )
+
+    # Bilateral symmetry — Σ(q_L + q_R)² over all 4 L/R pairs, stillness-
+    # gated. This is the HEAVY symmetry enforcer (Jul 15 2026).
+    #
+    # Capture 20260715_214224 (run 2026-07-15_12-35-39 ckpt-4000) showed the
+    # robot standing severely asymmetric on hardware despite the (correct,
+    # sum-convention) symmetry term existing in the code:
+    #     hip_flexion    L=-0.40  R=-0.42  L+R=-0.82  (symmetric would be 0)
+    #     hip_abduction  L=+0.20  R=-0.27  L+R=-0.07  (≈ symmetric)
+    #     knee_flexion   L=+0.13  R=-0.24  L+R=-0.12  (≈ symmetric)
+    #     foot           L=+0.18  R=+0.31  L+R=+0.49  (symmetric would be 0)
+    # Root cause: the symmetry term was NOT in the active RewardsCfg — the
+    # only symmetry enforcement was this -0.3 all-joint joint_pos_anchor
+    # above, whose gradient is diluted 8 ways and cannot enforce per-pair
+    # mirroring. The dedicated term below is heavily weighted (-2.0) so an
+    # asymmetric stance finally costs more than the alive reward earns.
+    #
+    # SIGN CONVENTION — the SUM, not the difference: every L/R pair on this
+    # robot is sign-mirrored in the URDF. The right-side flexion joints
+    # (hip_flexion, knee_flexion, foot) use a flipped -Y axis; hip_abduction
+    # uses the same +X axis but mirrored limits. A symmetric stance therefore
+    # reads q_L = -q_R for ALL four pairs, so the asymmetry residual is
+    # (q_L + q_R)² — NOT (q_L - q_R)². The pre-Jul-2026 version used the
+    # difference and actively TRAINED the twisted-hip contortion it was meant
+    # to prevent (run 2026-07-09_04-16-40). See the per-pair axis table in
+    # ``bilateral_joint_symmetry_l2``'s docstring for the full audit.
+    #
+    # STILLNESS-GATED (NOT balance-gated — Jul 15 2026 correction). The
+    # first attempt wired this term with balance_gate=True, which suppressed
+    # the penalty via the tilt-distance Gaussian whenever the robot was off
+    # the back-lean band. Training run 2026-07-15_22-32-35 (4568 steps) showed
+    # the term contributing only -0.03/tick at the -2.0 weight — the policy
+    # was tilted/falling (eplen 1160/2000, 58% survival) for most of the
+    # episode, so the gate clamped to its 0.2 floor and the effective weight
+    # dropped to -0.4, too weak to shape the posture.
+    #
+    # Symmetry is a POSTURE constraint, not a motion constraint. The balance
+    # gate (designed for motion penalties like joint_vel / position_rate that
+    # would otherwise block recovery MOTIONS) is the wrong gate here: we want
+    # the symmetry gradient active whenever the robot is holding *any* pose
+    # (even a tilted lean), not only when it's in the balanced band. The
+    # stillness gate (exp(-Σv²/σ²)) fires at full strength whenever the robot
+    # is holding still — regardless of tilt — and decays toward 0 only during
+    # active motion (when the policy legitimately needs asymmetric catch /
+    # recovery motions). This keeps the posture pull alive through the full
+    # learning curve, including the tilted-exploration phase where the
+    # balance gate was killing it.
+    bilateral_symmetry = RewTerm(
+        func=bilateral_joint_symmetry_l2,
+        weight=BILATERAL_SYMMETRY_WEIGHT,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "pairs": BILATERAL_SYMMETRY_PAIRS,
+            "balance_gate": False,
+            "stillness_std": 1.5,
+        },
+    )
+
+    # Feet flat — Σ_feet sin²(sole tilt from horizontal), stillness-gated
+    # (Jul 16 2026, user request). The torso back-lean band + hip-flexion
+    # anchor constrain the leg chain but leave the ankle free to hold the
+    # sole at any angle — and the sim exploits that: the rigid foot's
+    # contact patch lets the policy ride the toe or heel edge with a tilted
+    # sole. That strategy does NOT transfer to hardware: the real foot is
+    # small, the RS02 ankle is the weakest joint (~17 N·m, capped at its 6
+    # N·m continuous rating in sim), and an edge contact shrinks the support
+    # polygon to a line. Forcing the soles parallel to the ground maximizes
+    # the contact polygon and stacks the load through the whole foot —
+    # the foot-side counterpart to ``hip_flexion_anchor`` (hips straight +
+    # soles flat = the ankle strategy).
+    #
+    # NOT a foot-joint position anchor: under the 8-12° back lean the shank
+    # tilts with the torso, so a flat sole requires q_foot ≈ ±10° (mirrored
+    # sign convention; capture 20260715_214224 showed foot L=+0.18, R=+0.31).
+    # Anchoring q_foot at 0 would fight the back lean. This term reads the
+    # foot BODY orientation (sole normal = foot local +Z; every leg-chain
+    # joint origin in the URDF has rpy=0, so the foot frame aligns with
+    # base_link FLU at the zero pose) and lets the ankle find whatever angle
+    # makes the sole flat. Non-privileged — FK from joint encoders + IMU.
+    #
+    # STILLNESS-GATED (same rationale as ``bilateral_symmetry``): flat soles
+    # are a POSTURE constraint, enforced whenever the robot is holding a
+    # pose, relaxing toward 0 only during active motion so recovery footwork
+    # (toe-off, heel strike, lifting a foot) stays free. A balance gate
+    # would clamp to its floor during the tilted-exploration phase and never
+    # shape the stance — see the ``bilateral_symmetry`` comment for the
+    # training-run evidence.
+    #
+    # Weight -2.0: the raw term is sin²(tilt) summed over 2 feet, so a 10°
+    # sole tilt on both feet costs 2·sin²(10°)·2.0 ≈ -0.12/tick (a firm
+    # shaping gradient, comparable to ``torso_posture``'s pull near the band
+    # edge) and a 20° tilt ≈ -0.47/tick — expensive relative to alive (+1.0)
+    # but still below the survival gradient. Matches the -2.0 weighting
+    # precedent set by ``bilateral_symmetry`` for a stance-posture term.
+    feet_flat = RewTerm(
+        func=feet_flat_orientation_l2,
+        weight=-2.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "foot_body_names": ("foot_left_1", "foot_right_1"),
+            "balance_gate": False,
+            "stillness_std": 1.5,
         },
     )
 

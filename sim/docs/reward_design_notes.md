@@ -208,11 +208,13 @@ and focus on being still once it's recovered.
 
 ---
 
-### 6. `bilateral_symmetry` — the "stand straight" stick (stillness-gated)
+### 6. `bilateral_symmetry` — the "stand straight" stick (balance-gated)
 
 **What it does:** Penalizes the policy when the left and right joints
-aren't in the same position — e.g., if the right hip is flexed but the
-left isn't, or the right ankle is cranked but the left is flat.
+aren't in the mirrored position — e.g., if the right hip is flexed forward
+but the left is flexed back, or the right ankle is cranked positive while
+the left is also positive (both feet pointing the same way instead of
+mirroring).
 
 **Why it exists:** On hardware, the policy consistently finds an
 asymmetric stance — right hip flexed -0.3 to -0.4 rad while the left is
@@ -227,42 +229,61 @@ falls.
 This term pushes the policy toward a symmetric stance so it doesn't rely
 on the weak ankle motor to hold an extreme position.
 
-**The stillness gate — the key innovation:**
+**SIGN CONVENTION — the SUM, not the difference (critical):** every L/R
+joint pair on this robot is sign-mirrored in the URDF. The right-side
+flexion joints (hip_flexion, knee_flexion, foot) use a flipped `-Y` axis;
+hip_abduction uses the same `+X` axis but mirrored limits
+(`left [-10°, +20°]` vs `right [-20°, +10°]`). The same physical "both
+knees flexed the same way" pose therefore reads `q_left = -q_right`, so a
+symmetric stance is `q_L + q_R = 0`. The asymmetry residual is the **SUM**.
+The pre-Jul-2026 version used the difference `(q_L - q_R)²`, which rewarded
+`q_L = q_R` — one leg forward, one leg back — and actively trained the
+twisted-hip contortion it was meant to prevent (run 2026-07-09_04-16-40).
+The `analyze_capture.py` L/R report prints both `L+R` (correct) and `L-R`
+(buggy) so this is auditable per capture.
 
-The penalty is **multiplied by a stillness gate**:
+**The balance gate — the key innovation (Jul 15 2026 redesign):**
+
+The penalty is **multiplied by a balance gate**:
 
 ```
-gate = exp(-Σ v_i² / σ_gate²)
+gate = max(gate_floor, exp(-((g_x - center)² + g_y²) / gate_std²))
 ```
 
-where `Σ v_i²` is the same summed squared joint velocity used in
-`stationary_pose`, and `σ_gate = 1.5` (more lenient than
-stationary_pose's 0.5).
-
-- When the robot is **still** (holding a pose): `gate ≈ 1.0`, penalty
-  fires at full strength → policy is pushed toward a symmetric stance
-- When the robot is **moving** (recovering from a tip): `gate → 0`,
-  penalty is suppressed → policy is free to use whatever asymmetric
+- When the robot is **balanced** (in the back-lean band): `gate ≈ 1.0`,
+  penalty fires at full strength → policy is pushed toward a symmetric stance
+- When the robot is **tilted** (recovering from a tip): `gate → gate_floor`
+  (0.2), penalty is relaxed → policy is free to use whatever asymmetric
   catch motion it needs to recover
 
-**Why the gate matters:** Without it, the penalty fires *always*,
-including during recovery. Every time the robot tips and the policy tries
-an asymmetric catch (e.g., stepping out with one leg), it gets
-penalized — which pushes it back toward falling. The gate ensures the
-symmetry constraint only applies to the **goal** (stand still,
-symmetrically) not the **process** (recover from any perturbation by any
-means necessary).
+The floor is essential: without it (gate_floor=0) the penalty vanishes
+completely at tilt and the policy can manufacture tilt + chatter to
+suppress the symmetry constraint (the flailing exploit of capture
+20260715_122500). The gate keeps a -0.4/tick floor at full tilt so the
+policy can't escape the constraint by falling.
+
+**Why the balance gate (not the old stillness gate):** the Jul 15 2026
+reward redesign moved all movement penalties (joint_vel, position_rate,
+hip_flexion_anchor) to balance gates so they relax in lockstep during
+recovery. The symmetry term uses the same gate so the entire penalty
+suite relaxes together when the robot is tilted — without this, an
+ungated or stillness-gated symmetry term would keep fighting the policy
+during recovery while the other penalties had already relaxed.
 
 **The full math:**
 ```
-symmetry_error = Σ (q_left - q_right)²    over hip, knee, foot pairs
-gate = exp(-Σ v_i² / 1.5²)
+symmetry_error = Σ (q_left + q_right)²    over hip, knee, foot, abduction pairs
+gate = max(gate_floor, exp(-((g_x - center)² + g_y²) / gate_std²))
 bilateral_symmetry = symmetry_error × gate
 ```
 
-Weight: **-0.5** (stick). The gate means we can afford a stronger weight
-than the ungated version — the penalty only fires when the robot is
-still, so it won't fight recovery.
+Weight: **-2.0** (stick, heavily weighted). Capture 20260715_214224 showed
+the prior reward had NO active symmetry term (only the diluted -0.3
+all-joint anchor), so the policy stood with hip_flexion L+R=-0.82 and
+foot L+R=+0.49. At -2.0 the asymmetric stance costs ≈ -1.8/tick (for the
+two worst pairs alone), finally exceeding the +1.0 alive reward and making
+an asymmetric stand expensive relative to the survival gradient. The
+balance gate means the weight can be this strong without fighting recovery.
 
 ---
 
@@ -458,6 +479,57 @@ the worst kind of sim-to-real gap.
 
 ---
 
+### 13. `feet_flat` — the "soles parallel to the ground" stick (stillness-gated)
+
+**What it does:** Penalizes each foot whose *sole* is not parallel to the
+ground while standing. Replaces `foot_deviation` (section 7) for the
+active-balancing reward (Jul 16 2026, user request).
+
+**Why it exists:** `foot_deviation` anchored the foot *joint angle* at
+zero, which fights the 8-12° torso back-lean band — under a back lean the
+shank tilts with the torso, so a flat sole needs a *nonzero* ankle angle
+(q_foot ≈ ±10°). Anchoring the joint at zero meant the policy had to
+choose between the posture band and flat feet. `feet_flat` targets the
+**result** instead: the sole's world orientation (forward kinematics from
+the joint encoders + IMU, non-privileged), so the ankle is free to hold
+whatever angle makes the sole flat.
+
+The sim exploits a free ankle: the rigid foot's contact patch lets the
+policy ride the toe or heel edge with a tilted sole. That does not
+transfer — the real foot is small, the RS02 ankle is the weakest joint
+(~17 N·m stall, capped at its 6 N·m continuous rating in sim), and an
+edge contact shrinks the support polygon to a line. Flat soles maximize
+the contact polygon: hips straight + soles flat = the ankle strategy over
+a full contact patch (the foot-side counterpart to `hip_flexion_anchor`).
+
+**The math:**
+```
+per foot:  u = R(q_foot) @ (0,0,1)      # sole normal in world frame
+error = Σ_feet (u_x² + u_y²) = Σ_feet sin²(sole tilt)
+gate = exp(-Σ v_i² / 1.5²)              # stillness gate
+feet_flat = error × gate
+```
+
+- `q_foot` is the foot link's world quaternion from
+  `asset.data.body_quat_w`. **Isaac Lab 3.0 returns quaternions in
+  `(x, y, z, w)` order** (breaking change from 2.x WXYZ) — the rotation
+  uses `isaaclab.utils.math.quat_apply` so the convention stays
+  library-owned. The sole normal is the foot's local `+Z` because every
+  leg-chain joint origin in the URDF has `rpy="0 0 0"`, so the foot frame
+  aligns with base_link FLU at the zero pose.
+- The stillness gate (same as `bilateral_symmetry`, σ = 1.5) fires at
+  full strength whenever the robot is holding a pose — flat feet are a
+  *posture* constraint — and relaxes toward 0 during active motion so
+  recovery footwork (toe-off, heel strike, lifting a foot) stays free.
+
+Weight: **-2.0** (stick). A 10° sole tilt on both feet costs
+`2·sin²(10°)·2.0 ≈ -0.12`/tick (a firm shaping gradient), 20° ≈ -0.47/tick
+— expensive relative to `alive` (+1.0) but below the survival gradient.
+Matches the `bilateral_symmetry` weighting precedent for stance-posture
+terms.
+
+---
+
 ## How the terms work together
 
 The reward is designed as a **layered system**, where each layer addresses
@@ -476,10 +548,10 @@ a different failure mode:
    stick damps fast motion. This is what makes the stand *quiet* rather
    than a swaying limit cycle.
 
-4. **Symmetry layer (stillness-gated):** `bilateral_symmetry` (-0.5) and
-   `foot_deviation` (-0.5) — "stand straight with flat feet." These only
-   fire when the robot is still, so they enforce the resting pose without
-   fighting recovery. This is what makes the stand *hardware-safe* — the
+4. **Symmetry layer (balance-gated):** `bilateral_symmetry` (-2.0) — "stand
+   straight." Fires when the robot is balanced, relaxes during recovery.
+   Heavily weighted so an asymmetric stance costs more than the alive
+   reward earns. This is what makes the stand *hardware-safe* — the
    ankles don't get cranked to positions the weak RS02 motor can't hold.
 
 5. **Anti-cheat layer:** `feet_straight` (-1.5), `base_ang_vel_xy`
@@ -494,16 +566,19 @@ a different failure mode:
 The layers are ordered by priority: survival > posture > stillness >
 symmetry > anti-cheat > smoothness. The weights are tuned so that a
 violation of a higher layer costs more than optimizing a lower layer. For
-example, falling (survival) costs -200, while being asymmetric (symmetry)
-costs maybe -0.05 per step — so the policy will accept asymmetry to avoid
-a fall, which is the right trade-off.
+example, falling (survival) costs -200, while being asymmetric (symmetry
+at -2.0 weight) costs maybe -1.8 per step at the capture's mean asymmetry
+— so the policy will still accept asymmetry to avoid a fall (a fall costs
+-200), which is the right trade-off, but a *sustained* asymmetric stand
+is finally expensive enough that the policy prefers to correct it.
 
 ---
 
-## The stillness gate — why it's the key innovation
+## The balance gate — why it's the key innovation
 
-The stillness gate on `bilateral_symmetry` and `foot_deviation` is the
-most important design decision in the current reward. Here's why:
+The balance gate on `bilateral_symmetry`, `joint_vel`, `position_rate`,
+and `hip_flexion_anchor` is the most important design decision in the
+current (Jul 15 2026) reward. Here's why:
 
 **The problem:** The robot is physically asymmetric (left/right motor
 friction differences, mass distribution, joint alignment). The policy
@@ -512,33 +587,48 @@ during recovery, when it might need to step out with one leg or catch
 itself on one side. If the symmetry penalty fires during recovery, it
 fights the policy's recovery behavior and causes falls.
 
-**The solution:** Multiply the symmetry and foot-deviation penalties by
-a stillness gate:
+**The solution:** Multiply the symmetry and movement penalties by a
+balance gate:
 
 ```
-gate = exp(-Σ v_i² / σ_gate²)
+gate = max(gate_floor, exp(-((g_x - center)² + g_y²) / gate_std²))
 ```
 
-- When the robot is **still** (low joint velocity): gate ≈ 1.0, penalty
-  fires → policy is pushed toward a symmetric, flat-foot stance
-- When the robot is **moving** (high joint velocity, e.g., during
-  recovery): gate ≈ 0, penalty is suppressed → policy is free to use
-  whatever asymmetric catch motion it needs
+- When the robot is **balanced** (in the back-lean band): gate ≈ 1.0,
+  penalty fires → policy is pushed toward a symmetric, flat-foot stance
+- When the robot is **tilted** (recovering from a tip): gate → gate_floor
+  (0.2), penalty is relaxed → policy is free to use whatever asymmetric
+  catch motion it needs
 
-This separates the **goal** (stand still, symmetrically) from the
+This separates the **goal** (stand balanced, symmetrically) from the
 **process** (recover from any perturbation by any means necessary). The
 policy can be as asymmetric as it wants while catching a fall — but once
-it settles, it gets pushed toward symmetry.
+it settles back into the balance band, it gets pushed toward symmetry.
 
-**The math intuition:** The gate is a Gaussian (bell curve) over joint
-velocity. At zero velocity (perfectly still), the gate is 1.0 — full
-penalty. As velocity increases, the gate drops exponentially — the
-penalty is suppressed. The width `σ_gate = 1.5` controls how much
-velocity is "allowed" before the gate closes: at `Σ v_i² = 1.5² = 2.25`
-(e.g., one joint moving at 1.5 rad/s), the gate is 1/e ≈ 0.37, so the
-penalty is reduced to 37% of its full strength. By the time joints are
-moving at recovery speeds (several rad/s), the gate is near zero and the
-penalty is fully suppressed.
+**Why a floor (gate_floor=0.2):** without it the penalty vanishes
+completely at tilt and the policy learns to *manufacture* tilt to unlock
+chatter — the flailing limit cycle of capture 20260715_122500 (vel_std
+0.69-1.34, slew-exceedance 56.9%, g_x swinging ±30°). The floor keeps a
+minimum pressure on so the policy can't escape the constraint by
+manufacturing tilt.
+
+**The math intuition:** The gate is a Gaussian (bell curve) over how far
+the torso tilt is from the back-lean band center. At balance (g_x ≈ -0.17,
+g_y ≈ 0), the gate is 1.0 — full penalty. As the robot tilts away, the
+gate drops exponentially — the penalty is relaxed. The width
+`gate_std = 0.10` means the gate is ~1/e at ~5.7° off the band center. By
+the time the robot is in a full recovery (tilted >15°), the gate has
+collapsed to the floor (0.2) and the penalty is at 20% strength — relaxed
+enough to allow recovery, not zero.
+
+**History note:** the Jul 10-14 2026 reward used a *stillness* gate
+(`exp(-Σv²/σ²)` over joint velocities) on the symmetry term instead. The
+stillness gate worked for the statue-style stand but broke when the reward
+moved to active balancing: the stillness gate suppressed the symmetry
+penalty during ANY motion, including the slow limit-cycle sways the policy
+uses to chase posture reward. The balance gate ties the suppression to the
+balance STATE (am I tilted enough to need recovery?) rather than the
+motion (am I moving?), which is the semantically correct question.
 
 ---
 

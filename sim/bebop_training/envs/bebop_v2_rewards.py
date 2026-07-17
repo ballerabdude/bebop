@@ -6,6 +6,7 @@ import torch
 import warp as wp
 
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils.math import quat_apply
 
 
 def _ensure_tensor(
@@ -401,57 +402,93 @@ def bilateral_joint_symmetry_l2(
     pairs: list[tuple[str, str]],
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     stillness_std: float = 1.5,
+    balance_gate: bool = False,
+    gate_band_gx_center: float = -0.17,
+    gate_std: float = 0.15,
+    gate_floor: float = 0.2,
 ) -> torch.Tensor:
     """Penalize asymmetry between left/right joint pairs (sagittal plane).
 
     Returns ``Σ (q_left + q_right)²`` over the listed joint name pairs, gated
-    by a *stillness* multiplier so the penalty only fires when the robot is
-    holding a pose — NOT during recovery transients when the policy needs
-    asymmetric motions to catch a fall. Always ``>= 0``; use with a negative
-    weight.
+    so the penalty only fires when the policy is holding a balanced pose — NOT
+    during recovery transients when the policy needs asymmetric motions to
+    catch a fall. Always ``>= 0``; use with a negative weight.
 
     SIGN CONVENTION — why the *sum*, not the difference: every L/R joint
-    pair on this robot is sign-MIRRORED. The right-side pitch joints
-    (hip_flexion, knee_flexion, foot) use a flipped ``-Y`` axis in the
-    URDF/USD, and the abduction rolls physically mirror across the sagittal
-    plane (URDF limits: left ``[-10°, +20°]`` vs right ``[-20°, +10°]``;
-    knee: left ``[-45°, +90°]`` vs right ``[-90°, +45°]``). The same
+    pair on this robot is sign-MIRRORED, so the same physical "both legs
+    doing the same thing" pose reads ``q_left = -q_right`` and the mirrored
+    stance is ``q_L + q_R = 0``. This was verified joint-by-joint against
+    ``ros2/src/bebopv2_description/urdf/bebopv2.urdf`` (Jul 15 2026):
+
+    ============= ============= ============= ===========================
+    Pair           Left axis     Right axis    Symmetric residual
+    ============= ============= ============= ===========================
+    hip_flexion    ``(0,1,0)``   ``(0,-1,0)``  ``q_L + q_R`` (mirrored Y)
+    hip_abduction  ``(1,0,0)``   ``(1,0,0)``   ``q_L + q_R`` (same axis,
+                                               mirrored limits L
+                                               ``[-10°,+20°]`` vs R
+                                               ``[-20°,+10°]``)
+    knee_flexion   ``(0,1,0)``   ``(0,-1,0)``  ``q_L + q_R`` (mirrored Y)
+    foot           ``(0,1,0)``   ``(0,-1,0)``  ``q_L + q_R`` (mirrored Y)
+    ============= ============= ============= ===========================
+
+    The right-side flexion joints (hip_flexion, knee_flexion, foot) use a
+    flipped ``-Y`` axis in the URDF/USD. Hip_abduction uses the same ``+X``
+    axis on both sides, but its limits are mirrored (``left [-10°, +20°]``
+    vs ``right [-20°, +10°]``), so "both legs splayed out" reads
+    ``q_L > 0, q_R < 0`` and is symmetric at ``q_L + q_R = 0``. The same
     physical "both knees flexed the same way" pose therefore reads
-    ``q_left = -q_right``, so the mirrored stance is ``q_L + q_R = 0``.
+    ``q_left = -q_right`` for ALL four pairs.
+
     Penalizing ``(q_L - q_R)²`` (the pre-Jul-2026 version of this term)
     rewarded ``q_L = q_R`` — one leg pitched forward and the other back,
     both hips rolled the same way — i.e. it actively TRAINED the
     twisted-hip contortion it was meant to prevent, and raising its weight
     only pushed harder in the wrong direction (observed on hardware run
     2026-07-09_04-16-40: hip_flexion L-R driven to ~0.01 while the robot
-    stood visibly twisted).
+    stood visibly twisted). The ``analyze_capture.py`` L/R symmetry report
+    prints both ``L+R`` (the correct residual) and ``L-R`` (the buggy one)
+    so this can be audited per capture.
 
-    The stillness gate is ``exp(-Σv²/σ²)`` over all joint velocities, where
-    ``σ = stillness_std``. This is ``1.0`` when the robot is perfectly still
-    (the penalty fires at full strength) and decays toward ``0`` when joints
-    are moving fast (the penalty is suppressed so the policy is free to use
-    whatever asymmetric catch/recovery motion it needs). This directly
-    addresses the failure mode where the symmetry penalty was fighting the
-    policy during recovery: every time the robot tipped and the policy tried
-    an asymmetric catch, it got penalized, pushing it back toward falling.
+    **Gate** — two mutually exclusive options, selected by ``balance_gate``:
+
+    * **Stillness gate** (``balance_gate=False``, default, legacy):
+      ``exp(-Σv²/σ²)`` over all joint velocities. ``1.0`` when the robot is
+      perfectly still (penalty fires at full strength) and decays toward ``0``
+      when joints are moving fast (penalty suppressed so the policy is free to
+      use asymmetric catch/recovery motions). Semantically a *pose* gate:
+      symmetry is a property of the pose being held, not of the balance state.
+
+    * **Balance gate** (``balance_gate=True``, Jul 15 2026 redesign):
+      ``max(gate_floor, exp(-((g_x - center)² + g_y²) / gate_std²))`` — same
+      gate used by :func:`action_position_rate_l2`, :func:`joint_vel_l2`, and
+      :func:`joint_deviation_l1_balance_gated`. Fires at full strength when
+      the robot is in the back-lean balance band and decays toward
+      ``gate_floor`` when tilted. The floor is essential: without it the
+      penalty vanishes at tilt and the policy can manufacture tilt + chatter
+      to suppress the symmetry constraint (the flailing-limit-cycle exploit
+      of capture 20260715_122500). Use the balance gate when the reward
+      landscape already uses balance gates on the movement penalties, so the
+      symmetry term relaxes in lockstep with them during recovery.
 
     Args:
         pairs: list of ``(left_joint_name, right_joint_name)`` tuples. Names
             are resolved to articulation joint indices, so the caller does not
             need to know the USD joint order.
         asset_cfg: the robot articulation.
-        stillness_std: velocity scale for the stillness gate. ``1.5`` means the
-            gate is ~1/e once the summed squared joint velocity reaches 1.5².
-            Larger = more lenient (penalty fires even with some motion);
-            smaller = stricter (penalty only fires when nearly motionless).
+        stillness_std: velocity scale for the stillness gate (ignored when
+            ``balance_gate=True``). ``1.5`` means the gate is ~1/e once the
+            summed squared joint velocity reaches 1.5².
+        balance_gate: if True, use the tilt-distance Gaussian gate instead of
+            the stillness gate (see above).
+        gate_band_gx_center: ``g_x`` center of the balance gate.
+        gate_std: Gaussian width; ~0.10 ≈ 5.7° at 1/e.
+        gate_floor: minimum gate value (0..1). Prevents the penalty from
+            vanishing entirely at tilt.
     """
     asset = env.scene[asset_cfg.name]
-    joint_pos = _ensure_tensor(
-        asset.data.joint_pos, env_device=getattr(env, "device", None)
-    )
-    joint_vel = _ensure_tensor(
-        asset.data.joint_vel, env_device=getattr(env, "device", None)
-    )
+    device = getattr(env, "device", None)
+    joint_pos = _ensure_tensor(asset.data.joint_pos, env_device=device)
 
     err = None
     for left_name, right_name in pairs:
@@ -463,9 +500,19 @@ def bilateral_joint_symmetry_l2(
         sq = d * d
         err = sq if err is None else err + sq
 
+    if balance_gate:
+        proj_grav = _ensure_tensor(asset.data.projected_gravity_b, env_device=device)
+        g_x = proj_grav[:, 0]
+        g_y = proj_grav[:, 1]
+        tilt_err = torch.square(g_x - gate_band_gx_center) + torch.square(g_y)
+        gate = torch.exp(-tilt_err / (gate_std * gate_std))
+        gate = torch.clamp(gate, min=gate_floor)
+        return err * gate
+
     # Stillness gate: 1.0 when still, -> 0 when moving. Only penalize
     # asymmetry when the policy is trying to HOLD a pose, not when it's
     # recovering from a perturbation.
+    joint_vel = _ensure_tensor(asset.data.joint_vel, env_device=device)
     vel_sq = torch.sum(torch.square(joint_vel), dim=1)
     gate = torch.exp(-vel_sq / (stillness_std * stillness_std))
     return err * gate
@@ -755,3 +802,141 @@ def torso_pitch_asymmetric_reward(
     forward_penalty = forward_penalty_gain * forward_overshoot * forward_overshoot
 
     return pitch_good * roll_good - forward_penalty
+
+
+def feet_flat_orientation_l2(
+    env,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    foot_body_names: tuple[str, str] = ("foot_left_1", "foot_right_1"),
+    sole_normal_b: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    stillness_std: float = 1.5,
+    balance_gate: bool = False,
+    gate_band_gx_center: float = -0.17,
+    gate_std: float = 0.15,
+    gate_floor: float = 0.2,
+) -> torch.Tensor:
+    """Penalize feet whose soles are not parallel to the ground (flat-foot stand).
+
+    For each foot body, rotates the sole normal (``sole_normal_b``, expressed
+    in the foot link frame) into the world frame and returns the summed
+    squared horizontal components::
+
+        Σ_feet (u_x² + u_y²)  =  Σ_feet sin²(foot tilt from flat)
+
+    which is ``0`` when both soles are parallel to the ground and bounded in
+    ``[0, 2]`` (each foot contributes ``sin²`` of its tilt angle, quadratic
+    near flat so the shaping gradient grows with the misalignment). Always
+    ``>= 0``; use with a **negative** weight.
+
+    Foot orientations come from ``asset.data.body_quat_w`` — Isaac Lab 3.0
+    returns quaternions in ``(x, y, z, w)`` order (breaking change from the
+    2.x ``(w, x, y, z)`` convention) — and the rotation uses
+    :func:`isaaclab.utils.math.quat_apply` so the ordering convention stays
+    owned by the library, not by hand-rolled math here.
+
+    WHY a foot-orientation term, on top of the existing posture terms: the
+    torso back-lean band + hip-flexion anchor only constrain the *leg chain*
+    — the ankle (foot joint) is free to hold the sole at any angle, and the
+    sim exploits that: the rigid foot's contact patch lets the policy ride
+    the toe or heel edge with a tilted sole, a balance strategy that does
+    NOT transfer to hardware (the real foot is small, the RS02 ankle is the
+    weakest joint at ~17 N·m, and an edge contact shrinks the support
+    polygon to a line). Forcing the sole parallel to the ground maximizes
+    the contact polygon and stacks the load through the whole foot instead
+    of leaning on the ankle motor. This is the foot-side counterpart to
+    ``hip_flexion_anchor``: hips straight + soles flat = the ankle strategy,
+    the entire body leaning together over a full contact patch.
+
+    This is deliberately NOT a joint-position anchor on the foot joints:
+    under the 8-12° back lean the shank tilts back with the torso, so a flat
+    sole requires the ankle to hold a *nonzero* compensation angle
+    (q_foot ≈ ±10° in the mirrored sign convention — cf. capture
+    20260715_214224: foot L=+0.18, R=+0.31 rad). Anchoring q_foot at 0 would
+    fight the back lean; this orientation term targets the *result* (sole ∥
+    ground) and lets the ankle find whatever angle achieves it.
+
+    SOLE NORMAL — why the default ``(0, 0, 1)``: every leg-chain joint
+    origin in ``ros2/src/bebopv2_description/urdf/bebopv2.urdf`` has
+    ``rpy="0 0 0"`` (verified Jul 16 2026: hip_flexion, hip_abduction,
+    knee_flexion, foot joints, both sides), so at the all-zeros default pose
+    — the documented straight-leg symmetric stand with both feet flat — the
+    foot link frame is aligned with the base_link FLU frame and the sole
+    normal is the foot's local ``+Z``. If a future foot redesign rotates the
+    foot frame in the USD, pass the corrected axis via ``sole_normal_b``
+    instead of editing this function.
+
+    **Gate** — two mutually exclusive options, selected by ``balance_gate``
+    (same machinery as :func:`bilateral_joint_symmetry_l2`):
+
+    * **Stillness gate** (``balance_gate=False``, default):
+      ``exp(-Σv²/σ²)`` over all joint velocities. Fires at full strength
+      whenever the robot is holding a pose — "when standing" — regardless of
+      torso tilt, and decays toward ``0`` during active motion, so recovery
+      footwork (toe-off, heel strike, lifting a foot) stays free. Flat feet
+      are a POSTURE constraint like bilateral symmetry, not a motion
+      penalty, so the stillness gate is the right default (see the
+      ``bilateral_symmetry`` term comment in ``exp_standing.py`` for why
+      posture constraints use stillness, not balance, gating — a
+      balance-gated posture term drops to its floor during the
+      tilted-exploration phase of training and never shapes the stance).
+    * **Balance gate** (``balance_gate=True``):
+      ``max(gate_floor, exp(-((g_x - center)² + g_y²) / gate_std²))`` —
+      the same tilt-distance Gaussian used by ``joint_vel_l2`` and
+      ``action_position_rate_l2``. Full strength in the back-lean band,
+      relaxing toward ``gate_floor`` when tilted.
+
+    Non-privileged: foot orientation is forward kinematics from the joint
+    encoders + root IMU, both observed on hardware — same sim-to-real
+    justification as :func:`com_over_support_reward`.
+
+    Args:
+        asset_cfg: the robot articulation.
+        foot_body_names: the foot articulation body names to score.
+        sole_normal_b: unit vector in the foot link frame normal to the sole
+            (points world ``+Z`` when the foot is flat). Default ``(0,0,1)``
+            — see the frame audit above.
+        stillness_std: velocity scale for the stillness gate (ignored when
+            ``balance_gate=True``). ``1.5`` matches ``bilateral_symmetry``.
+        balance_gate: if True, use the tilt-distance Gaussian gate instead
+            of the stillness gate.
+        gate_band_gx_center: ``g_x`` center of the balance gate.
+        gate_std: Gaussian width; ~0.10 ≈ 5.7° at 1/e.
+        gate_floor: minimum gate value (0..1).
+    """
+    asset = env.scene[asset_cfg.name]
+    device = getattr(env, "device", None)
+    body_quat_w = _ensure_tensor(asset.data.body_quat_w, env_device=device)
+
+    err = None
+    for body_name in foot_body_names:
+        body_id = asset.body_names.index(body_name)
+        # (N, 4) — Isaac Lab 3.0 quaternion order is (x, y, z, w); quat_apply
+        # owns the convention (the pre-3.0 WXYZ unpack made X-axis roll —
+        # the lateral edge-riding this term exists to prevent — invisible).
+        quat = body_quat_w[:, body_id]
+        normal = torch.tensor(
+            sole_normal_b, dtype=quat.dtype, device=quat.device
+        ).expand(quat.shape[0], 3)
+        # Rotate the sole normal into the world frame: u = R(q) @ n.
+        sole_normal_w = quat_apply(quat, normal)
+        # Horizontal components of the world-frame sole normal: 0 when the
+        # sole is parallel to the ground, sin²(tilt) otherwise.
+        misalign = torch.sum(torch.square(sole_normal_w[:, :2]), dim=1)
+        err = misalign if err is None else err + misalign
+
+    if balance_gate:
+        proj_grav = _ensure_tensor(asset.data.projected_gravity_b, env_device=device)
+        g_x = proj_grav[:, 0]
+        g_y = proj_grav[:, 1]
+        tilt_err = torch.square(g_x - gate_band_gx_center) + torch.square(g_y)
+        gate = torch.exp(-tilt_err / (gate_std * gate_std))
+        gate = torch.clamp(gate, min=gate_floor)
+        return err * gate
+
+    # Stillness gate: 1.0 when still, -> 0 when moving. Only enforce flat
+    # soles when the policy is trying to HOLD a stance, not when it's
+    # articulating the feet for a recovery step.
+    joint_vel = _ensure_tensor(asset.data.joint_vel, env_device=device)
+    vel_sq = torch.sum(torch.square(joint_vel), dim=1)
+    gate = torch.exp(-vel_sq / (stillness_std * stillness_std))
+    return err * gate
