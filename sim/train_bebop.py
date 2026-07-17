@@ -37,11 +37,9 @@ parser.add_argument(
     type=float,
     default=None,
     help=(
-        "Override PPO entropy_coef (cfg default is 0.02). Lower it (e.g. 0.01) "
-        "to reduce the risk of late-training std runaway — once a value-loss "
-        "spike kills the advantage signal, the entropy bonus is what inflates "
-        "the action std. Don't set it to 0: too little exploration lets the std "
-        "collapse to a near-deterministic policy that ignores observations."
+        "Override PPO entropy_coef (cfg default is 0.01). Lower it (e.g. 0.005) "
+        "if the action std refuses to come down; raise it (e.g. 0.02) if the "
+        "std collapses before the policy finds balance."
     ),
 )
 parser.add_argument(
@@ -49,11 +47,10 @@ parser.add_argument(
     type=float,
     default=None,
     help=(
-        "Override PPO learning_rate (cfg default is 5e-4). The adaptive "
+        "Override PPO learning_rate (cfg default is 1e-3). The adaptive "
         "schedule can only lower this from the base value, so this sets the "
         "ceiling. Try 1e-4 or 2.5e-4 if the policy converges too fast and "
-        "collapses std before finding balance; raise toward 1e-3 if learning "
-        "is too slow."
+        "collapses std before finding balance."
     ),
 )
 parser.add_argument("--seed", type=int, default=None, help="Random seed.")
