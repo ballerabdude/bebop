@@ -68,40 +68,56 @@ ROLL_FALL_LIMIT_GY = math.sin(math.radians(ROLL_FALL_LIMIT_DEG))
 PITCH_INIT_RAD = math.radians(15.0)
 PITCH_RATE_INIT_RAD_S = 0.6
 
-# Resting torso posture: a slight BACK lean held as a band (not a point).
-# Why a band, not a single upright target: the previous ``upright_pose``
-# Gaussian was centered on g_x = g_y = 0 (perfect vertical) with its steepest
-# gradient AT vertical, so the policy was pulled hard to a perfectly upright
-# posture that is NOT hardware-stable — the CoM ends up over the toes / ankle
-# pivot and the weak RS02 ankle motor can't hold it (run 2026-07-14_04-09-59:
-# 70% of episodes ended in base_link_ground_contact while upright_pose was the
-# second-largest positive shaping term). A flat-top plateau over a back-lean
-# band lets the policy settle anywhere in the band rather than being collapsed
-# onto one point, and the deeper back lean shifts the CoM behind the ankle
-# pivot so the leg stacks load through the hip/knee instead of leaning on the
-# foot. See ``torso_pitch_asymmetric_reward`` in bebop_v2_rewards.py.
+# Balance band (g_x) for the torso: near-upright with a slight FORWARD bias.
 #
-# Sign convention (body FLU): g_x = -sin(pitch); back lean is g_x < 0.
-#   BACK_LEAN_DEEP_DEG  = 12  -> g_x = -0.208 (deep edge of the plateau)
-#   BACK_LEAN_SHALLOW_DEG = 8  -> g_x = -0.139 (shallow edge; still a back lean)
-# 10° sits in the middle of the band (g_x ≈ -0.174), the user-requested target.
-BACK_LEAN_DEEP_DEG = 12.0
-BACK_LEAN_SHALLOW_DEG = 8.0
-BACK_LEAN_BAND_GX = (
-    -math.sin(math.radians(BACK_LEAN_DEEP_DEG)),     # band_gx_min (deep edge)
-    -math.sin(math.radians(BACK_LEAN_SHALLOW_DEG)),   # band_gx_max (shallow edge)
-)
-# Gaussian falloff width outside the band (in g_x units; ~0.12 ≈ 7° shoulder).
-BACK_LEAN_EDGE_STD = 0.12
-# Roll tolerance inside the band (g_y; ~0.15 ≈ 8.6° at 1/e).
-BACK_LEAN_ROLL_STD = 0.15
-# Forward-pitch penalty inside the reward (g_x > 0 is the hardware-fatal
-# forward lean; penalize any forward component, no deadband).
-BACK_LEAN_FWD_PENALTY_GAIN = 5.0
+# Jul 17 2026 geometry audit (URDF link masses + foot sole STL), replacing
+# the 8-12 deg BACK-lean band that preceded it:
+#   * the ankle axis sits only 23 mm ahead of the heel edge of the sole
+#     (the toe edge is +140 mm ahead — a toe-heavy, human-like foot);
+#   * at the upright zero pose the whole-robot CoM (~14 kg, torso 6.7 kg)
+#     already sits 48 mm BEHIND the ankle axis = 25 mm behind the heel
+#     edge: straight-leg upright standing is statically IMPOSSIBLE. The
+#     robot must flex the hips ~5 deg (slant the legs back, moving the
+#     ankle under the CoM) and/or pitch the torso ~5 deg forward;
+#   * the old 8-12 deg back-lean band put the CoM 131-172 mm behind the
+#     ankle — 6-7x the heel margin. No posture in that band is statically
+#     sustainable. Capture 20260717_213006 (run 2026-07-17_13-07-06
+#     ckpt-4999) showed the consequence on hardware: the policy slid to
+#     the feasible posture NEAREST the unreachable band — g_x mean -0.027
+#     with hips flexed ~0.06 rad, CoM within a few mm of the heel edge —
+#     where any backward wobble crosses the heel and the robot tips back
+#     irrecoverably ("unstable once it adjusts pitch, has to be held").
+#     Fighting the impossible target all episode also doubled its chatter:
+#     24.4% slew-exceedance vs 6.3% for the Jul 15 quiet stand.
+#
+# The band therefore straddles the statically sustainable posture:
+# near-upright (the hip anchor below is relaxed so the policy can make
+# the ~5 deg geometric compensation), biased slightly FORWARD because the
+# toe side carries the support margin (140 mm) while the heel side
+# (23 mm) is the fall direction. g_x = -sin(pitch); g_x > 0 = forward.
+BALANCE_BAND_GX_MIN = -0.02   # 1.1 deg back (heel side — stay off it)
+BALANCE_BAND_GX_MAX = +0.05   # 2.9 deg forward (toe side — the safe side)
 
-# Center of the back-lean band in g_x units — the balance target the movement
-# penalties gate on. ~= -0.174 (10° back lean), the midpoint of the band.
-BACK_LEAN_BAND_GX_CENTER = 0.5 * (BACK_LEAN_BAND_GX[0] + BACK_LEAN_BAND_GX[1])
+# Asymmetric Gaussian shoulders outside the band. The BACK (below) shoulder
+# is wide (0.15 -> restoring slope reaches ~17 deg back) so a backward-
+# tipped robot still has gradient home; the FORWARD shoulder is tighter
+# (0.08) — forward excursions are self-limiting over the 140 mm toe margin.
+BALANCE_EDGE_STD_BELOW = 0.15
+BALANCE_EDGE_STD_ABOVE = 0.08
+# Quadratic tails beyond the band, both directions (gain on
+# relu(overshoot)^2, deadband at the band edge). The Gaussian shoulders'
+# gradient dies ~2 std out; the tails keep a nonzero restoring gradient at
+# large tilt — the learnable signal for "recover once the pitch starts to
+# run away", which the pre-Jul-17 reward lacked (flat alive + termination
+# cliff only). Mild gain: far-field direction, not a wall.
+BALANCE_FWD_PENALTY_GAIN = 1.0
+BALANCE_BWD_PENALTY_GAIN = 1.0
+# Roll tolerance inside the band (g_y; ~0.15 ≈ 8.6° at 1/e).
+BALANCE_ROLL_STD = 0.15
+
+# Center of the balance band in g_x units — the balance target the movement
+# penalties gate on. ~= +0.015 (~1 deg forward lean), the midpoint.
+BALANCE_BAND_GX_CENTER = 0.5 * (BALANCE_BAND_GX_MIN + BALANCE_BAND_GX_MAX)
 # Width of the balance gate Gaussian (in g_x units; ~0.10 ≈ 5.7° at 1/e).
 # Tightened 0.15 -> 0.10 (Jul 15 2026) after capture 20260715_122500 showed
 # the 0.15 gate opened too early (at moderate tilt where the policy should
@@ -484,25 +500,36 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Active-balancing standing reward (Jul 15 2026): survive, hold a
-    back-lean posture, keep the CoM over the feet, and MOVE to recover.
+    """Active-balancing standing reward (Jul 17 2026 retarget): survive, hold
+    a near-upright slightly-forward posture, keep the CoM over the feet, and
+    MOVE to recover.
 
-    History: the previous design (Jul 10-14 2026) was a *statue* — survive,
-    hold a back-lean posture, keep the hips straight, move smoothly. The
-    smoothing worked (capture 20260715_041834: slew-exceedance 40-55% -> 6.3%)
-    but the robot could not balance: on a gantry test it hung at g_x mean
-    +0.065 (12° FORWARD of the back-lean band [-0.208, -0.139]) instead of
-    correcting, because the movement penalties (position_rate -10.0,
+    Jul 17 2026 posture retarget (geometry audit, see the BALANCE_BAND_GX_*
+    constants block): the 8-12° back-lean band used since Jul 10 put the CoM
+    131-172 mm behind an ankle axis that has only a 23 mm heel margin —
+    statically impossible. On hardware the policy slid to the feasible
+    posture nearest the band and balanced within millimeters of the heel
+    edge, so any backward pitch wobble tipped it over irrecoverably
+    (capture 20260717_213006). The band now straddles upright with a slight
+    forward bias (g_x ∈ [-0.02, +0.05]), the hip anchor is relaxed so the
+    policy can make the ~5° hip-flexion compensation the statics require,
+    and quadratic tails keep a restoring gradient at large tilt.
+
+    History: the Jul 10-14 2026 design was a *statue* — survive, hold
+    posture, move smoothly. The smoothing worked (capture 20260715_041834:
+    slew-exceedance 40-55% -> 6.3%) but the robot could not balance: on a
+    gantry test it hung at g_x mean +0.065 (12° off the then-band) instead
+    of correcting, because the movement penalties (position_rate -10.0,
     joint_vel -0.5, hip_flexion_anchor -0.6) made every recovery motion
-    unaffordable. A 0.1 rad hip flexion cost -0.4/tick while ``torso_posture``
-    only earned +0.028/tick at that tilt — the policy correctly chose not to
-    move and was caught by the gantry.
+    unaffordable. A 0.1 rad hip flexion cost -0.4/tick while
+    ``torso_posture`` only earned +0.028/tick at that tilt — the policy
+    correctly chose not to move and was caught by the gantry.
 
-    The fix inverts the gate pattern already used by
+    The Jul 15 fix inverts the gate pattern already used by
     :func:`bilateral_joint_symmetry_l2` (a stillness gate that suppresses a
     penalty during motion): the movement penalties now carry a *balance gate*
     that suppresses them during tilt. The gate is a Gaussian on how far the
-    torso tilt is from the back-lean band center:
+    torso tilt is from the balance-band center:
 
         gate = exp(-((g_x - center)² + g_y²) / gate_std²)
 
@@ -511,26 +538,25 @@ class RewardsCfg:
     failure tilt (12° off band) the gate is ~0.08 — the penalties vanish and
     the policy is free to swing the legs to catch the fall.
 
-    * ``torso_posture`` (``torso_pitch_asymmetric_reward``) — unchanged: the
-      flat-top back-lean band (8-12°) is still the balance target. The change
-      is removing the penalties that *blocked* reaching it, not changing the
-      target.
-    * ``com_over_support`` (NEW) — bounded [0,1] reward for keeping the CoM
-      (base_link xy) over the foot midpoint. The positive carrot that
-      complements the gates: gives a gradient *toward* balance, growing
-      stronger when tilted. This is what makes active leg-lifting the
-      *rewarded* recovery strategy, not just a tolerated one.
-    * ``hip_flexion_anchor`` — now balance-gated. Holds hips straight at
-      steady state (the ankle strategy) but frees them to flex for recovery.
-    * ``joint_vel`` — now balance-gated. Kills wobble at balance, frees the
+    * ``torso_posture`` (``torso_pitch_asymmetric_reward``) — the balance
+      target: flat-top band straddling upright (Jul 17 retarget, above),
+      asymmetric shoulders (wide on the heel side for recovery reach,
+      tight on the toe side), quadratic tails for far-field gradient.
+    * ``com_over_support`` — bounded [0,1] reward for keeping the CoM
+      (base_link xy) over the foot midpoint, stillness-gated. The positive
+      carrot that complements the gates: gives a gradient *toward* balance.
+    * ``hip_flexion_anchor`` — balance-gated, relaxed to -0.2 (Jul 17):
+      the ~5° hip flexion the statics require is now affordable; only a
+      deep crouch is priced out. Frees the hips fully when tilted.
+    * ``joint_vel`` — balance-gated. Kills wobble at balance, frees the
       legs to move when tilted.
-    * ``position_rate`` — now balance-gated. Kills chatter at balance (-10.0
+    * ``position_rate`` — balance-gated. Kills chatter at balance (-10.0
       full strength), frees the setpoints to move rapidly when tilted.
     * ``joint_pos_anchor`` (``mdp.joint_deviation_l1``) over all joints —
       general posture regularizer, NOT gated (the home pose should always be
       the quiet attractor; the L1 pull is cheap and the gate machinery is
       only needed where the weight is high enough to block recovery).
-    * ``bilateral_symmetry`` (NEW Jul 15 2026) — Σ(q_L + q_R)² over all 4
+    * ``bilateral_symmetry`` — Σ(q_L + q_R)² over all 4
       L/R joint pairs, stillness-gated. The HEAVY symmetry enforcer:
       capture 20260715_214224 showed the prior reward had NO active symmetry
       term (only the diluted -0.3 all-joint anchor), so the policy stood with
@@ -542,15 +568,14 @@ class RewardsCfg:
       constraint that should fire whenever the robot is holding any pose,
       not only when balanced; the balance gate suppressed it to -0.03/tick
       during the tilted-exploration phase of training).
-    * ``feet_flat`` (NEW Jul 16 2026) — Σ_feet sin²(sole tilt from
+    * ``feet_flat`` — Σ_feet sin²(sole tilt from
       horizontal), stillness-gated. Forces both soles parallel to the ground
       while standing, so the policy cannot ride the toe/heel edge of the
       rigid sim foot (a non-transferable contact cheat that leans on the
-      weak RS02 ankle). Foot-side counterpart to ``hip_flexion_anchor``:
-      hips straight + soles flat = the ankle strategy over a full contact
-      patch. NOT a foot-joint position anchor — under the 8-12° back lean a
-      flat sole needs q_foot ≈ ±10°, so the term targets the sole
-      *orientation* (FK from encoders) and lets the ankle pick the angle.
+      weak RS02 ankle). NOT a foot-joint position anchor: in the balanced
+      stance the shank slants ~5° (hip-flexion compensation), so a flat
+      sole needs q_foot ≈ +5°; the term targets the sole *orientation*
+      (FK from encoders) and lets the ankle pick the angle.
 
     The ankle-support hack stays fixed in PHYSICS, not reward: the foot
     ``effort_limit_sim`` is capped at the RS02 continuous rating (6 Nm).
@@ -559,58 +584,55 @@ class RewardsCfg:
     alive = RewTerm(func=mdp.is_alive, weight=1.0)
     termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
 
-    # Torso posture: a flat-top back-lean BAND (8-12°, centered on the
-    # user-requested 10° back lean) — NOT a single-target Gaussian on vertical.
-    # The previous ``upright_pose`` Gaussian was centered on g_x = g_y = 0
-    # (perfect vertical) with its steepest gradient AT vertical, which pulled
-    # the policy to a posture that is not hardware-stable: CoM over the ankle
-    # pivot, load carried by the weak RS02 foot motor. Run 2026-07-14_04-09-59
-    # showed the failure — 70% of episodes ended in base_link_ground_contact
-    # while upright_pose was the second-largest positive shaping term,
-    # steering the policy away from active balance. The flat-top band lets the
-    # torso settle anywhere in [8°, 12°] of back lean (g_x ∈ [-0.208, -0.139])
-    # without being collapsed onto one point, and the deeper back lean shifts
-    # the CoM behind the ankle pivot so the leg stacks load through the
-    # hip/knee instead of the foot. Forward pitch (g_x > 0) is penalized
-    # inside the same term — the hardware-fatal direction.
-    # See ``torso_pitch_asymmetric_reward`` and the BACK_LEAN_* constants.
+    # Torso posture: a flat-top BAND straddling upright (g_x ∈ [-0.02, +0.05],
+    # 1.1° back … 2.9° forward) with a slight forward bias, asymmetric
+    # Gaussian shoulders, and quadratic far-field tails. NOT the pre-Jul-17
+    # 8-12° back-lean band: the geometry audit (see the BALANCE_BAND_GX_*
+    # constants block) showed that band put the CoM 6-7x the heel margin
+    # behind the ankle — statically impossible — and the hardware policy was
+    # living at the heel edge nearest the unreachable target (capture
+    # 20260717_213006). The forward bias exploits the 140 mm toe margin;
+    # the back edge stays shallow because the 23 mm heel margin is the fall
+    # direction. The quadratic tails (deadband at the band edges) keep a
+    # restoring gradient at large tilt where the shoulders' gradient dies —
+    # the learnable "recover once the pitch runs away" signal.
+    # See ``torso_pitch_asymmetric_reward``.
     torso_posture = RewTerm(
         func=torso_pitch_asymmetric_reward,
         weight=0.5,
         params={
-            "band_gx_min": BACK_LEAN_BAND_GX[0],
-            "band_gx_max": BACK_LEAN_BAND_GX[1],
-            "edge_std": BACK_LEAN_EDGE_STD,
-            "roll_std": BACK_LEAN_ROLL_STD,
-            "forward_penalty_gain": BACK_LEAN_FWD_PENALTY_GAIN,
-            "forward_deadband": 0.0,
+            "band_gx_min": BALANCE_BAND_GX_MIN,
+            "band_gx_max": BALANCE_BAND_GX_MAX,
+            "edge_std_below": BALANCE_EDGE_STD_BELOW,
+            "edge_std_above": BALANCE_EDGE_STD_ABOVE,
+            "roll_std": BALANCE_ROLL_STD,
+            "forward_penalty_gain": BALANCE_FWD_PENALTY_GAIN,
+            "backward_penalty_gain": BALANCE_BWD_PENALTY_GAIN,
         },
     )
 
     # Hip-flexion anchor — Σ|q| over ONLY the two hip flexion joints, gated
-    # by how close the torso is to the balance band. The whole-joint
-    # ``joint_pos_anchor`` below is too weak to hold hip flexion at zero once
-    # the torso is leaning back: the natural compensation for a back-leaning
-    # torso is to counter-rotate by flexing the hips forward (keeping CoM
-    # over the feet via joint angles). We want the ankle strategy instead —
-    # the entire body leans together, hips stay straight — so the hip flexion
-    # joints get their own stronger, scoped anchor. Restricted to hip_flexion
-    # (not knee/foot) so the knees/feet can still bend for recovery.
+    # by how close the torso is to the balance band. Weight relaxed -0.6 ->
+    # -0.2 (Jul 17 2026): the geometry audit showed ~0.06-0.10 rad of hip
+    # flexion is the geometric compensation that moves the ankle under the
+    # CoM (the ankle axis would otherwise sit 48 mm ahead of the CoM with
+    # only a 23 mm heel margin) — the stance REQUIRES it, so the anchor
+    # must not price it out. At -0.2 the needed flexion costs ~-0.03/tick
+    # (cheap) while a deep 0.5 rad crouch still costs -0.2/tick (a wall).
+    # The whole-joint ``joint_pos_anchor`` below keeps the knees near
+    # straight. Restricted to hip_flexion (not knee/foot) so the knees/feet
+    # can still bend for recovery.
     #
-    # BALANCE-GATED (Jul 15 2026): the anchor was non-gated at -0.6, which
-    # made the primary balance-recovery motion (swinging the legs to put a
-    # foot under the falling CoM) unaffordable. Capture 20260715_041834
-    # (gantry-supported, on-policy) showed the robot hanging at g_x mean
-    # +0.065 — 12° FORWARD of the back-lean band — instead of correcting,
-    # because a 0.1 rad hip flexion cost -0.4/tick at -0.6 while
-    # ``torso_posture`` only earned +0.028/tick at that tilt. The gate
-    # (``exp(-tilt_err/gate_std²)``) fires at full strength when balanced
-    # (holds hips straight at steady state) and vanishes when tilted (frees
-    # the hips to recover). At the capture's failure tilt the gate is ~0.08,
-    # so the same recovery costs only -0.031/tick — finally affordable.
+    # BALANCE-GATED (Jul 15 2026): the gate fires at full strength when
+    # balanced (holds hips near straight at steady state) and vanishes when
+    # tilted (frees the hips to swing a foot under the falling CoM).
+    # Capture 20260715_041834 showed the ungated -0.6 anchor made recovery
+    # unaffordable: the robot hung at g_x mean +0.065 instead of
+    # correcting, because a 0.1 rad hip flexion cost -0.4/tick while
+    # ``torso_posture`` only earned +0.028/tick at that tilt.
     hip_flexion_anchor = RewTerm(
         func=joint_deviation_l1_balance_gated,
-        weight=-0.6,
+        weight=-0.2,
         params={
             "asset_cfg": SceneEntityCfg(
                 "robot",
@@ -620,7 +642,7 @@ class RewardsCfg:
                 ],
                 preserve_order=True,
             ),
-            "gate_band_gx_center": BACK_LEAN_BAND_GX_CENTER,
+            "gate_band_gx_center": BALANCE_BAND_GX_CENTER,
             "gate_std": BALANCE_GATE_STD,
             "gate_floor": BALANCE_GATE_FLOOR,
         },
@@ -653,7 +675,7 @@ class RewardsCfg:
                 "robot", joint_names=JOINT_NAMES_ALL, preserve_order=True
             ),
             "balance_gate": True,
-            "gate_band_gx_center": BACK_LEAN_BAND_GX_CENTER,
+            "gate_band_gx_center": BALANCE_BAND_GX_CENTER,
             "gate_std": BALANCE_GATE_STD,
             "gate_floor": BALANCE_GATE_FLOOR,
         },
@@ -694,7 +716,7 @@ class RewardsCfg:
         weight=-10.00,
         params={
             "balance_gate": True,
-            "gate_band_gx_center": BACK_LEAN_BAND_GX_CENTER,
+            "gate_band_gx_center": BALANCE_BAND_GX_CENTER,
             "gate_std": BALANCE_GATE_STD,
             "gate_floor": BALANCE_GATE_FLOOR,
         },
@@ -800,7 +822,7 @@ class RewardsCfg:
     )
 
     # Feet flat — Σ_feet sin²(sole tilt from horizontal), stillness-gated
-    # (Jul 16 2026, user request). The torso back-lean band + hip-flexion
+    # (Jul 16 2026, user request). The torso balance band + hip-flexion
     # anchor constrain the leg chain but leave the ankle free to hold the
     # sole at any angle — and the sim exploits that: the rigid foot's
     # contact patch lets the policy ride the toe or heel edge with a tilted
@@ -812,10 +834,11 @@ class RewardsCfg:
     # the foot-side counterpart to ``hip_flexion_anchor`` (hips straight +
     # soles flat = the ankle strategy).
     #
-    # NOT a foot-joint position anchor: under the 8-12° back lean the shank
-    # tilts with the torso, so a flat sole requires q_foot ≈ ±10° (mirrored
-    # sign convention; capture 20260715_214224 showed foot L=+0.18, R=+0.31).
-    # Anchoring q_foot at 0 would fight the back lean. This term reads the
+    # NOT a foot-joint position anchor: in the balanced stance the shank
+    # slants ~5° back (the hip-flexion compensation that puts the ankle
+    # under the CoM — see the BALANCE_BAND_GX_* audit), so a flat sole
+    # requires q_foot ≈ +5° of ankle compensation. Anchoring q_foot at 0
+    # would fight that stance. This term reads the
     # foot BODY orientation (sole normal = foot local +Z; every leg-chain
     # joint origin in the URDF has rpy=0, so the foot frame aligns with
     # base_link FLU at the zero pose) and lets the ankle find whatever angle

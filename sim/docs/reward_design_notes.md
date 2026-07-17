@@ -250,7 +250,7 @@ The penalty is **multiplied by a balance gate**:
 gate = max(gate_floor, exp(-((g_x - center)² + g_y²) / gate_std²))
 ```
 
-- When the robot is **balanced** (in the back-lean band): `gate ≈ 1.0`,
+- When the robot is **balanced** (in the balance band): `gate ≈ 1.0`,
   penalty fires at full strength → policy is pushed toward a symmetric stance
 - When the robot is **tilted** (recovering from a tip): `gate → gate_floor`
   (0.2), penalty is relaxed → policy is free to use whatever asymmetric
@@ -486,10 +486,11 @@ ground while standing. Replaces `foot_deviation` (section 7) for the
 active-balancing reward (Jul 16 2026, user request).
 
 **Why it exists:** `foot_deviation` anchored the foot *joint angle* at
-zero, which fights the 8-12° torso back-lean band — under a back lean the
-shank tilts with the torso, so a flat sole needs a *nonzero* ankle angle
-(q_foot ≈ ±10°). Anchoring the joint at zero meant the policy had to
-choose between the posture band and flat feet. `feet_flat` targets the
+zero, which fights the balanced stance — the shank slants ~5° back in that
+stance (the hip-flexion compensation that puts the ankle under the CoM,
+see the Jul 17 2026 geometry audit below), so a flat sole needs a
+*nonzero* ankle angle (q_foot ≈ +5°). Anchoring the joint at zero meant
+the policy had to choose between the posture band and flat feet. `feet_flat` targets the
 **result** instead: the sole's world orientation (forward kinematics from
 the joint encoders + IMU, non-privileged), so the ankle is free to hold
 whatever angle makes the sole flat.
@@ -574,6 +575,43 @@ is finally expensive enough that the policy prefers to correct it.
 
 ---
 
+## The balance band — where the torso should point (Jul 17 2026 geometry audit)
+
+The `torso_posture` target was re-derived from the robot's actual geometry
+after the Jul 17 hardware test (capture 20260717_213006, run
+2026-07-17_13-07-06 ckpt-4999) showed the robot "standing badly" and never
+recovering from pitch excursions. The audit (URDF link masses + foot sole
+STL, computed in `exp_standing.py`'s `BALANCE_BAND_GX_*` comment):
+
+- **The foot is toe-heavy**: the ankle axis sits only **23 mm ahead of the
+  heel edge** of the sole; the toe edge is +140 mm ahead.
+- **Upright is not free**: at the zero pose (torso vertical, legs straight)
+  the whole-robot CoM (~14 kg, 6.7 kg torso) is already **48 mm BEHIND the
+  ankle axis** = 25 mm behind the heel edge. Straight-leg upright standing
+  is statically impossible; the robot must flex the hips ~5° (slant the
+  legs back, bringing the ankle under the CoM) and/or pitch the torso
+  ~5° forward.
+- **The old 8-12° back-lean band was unreachable**: it put the CoM
+  131-172 mm behind the ankle — 6-7x the heel margin. On hardware the
+  policy slid to the feasible posture *nearest* the band: g_x mean -0.027
+  with hips flexed ~0.06 rad, i.e. balanced within millimeters of the
+  heel edge. Any backward wobble crossed the heel → tipped back
+  irrecoverably. Fighting the impossible target also doubled chatter
+  (24.4% slew-exceedance vs 6.3% for the Jul 15 quiet stand).
+
+The band therefore moved to `g_x ∈ [-0.02, +0.05]` (1.1° back … 2.9°
+forward), straddling upright with a slight **forward** bias: the toe side
+carries the support margin (140 mm) while the heel side (23 mm) is the
+fall direction. Companion changes: `hip_flexion_anchor` relaxed -0.6 →
+-0.2 (the ~5° hip flexion is required statics, not laziness), asymmetric
+shoulders on the band (wide 0.15 on the heel side for recovery reach,
+tight 0.08 on the toe side), and **quadratic tails** beyond both band
+edges so a far-tilted robot still feels a restoring gradient (the
+Gaussian shoulders' gradient dies ~2σ out; before Jul 17 the only
+far-field signals were the flat `alive` reward and the termination cliff).
+
+---
+
 ## The balance gate — why it's the key innovation
 
 The balance gate on `bilateral_symmetry`, `joint_vel`, `position_rate`,
@@ -594,7 +632,7 @@ balance gate:
 gate = max(gate_floor, exp(-((g_x - center)² + g_y²) / gate_std²))
 ```
 
-- When the robot is **balanced** (in the back-lean band): gate ≈ 1.0,
+- When the robot is **balanced** (in the balance band): gate ≈ 1.0,
   penalty fires → policy is pushed toward a symmetric, flat-foot stance
 - When the robot is **tilted** (recovering from a tip): gate → gate_floor
   (0.2), penalty is relaxed → policy is free to use whatever asymmetric
@@ -613,7 +651,7 @@ minimum pressure on so the policy can't escape the constraint by
 manufacturing tilt.
 
 **The math intuition:** The gate is a Gaussian (bell curve) over how far
-the torso tilt is from the back-lean band center. At balance (g_x ≈ -0.17,
+the torso tilt is from the balance band center. At balance (g_x ≈ +0.015,
 g_y ≈ 0), the gate is 1.0 — full penalty. As the robot tilts away, the
 gate drops exponentially — the penalty is relaxed. The width
 `gate_std = 0.10` means the gate is ~1/e at ~5.7° off the band center. By

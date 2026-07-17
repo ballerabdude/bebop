@@ -62,7 +62,7 @@ def action_position_rate_l2(
     env,
     num_position_channels: int = 8,
     balance_gate: bool = False,
-    gate_band_gx_center: float = -0.17,
+    gate_band_gx_center: float = 0.015,
     gate_std: float = 0.15,
     gate_floor: float = 0.2,
     asset_cfg: SceneEntityCfg | None = None,
@@ -160,7 +160,7 @@ def joint_vel_l2(
     env,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     balance_gate: bool = False,
-    gate_band_gx_center: float = -0.17,
+    gate_band_gx_center: float = 0.015,
     gate_std: float = 0.15,
     gate_floor: float = 0.2,
 ) -> torch.Tensor:
@@ -403,7 +403,7 @@ def bilateral_joint_symmetry_l2(
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     stillness_std: float = 1.5,
     balance_gate: bool = False,
-    gate_band_gx_center: float = -0.17,
+    gate_band_gx_center: float = 0.015,
     gate_std: float = 0.15,
     gate_floor: float = 0.2,
 ) -> torch.Tensor:
@@ -563,7 +563,7 @@ def joint_deviation_l1_stillness_gated(
 def joint_deviation_l1_balance_gated(
     env,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    gate_band_gx_center: float = -0.17,
+    gate_band_gx_center: float = 0.015,
     gate_std: float = 0.15,
     gate_floor: float = 0.2,
 ) -> torch.Tensor:
@@ -733,37 +733,48 @@ def upright_pose_exp(
 def torso_pitch_asymmetric_reward(
     env,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    band_gx_min: float = -0.30,
-    band_gx_max: float = -0.17,
+    band_gx_min: float = -0.02,
+    band_gx_max: float = 0.05,
     edge_std: float = 0.12,
     roll_std: float = 0.15,
-    forward_penalty_gain: float = 5.0,
-    forward_deadband: float = 0.0,
+    forward_penalty_gain: float = 1.0,
+    forward_deadband: float | None = None,
+    edge_std_below: float | None = None,
+    edge_std_above: float | None = None,
+    backward_penalty_gain: float = 1.0,
+    backward_deadband: float | None = None,
 ) -> torch.Tensor:
-    """Reward balancing anywhere in a back-lean *band*; penalize forward pitch.
+    """Reward balancing anywhere in a pitch *band*; quadratic tails beyond it.
 
     Uses the same articulation root ``projected_gravity_b`` signal as
     ``mdp.projected_gravity`` and the firmware observation builder.
-    In body FLU:
+    In body FLU (``g_x = -sin(pitch)``):
 
-    * ``proj_grav[:, 0] < 0`` — torso pitched **back** (stable on hardware)
-    * ``proj_grav[:, 0] > 0`` — torso pitched **forward** (falls on hardware)
+    * ``proj_grav[:, 0] < 0`` — torso pitched **back** (toward the heel edge)
+    * ``proj_grav[:, 0] > 0`` — torso pitched **forward** (toward the toe edge)
 
-    Unlike a single-target Gaussian (which collapses the policy onto one
-    pitch in playback), this uses a **flat-top plateau**: the pitch term
-    is ``1.0`` for any ``g_x`` inside the closed band
-    ``[band_gx_min, band_gx_max]`` and falls off as a Gaussian of width
-    ``edge_std`` in the (signed) distance *outside* the band. So the
-    policy is free to balance at any lean angle within the band rather
-    than being pulled to a single point — this is what lets the torso
-    settle at multiple pitches across different inits.
+    Structure: a flat-top plateau (``1.0`` for any ``g_x`` inside
+    ``[band_gx_min, band_gx_max]``), Gaussian shoulders just outside the
+    band (asymmetric widths ``edge_std_below`` / ``edge_std_above``), and
+    *quadratic tails* (``backward_penalty`` / ``forward_penalty``) that
+    keep a nonzero restoring gradient at large tilt where the shoulders'
+    gradient has died. The tails are what make "recover once the pitch
+    starts to run away" learnable: without them the only far-field signals
+    are the flat ``alive`` reward and the termination cliff.
 
-    Note ``g_x = -sin(pitch)``: a *more negative* ``g_x`` is a *deeper*
-    back lean. Hence ``band_gx_min`` (more negative) is the deep edge and
-    ``band_gx_max`` (less negative) is the shallow edge. Keep both inside
-    the ``imu_pitch_out_of_bounds`` termination envelope (``|g_x| <
-    sin(20°) ≈ 0.342``) or the policy will be rewarded for sitting on the
-    termination cliff.
+    Where the band sits is a GEOMETRY question, answered by the Jul 17 2026
+    audit (URDF masses + foot sole STL, see ``exp_standing.py``): the ankle
+    axis is only 23 mm ahead of the heel edge (toe edge +140 mm), and at
+    the upright zero pose the CoM already sits 48 mm BEHIND the ankle axis
+    — so straight-leg upright standing is statically impossible and any
+    back lean deepens the deficit (~60 mm of extra CoM travel per 6 deg).
+    The sustainable posture is near-upright with ~5 deg of hip flexion
+    (legs slanted back, ankle under the CoM) and/or a slight forward torso
+    pitch. The band should therefore straddle upright with a slight forward
+    bias — NOT a back lean: the pre-Jul-17 8-12 deg back-lean band put the
+    CoM 131-172 mm behind the ankle (6-7x the heel margin) and the hardware
+    policy slid to the feasible posture nearest the unreachable band, i.e.
+    balancing within a few mm of the heel edge (capture 20260717_213006).
 
     Args:
         asset_cfg: articulation whose root ``projected_gravity_b`` to read.
@@ -771,17 +782,24 @@ def torso_pitch_asymmetric_reward(
             ``projected_gravity_b`` was removed in Isaac Lab 3.0 beta2, so we
             read the articulation root (``base_link``) gravity projection
             instead — equivalent for an IMU mounted with identity orientation.
-        band_gx_min: deep-lean edge of the plateau (most negative ``g_x``).
-        band_gx_max: shallow-lean edge of the plateau (least negative
-            ``g_x``); should still be a back lean (``< 0``) so the plateau
-            never rewards an upright/forward torso.
-        edge_std: Gaussian width of the falloff outside the band.
+        band_gx_min: back edge of the plateau (most negative ``g_x``; the
+            heel side — keep it shallow, the heel margin is tiny).
+        band_gx_max: forward edge of the plateau (the toe side, where the
+            support margin lives; may be positive).
+        edge_std: shared Gaussian shoulder width, used for a side whose
+            specific width below is ``None``.
         roll_std: Gaussian width on ``proj_grav[1]`` (lateral tilt).
-        forward_penalty_gain: scales ``relu(g_x - deadband)²`` — keeps the
-            policy out of the forward-fall basin even when the plateau
-            term is still non-zero.
-        forward_deadband: only penalize forward tilt above this ``g_x``.
-            ``0.0`` penalizes any forward component.
+        forward_penalty_gain: scales ``relu(g_x - forward_deadband)²``.
+        forward_deadband: only penalize forward tilt above this ``g_x``;
+            ``None`` (default) starts the tail at ``band_gx_max``.
+        edge_std_below: Gaussian width on the back (``g_x < band_gx_min``)
+            shoulder. Wider = restoring reach further into a backward tip.
+        edge_std_above: Gaussian width on the forward (``g_x > band_gx_max``)
+            shoulder.
+        backward_penalty_gain: scales ``relu(backward_deadband - g_x)²`` —
+            the heel-side far-field restoring gradient.
+        backward_deadband: only penalize back tilt below this ``g_x``;
+            ``None`` (default) starts the tail at ``band_gx_min``.
     """
     asset = env.scene[asset_cfg.name]
     proj_grav = _ensure_tensor(
@@ -790,18 +808,29 @@ def torso_pitch_asymmetric_reward(
     g_x = proj_grav[:, 0]
     g_y = proj_grav[:, 1]
 
-    # Signed distance to the band: 0 inside [band_gx_min, band_gx_max],
-    # positive once g_x leaves either edge. Flat top, Gaussian shoulders.
-    below = torch.relu(band_gx_min - g_x)  # deeper back lean than the band
-    above = torch.relu(g_x - band_gx_max)  # shallower lean than the band
-    dist = below + above
-    pitch_good = torch.exp(-torch.square(dist) / (edge_std * edge_std))
+    # Signed overshoot past each band edge: 0 inside
+    # [band_gx_min, band_gx_max], positive outside. Only one side is ever
+    # nonzero. Flat top, asymmetric Gaussian shoulders.
+    below = torch.relu(band_gx_min - g_x)  # back past the heel-side edge
+    above = torch.relu(g_x - band_gx_max)  # forward past the toe-side edge
+    std_below = edge_std if edge_std_below is None else edge_std_below
+    std_above = edge_std if edge_std_above is None else edge_std_above
+    pitch_good = torch.exp(
+        -torch.square(below) / (std_below * std_below)
+        - torch.square(above) / (std_above * std_above)
+    )
 
     roll_good = torch.exp(-torch.square(g_y) / (roll_std * roll_std))
-    forward_overshoot = torch.relu(g_x - forward_deadband)
+
+    fwd_db = band_gx_max if forward_deadband is None else forward_deadband
+    forward_overshoot = torch.relu(g_x - fwd_db)
     forward_penalty = forward_penalty_gain * forward_overshoot * forward_overshoot
 
-    return pitch_good * roll_good - forward_penalty
+    bwd_db = band_gx_min if backward_deadband is None else backward_deadband
+    backward_overshoot = torch.relu(bwd_db - g_x)
+    backward_penalty = backward_penalty_gain * backward_overshoot * backward_overshoot
+
+    return pitch_good * roll_good - forward_penalty - backward_penalty
 
 
 def feet_flat_orientation_l2(
@@ -811,7 +840,7 @@ def feet_flat_orientation_l2(
     sole_normal_b: tuple[float, float, float] = (0.0, 0.0, 1.0),
     stillness_std: float = 1.5,
     balance_gate: bool = False,
-    gate_band_gx_center: float = -0.17,
+    gate_band_gx_center: float = 0.015,
     gate_std: float = 0.15,
     gate_floor: float = 0.2,
 ) -> torch.Tensor:
