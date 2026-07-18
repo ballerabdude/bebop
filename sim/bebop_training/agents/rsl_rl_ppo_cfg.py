@@ -121,10 +121,13 @@ class BebopPPOLowLRCfg(BebopPPOBaseCfg):
 class BebopPPOPushCfg(BebopPPOBaseCfg):
     """Variant for the push-recovery stand (``Isaac-BebopV2-Standing-Push-v0``).
 
-    Higher entropy than the base because push recovery requires exploring a
-    family of recovery motions, not a single quiet pose. Raise toward 0.02 if
-    the policy goes deterministic and stops recovering; lower if the action
-    std refuses to come down.
+    Higher entropy than the base (0.02 vs 0.01, restored Jul 18 2026 for the
+    first push-training run): push recovery requires exploring a family of
+    recovery motions, not a single quiet pose, and the standing runs showed
+    the action std collapsing to ~0.12 within 1k iters at 0.01 — too little
+    exploration to discover catch steps under shoves. Raise toward 0.03 if
+    the policy goes deterministic and stops recovering; lower back to 0.01
+    if the action std refuses to come down.
     """
 
     experiment_name = "bebop_push"
@@ -132,7 +135,7 @@ class BebopPPOPushCfg(BebopPPOBaseCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
+        entropy_coef=0.02,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-3,
