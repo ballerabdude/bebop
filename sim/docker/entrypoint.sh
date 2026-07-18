@@ -22,6 +22,16 @@ if [ -f "${PKG_DIR}/pyproject.toml" ]; then
         PYTHON_CMD="python3"
     fi
 
+    # Install runtime deps that the Isaac image doesn't already ship.
+    # The package itself is installed with --no-deps below to avoid pulling
+    # `isaaclab` from PyPI (it already lives in the container), but that
+    # also skips `websocket-client` / `protobuf`, which runtime_ws.py needs.
+    $PYTHON_CMD -m pip install --quiet \
+        "websocket-client>=1.6" \
+        "protobuf>=3.21" || {
+        echo "[WARNING] Failed to install runtime deps. Continuing anyway..."
+    }
+
     $PYTHON_CMD -m pip install -e "${PKG_DIR}" --no-deps --quiet || {
         echo "[WARNING] Failed to install bebop_training package. Continuing anyway..."
     }
