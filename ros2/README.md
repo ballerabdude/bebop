@@ -81,7 +81,7 @@ the ROS 2 dev container comes along with it.
 `package://bebopv2_description/...` or relative `../meshes/...` form:
 
 ```xml
-<mesh filename="file:///workspace/bebop_bot/ros2_ws/src/bebopv2_description/meshes/base_link.stl" .../>
+<mesh filename="file:///workspace/bebop_bot/ros2/src/bebopv2_description/meshes/base_link.stl" .../>
 ```
 
 This is deliberate. When the URDF is opened in **Isaac Sim** to be
@@ -91,12 +91,12 @@ ROS package index loaded, and its working directory isn't the URDF's
 parent. The only form it can reliably resolve is a `file://` URI
 pointing at a path that exists **inside the Isaac Sim container**.
 
-Because both `bebop_ros2` and the Isaac containers bind-mount this
-workspace at the same path (`/workspace/bebop_bot/ros2_ws`), hard-coding
-that absolute path works everywhere we care about: ROS 2 tooling
-(`robot_state_publisher`, RViz), Isaac Sim's URDF importer, and Isaac
-Lab. If you move the workspace mount point in `docker-compose.yml`,
-you'll need to regenerate the URDF (or sed the paths) to match.
+Because the Isaac containers bind-mount this repo root at
+`/workspace/bebop_bot`, hard-coding that absolute path works everywhere
+we care about: ROS 2 tooling (`robot_state_publisher`, RViz), Isaac
+Sim's URDF importer, and Isaac Lab. If you move the repo mount point in
+`docker-compose.yml`, you'll need to regenerate the URDF (or sed the
+paths) to match.
 
 ### Regenerating the URDF from the xacro
 
@@ -129,7 +129,7 @@ Defaults match what's currently committed:
 |------------------|--------------------------------------------------------------------------|
 | `--in`           | `src/bebopv2_description/urdf/bebopv2.xacro`                             |
 | `--out`          | `src/bebopv2_description/urdf/bebopv2.urdf`                              |
-| `--mesh-prefix`  | `/workspace/bebop_bot/ros2_ws/src/bebopv2_description/meshes`            |
+| `--mesh-prefix`  | `/workspace/bebop_bot/ros2/src/bebopv2_description/meshes`             |
 
 The script relies on `xacro` (declared in `package.xml`) and `python3`
 (part of the base image), both available in `bebop_ros2` once the
@@ -137,9 +137,38 @@ overlay is sourced.
 
 ### Importing the URDF into Isaac Sim (URDF → USD)
 
-Once `bebopv2.urdf` is regenerated, convert it to USD inside the Isaac
-Lab container (Isaac Sim is launchable from there via
-`/workspace/isaaclab/isaaclab.sh -s`):
+Once `bebopv2.urdf` is regenerated, convert it to USD **headlessly**
+inside the Isaac Lab container — one command:
+
+```sh
+just lab-urdf-to-usd
+```
+
+This runs [`sim/scripts/urdf_to_usd_bebopv2.py`](../sim/scripts/urdf_to_usd_bebopv2.py)
+via `isaaclab.sh -p`, which:
+
+1. converts the URDF with Isaac Lab's `UrdfConverter` (the same importer
+   the GUI uses) into the layered asset at `sim/usd/bebopv2/`
+   (`bebopv2.usda` + `payloads/`), **deleting the previous generated
+   asset first** — it's recoverable from git;
+2. applies the post-import fixes from
+   [`sim/scripts/post_import_bebopv2.py`](../sim/scripts/post_import_bebopv2.py)
+   (see "Post-import fixup" below) directly to the USD root layer; and
+3. prints a sanity report: joint completeness, per-link masses, and the
+   measured sole height vs. the configured spawn lift (`LIFT_Z`) — it
+   warns if a feet/leg redesign has made the spawn height stale.
+
+The importer settings match the GUI table below
+(`collision_from_visuals=False`, `self_collision=False`,
+`merge_mesh=False`, floating base). After it finishes, verify with
+`just lab-play --num_envs 1` — the env's joint-order assertion
+(`preserve_order=True` in the action/observation terms) fails fast if
+the re-import shuffled joints.
+
+#### GUI flow (manual fallback)
+
+If you need the GUI instead (e.g. debugging an importer issue), launch
+Isaac Sim from the lab container (`/workspace/isaaclab/isaaclab.sh -s`):
 
 1. `just lab-up && just lab-shell`
 2. Launch Isaac Sim: `/workspace/isaaclab/isaaclab.sh -s`
@@ -168,8 +197,9 @@ Notes:
 
 - **USD Output** points at the bind-mounted `sim/usd/` directory in
   this repo, so the generated USD lands directly under version control
-  (or, in practice, under `sim/usd/bebopv2/`). The repo currently keeps
-  the previous import as `sim/usd/bebopv2.bak/` for reference.
+  (i.e. `sim/usd/bebopv2/`). The previous import is recoverable from
+  git history — the headless pipeline deletes and regenerates that
+  directory on every run.
 - **ROS Package List** stays empty because the URDF uses absolute
   `file://` mesh paths (see "URDF mesh paths" above) — there are no
   `package://` URIs that need resolving.
@@ -185,29 +215,35 @@ Notes:
 
 #### Post-import fixup
 
-The URDF importer leaves the asset in three states that need fixing
+The URDF importer leaves the asset in states that need fixing
 for a free-standing biped:
 
-- it adds a **fixed root joint** that anchors `base_link` to world
+- it may add a **fixed root joint** that anchors `base_link` to world
   (we want a free-floating base so PhysX simulates gravity);
 - the robot prim sits at world origin, but `base_link`'s frame is at
   the **hip**, so half the robot spawns through the floor;
 - there's no **IMU sensor** on `base_link`, but the on-robot stack and
   the trained policy both consume `/imu/data` (orientation, angular
-  velocity, linear acceleration of the base frame).
+  velocity, linear acceleration of the base frame);
+- the foot rigid bodies lack `PhysxContactReportAPI`, which Isaac Lab's
+  `ContactSensor` needs to surface ground-contact events.
 
-Run [`sim/scripts/post_import_bebopv2.py`](../sim/scripts/post_import_bebopv2.py)
-once after import to:
+[`sim/scripts/post_import_bebopv2.py`](../sim/scripts/post_import_bebopv2.py)
+applies the fixes (idempotent — safe to re-run):
 
-1. disable the root joint,
+1. disable the root joint (if the importer added one),
 2. ensure `base_link` is dynamic (not kinematic),
-3. translate the robot up by 0.65 m so the feet land on the ground plane,
+3. translate the robot up by `LIFT_Z` so the feet land on the ground
+   plane — currently **0.765 m**: the sole sits 0.7302 m below
+   `base_link` at zero pose (Jul 2026 feet) + 35 mm settle clearance.
+   The headless converter re-measures this on every run and warns if a
+   redesign makes it stale,
 4. attach a 200 Hz IMU prim (`Imu_Sensor`) under
-   `<robot>/Geometry/base_link`.
+   `<robot>/Geometry/base_link`, and
+5. bake `PhysxContactReportAPI` onto both foot prims.
 
-The script is idempotent — re-running it is safe.
-
-In Isaac Sim: open **Window → Script Editor**, paste the file's
+The headless pipeline (`just lab-urdf-to-usd`) runs this automatically.
+For the GUI flow: open **Window → Script Editor**, paste the file's
 contents (or use **Open** and point it at
 `/workspace/bebop_bot/sim/scripts/post_import_bebopv2.py`), and hit
 **Run**. Then press **Play** — the robot should fall under gravity onto
@@ -345,7 +381,7 @@ You should get:
   `exec`'d shell until that runs.
 - Robot shows in the TF tree but **meshes are missing / blank** → the
   URDF references absolute container paths under
-  `/workspace/bebop_bot/ros2_ws/...` (see "URDF mesh paths"). Make sure
+  `/workspace/bebop_bot/ros2/...` (see "URDF mesh paths"). Make sure
   that bind-mount actually exists in the running container.
 
 ## micro-ROS agent

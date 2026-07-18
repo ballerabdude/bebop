@@ -1,19 +1,19 @@
 #usda 1.0
 (
     customLayerData = {
-        string creator = "URDF USD Converter v0.1.0"
+        string creator = "URDF USD Converter v0.1.3"
     }
     defaultPrim = "bebopv2"
-    doc = """Generated from Composed Stage of root layer /tmp/tmpmbgjp3ib/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmp1tl6hocs/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/usdex/bebopv2.usdc
+Generated from Composed Stage of root layer /tmp/urdf_import_bebopv2__rs9hxlp/usdex_bebopv2/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/temp/bebopv2.usd
+Generated from Composed Stage of root layer /tmp/urdf_import_bebopv2__rs9hxlp/temp_bebopv2/bebopv2.usd
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/bebopv2/payloads/base.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/bebopv2/payloads/base.usd
 """
     kilogramsPerUnit = 1
     metersPerUnit = 1
@@ -21,33 +21,11 @@ Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/correct
 )
 
 over "bebopv2" (
-    prepend apiSchemas = ["IsaacRobotAPI", "IsaacLinkAPI"]
+    prepend apiSchemas = ["IsaacRobotAPI"]
 )
 {
     custom rel isaac:physics:robotJoints
-    prepend rel isaac:physics:robotJoints = [
-        </bebopv2/Physics/hip_flexion_right_joint>,
-        </bebopv2/Physics/hip_flexion_left_joint>,
-        </bebopv2/Physics/root_joint>,
-        </bebopv2/Physics/hip_abduction_right_joint>,
-        </bebopv2/Physics/hip_abduction_left_joint>,
-        </bebopv2/Physics/knee_flexion_right_joint>,
-        </bebopv2/Physics/knee_flexion_left_joint>,
-        </bebopv2/Physics/foot_right_joint>,
-        </bebopv2/Physics/foot_left_joint>,
-    ]
     custom rel isaac:physics:robotLinks
-    prepend rel isaac:physics:robotLinks = [
-        </bebopv2/Geometry/base_link>,
-        </bebopv2/Geometry/base_link/hip_flexion_right_1>,
-        </bebopv2/Geometry/base_link/hip_flexion_left_1>,
-        </bebopv2/Geometry/base_link/hip_flexion_right_1/hip_abduction_right_1>,
-        </bebopv2/Geometry/base_link/hip_flexion_left_1/hip_abduction_left_1>,
-        </bebopv2/Geometry/base_link/hip_flexion_right_1/hip_abduction_right_1/knee_flexion_right_1>,
-        </bebopv2/Geometry/base_link/hip_flexion_left_1/hip_abduction_left_1/knee_flexion_left_1>,
-        </bebopv2/Geometry/base_link/hip_flexion_right_1/hip_abduction_right_1/knee_flexion_right_1/foot_right_1>,
-        </bebopv2/Geometry/base_link/hip_flexion_left_1/hip_abduction_left_1/knee_flexion_left_1/foot_left_1>,
-    ]
 
     over "Physics"
     {
@@ -63,19 +41,7 @@ over "bebopv2" (
         {
         }
 
-        over "root_joint" (
-            prepend apiSchemas = ["IsaacJointAPI"]
-        )
-        {
-        }
-
         over "hip_abduction_right_joint" (
-            prepend apiSchemas = ["IsaacJointAPI"]
-        )
-        {
-        }
-
-        over "hip_abduction_left_joint" (
             prepend apiSchemas = ["IsaacJointAPI"]
         )
         {
@@ -87,13 +53,19 @@ over "bebopv2" (
         {
         }
 
-        over "knee_flexion_left_joint" (
+        over "foot_right_joint" (
             prepend apiSchemas = ["IsaacJointAPI"]
         )
         {
         }
 
-        over "foot_right_joint" (
+        over "hip_abduction_left_joint" (
+            prepend apiSchemas = ["IsaacJointAPI"]
+        )
+        {
+        }
+
+        over "knee_flexion_left_joint" (
             prepend apiSchemas = ["IsaacJointAPI"]
         )
         {

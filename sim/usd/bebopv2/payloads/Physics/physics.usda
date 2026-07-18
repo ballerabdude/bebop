@@ -1,19 +1,19 @@
 #usda 1.0
 (
     customLayerData = {
-        string creator = "URDF USD Converter v0.1.0"
+        string creator = "URDF USD Converter v0.1.3"
     }
     defaultPrim = "bebopv2"
-    doc = """Generated from Composed Stage of root layer /tmp/tmpmbgjp3ib/bebopv2.usdc
+    doc = """Generated from Composed Stage of root layer /tmp/tmp1tl6hocs/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/usdex/bebopv2.usdc
+Generated from Composed Stage of root layer /tmp/urdf_import_bebopv2__rs9hxlp/usdex_bebopv2/bebopv2.usdc
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/temp/bebopv2.usd
+Generated from Composed Stage of root layer /tmp/urdf_import_bebopv2__rs9hxlp/temp_bebopv2/bebopv2.usd
 
 
-Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/corrected2/bebopv2/payloads/base.usd
+Generated from Composed Stage of root layer /workspace/bebop_bot/sim/usd/bebopv2/payloads/base.usd
 """
     kilogramsPerUnit = 1
     metersPerUnit = 1
@@ -62,20 +62,13 @@ over "bebopv2"
                         quatf physics:principalAxes = (0.5085357, 0.50001705, 0.49668103, 0.49465376)
 
                         over "foot_right_1" (
-                            prepend apiSchemas = [
-                                "PhysicsRigidBodyAPI",
-                                "PhysicsMassAPI",
-                                "PhysxRigidBodyAPI",
-                                "PhysxContactReportAPI",
-                            ]
+                            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
                         )
                         {
-                            point3f physics:centerOfMass = (0.022189349, 0.016069982, -0.04081689)
-                            float3 physics:diagonalInertia = (0.0008919446, 0.0020723299, 0.0023467257)
-                            float physics:mass = 0.64200103
-                            quatf physics:principalAxes = (0.85334855, -0.5145566, -0.051467456, 0.06617266)
-                            float physxContactReport:threshold = 0.0
-                            float physxRigidBody:sleepThreshold = 0.0
+                            point3f physics:centerOfMass = (0.0114856865, 0.022215465, -0.023509072)
+                            float3 physics:diagonalInertia = (0.0010262867, 0.002541, 0.0025747132)
+                            float physics:mass = 0.8000057
+                            quatf physics:principalAxes = (0.9986462, 4.113394e-15, -0.052016877, -2.2611738e-16)
                         }
                     }
                 }
@@ -109,20 +102,13 @@ over "bebopv2"
                         quatf physics:principalAxes = (0.4983984, 0.5015965, 0.5015965, 0.4983984)
 
                         over "foot_left_1" (
-                            prepend apiSchemas = [
-                                "PhysicsRigidBodyAPI",
-                                "PhysicsMassAPI",
-                                "PhysxRigidBodyAPI",
-                                "PhysxContactReportAPI",
-                            ]
+                            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
                         )
                         {
-                            point3f physics:centerOfMass = (0.02219242, -0.016069975, -0.040821377)
-                            float3 physics:diagonalInertia = (0.0008919446, 0.0020723299, 0.0023467257)
-                            float physics:mass = 0.6420025
-                            quatf physics:principalAxes = (-0.5145566, 0.85334855, 0.06617266, -0.051467456)
-                            float physxContactReport:threshold = 0.0
-                            float physxRigidBody:sleepThreshold = 0.0
+                            point3f physics:centerOfMass = (0.0114739565, -0.025038911, -0.02348435)
+                            float3 physics:diagonalInertia = (0.0010272182, 0.0025345979, 0.002578184)
+                            float physics:mass = 0.7999816
+                            quatf physics:principalAxes = (0.9854892, -0.1615182, -0.050969705, 0.011179177)
                         }
                     }
                 }
@@ -137,6 +123,7 @@ over "bebopv2"
         )
         {
             float drive:angular:physics:maxForce = 100
+            uniform token drive:angular:physics:type = "force"
             uniform token physics:axis = "Y"
             custom rel physics:body0
             prepend rel physics:body0 = </bebopv2/Geometry/base_link/hip_flexion_left_1/hip_abduction_left_1>
@@ -157,6 +144,7 @@ over "bebopv2"
         )
         {
             float drive:angular:physics:maxForce = 100
+            uniform token drive:angular:physics:type = "force"
             uniform token physics:axis = "Y"
             custom rel physics:body0
             prepend rel physics:body0 = </bebopv2/Geometry/base_link/hip_flexion_right_1/hip_abduction_right_1>
@@ -172,51 +160,12 @@ over "bebopv2"
             custom float urdf:limit:velocity = 100
         }
 
-        def PhysicsRevoluteJoint "foot_left_joint" (
-            prepend apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
-        )
-        {
-            float drive:angular:physics:maxForce = 100
-            uniform token physics:axis = "Y"
-            custom rel physics:body0
-            prepend rel physics:body0 = </bebopv2/Geometry/base_link/hip_flexion_left_1/hip_abduction_left_1/knee_flexion_left_1>
-            custom rel physics:body1
-            prepend rel physics:body1 = </bebopv2/Geometry/base_link/hip_flexion_left_1/hip_abduction_left_1/knee_flexion_left_1/foot_left_1>
-            point3f physics:localPos0 = (0.000004, 0, -0.2535)
-            point3f physics:localPos1 = (0, 0, 0)
-            quatf physics:localRot0 = (1, 0, 0, 0)
-            quatf physics:localRot1 = (1, 0, 0, 0)
-            float physics:lowerLimit = -30.000013
-            float physics:upperLimit = 30.000013
-            custom float urdf:limit:effort = 100
-            custom float urdf:limit:velocity = 100
-        }
-
-        def PhysicsRevoluteJoint "foot_right_joint" (
-            prepend apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
-        )
-        {
-            float drive:angular:physics:maxForce = 100
-            uniform token physics:axis = "Y"
-            custom rel physics:body0
-            prepend rel physics:body0 = </bebopv2/Geometry/base_link/hip_flexion_right_1/hip_abduction_right_1/knee_flexion_right_1>
-            custom rel physics:body1
-            prepend rel physics:body1 = </bebopv2/Geometry/base_link/hip_flexion_right_1/hip_abduction_right_1/knee_flexion_right_1/foot_right_1>
-            point3f physics:localPos0 = (-0.004429, 0, -0.253461)
-            point3f physics:localPos1 = (0, 0, 0)
-            quatf physics:localRot0 = (-0, -1, 0, 0)
-            quatf physics:localRot1 = (0, 1, 0, 0)
-            float physics:lowerLimit = -30.000013
-            float physics:upperLimit = 30.000013
-            custom float urdf:limit:effort = 100
-            custom float urdf:limit:velocity = 100
-        }
-
         def PhysicsRevoluteJoint "hip_flexion_right_joint" (
             prepend apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
         )
         {
             float drive:angular:physics:maxForce = 100
+            uniform token drive:angular:physics:type = "force"
             uniform token physics:axis = "Y"
             custom rel physics:body0
             prepend rel physics:body0 = </bebopv2/Geometry/base_link>
@@ -237,6 +186,7 @@ over "bebopv2"
         )
         {
             float drive:angular:physics:maxForce = 100
+            uniform token drive:angular:physics:type = "force"
             uniform token physics:axis = "Y"
             custom rel physics:body0
             prepend rel physics:body0 = </bebopv2/Geometry/base_link>
@@ -257,6 +207,7 @@ over "bebopv2"
         )
         {
             float drive:angular:physics:maxForce = 100
+            uniform token drive:angular:physics:type = "force"
             uniform token physics:axis = "X"
             custom rel physics:body0
             prepend rel physics:body0 = </bebopv2/Geometry/base_link/hip_flexion_right_1>
@@ -266,9 +217,8 @@ over "bebopv2"
             point3f physics:localPos1 = (0, 0, 0)
             quatf physics:localRot0 = (1, 0, 0, 0)
             quatf physics:localRot1 = (1, 0, 0, 0)
-            # -0.20 rad / +0.07 rad (mirror of left). Was -20°/+10° (~-0.349/+0.175 rad).
-            float physics:lowerLimit = -11.459156
-            float physics:upperLimit = 4.010705
+            float physics:lowerLimit = -20.000008
+            float physics:upperLimit = 10.000004
             custom float urdf:limit:effort = 100
             custom float urdf:limit:velocity = 100
         }
@@ -278,6 +228,7 @@ over "bebopv2"
         )
         {
             float drive:angular:physics:maxForce = 100
+            uniform token drive:angular:physics:type = "force"
             uniform token physics:axis = "X"
             custom rel physics:body0
             prepend rel physics:body0 = </bebopv2/Geometry/base_link/hip_flexion_left_1>
@@ -287,23 +238,52 @@ over "bebopv2"
             point3f physics:localPos1 = (0, 0, 0)
             quatf physics:localRot0 = (1, 0, 0, 0)
             quatf physics:localRot1 = (1, 0, 0, 0)
-            # -0.07 rad / +0.20 rad. Was -10°/+20° (~-0.175/+0.349 rad).
-            float physics:lowerLimit = -4.010705
-            float physics:upperLimit = 11.459156
+            float physics:lowerLimit = -10.000004
+            float physics:upperLimit = 20.000008
             custom float urdf:limit:effort = 100
             custom float urdf:limit:velocity = 100
         }
 
-        def PhysicsFixedJoint "root_joint"
+        def PhysicsRevoluteJoint "foot_right_joint" (
+            prepend apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+        )
         {
+            float drive:angular:physics:maxForce = 100
+            uniform token drive:angular:physics:type = "force"
+            uniform token physics:axis = "Y"
             custom rel physics:body0
-            prepend rel physics:body0 = </bebopv2>
+            prepend rel physics:body0 = </bebopv2/Geometry/base_link/hip_flexion_right_1/hip_abduction_right_1/knee_flexion_right_1>
             custom rel physics:body1
-            prepend rel physics:body1 = </bebopv2/Geometry/base_link>
-            point3f physics:localPos0 = (0, 0, 0)
+            prepend rel physics:body1 = </bebopv2/Geometry/base_link/hip_flexion_right_1/hip_abduction_right_1/knee_flexion_right_1/foot_right_1>
+            point3f physics:localPos0 = (-0.004429, 0, -0.253461)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (-0, -1, 0, 0)
+            quatf physics:localRot1 = (-0, -1, 0, 0)
+            float physics:lowerLimit = -30.000013
+            float physics:upperLimit = 30.000013
+            custom float urdf:limit:effort = 100
+            custom float urdf:limit:velocity = 100
+        }
+
+        def PhysicsRevoluteJoint "foot_left_joint" (
+            prepend apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+        )
+        {
+            float drive:angular:physics:maxForce = 100
+            uniform token drive:angular:physics:type = "force"
+            uniform token physics:axis = "Y"
+            custom rel physics:body0
+            prepend rel physics:body0 = </bebopv2/Geometry/base_link/hip_flexion_left_1/hip_abduction_left_1/knee_flexion_left_1>
+            custom rel physics:body1
+            prepend rel physics:body1 = </bebopv2/Geometry/base_link/hip_flexion_left_1/hip_abduction_left_1/knee_flexion_left_1/foot_left_1>
+            point3f physics:localPos0 = (0.000004, 0, -0.2535)
             point3f physics:localPos1 = (0, 0, 0)
             quatf physics:localRot0 = (1, 0, 0, 0)
             quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = -30.000013
+            float physics:upperLimit = 30.000013
+            custom float urdf:limit:effort = 100
+            custom float urdf:limit:velocity = 100
         }
     }
 }

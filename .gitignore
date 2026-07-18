@@ -59,6 +59,10 @@ firmware/**/lib/
 # Sim training output
 sim/logs/
 
+# UrdfConverter cache artifacts (sim/scripts/urdf_to_usd_bebopv2.py)
+sim/usd/.asset_hash
+sim/usd/config.yaml
+
 # Jetson L4T flashing artifacts (multi-GB downloads + extracted toolchain;
 # regenerate by re-running jetson-flash/setup_env.sh)
 jetson-flash/Linux_for_Tegra/

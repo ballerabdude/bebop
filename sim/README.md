@@ -46,22 +46,39 @@ docker compose --profile lab up --build
 
 After regenerating `ros2/src/bebopv2_description/urdf/bebopv2.urdf` (see
 [`ros2/README.md`](../ros2/README.md) → "URDF mesh paths"), convert it
-to USD inside the Isaac Lab container — Isaac Sim is launchable from
-there via `/workspace/isaaclab/isaaclab.sh -s`. After the importer
-finishes, run [`scripts/post_import_bebopv2.py`](scripts/post_import_bebopv2.py)
-in **Window → Script Editor** to:
+to USD headlessly inside the Isaac Lab container:
 
-- disable the fixed root joint the importer adds (we need a
+```sh
+just lab-urdf-to-usd
+```
+
+That runs [`scripts/urdf_to_usd_bebopv2.py`](scripts/urdf_to_usd_bebopv2.py),
+which converts the URDF into the layered asset at `usd/bebopv2/`
+(wiping the previous generated copy — recoverable from git), applies the
+post-import fixes from [`scripts/post_import_bebopv2.py`](scripts/post_import_bebopv2.py),
+and prints a sanity report (joint completeness, link masses, measured
+sole height vs. the configured spawn lift). The fixes:
+
+- disable the fixed root joint the importer may add (we need a
   free-floating base for the biped),
 - ensure `base_link` is a dynamic (not kinematic) rigid body,
-- translate the robot up by 0.65 m so it spawns standing on the ground
-  plane (the URDF's `base_link` frame is at the hip, so without this
-  the lower half of the robot is below `z=0`),
+- translate the robot up by 0.765 m so it spawns with its feet on the
+  ground plane (the URDF's `base_link` frame is at the hip; the sole
+  sits 0.7302 m below it at zero pose, +35 mm settle clearance),
 - attach a 200 Hz IMU prim (`Imu_Sensor`) under
   `<robot>/Geometry/base_link`, matching the on-robot BNO085 placement
-  so the policy sees the same `/imu/data` shape in sim and on hardware.
+  so the policy sees the same `/imu/data` shape in sim and on hardware,
+- bake `PhysxContactReportAPI` onto both foot prims so Isaac Lab's
+  `ContactSensor` surfaces ground-contact events.
 
-The script is idempotent — safe to re-run.
+Both scripts are idempotent — safe to re-run. If you need the GUI
+importer instead (manual fallback with the same settings), see
+[`ros2/README.md`](../ros2/README.md) → "Importing the URDF into Isaac
+Sim".
+
+After converting, sanity-check the asset with `just lab-play
+--num_envs 1` — the env's joint-order assertion fails fast if the
+re-import shuffled joints.
 
 ## Sim-to-real contract (READ BEFORE TRAINING)
 

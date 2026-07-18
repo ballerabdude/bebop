@@ -44,7 +44,10 @@ from .exp_standing import (
     MOTOR_STALL_TORQUE_RS04,
 )
 
-MIRROR_BASE_POS = (0.0, 0.0, 0.8)
+# Base height for a flat stance with the Jul 2026 feet (sole 0.7302 m
+# below base_link + 0.035 m clearance). Keep in sync with LIFT_Z in
+# sim/scripts/post_import_bebopv2.py.
+MIRROR_BASE_POS = (0.0, 0.0, 0.765)
 
 
 class MirrorNoOpAction(ActionTerm):

@@ -314,6 +314,18 @@ lab-mirror HOST *ARGS:
             --telemetry-hz 100 \
             {{ARGS}}'
 
+# Convert the regenerated bebopv2 URDF into the layered USD asset at
+# sim/usd/bebopv2/ — headless, one command (UrdfConverter + post-import
+# fixups + sanity report). WIPES and regenerates sim/usd/bebopv2/ (it's a
+# generated artifact; the previous version is recoverable from git).
+# Requires the lab profile (`just lab-up`) and a freshly generated URDF
+# (`just ros2-urdf`). Extra args pass through, e.g. `--urdf <path>`.
+lab-urdf-to-usd *ARGS:
+    docker exec bebop_isaac_lab bash -lc \
+        "/workspace/isaaclab/isaaclab.sh -p \
+            /workspace/bebop_bot/sim/scripts/urdf_to_usd_bebopv2.py \
+            --headless {{ARGS}}"
+
 # --- ROS 2 dev container ---------------------------------------------------
 
 # Build (or rebuild) only the ROS 2 dev image.

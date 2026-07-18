@@ -303,7 +303,11 @@ BEBOP_V2_STANDING_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.8),
+        # Spawn z: sole sits 0.7302 m below base_link at zero pose (Jul 2026
+        # feet redesign; old feet were 0.7668 → z=0.8). +0.035 m settle
+        # clearance. Keep in sync with LIFT_Z in
+        # sim/scripts/post_import_bebopv2.py.
+        pos=(0.0, 0.0, 0.765),
         joint_pos={joint_name: 0.0 for joint_name in JOINT_NAMES_ALL},
         joint_vel={joint_name: 0.0 for joint_name in JOINT_NAMES_ALL},
     ),

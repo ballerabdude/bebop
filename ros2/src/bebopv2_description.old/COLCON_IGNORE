@@ -1,0 +1,6 @@
+This directory is an archived copy of the previous bebopv2_description
+export (kept for reference after the feet redesign, commit ffaf4a4).
+It still contains a package.xml named "bebopv2_description", which
+collides with the live package during colcon's recursive discovery
+("Duplicate package names not supported"). This empty COLCON_IGNORE
+marker excludes it from every colcon invocation.

@@ -1,23 +1,39 @@
 # pyright: reportMissingImports=false
 """Post-import fixup for the Bebop V2 robot in Isaac Sim.
 
-Run this *inside Isaac Sim's Script Editor* immediately after using the
-URDF importer to convert `ros2/src/bebopv2_description/urdf/bebopv2.urdf`
-to USD. The importer leaves the asset in three states that are wrong
-for a free-standing biped:
+This module is used two ways:
+
+1. **GUI / Script Editor** (documented manual flow): run it *inside Isaac
+   Sim's Script Editor* immediately after using the URDF importer to
+   convert `ros2/src/bebopv2_description/urdf/bebopv2.urdf` to USD. Paste
+   the whole file in and hit Run (the Script Editor executes it as
+   `__main__`), or open it via the Editor's "Open" button — it lives at
+   `sim/scripts/post_import_bebopv2.py` in the repo (bind-mounted into
+   the Isaac containers at
+   `/workspace/bebop_bot/sim/scripts/post_import_bebopv2.py`).
+
+2. **Headless pipeline**: `sim/scripts/urdf_to_usd_bebopv2.py` imports
+   :func:`apply_fixes` and runs it against the freshly converted USD
+   stage — no GUI needed. That is the preferred flow; see
+   `ros2/README.md` → "Importing the URDF into Isaac Sim (URDF → USD)".
+
+Either way, the importer leaves the asset in states that are wrong for a
+free-standing biped:
 
   1. A **fixed root joint** is added that anchors `base_link` to world.
      For a walking biped we want `base_link` to be a free-floating
      dynamic body so PhysX simulates it under gravity.
   2. The robot prim sits at world origin (0, 0, 0). Because the URDF's
      `base_link` origin is at the **hip**, half the robot is below the
-     ground plane on first Play. We lift the whole robot by 0.65 m so
-     it spawns standing on the floor.
+     ground plane on first Play. We lift the whole robot by
+     :data:`LIFT_Z` so it spawns standing on the floor.
   3. There's no IMU sensor on `base_link`, but the on-robot stack and
      the trained policy both consume `/imu/data` (orientation, angular
      velocity, linear acceleration of the base frame). We attach an
      IMU prim so the asset matches the real robot wherever it's
-     loaded — Isaac Sim standalone, Isaac Lab, etc.
+     loaded — Isaac Sim standalone, Isaac Lab, etc. (Isaac Lab's own
+     `ImuCfg` reads the `base_link` rigid body directly and does not
+     consume this prim; it exists for Isaac Sim standalone parity.)
   4. The two foot rigid bodies (`foot_left_1`, `foot_right_1`) lack
      `PhysxContactReportAPI`, which Isaac Lab's `ContactSensor` requires
      to surface ground-contact events. Isaac Lab's spawn-time helper
@@ -31,34 +47,37 @@ for a free-standing biped:
      feet. Pre-baking the contact-report API onto the foot prims in
      USD fixes this once and for all.
 
-All fixes are idempotent — re-running the script is a no-op if the
-fixes are already in place.
+All fixes are idempotent — re-running them is a no-op if the fixes are
+already in place.
 
-Usage
------
-
-In the Script Editor (Window → Script Editor in Isaac Sim):
-
-    1. Drop the imported `bebopv2` USD into your stage if it isn't
-       already there.
-    2. Paste this whole file in and hit Run.
-    3. Press Play — the robot should fall under gravity and stand on
-       the ground plane.
-
-You can also load it via the Editor's "Open" button — it lives at
-`sim/scripts/post_import_bebopv2.py` in the repo (which is bind-mounted
-into the Isaac Lab/Sim container at
-`/workspace/bebop_bot/sim/scripts/post_import_bebopv2.py`).
+After running in the Script Editor: press Play — the robot should fall
+under gravity and stand on the ground plane.
 """
 
 from __future__ import annotations
 
 import omni.kit.commands
 import omni.usd
-from pxr import Gf, UsdGeom, UsdPhysics
+from pxr import Gf, Sdf, UsdGeom, UsdPhysics
 
 ROBOT_CANDIDATES = ["/World/bebopv2", "/bebopv2"]
-LIFT_Z = 0.8  # meters — half the leg length, so the foot lands on z=0
+
+# Spawn height of the robot root, chosen so the feet land ON the ground
+# plane — not inside it, not hovering above it.
+#
+# Derivation (Jul 2026 feet redesign): with all joints at zero, the foot
+# sole plane sits 0.7302 m below `base_link` (min-z vertex of the foot
+# STLs x the 0.001 mesh scale; the STL world frame == base_link frame
+# because each leg's joint-origin z-offsets exactly cancel the foot
+# mesh's visual-origin z). The previous feet measured 0.7668 m, which
+# matched the old 0.8 m lift (~33 mm settle clearance). We keep the same
+# ~35 mm clearance: 0.7302 + 0.035 = 0.7652 -> 0.765.
+#
+# `sim/scripts/urdf_to_usd_bebopv2.py` re-measures this from the
+# converted asset on every run and warns if it drifts. Keep the value in
+# sync with `InitialStateCfg.pos` in `bebop_training/experiments/
+# exp_standing.py` and `MIRROR_BASE_POS` in `exp_mirror.py`.
+LIFT_Z = 0.765  # meters — sole-at-zero (0.7302) + 0.035 settle clearance
 
 # Foot rigid bodies (relative to `<robot>/Geometry/base_link`) that need
 # `PhysxContactReportAPI` baked in for Isaac Lab's `ContactSensor` to
@@ -131,7 +150,43 @@ def _lift_robot(stage, robot_path: str, dz: float = LIFT_Z) -> None:
     print(f"[post_import] translate {robot_path} → (0, 0, {dz})")
 
 
-def _add_imu(stage, robot_path: str) -> None:
+def _add_imu_pxr(stage, base_link_path: str, imu_path: str) -> None:
+    """Author the IMU prim with plain pxr (no Kit commands).
+
+    Used by the headless pipeline, where the Script-Editor Kit command
+    may be unavailable. Replicates exactly the prim that
+    `IsaacSensorCreateImuSensor` produces (attr-for-attr, checked against
+    the previously committed GUI-imported asset).
+    """
+    prim = stage.DefinePrim(imu_path, "IsaacImuSensor")
+    # custom=False: these are IsaacImuSensor schema attrs — author them as
+    # such (matches what IsaacSensorCreateImuSensor writes), not as custom
+    # user attributes.
+    prim.CreateAttribute("enabled", Sdf.ValueTypeNames.Bool, custom=False).Set(True)
+    prim.CreateAttribute("sensorPeriod", Sdf.ValueTypeNames.Float, custom=False).Set(
+        1.0 / IMU_FREQUENCY_HZ
+    )
+    prim.CreateAttribute(
+        "angularVelocityFilterWidth", Sdf.ValueTypeNames.Int, custom=False
+    ).Set(1)
+    prim.CreateAttribute(
+        "linearAccelerationFilterWidth", Sdf.ValueTypeNames.Int, custom=False
+    ).Set(1)
+    prim.CreateAttribute(
+        "orientationFilterWidth", Sdf.ValueTypeNames.Int, custom=False
+    ).Set(1)
+
+    xformable = UsdGeom.Xformable(prim)
+    xformable.AddTranslateOp().Set(IMU_TRANSLATION)
+    # AddOrientOp/AddScaleOp author float-precision ops by default (the
+    # current IsaacImuSensor schema expects quatf/float3), so convert —
+    # the older Kit command wrote quatd/double3, which is equivalent.
+    xformable.AddOrientOp().Set(Gf.Quatf(IMU_ORIENTATION))
+    xformable.AddScaleOp().Set(Gf.Vec3f(1.0, 1.0, 1.0))
+    print(f"[post_import] authored IMU prim at {imu_path} via pxr")
+
+
+def _add_imu(stage, robot_path: str, use_kit_command: bool = True) -> None:
     base_link_path = f"{robot_path}/Geometry/base_link"
     base_link_prim = stage.GetPrimAtPath(base_link_path)
     if not base_link_prim.IsValid():
@@ -141,6 +196,10 @@ def _add_imu(stage, robot_path: str) -> None:
     imu_path = f"{base_link_path}/{IMU_PRIM_NAME}"
     if stage.GetPrimAtPath(imu_path).IsValid():
         print(f"[post_import] IMU already present at {imu_path}; skipping")
+        return
+
+    if not use_kit_command:
+        _add_imu_pxr(stage, base_link_path, imu_path)
         return
 
     # `IsaacSensorCreateImuSensor` is the stable, version-portable way
@@ -165,7 +224,11 @@ def _add_imu(stage, robot_path: str) -> None:
             f"({IMU_FREQUENCY_HZ:.0f} Hz)"
         )
     else:
-        print(f"[post_import] WARNING: IsaacSensorCreateImuSensor failed for {imu_path}")
+        print(
+            f"[post_import] WARNING: IsaacSensorCreateImuSensor failed for "
+            f"{imu_path}; falling back to pxr-authored prim"
+        )
+        _add_imu_pxr(stage, base_link_path, imu_path)
 
 
 def _enable_foot_contact_report(stage, robot_path: str) -> None:
@@ -218,15 +281,25 @@ def _enable_foot_contact_report(stage, robot_path: str) -> None:
         print(f"[post_import] enabled contact-report API on {prim_path}")
 
 
-def main() -> None:
-    stage = omni.usd.get_context().get_stage()
-    robot_path = _find_robot_path(stage)
+def apply_fixes(stage, robot_path: str, imu_via_kit_command: bool = True) -> None:
+    """Apply all post-import fixes to `stage` (idempotent).
 
+    `robot_path` is the robot root prim (e.g. `/bebopv2`). Pass
+    `imu_via_kit_command=False` when running headless without the sensor
+    Kit extensions loaded — the IMU prim is then authored directly with
+    pxr (same result, see `_add_imu_pxr`).
+    """
     _disable_root_joint(stage, robot_path)
     _ensure_dynamic_base(stage, robot_path)
     _lift_robot(stage, robot_path)
-    _add_imu(stage, robot_path)
+    _add_imu(stage, robot_path, use_kit_command=imu_via_kit_command)
     _enable_foot_contact_report(stage, robot_path)
+
+
+def main() -> None:
+    stage = omni.usd.get_context().get_stage()
+    robot_path = _find_robot_path(stage)
+    apply_fixes(stage, robot_path)
 
     print(
         "[post_import] done. Press Play — the robot should fall under "
@@ -234,4 +307,9 @@ def main() -> None:
     )
 
 
-main()
+# The Isaac Sim Script Editor executes pasted/opened code as `__main__`,
+# so the GUI flow is unaffected by this guard — while the headless
+# pipeline (`urdf_to_usd_bebopv2.py`) can now import this module without
+# triggering it.
+if __name__ == "__main__":
+    main()
