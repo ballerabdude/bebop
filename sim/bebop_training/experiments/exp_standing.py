@@ -46,6 +46,7 @@ from ..envs.bebop_v2_rewards import (
     joint_deviation_l1_balance_gated,
     joint_vel_l2,
     torso_pitch_asymmetric_reward,
+    torso_settle_in_band_l2,
 )
 from ..envs.bebop_v2_terminations import (
     base_link_on_ground,
@@ -540,8 +541,13 @@ class RewardsCfg:
 
     * ``torso_posture`` (``torso_pitch_asymmetric_reward``) — the balance
       target: flat-top band straddling upright (Jul 17 retarget, above),
-      asymmetric shoulders (wide on the heel side for recovery reach,
+      asymmetric       shoulders (wide on the heel side for recovery reach,
       tight on the toe side), quadratic tails for far-field gradient.
+    * ``torso_settle`` (``torso_settle_in_band_l2``, -2.0) — stillness-gated
+      stick for the carrot above: settling outside the band while quiet
+      pays quadratically (capture 20260718_040142 settled at g_x -0.24
+      where the real 81 mm heel made it survivable and the gated movement
+      penalties were floored). Opens during motion — recovery stays free.
     * ``com_over_support`` — bounded [0,1] reward for keeping the CoM
       (base_link xy) over the foot midpoint, stillness-gated. The positive
       carrot that complements the gates: gives a gradient *toward* balance.
@@ -614,6 +620,31 @@ class RewardsCfg:
             "roll_std": BALANCE_ROLL_STD,
             "forward_penalty_gain": BALANCE_FWD_PENALTY_GAIN,
             "backward_penalty_gain": BALANCE_BWD_PENALTY_GAIN,
+        },
+    )
+
+    # Settle-in-band penalty — (dist(g_x, band)² + g_y²) × stillness gate,
+    # weight -2.0 (Jul 18 2026). Closes the settle-off-band exploit found in
+    # capture 20260718_040142 (run 2026-07-18_02-16-59 ckpt-2000): the policy
+    # settled steadily at g_x = -0.24 — 14° back, far off the band — because
+    # (a) the real heel (~81 mm behind the ankle; the sim STL said 23 mm)
+    # makes that stance statically survivable, and (b) off-band the
+    # balance-gated movement penalties sit at their 0.2 floor while every
+    # stillness-gated posture term was satisfied (quiet, symmetric, feet
+    # flat). ``torso_posture`` only REWARDS the band; nothing PUNISHED
+    # settling off it. This term is the stick counterpart: hold still
+    # outside the band and pay quadratically in the distance; the
+    # stillness gate opens during motion so recovery stays free. Weight
+    # -2.0 matches the feet_flat / bilateral_symmetry posture-term
+    # precedent: at the capture's stance (dist 0.22, quiet) it costs
+    # -0.10/tick — persistent migration pressure, not a wall.
+    torso_settle = RewTerm(
+        func=torso_settle_in_band_l2,
+        weight=-2.0,
+        params={
+            "band_gx_min": BALANCE_BAND_GX_MIN,
+            "band_gx_max": BALANCE_BAND_GX_MAX,
+            "stillness_std": 1.5,
         },
     )
 

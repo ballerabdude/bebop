@@ -833,6 +833,73 @@ def torso_pitch_asymmetric_reward(
     return pitch_good * roll_good - forward_penalty - backward_penalty
 
 
+def torso_settle_in_band_l2(
+    env,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    band_gx_min: float = -0.02,
+    band_gx_max: float = 0.05,
+    stillness_std: float = 1.5,
+) -> torch.Tensor:
+    """Penalize SETTLING outside the torso pitch band while holding still.
+
+    Returns ``(dist(g_x, band)² + g_y²) × stillness_gate`` where
+    ``dist`` is the signed overshoot outside ``[band_gx_min, band_gx_max]``
+    (0 inside) and the gate is ``exp(-Σv² / stillness_std²)`` over all
+    joint velocities. Always ``>= 0``; use with a **negative** weight.
+
+    Why this exists on top of ``torso_pitch_asymmetric_reward`` (Jul 18
+    2026): the carrot only REWARDS being in the band — nothing punishes
+    settling OFF it, and the balance-gated movement penalties
+    (joint_vel / position_rate / hip_flexion_anchor) sit at their
+    ``gate_floor`` when tilted, so an off-band stance is nearly free of
+    movement cost. Capture 20260718_040142 (run 2026-07-18_02-16-59
+    ckpt-2000, hardware) showed the exploit: the policy settled steadily
+    (g_x std 0.012!) at g_x = -0.24 — 14° back, far off the
+    [-0.02, +0.05] band — because the robot's real heel (~81 mm behind
+    the ankle, vs 23 mm in the sim STL at the time) makes that stance
+    statically survivable, and quiet + symmetric + flat-footed satisfied
+    every stillness-gated posture term. With the foot model corrected to
+    the real geometry the same settle-off-band optimum exists in sim too
+    — this term closes it in both worlds: hold still outside the band and
+    you pay, per tick, growing quadratically with the distance.
+
+    STILLNESS-GATED (the ``bilateral_symmetry`` / ``feet_flat`` pattern):
+    settling is a POSTURE failure, so the penalty fires at full strength
+    whenever the robot is holding any pose — including a tilted one — and
+    decays toward 0 only during active motion, so recovery stays free. A
+    balance gate would be wrong here: it would clamp to its floor exactly
+    in the tilted-settle state this term exists to prevent.
+
+    Roll is included as a plain ``g_y²`` (no band): settling rolled is as
+    much a posture failure as settling pitched.
+
+    Non-privileged: reads the articulation root ``projected_gravity_b``
+    (the same signal the policy observes via ``mdp.projected_gravity``)
+    and joint velocities (encoders).
+
+    Args:
+        asset_cfg: articulation whose root ``projected_gravity_b`` to read.
+        band_gx_min: back edge of the pitch plateau (most negative ``g_x``).
+        band_gx_max: forward edge of the pitch plateau.
+        stillness_std: velocity scale for the stillness gate; matches the
+            sibling posture terms (``1.5``).
+    """
+    asset = env.scene[asset_cfg.name]
+    device = getattr(env, "device", None)
+    proj_grav = _ensure_tensor(asset.data.projected_gravity_b, env_device=device)
+    g_x = proj_grav[:, 0]
+    g_y = proj_grav[:, 1]
+
+    below = torch.relu(band_gx_min - g_x)
+    above = torch.relu(g_x - band_gx_max)
+    dist_sq = torch.square(below + above)
+
+    joint_vel = _ensure_tensor(asset.data.joint_vel, env_device=device)
+    vel_sq = torch.sum(torch.square(joint_vel), dim=1)
+    stillness_gate = torch.exp(-vel_sq / (stillness_std * stillness_std))
+    return (dist_sq + torch.square(g_y)) * stillness_gate
+
+
 def feet_flat_orientation_l2(
     env,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
