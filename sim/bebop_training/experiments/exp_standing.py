@@ -1131,6 +1131,10 @@ class BebopV2StandingPushCfg(BebopV2StandingCfg):
                 "term_name": "push_robot",
                 "full_velocity_range": dict(PUSH_VELOCITY_RANGE),
                 "start_fraction": 0.4,
-                "num_curriculum_steps": 150_000,
+                # 75k control steps ~= iter 2300 of a 5000-iter run (32
+                # steps/iter): full pushes for the whole second half.
+                # (Was 150k for a 10000-iter plan; user scaled the run to
+                # 5000 iters Jul 18 2026.)
+                "num_curriculum_steps": 75_000,
             },
         )
