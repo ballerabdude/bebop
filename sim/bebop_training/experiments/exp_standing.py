@@ -550,6 +550,12 @@ class RewardsCfg:
       deep crouch is priced out. Frees the hips fully when tilted.
     * ``joint_vel`` — balance-gated. Kills wobble at balance, frees the
       legs to move when tilted.
+    * ``base_ang_vel_xy`` (``mdp.ang_vel_xy_l2``, -0.10) — NOT gated:
+      the D-term on the torso itself (ω_x² + ω_y² from the IMU gyro).
+      Prices the ~4 Hz pitch-rate limit cycle (capture
+      20260717_hanging-but-feet-on-floor) that moderate joint velocities
+      slip through the gated joint_vel floor. Quadratic: free when quiet,
+      ~-0.2/tick at real wobble amplitude.
     * ``position_rate`` — balance-gated. Kills chatter at balance (-10.0
       full strength), frees the setpoints to move rapidly when tilted.
     * ``joint_pos_anchor`` (``mdp.joint_deviation_l1``) over all joints —
@@ -680,6 +686,24 @@ class RewardsCfg:
             "gate_floor": BALANCE_GATE_FLOOR,
         },
     )
+
+    # Torso wobble damper — Σ(ω_x² + ω_y²) over the BASE angular velocity,
+    # from the same root the IMU observes (non-privileged; the policy's
+    # base_ang_vel obs is the IMU gyro). This is the D-term on the torso
+    # that the joint-level penalties cannot express: capture
+    # 20260717_hanging-but-feet-on-floor (run 2026-07-17_22-35-31 ckpt-4999)
+    # showed a ~4 Hz pitch-rate limit cycle (gyro_wy FFT peak 4.11 Hz, leg
+    # FFTs 3.3-4.6 Hz, 19-28% slew-exceedance) riding on the mean tilt —
+    # a fast torso wobble whose moderate joint velocities slip through the
+    # balance-gated joint_vel floor. The quadratic is gentle near zero
+    # (0.2 rad/s costs -0.004/tick — normal tracking is free) but a real
+    # wobble (~1 rad/s per axis) costs ~-0.2/tick — expensive.
+    # NOT balance-gated (Jul 17 2026): damping is wanted in EVERY state —
+    # during recovery the torso should move deliberately, not spin; the
+    # term only prices rate, never position, so a controlled catch motion
+    # stays cheap. Weight -0.10 per the reward-design-notes precedent
+    # (section 9) — firm at wobble amplitude, invisible when quiet.
+    base_ang_vel_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.10)
 
     # Tick-to-tick change penalty on the 16 kp/kd channels — main anti-chatter
     # term for variable impedance, and the "produce the SAME gain every tick"
