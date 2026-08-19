@@ -36,16 +36,37 @@ defaults:
   # Setpoint slew limits applied to the *position channel* of the
   # variable-impedance MIT-mode policy output. MUST match
   # `max_pos_step_per_tick` on the sim ActionsCfg in
-  # `sim/bebop_training/experiments/exp_standing.py` (currently 0.020).
-  # 0.020 rad/tick @ 100 Hz tick = 2 rad/s setpoint slew — the
-  # mechanical safety envelope agreed with the operator. Gain
-  # channels (kp/kd) are NOT slew-clamped — variable impedance demands
-  # instantaneous between-tick gain changes. If you retune this value,
-  # retrain.
+  # `sim/bebop_training/experiments/exp_standing.py` (currently 0.030).
+  # 0.030 rad/tick @ 100 Hz tick = 3 rad/s setpoint slew — the
+  # mechanical safety envelope agreed with the operator (relaxed from
+  # 2 rad/s Jul 22 2026, round 6: sim showed recovery from ~±0.5 m/s
+  # shoves needs catch-step bandwidth 2 rad/s couldn't deliver).
+  # Gain channels (kp/kd) are NOT slew-clamped — they are EMA
+  # low-passed instead (see the `policy:` block). If you retune this
+  # value, retrain.
   slew:
-    max_pos_step_per_tick: 0.020   # rad/tick — must match sim exp_standing.py max_pos_step_per_tick
+    max_pos_step_per_tick: 0.030   # rad/tick — must match sim exp_standing.py max_pos_step_per_tick
     arm_ramp_s:            0.5     # gain ramp 0 → hold over arm
     abort_ramp_s:          0.3     # gain ramp hold → 0 over abort
+
+  # Policy action-decode parameters. MUST match the sim action term
+  # (`VariableImpedanceJointActionCfg` in
+  # `sim/bebop_training/envs/bebop_v2_actions.py`).
+  policy:
+    # First-order low-pass time constant (seconds) applied to the decoded
+    # kp/kd channels every 100 Hz tick: g += alpha * (cmd - g) with
+    # alpha = 1 - exp(-0.01 / tau). Hard anti-snap guarantee: tick-rate
+    # gain flipping is attenuated ~16-30x while slow impedance shifts
+    # pass through. MUST equal the `gain_ema_tau_s` the DEPLOYED
+    # CHECKPOINT was trained with (sim ActionsCfg in exp_standing.py):
+    #   0.15  <- round-4/round-5 checkpoints (incl. run
+    #            2026-07-22_23-44-50 ckpt-1500, deployed now)
+    #   0.08  <- round-6+ checkpoints (retrained with the relaxed value)
+    # Deploying with a mismatched tau makes the motors' gains move at a
+    # rate the policy never trained against (oscillation!). 0 disables
+    # the filter — never deploy disabled against an EMA-trained policy.
+    # Seeded at the per-joint midpoint gains on RunPolicy entry.
+    gain_ema_tau_s: 0.15
 
   # Per-joint policy-emitted kp/kd clamps. The 24-dim MIT-mode action
   # vector carries (8 positions, 8 kp, 8 kd) per tick; the loader
@@ -129,7 +150,7 @@ joints:
     # (20260711_013801, 20260711_163155: kp wandered ±10-20 tracking body
     # motion). Restore the wide band { kp 20..120, kd 2..5 } for
     # variable-impedance policies.
-    policy_gain_clamps: { kp_min: 69.5, kp_max: 70.5, kd_min: 3.45, kd_max: 3.55 }
+    policy_gain_clamps: { kp_min: 20.0, kp_max: 120.0, kd_min: 2.0, kd_max: 5.0 }
     # Jun 16: reversed encoder polarity vs URDF/sim. Passive back-drive capture
     # (policy off) showed legs bent BACK by hand reading as URDF FORWARD; FK on
     # the logged signs confirmed. RS04 hip-flexion motor is mounted/zeroed with
@@ -145,7 +166,7 @@ joints:
     # Jun 2026 sim2real: kp_max 100 -> 80, kd_min 1.5 -> 2.0 (mirror hip_flexion_left)
     # Jun 14: kp_max 80 -> 120 (mirror hip_flexion_left)
     # Jul 11 2026 GAIN PIN: mirror hip_flexion_left (kp 70, kd 3.5 epsilon band).
-    policy_gain_clamps: { kp_min: 69.5, kp_max: 70.5, kd_min: 3.45, kd_max: 3.55 }
+    policy_gain_clamps: { kp_min: 20.0, kp_max: 120.0, kd_min: 2.0, kd_max: 5.0 }
     # Jun 16: reversed encoder polarity vs URDF/sim (mirror hip_flexion_left).
     direction: -1
 
@@ -159,13 +180,13 @@ joints:
     # Jul 13 2026: pos range tightened ±1 -> -0.07/+0.20 rad to mirror the
     # USD hip_abduction limits (sim/usd/bebopv2/.../physics.usda). Old ±1 rad
     # far exceeded the mechanical envelope; this matches the URDF/USD range.
-    hard_limits: { pos_min: -0.30, pos_max: 0.50, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -0.50, pos_max: 0.50, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
     # v0.15: kp_min raised 20 -> 40, kd_min 1.0 -> 2.0
     # Jun 2026 sim2real: kp_max 300 -> 150, kd_min 2.0 -> 3.0 (cut wide gain band)
     # Jul 11 2026 GAIN PIN (see hip_flexion_left): kp 95 = mid of [40,150],
     # kd 5.5 = mid of [3,8]; epsilon band because the loader rejects min==max.
-    policy_gain_clamps: { kp_min: 94.5, kp_max: 95.5, kd_min: 5.45, kd_max: 5.55 }
+    policy_gain_clamps: { kp_min: 40.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
     # Jun 16: encoder polarity is reversed vs the URDF/sim. A passive
     # back-drive capture (policy off) showed manual INWARD adduction reading
     # as POSITIVE (= URDF OUTWARD splay), confirmed against the matching USD
@@ -181,11 +202,11 @@ joints:
     # Jul 13 2026: pos range tightened ±1 -> -0.20/+0.07 rad to mirror the
     # USD hip_abduction limits (sim/usd/bebopv2/.../physics.usda). Old ±1 rad
     # far exceeded the mechanical envelope; this matches the URDF/USD range.
-    hard_limits: { pos_min: -0.50, pos_max: 0.30, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
+    hard_limits: { pos_min: -0.50, pos_max: 0.50, vel_max: 12.0, tau_max: 42.0, temp_max: 70.0 }
     hold_gains:  { kp: 160.0, kd: 6.0 }
     # Jun 2026 sim2real: kp_max 300 -> 150, kd_min 2.0 -> 3.0 (mirror hip_abduction_left)
     # Jul 11 2026 GAIN PIN: mirror hip_abduction_left (kp 95, kd 5.5 epsilon band).
-    policy_gain_clamps: { kp_min: 94.5, kp_max: 95.5, kd_min: 5.45, kd_max: 5.55 }
+    policy_gain_clamps: { kp_min: 40.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
     # Jun 16: reversed encoder polarity vs URDF/sim (mirror hip_abduction_left).
     direction: -1
 
@@ -201,7 +222,7 @@ joints:
     # Jun 2026 sim2real: kp_max 250 -> 150, kd_min 2.0 -> 3.0 (cut wide gain band)
     # Jul 11 2026 GAIN PIN (see hip_flexion_left): kp 90 = mid of [30,150],
     # kd 5.5 = mid of [3,8]; epsilon band because the loader rejects min==max.
-    policy_gain_clamps: { kp_min: 89.5, kp_max: 90.5, kd_min: 5.45, kd_max: 5.55 }
+    policy_gain_clamps: { kp_min: 30.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
     # Jun 16: reversed encoder polarity vs URDF/sim. Passive back-drive capture
     # (policy off) showed knee bent FORWARD by hand reading as URDF BACKWARD; FK
     # on the logged signs confirmed. Flip at the motor⇄robot boundary. (Mirror
@@ -216,7 +237,7 @@ joints:
     hold_gains:  { kp: 120.0, kd: 4.0 }
     # Jun 2026 sim2real: kp_max 250 -> 150, kd_min 2.0 -> 3.0 (mirror knee_flexion_left)
     # Jul 11 2026 GAIN PIN: mirror knee_flexion_left (kp 90, kd 5.5 epsilon band).
-    policy_gain_clamps: { kp_min: 89.5, kp_max: 90.5, kd_min: 5.45, kd_max: 5.55 }
+    policy_gain_clamps: { kp_min: 30.0, kp_max: 150.0, kd_min: 3.0, kd_max: 8.0 }
     # Jun 16: reversed encoder polarity vs URDF/sim (mirror knee_flexion_left).
     direction: -1
 
@@ -257,7 +278,7 @@ joints:
     # soft. Mirror POLICY_KP_MIN[6] in sim exp_standing.py.
     # Jul 11 2026 GAIN PIN (see hip_flexion_left): kp 231.25 = mid of
     # [212.5,250], kd 4.0 = mid of [3,5]; epsilon band (loader rejects min==max).
-    policy_gain_clamps: { kp_min: 230.75, kp_max: 231.75, kd_min: 3.95, kd_max: 4.05 }
+    policy_gain_clamps: { kp_min: 212.5, kp_max: 250.0, kd_min: 3.0, kd_max: 5.0 }
 
   foot_right_joint:
     can_interface: can1
@@ -272,7 +293,7 @@ joints:
     # Jun 14 ANKLE RESTORE: kp_max 180 -> 250, kp_min 80 -> 100 (mirror foot_left_joint).
     # Jul 9 2026: kp_min 100 -> 212.5 (mirror foot_left_joint).
     # Jul 11 2026 GAIN PIN: mirror foot_left_joint (kp 231.25, kd 4.0 epsilon band).
-    policy_gain_clamps: { kp_min: 230.75, kp_max: 231.75, kd_min: 3.95, kd_max: 4.05 }
+    policy_gain_clamps: { kp_min: 212.5, kp_max: 250.0, kd_min: 3.0, kd_max: 5.0 }
 
 # ============================================================================
 # IMU (Adafruit BNO085 breakout on SPI) — optional

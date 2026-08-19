@@ -26,6 +26,7 @@ import {
   ServerRuntimeMessageSchema,
   SetAllMotorsEnabledSchema,
   SetMechanicalZeroSchema,
+  SetMechanicalZeroAllSchema,
   SetModeSchema,
   SetMotorEnabledSchema,
   SetMotorTargetSchema,
@@ -410,6 +411,30 @@ export class RuntimeTransport {
       case: "setMechanicalZero",
       value: create(SetMechanicalZeroSchema, { jointName }),
     });
+  }
+
+  /// Batch re-zero of every actuator for the guided zero-calibration
+  /// flow (robot in the reference pose — face-flat, legs straight — with
+  /// every joint disarmed). The firmware checks preconditions for ALL
+  /// joints before touching any motor, then reports a per-joint summary
+  /// including post-zero verification failures (a motor that ignored
+  /// SET_ZERO, or a joint not at the reference pose). Returns the
+  /// firmware's summary message so the UI can show it verbatim.
+  async setMechanicalZeroAll(): Promise<string> {
+    const reply = await this.request({
+      case: "setMechanicalZeroAll",
+      value: create(SetMechanicalZeroAllSchema, {}),
+    });
+    if (reply.payload.case === "error") {
+      throw new Error(reply.payload.value.message || "runtime error");
+    }
+    if (reply.payload.case !== "ack") {
+      throw new Error(`expected Ack, got ${String(reply.payload.case)}`);
+    }
+    if (!reply.payload.value.ok) {
+      throw new Error(reply.payload.value.message || "request failed");
+    }
+    return reply.payload.value.message;
   }
 
   async setMode(mode: RuntimeMode): Promise<void> {

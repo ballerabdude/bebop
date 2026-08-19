@@ -238,6 +238,34 @@ impl SlewParams {
     };
 }
 
+/// Global policy action-decode parameters (`defaults.policy` in the YAML).
+/// These MUST mirror the sim action term
+/// (`VariableImpedanceJointActionCfg` in
+/// `sim/bebop_training/envs/bebop_v2_actions.py`) — the trained policy
+/// baked in whatever bandwidth these values allow.
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyConfig {
+    /// First-order low-pass time constant (seconds) applied to the decoded
+    /// kp/kd channels every 100 Hz policy tick:
+    /// `g += alpha * (cmd - g)`, `alpha = 1 - exp(-tick_dt / tau)`.
+    /// Hard anti-snap guarantee on the gain channels (the position
+    /// channel's analog is the slew clamp): tick-rate gain flipping is
+    /// attenuated ~16x at tau = 0.08 while impedance shifts slower than
+    /// ~2 Hz pass through. `0` disables the filter — do NOT deploy
+    /// disabled against an EMA-trained policy. See
+    /// [`crate::observation::GainEma`].
+    pub gain_ema_tau_s: f32,
+}
+
+impl PolicyConfig {
+    pub const DEFAULT: Self = Self {
+        // Mirrors the sim ActionsCfg `gain_ema_tau_s` (round 6, Jul 22
+        // 2026). Explicitly set in bebop_v2.yaml; the fallback only
+        // guards older configs.
+        gain_ema_tau_s: 0.08,
+    };
+}
+
 /// Per-joint bounds on the policy-emitted kp / kd values for the
 /// MIT-mode variable-impedance action. The decode path affine-maps each
 /// raw `[-1, 1]` channel into `(min, max)` for its joint. Values MUST
@@ -375,6 +403,8 @@ pub struct RobotConfig {
     pub can_interfaces: Vec<String>,
     pub server: ServerConfig,
     pub power: Option<PowerBoardConfig>,
+    /// Global policy action-decode parameters (`defaults.policy`).
+    pub policy: PolicyConfig,
     /// When set, [`crate::imu`] streams fused orientation into the shared
     /// state consumed by the WS telemetry pump. Policy observations still
     /// use synthetic IMU until explicitly wired.
@@ -666,6 +696,23 @@ impl RobotConfig {
         let mut can_interfaces: Vec<String> = interfaces.into_iter().collect();
         can_interfaces.sort();
 
+        let policy = {
+            let tau = defaults
+                .policy
+                .as_ref()
+                .and_then(|p| p.gain_ema_tau_s)
+                .unwrap_or(PolicyConfig::DEFAULT.gain_ema_tau_s);
+            if tau < 0.0 {
+                return Err(anyhow!(
+                    "defaults.policy.gain_ema_tau_s must be >= 0 (0 disables the \
+                     filter); got {tau}"
+                ));
+            }
+            PolicyConfig {
+                gain_ema_tau_s: tau,
+            }
+        };
+
         let imu = raw
             .imu
             .map(|raw_imu| -> Result<ImuConfig> {
@@ -744,6 +791,7 @@ impl RobotConfig {
             can_interfaces,
             server,
             power,
+            policy,
             imu,
         })
     }
@@ -845,6 +893,7 @@ struct RawDefaults {
     hold_gains: Option<RawGains>,
     test_gains: Option<RawGains>,
     slew: Option<RawSlew>,
+    policy: Option<RawPolicy>,
     policy_gain_clamps: Option<RawPolicyGainClamps>,
     direction: Option<f32>,
 }
@@ -894,6 +943,11 @@ struct RawSlew {
     max_pos_step_per_tick: Option<f32>,
     arm_ramp_s: Option<f32>,
     abort_ramp_s: Option<f32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawPolicy {
+    gain_ema_tau_s: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]

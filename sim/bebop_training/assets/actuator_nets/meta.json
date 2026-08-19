@@ -1,0 +1,87 @@
+{
+  "window": 5,
+  "sim_rate_hz": 200.0,
+  "input_layout": "[cmd_tau/stall (H newest-first), fb_vel/noload (H newest-first)]",
+  "output": "fb_tau/stall (multiply by stall)",
+  "models": {
+    "RS04": {
+      "stall_torque": 120.0,
+      "noload_vel": 20.9,
+      "effort_limit_sim": 84.0,
+      "net_rmse_nm": {
+        "hip_flexion_right_joint:friction_sweep": 0.7166515127110898,
+        "hip_flexion_right_joint:noload_speed": 0.4382221909869096,
+        "hip_flexion_right_joint:stall_torque": 0.41111588629096185,
+        "hip_flexion_right_joint:torque_chirp": 1.004737929138702,
+        "hip_flexion_right_joint:torque_step": 0.69966787330475,
+        "knee_flexion_left_joint:torque_chirp": 0.5089475387328871,
+        "knee_flexion_right_joint:friction_sweep": 0.5633809867226299,
+        "knee_flexion_right_joint:noload_speed": 0.470500124870087,
+        "knee_flexion_right_joint:stall_torque": 0.438428061219926,
+        "knee_flexion_right_joint:torque_chirp": 0.4076836031549669,
+        "knee_flexion_right_joint:torque_step": 0.8375550721584046,
+        "ALL": 0.6338534516313524
+      },
+      "baseline_rmse_nm": {
+        "hip_flexion_right_joint:friction_sweep": 1.469950623390663,
+        "hip_flexion_right_joint:noload_speed": 25.802835426495214,
+        "hip_flexion_right_joint:stall_torque": 25.80511845687717,
+        "hip_flexion_right_joint:torque_chirp": 12.027474033389852,
+        "hip_flexion_right_joint:torque_step": 12.396631061171632,
+        "knee_flexion_left_joint:torque_chirp": 4.3847523205598256,
+        "knee_flexion_right_joint:friction_sweep": 1.4196164097061443,
+        "knee_flexion_right_joint:noload_speed": 25.778992039940704,
+        "knee_flexion_right_joint:stall_torque": 25.78464305708961,
+        "knee_flexion_right_joint:torque_chirp": 4.311687978424856,
+        "knee_flexion_right_joint:torque_step": 12.401558567945697,
+        "ALL": 14.061974907663357
+      }
+    },
+    "RS03": {
+      "stall_torque": 60.0,
+      "noload_vel": 20.4,
+      "effort_limit_sim": 42.0,
+      "net_rmse_nm": {
+        "hip_abduction_left_joint:torque_chirp": 0.7841306414698725,
+        "hip_abduction_right_joint:friction_sweep": 0.5903583687706012,
+        "hip_abduction_right_joint:noload_speed": 0.5120412090058495,
+        "hip_abduction_right_joint:stall_torque": 0.4905121546023809,
+        "hip_abduction_right_joint:torque_chirp": 0.6099525966138405,
+        "hip_abduction_right_joint:torque_step": 0.8068554796115428,
+        "ALL": 0.6267754446379272
+      },
+      "baseline_rmse_nm": {
+        "hip_abduction_left_joint:torque_chirp": 6.437296959296414,
+        "hip_abduction_right_joint:friction_sweep": 0.930655984461123,
+        "hip_abduction_right_joint:noload_speed": 1.1975855715295645,
+        "hip_abduction_right_joint:stall_torque": 1.177493828685469,
+        "hip_abduction_right_joint:torque_chirp": 6.283556199278295,
+        "hip_abduction_right_joint:torque_step": 3.897236291105512,
+        "ALL": 4.058588819825841
+      }
+    },
+    "RS02": {
+      "stall_torque": 17.0,
+      "noload_vel": 42.9,
+      "effort_limit_sim": 17.0,
+      "net_rmse_nm": {
+        "foot_left_joint:torque_chirp": 0.0600683082141707,
+        "foot_right_joint:friction_sweep": 0.08213880451293128,
+        "foot_right_joint:noload_speed": 0.25220109745133096,
+        "foot_right_joint:stall_torque": 0.2599227432435999,
+        "foot_right_joint:torque_chirp": 0.08832399414568837,
+        "foot_right_joint:torque_step": 0.22906235873231956,
+        "ALL": 0.14849754258881198
+      },
+      "baseline_rmse_nm": {
+        "foot_left_joint:torque_chirp": 0.5208866954637064,
+        "foot_right_joint:friction_sweep": 0.2871731613246925,
+        "foot_right_joint:noload_speed": 3.9152554653532006,
+        "foot_right_joint:stall_torque": 3.9115257081184507,
+        "foot_right_joint:torque_chirp": 0.5333985533704342,
+        "foot_right_joint:torque_step": 2.469567976832136,
+        "ALL": 1.995585927581195
+      }
+    }
+  }
+}

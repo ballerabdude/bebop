@@ -14,6 +14,7 @@ from .experiments.exp_mirror import BebopV2MirrorCfg
 from .experiments.exp_standing import (
     BebopV2StandingCfg,
     BebopV2StandingFixedGainCfg,
+    BebopV2StandingPushActNetCfg,
     BebopV2StandingPushCfg,
 )
 from .agents.rsl_rl_ppo_cfg import BebopPPOBaseCfg, BebopPPOPushCfg
@@ -60,6 +61,22 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": BebopV2StandingPushCfg,
+        "rsl_rl_cfg_entry_point": BebopPPOPushCfg,
+    },
+)
+
+# Actuator-net variant of the push-stand (td-b05f58): identical to
+# Standing-Push-v0 except each DCMotor group is swapped for the hybrid
+# learned torque-response actuator (analytic PD + learned cmd->realized
+# torque net + analytic envelope rail; see envs/bebop_v2_actuator_net.py).
+# Requires tools/actuator_net_fit.py to have produced the TorchScript nets.
+# Policy I/O contract unchanged, so checkpoints remain firmware-deployable.
+gym.register(
+    id="Isaac-BebopV2-Standing-Push-ActNet-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": BebopV2StandingPushActNetCfg,
         "rsl_rl_cfg_entry_point": BebopPPOPushCfg,
     },
 )

@@ -125,9 +125,16 @@ class BebopPPOPushCfg(BebopPPOBaseCfg):
     first push-training run): push recovery requires exploring a family of
     recovery motions, not a single quiet pose, and the standing runs showed
     the action std collapsing to ~0.12 within 1k iters at 0.01 — too little
-    exploration to discover catch steps under shoves. Raise toward 0.03 if
-    the policy goes deterministic and stops recovering; lower back to 0.01
-    if the action std refuses to come down.
+    exploration to discover catch steps under shoves. A bump to 0.03 was
+    tried Jul 22 2026 (round 4) and REVERTED the same day (round 5): with
+    ``gain_rate`` deleted in the same change there was no brake on the
+    shared log-std, and the stronger entropy bonus inflated it
+    exponentially (std 75k -> 4.7e15, run 2026-07-22_20-49-06). Back to
+    0.02 — the last-known-good setting; the gain_ema_tau_s filter now
+    breaks the gain-modulation local optimum STRUCTURALLY, so the
+    exploration bump is unnecessary. Raise toward 0.03 only WITH the
+    gain_rate std governor in place if the policy still goes deterministic;
+    lower back to 0.01 if the action std refuses to come down.
     """
 
     experiment_name = "bebop_push"

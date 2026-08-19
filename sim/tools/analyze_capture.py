@@ -29,7 +29,7 @@ def quat_to_projgrav(x, y, z, w):
 
 def load(path):
     rows = {k: [] for k in
-            ["js_t", "js_pos", "js_vel", "js_names",
+            ["js_t", "js_pos", "js_vel", "js_eff", "js_names",
              "imu_t", "quat", "gyro",
              "act_t", "raw", "tgt", "kp", "kd",
              "obs_t", "obs",
@@ -43,6 +43,7 @@ def load(path):
                 rows["js_t"].append(t)
                 rows["js_pos"].append(list(ros_msg.position))
                 rows["js_vel"].append(list(ros_msg.velocity))
+                rows["js_eff"].append(list(ros_msg.effort))
                 if not rows["js_names"]:
                     rows["js_names"] = list(ros_msg.name)
             elif top == "/imu":
@@ -160,6 +161,22 @@ def main(path):
                   f"{np.percentile(d,95):8.4f} {frac:9.3f}")
         alld = dtg.flatten()
         print(f"  ALL JOINTS slew-exceedance fraction = {np.mean(alld>SLEW):.3f}")
+
+    # 3b. Torque (motor feedback; empty on captures predating effort logging)
+    print("\n[3b] TORQUE (Nm, motor feedback in /joint_states.effort)")
+    eff = R["js_eff"]
+    if eff.ndim == 2 and eff.shape[1] == 8:
+        print(f"  {'joint':20s} {'mean':>8s} {'std':>7s} {'p95|':>8s} {'max|':>8s}")
+        for j in range(8):
+            e = eff[:, j]
+            print(f"  {JOINT_NAMES[j]:20s} {e.mean():+8.3f} {e.std():7.3f} "
+                  f"{np.percentile(np.abs(e),95):8.3f} {np.abs(e).max():8.3f}")
+        el, er = eff[:, 6], eff[:, 7]
+        print(f"\n  ankles: |L| p95={np.percentile(np.abs(el),95):.2f} max={np.abs(el).max():.2f}  "
+              f"|R| p95={np.percentile(np.abs(er),95):.2f} max={np.abs(er).max():.2f} Nm")
+        print(f"  refs: old sim cap 6.0 Nm, firmware tau_max 17.0 Nm")
+    else:
+        print("  effort[] empty (capture predates torque logging)")
 
     # 4. Balance
     print("\n[4] BALANCE")

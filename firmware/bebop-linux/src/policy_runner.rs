@@ -67,7 +67,7 @@ use crate::config::{dims, PolicyGainClamps};
 use crate::imu::ImuShared;
 use crate::mode::Mode;
 use crate::observation::{
-    decode_policy_action, DecodedAction, ImuState, ObservationBuilder, VelocityCommand,
+    decode_policy_action, DecodedAction, GainEma, ImuState, ObservationBuilder, VelocityCommand,
     JOINT_NAMES, NUM_JOINTS,
 };
 use crate::policy::PolicyController;
@@ -104,6 +104,12 @@ pub struct PolicyRunner {
     /// startup from `JointConfig::policy_gain_clamps` so we don't have
     /// to re-resolve the joint mapping on every tick.
     policy_gain_clamps: [PolicyGainClamps; NUM_JOINTS],
+    /// Low-pass filter on the decoded kp/kd (the firmware mirror of the
+    /// sim action term's `gain_ema_tau_s`). Re-seeded at the midpoint
+    /// gains on every RunPolicy entry; applied after
+    /// [`decode_policy_action`] every tick so the gains sent to the
+    /// motors can never snap tick-to-tick.
+    gain_ema: GainEma,
     /// Edge-detect entering RunPolicy so we can clear the policy's history
     /// buffer + last_action cache.
     was_running: bool,
@@ -225,6 +231,12 @@ impl PolicyRunner {
         let mut obs_builder = ObservationBuilder::new();
         obs_builder.set_default_positions(&default_positions);
 
+        let gain_ema = GainEma::new(cfg.policy.gain_ema_tau_s, &policy_gain_clamps);
+        info!(
+            gain_ema_tau_s = cfg.policy.gain_ema_tau_s,
+            "gain low-pass filter configured (must mirror sim gain_ema_tau_s)"
+        );
+
         info!(
             model = %model_path.display(),
             obs_dim = dims::OBS_DIM,
@@ -241,6 +253,7 @@ impl PolicyRunner {
             joint_indices,
             default_positions,
             policy_gain_clamps,
+            gain_ema,
             was_running: false,
             imu_was_live: false,
             policy_control,
@@ -335,6 +348,10 @@ impl PolicyRunner {
             self.controller.reset();
             self.obs_builder
                 .update_last_action(&[0.0_f32; dims::ACTION_DIM]);
+            // Re-seed the gain low-pass at the midpoint gains (what the
+            // robot physically holds at arm) so engagement starts
+            // transient-free — mirrors the sim action term's reset().
+            self.gain_ema.reset(&self.policy_gain_clamps);
             info!("RunPolicy entered; policy controller reset");
             self.was_running = true;
         }
@@ -345,11 +362,13 @@ impl PolicyRunner {
         let snapshots = sup.snapshot_motors();
         let mut joint_pos = [0.0_f32; NUM_JOINTS];
         let mut joint_vel = [0.0_f32; NUM_JOINTS];
+        let mut joint_trq = [0.0_f32; NUM_JOINTS];
         let mut armed = [false; NUM_JOINTS];
         for (slot, &idx) in self.joint_indices.iter().enumerate() {
             let s = &snapshots[idx];
             joint_pos[slot] = s.position;
             joint_vel[slot] = s.velocity;
+            joint_trq[slot] = s.torque;
             armed[slot] = s.armed;
         }
 
@@ -447,14 +466,18 @@ impl PolicyRunner {
         //    8 kp, 8 kd). The decoder clips raw channels to [-1, 1],
         //    applies the position scale + default offset, and affine-maps
         //    each per-joint kp/kd to its `policy_gain_clamps` range. The
+        //    decoded kp/kd then pass through the gain low-pass
+        //    (`gain_ema_tau_s`, mirrors the sim action term) so the gains
+        //    sent to the motors can never snap tick-to-tick. The
         //    supervisor's `safe_send_ctrl` then additionally clamps
         //    position to per-joint `pos_min..pos_max` and slew-limits
         //    per tick before pushing the MIT-mode CAN frame.
-        let decoded = decode_policy_action(
+        let mut decoded = decode_policy_action(
             &action,
             &self.default_positions,
             &self.policy_gain_clamps,
         );
+        self.gain_ema.apply(&mut decoded);
 
         // Per-tick policy I/O is now captured to MCAP (see
         // `crate::policy_capture`); no console log here. Open the latest
@@ -488,6 +511,7 @@ impl PolicyRunner {
                 imu_was_live,
                 &joint_pos,
                 &joint_vel,
+                &joint_trq,
                 &armed,
                 &obs,
                 Some((&action, &decoded)),
@@ -621,11 +645,13 @@ impl PolicyRunner {
         let snapshots = sup.snapshot_motors();
         let mut joint_pos = [0.0_f32; NUM_JOINTS];
         let mut joint_vel = [0.0_f32; NUM_JOINTS];
+        let mut joint_trq = [0.0_f32; NUM_JOINTS];
         let mut armed = [false; NUM_JOINTS];
         for (slot, &idx) in self.joint_indices.iter().enumerate() {
             let s = &snapshots[idx];
             joint_pos[slot] = s.position;
             joint_vel[slot] = s.velocity;
+            joint_trq[slot] = s.torque;
             armed[slot] = s.armed;
         }
 
@@ -671,6 +697,7 @@ impl PolicyRunner {
             imu_live,
             &joint_pos,
             &joint_vel,
+            &joint_trq,
             &armed,
             &obs,
             None,
@@ -690,6 +717,7 @@ impl PolicyRunner {
         imu_live: bool,
         joint_pos: &[f32; NUM_JOINTS],
         joint_vel: &[f32; NUM_JOINTS],
+        joint_trq: &[f32; NUM_JOINTS],
         armed: &[bool; NUM_JOINTS],
         observation: &[f32],
         action: Option<(&[f32], &DecodedAction)>,
@@ -731,6 +759,7 @@ impl PolicyRunner {
             angular_velocity: ang_vel,
             joint_pos_rad: joint_pos.to_vec(),
             joint_vel_rad_s: joint_vel.to_vec(),
+            joint_torque_nm: joint_trq.to_vec(),
             joint_armed: armed.to_vec(),
             observation: observation.to_vec(),
             raw_action,

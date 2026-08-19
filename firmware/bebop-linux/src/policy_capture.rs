@@ -43,6 +43,11 @@ pub struct TickSample {
     pub angular_velocity: [f32; 3],
     pub joint_pos_rad: Vec<f32>,
     pub joint_vel_rad_s: Vec<f32>,
+    /// Motor torque feedback (Nm), URDF joint convention (direction-
+    /// corrected at the RX boundary, same as position / velocity). Written
+    /// to `/joint_states.effort` so captures can be checked against the
+    /// static gravity load and the per-joint `tau_max` envelopes.
+    pub joint_torque_nm: Vec<f32>,
     pub joint_armed: Vec<bool>,
     pub observation: Vec<f32>,
     pub raw_action: Vec<f32>,
@@ -218,7 +223,8 @@ impl OpenCapture {
         for &v in &data.joint_pos_rad { enc.write_f64(v as f64); }
         enc.write_u32(data.joint_vel_rad_s.len() as u32);
         for &v in &data.joint_vel_rad_s { enc.write_f64(v as f64); }
-        enc.write_u32(0u32); // effort empty
+        enc.write_u32(data.joint_torque_nm.len() as u32);
+        for &v in &data.joint_torque_nm { enc.write_f64(v as f64); }
         self.post_message(0, data.wall_time_ns, &enc)
     }
 
@@ -493,6 +499,7 @@ mod tests {
             angular_velocity: [0.0, 0.0, 0.0],
             joint_pos_rad: vec![0.1; 8],
             joint_vel_rad_s: vec![0.0; 8],
+            joint_torque_nm: vec![0.0; 8],
             joint_armed: vec![true; 8],
             observation: vec![0.0; 49],
             raw_action: vec![0.0; 24],

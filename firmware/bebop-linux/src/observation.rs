@@ -325,6 +325,78 @@ pub fn decode_policy_action(
     out
 }
 
+/// Policy tick period (seconds). Mirrors `TICK_PERIOD` in `main.rs`
+/// (10 ms = 100 Hz) — the rate [`GainEma::apply`] runs at.
+pub const POLICY_TICK_DT_S: f32 = 0.01;
+
+/// First-order low-pass (exponential moving average) on the decoded
+/// kp/kd gain channels — the firmware mirror of the sim action term's
+/// `gain_ema_tau_s` filter (`bebop_v2_actions.py`), and the gain-channel
+/// analog of the position slew clamp: whatever the policy emits, the
+/// gains sent to the motors can move no faster than the filter allows.
+///
+/// `g += alpha * (cmd - g)` per policy tick with
+/// `alpha = 1 - exp(-POLICY_TICK_DT_S / tau)`. At tau = 0.08 s (the
+/// round-6 sim value) a tick-rate (100 Hz) gain flip is attenuated ~16x
+/// (steady-state ripple ~6.5% of command amplitude) while impedance
+/// shifts slower than ~2 Hz pass through, so the policy keeps slow
+/// stiffness scheduling but can never snap the gains tick-to-tick.
+///
+/// The filter state is seeded (and re-seeded on RunPolicy entry) at the
+/// per-joint midpoint gains — the value the robot physically holds at
+/// arm — so engagement starts transient-free, exactly like the sim
+/// action term's `reset()`.
+pub struct GainEma {
+    alpha: f32,
+    kp: [f32; NUM_JOINTS],
+    kd: [f32; NUM_JOINTS],
+}
+
+impl GainEma {
+    /// Build a filter for time constant `tau_s` (seconds). `tau_s <= 0`
+    /// disables the filter (alpha = 1, exact pass-through) — do NOT
+    /// deploy disabled against an EMA-trained policy.
+    pub fn new(tau_s: f32, clamps: &[PolicyGainClamps; NUM_JOINTS]) -> Self {
+        let alpha = if tau_s > 0.0 {
+            1.0 - (-POLICY_TICK_DT_S / tau_s).exp()
+        } else {
+            1.0
+        };
+        let mut ema = Self {
+            alpha,
+            kp: [0.0; NUM_JOINTS],
+            kd: [0.0; NUM_JOINTS],
+        };
+        ema.reset(clamps);
+        ema
+    }
+
+    /// Re-seed the filter state at the per-joint midpoint gains. Call on
+    /// RunPolicy entry so a freshly armed robot starts at the gains it
+    /// physically holds (mid = raw 0 decode), with no filter spin-up ramp.
+    pub fn reset(&mut self, clamps: &[PolicyGainClamps; NUM_JOINTS]) {
+        for (i, c) in clamps.iter().enumerate() {
+            self.kp[i] = 0.5 * (c.kp_min + c.kp_max);
+            self.kd[i] = 0.5 * (c.kd_min + c.kd_max);
+        }
+    }
+
+    /// Filter the decoded kp/kd in place. Position targets are untouched
+    /// (the supervisor's slew clamp owns that channel). With the filter
+    /// disabled (alpha = 1) this is a no-op pass-through.
+    pub fn apply(&mut self, decoded: &mut DecodedAction) {
+        if self.alpha >= 1.0 {
+            return;
+        }
+        for i in 0..NUM_JOINTS {
+            self.kp[i] += self.alpha * (decoded.kp[i] - self.kp[i]);
+            self.kd[i] += self.alpha * (decoded.kd[i] - self.kd[i]);
+            decoded.kp[i] = self.kp[i];
+            decoded.kd[i] = self.kd[i];
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,5 +561,85 @@ mod tests {
         // The MIT-mode action has 3 channels per joint (position, kp, kd).
         assert_eq!(3 * JOINT_NAMES.len(), dims::ACTION_DIM);
         assert!(JOINT_NAMES.iter().all(|n| n.ends_with("_joint")));
+    }
+
+    #[test]
+    fn gain_ema_seeds_at_midpoints() {
+        let clamps = default_clamps();
+        let ema = GainEma::new(0.08, &clamps);
+        let kp_mid = 0.5 * (clamps[0].kp_min + clamps[0].kp_max);
+        let kd_mid = 0.5 * (clamps[0].kd_min + clamps[0].kd_max);
+        for i in 0..NUM_JOINTS {
+            assert!((ema.kp[i] - kp_mid).abs() < 1e-5);
+            assert!((ema.kd[i] - kd_mid).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn gain_ema_step_response_tracks_time_constant() {
+        let clamps = default_clamps();
+        let mut ema = GainEma::new(0.08, &clamps);
+        let mut decoded = DecodedAction::default();
+        // Command kp_max on every joint (a step from the midpoint seed).
+        for i in 0..NUM_JOINTS {
+            decoded.kp[i] = clamps[i].kp_max;
+            decoded.kd[i] = clamps[i].kd_max;
+        }
+        // After tau = 0.08 s = 8 ticks the error should be ~1/e, i.e. the
+        // output covers ~63.2% of the step from mid to max.
+        for _ in 0..8 {
+            ema.apply(&mut decoded);
+            // Re-issue the same step command each tick (apply consumed it).
+            for i in 0..NUM_JOINTS {
+                decoded.kp[i] = clamps[i].kp_max;
+                decoded.kd[i] = clamps[i].kd_max;
+            }
+        }
+        let kp_mid = 0.5 * (clamps[0].kp_min + clamps[0].kp_max);
+        let frac = (ema.kp[0] - kp_mid) / (clamps[0].kp_max - kp_mid);
+        assert!(
+            (0.55..=0.70).contains(&frac),
+            "step response after tau should be ~63%, got {frac}"
+        );
+    }
+
+    #[test]
+    fn gain_ema_attenuates_tick_rate_flipping() {
+        let clamps = default_clamps();
+        let mut ema = GainEma::new(0.08, &clamps);
+        let mut decoded = DecodedAction::default();
+        // Alternate kp_min <-> kp_max every tick (the 100 Hz gain-snap
+        // failure mode). Steady-state ripple must be ~alpha/(2-alpha)
+        // ~6.5% of the full swing, i.e. ~15x attenuation.
+        let mut high = true;
+        for _ in 0..2000 {
+            let v = if high { clamps[0].kp_max } else { clamps[0].kp_min };
+            high = !high;
+            for i in 0..NUM_JOINTS {
+                decoded.kp[i] = v;
+            }
+            ema.apply(&mut decoded);
+        }
+        let kp_mid = 0.5 * (clamps[0].kp_min + clamps[0].kp_max);
+        let half_swing = clamps[0].kp_max - kp_mid;
+        let ripple = (ema.kp[0] - kp_mid).abs() / half_swing;
+        assert!(
+            ripple < 0.10,
+            "tick-rate ripple should be ~6.5% of swing, got {ripple}"
+        );
+    }
+
+    #[test]
+    fn gain_ema_disabled_is_passthrough() {
+        let clamps = default_clamps();
+        let mut ema = GainEma::new(0.0, &clamps);
+        let mut decoded = DecodedAction::default();
+        for i in 0..NUM_JOINTS {
+            decoded.kp[i] = clamps[i].kp_max;
+            decoded.kd[i] = clamps[i].kd_min;
+        }
+        let before = decoded;
+        ema.apply(&mut decoded);
+        assert_eq!(decoded, before, "tau=0 must pass the command through");
     }
 }

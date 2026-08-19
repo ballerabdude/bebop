@@ -60,6 +60,18 @@ message ClientRuntimeMessage {
     // `firmware/bebop-linux/src/policy_capture.rs`), so the toggle no
     // longer exists. Reserved so this tag isn't accidentally re-used
     // by a different message with the same id.
+    //
+    // Batch variant of SetMechanicalZero for the guided zero-calibration
+    // flow in the operator app: the robot is placed in the reference pose
+    // (face-flat on the floor, both legs straight) with every joint
+    // disarmed, and one request re-zeroes all actuators. The firmware
+    // enforces the per-joint preconditions atomically *before* touching
+    // any motor (no E-STOP, every joint disarmed, every bus healthy), so
+    // a half-armed robot can't end up with a mixed set of origins.
+    // Robstride motors intermittently lose their stored origin across a
+    // power cycle, so this flow is part of normal pre-flight, not just
+    // reassembly.
+    SetMechanicalZeroAll set_mechanical_zero_all = 13;
   }
   reserved 12;
   reserved "set_policy_capture";
@@ -332,6 +344,15 @@ message SetMotorTarget {
 message SetMechanicalZero {
   string joint_name = 1;
 }
+
+// Re-zero every actuator at once. See `ClientRuntimeMessage.set_mechanical_zero_all`
+// for the flow and preconditions. The reply Ack carries a per-joint
+// summary: which joints were re-zeroed and which reported a fresh
+// position outside the verification tolerance after the write (a motor
+// that silently ignored SET_ZERO shows up there instead of failing
+// silently — the exact failure mode that makes ad-hoc re-zeroing
+// untrustworthy).
+message SetMechanicalZeroAll {}
 
 // Toggle the policy dry-run flag. See `ClientRuntimeMessage.set_policy_dry_run`
 // for semantics. The firmware acks the request immediately; the new value

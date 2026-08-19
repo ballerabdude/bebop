@@ -146,6 +146,42 @@ pub fn handle_client_message(
             ),
             Err(e) => error_response(request_id, fmt_err(&e)),
         },
+        P::SetMechanicalZeroAll(_) => match sup.set_mechanical_zero_all() {
+            Ok(outcomes) => {
+                let failed: Vec<_> = outcomes.iter().filter(|o| o.error.is_some()).collect();
+                if !failed.is_empty() {
+                    let msg = failed
+                        .iter()
+                        .map(|o| format!("{}: {:#}", o.joint_name, o.error.as_ref().unwrap()))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    error_response(request_id, format!("partial failure re-zeroing: {msg}"))
+                } else {
+                    let unverified: Vec<String> = outcomes
+                        .iter()
+                        .filter(|o| match o.position_after_rad {
+                            Some(p) => p.abs() > Supervisor::ZERO_VERIFY_TOLERANCE_RAD,
+                            None => true,
+                        })
+                        .map(|o| match o.position_after_rad {
+                            Some(p) => format!("{} ({p:+.3} rad)", o.joint_name),
+                            None => format!("{} (no feedback)", o.joint_name),
+                        })
+                        .collect();
+                    let mut msg =
+                        format!("all {} actuators re-zeroed", outcomes.len());
+                    if !unverified.is_empty() {
+                        msg.push_str(&format!(
+                            "; VERIFY FAILED (post-zero |pos| > {:.2} rad — motor may have ignored SET_ZERO, or joint not at the reference pose): {}",
+                            Supervisor::ZERO_VERIFY_TOLERANCE_RAD,
+                            unverified.join(", ")
+                        ));
+                    }
+                    ack(request_id, msg)
+                }
+            }
+            Err(e) => error_response(request_id, fmt_err(&e)),
+        },
         P::SetPolicyDryRun(req) => {
             // Flip the flag here; PolicyRunner reads it on the next tick
             // (≤10 ms). We deliberately don't try to validate "is the

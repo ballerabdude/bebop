@@ -26,8 +26,17 @@ This module exists to close three known sim-to-real gaps that the stock
    ``firmware/bebop-linux/config/bebop_v2.yaml::defaults.slew`` and the
    clamp in ``firmware/bebop-linux/src/safety/supervisor.rs``
    ``safe_send_ctrl``). The slew clamp lives on the **position channel
-   only** — gain channels are instantaneous, which is the whole point of
-   variable impedance.
+   only**; the gain channels instead pass through a first-order low-pass
+   (``gain_ema_tau_s``, added Jul 22 2026 — see the cfg field docs).
+   Gains were originally left instantaneous ("the whole point of variable
+   impedance"), but the round-4 push runs showed the policy's ONLY
+   survival strategy at high push force is high-bandwidth kp/kd
+   modulation, which the ``gain_rate`` reward penalty then taxed into a
+   reward collapse. Filtering the gains in the ACTION SPACE (like the
+   position slew clamp does) makes gain-snapping physically impossible,
+   so ``gain_rate`` no longer taxes the survival strategy — it survives
+   only as an anti-noise governor on the shared log-std (round 5) — and
+   fast recovery is pushed onto the (slew-limited) position channels.
 
 3. **Action / actuation latency.** On the real robot the policy's action
    travels tokio task -> CAN frame -> motor PD loop -> encoder -> CAN
@@ -42,6 +51,7 @@ both — the policy bakes in the achievable control bandwidth.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import MISSING, field
 from typing import TYPE_CHECKING
@@ -55,6 +65,23 @@ from isaaclab.utils.configclass import configclass
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
+
+
+def gain_low_pass_ema(prev: torch.Tensor, cmd: torch.Tensor, alpha: float) -> torch.Tensor:
+    """First-order low-pass (exponential moving average) on gain commands.
+
+    ``out = prev + alpha * (cmd - prev)`` with ``alpha = 1 - exp(-dt / tau)``,
+    i.e. a unity-DC-gain IIR filter with time constant ``tau``. A step
+    command reaches ~63% in ``tau`` seconds; a tick-rate (100 Hz)
+    square-wave command is attenuated to a steady-state ripple of
+    ``alpha / (2 - alpha)`` of its amplitude (~3% for tau=0.15 s at 100 Hz),
+    so tick-to-tick gain snapping is physically impossible no matter what
+    the policy emits.
+
+    Kept as a module-level pure function so the filter math is unit-testable
+    without instantiating the full action term (needs a live env).
+    """
+    return prev + alpha * (cmd - prev)
 
 
 class VariableImpedanceJointAction(JointPositionAction):
@@ -125,6 +152,21 @@ class VariableImpedanceJointAction(JointPositionAction):
                 "VariableImpedanceJointActionCfg.action_delay_steps must be >= 0; "
                 f"got {cfg.action_delay_steps}."
             )
+        if cfg.gain_ema_tau_s < 0.0:
+            raise ValueError(
+                "VariableImpedanceJointActionCfg.gain_ema_tau_s must be >= 0 "
+                f"(0 disables the filter); got {cfg.gain_ema_tau_s}."
+            )
+
+        # Gain low-pass state. ``_gain_ema_alpha`` is derived lazily in
+        # ``_ensure_state`` (needs ``env.step_dt``); ``_kp_ema`` / ``_kd_ema``
+        # hold the running filtered gains per env and are seeded at the
+        # midpoint gains alongside the delay buffer (and re-seeded on
+        # episode reset). alpha == 1.0 means the filter is disabled
+        # (tau == 0) and the EMA step is skipped entirely.
+        self._gain_ema_alpha: float = 1.0
+        self._kp_ema: torch.Tensor | None = None
+        self._kd_ema: torch.Tensor | None = None
 
         n_joints = self._num_joints
         for name, vec in (
@@ -320,6 +362,21 @@ class VariableImpedanceJointAction(JointPositionAction):
             self._env_arange = torch.arange(num_envs, device=device)
             self._delay_steps_per_env = self._sample_delays(num_envs, device)
 
+            # Gain low-pass: derive the per-tick EMA coefficient from the
+            # control dt and seed the filter state at the same midpoint
+            # gains the delay buffer starts with, so the applied gains
+            # begin exactly at mid with no filter spin-up transient.
+            tau = float(self.cfg.gain_ema_tau_s)
+            if tau > 0.0:
+                dt = float(self._env.step_dt)
+                self._gain_ema_alpha = 1.0 - math.exp(-dt / tau)
+                self._kp_ema = seed_kp.clone()
+                self._kd_ema = seed_kd.clone()
+            else:
+                self._gain_ema_alpha = 1.0
+                self._kp_ema = None
+                self._kd_ema = None
+
     def _sample_delays(self, num: int, device: torch.device) -> torch.Tensor:
         """Per-env action-delay (in ticks). Uniform in [min, max] when
         randomizing, else a constant ``max`` (the fixed-delay behavior)."""
@@ -402,6 +459,23 @@ class VariableImpedanceJointAction(JointPositionAction):
             applied = stack[sel, self._env_arange]
         else:
             applied = self._delay_buffer[0]
+
+        # Gain low-pass on the DELAYED gains, so the filter smooths the
+        # exact sequence physics sees (including per-env delay jumps).
+        # This is the hard anti-snap guarantee that freed the ``gain_rate``
+        # reward penalty from taxing the survival strategy (round 4-5):
+        # whatever the policy emits, the applied kp/kd can move no faster
+        # than the cfg.gain_ema_tau_s EMA allows. ``applied`` is never
+        # mutated in place — with the fixed-delay path it ALIASES
+        # ``self._delay_buffer[0]`` — the torch.cat below builds a fresh
+        # tensor instead.
+        if self._gain_ema_alpha < 1.0:
+            assert self._kp_ema is not None and self._kd_ema is not None
+            kp_filt = gain_low_pass_ema(self._kp_ema, applied[:, n : 2 * n], self._gain_ema_alpha)
+            kd_filt = gain_low_pass_ema(self._kd_ema, applied[:, 2 * n : 3 * n], self._gain_ema_alpha)
+            self._kp_ema = kp_filt
+            self._kd_ema = kd_filt
+            applied = torch.cat([applied[:, 0:n], kp_filt, kd_filt], dim=-1)
 
         # Stash decoded outputs for apply_actions.
         self._processed_actions = applied
@@ -491,6 +565,20 @@ class VariableImpedanceJointAction(JointPositionAction):
                 )
                 self._delay_steps_per_env[ids] = self._sample_delays(int(ids.numel()), dev)
 
+        # Re-seed the gain low-pass state at the midpoint gains for the
+        # reset envs, matching the delay-buffer re-seed above: the applied
+        # gains right after reset ARE mid, so the filter must start there
+        # too (otherwise it would falsely ramp from a stale episode-end
+        # value and yank the gains on the first ticks of the new episode).
+        if self._kp_ema is not None:
+            assert self._kd_ema is not None
+            if env_ids is None:
+                self._kp_ema[:] = kp_mid
+                self._kd_ema[:] = kd_mid
+            else:
+                self._kp_ema[env_ids] = kp_mid
+                self._kd_ema[env_ids] = kd_mid
+
 
 @configclass
 class VariableImpedanceJointActionCfg(JointPositionActionCfg):
@@ -566,3 +654,46 @@ class VariableImpedanceJointActionCfg(JointPositionActionCfg):
     """Per-joint kd applied when ``freeze_gains`` is True, in JOINT_NAMES order.
     Empty (default) -> midpoint of [kd_min, kd_max] per joint (firmware raw_kd =
     0 decode)."""
+
+    gain_ema_tau_s: float = 0.15
+    """First-order low-pass time constant (seconds) on the decoded kp/kd
+    channels, applied each policy tick AFTER the action-delay selection.
+    0 disables the filter (gains instantaneous, the pre-Jul-22-2026
+    behavior).
+
+    Why this exists (post-mortem of push runs 2026-07-22_10-55-08 and
+    2026-07-22_12-29-28): with instantaneous gains, the policy's ONLY
+    survival strategy once the push curriculum passed ~±0.45 m/s was
+    high-bandwidth kp/kd modulation — and the ``gain_rate`` reward
+    penalty taxed that strategy quadratically, harder the better the
+    policy balanced (reward peaked +27.7 at 30% of training, then
+    collapsed to -21 while eplen was still rising; both runs degraded to
+    eplen ~600-900). Enforcing smoothness as a REWARD TAX makes survival
+    unaffordable; enforcing it in the ACTION SPACE (exactly like the
+    position slew clamp) makes it free. With tau=0.15 s at the 100 Hz
+    control rate, tick-to-tick gain snapping is attenuated ~30x
+    (steady-state ripple ~3% of command amplitude) while impedance
+    shifts slower than ~1-2 Hz pass through — the policy keeps slow
+    stiffness scheduling (soften at rest, stiffen for recovery) and fast
+    recovery moves are pushed onto the slew-limited position channels,
+    i.e. the stepping/crouching behavior we actually want. Note: the
+    ``gain_rate`` reward term was briefly deleted with this change
+    (round 4) and RE-ADDED the same day (round 5) in a new role — with
+    the filter decoupling gain noise from physics, an ungoverned shared
+    log-std exploded to 4.7e15 (run 2026-07-22_20-49-06); the -2.0 tax
+    on the RAW gain-channel rate now serves purely as an anti-noise
+    std governor (slow legitimate ramps cost ~-0.06/step).
+
+    Round 6 (Jul 22 2026): tau relaxed 0.15 -> 0.08 in the standing
+    ActionsCfg after four configs hit the same push wall at ~±0.4-0.5
+    m/s — recovery needs impedance bandwidth the 0.15 s filter (1 Hz)
+    couldn't pass. At 0.08 the tick-rate ripple rises to ~6.5% (still
+    ~15x snap attenuation, far inside the hardware envelope) and the
+    -3 dB bandwidth doubles to ~2 Hz (stiffen in ~0.08 s).
+
+    DEPLOYMENT CONTRACT: the firmware MUST apply the same EMA to the
+    decoded kp/kd in ``observation.rs::decode_policy_action`` (alpha =
+    1 - exp(-dt / 0.15)) before writing gains to the motors, or the
+    deployed gains will move far faster than anything the policy
+    trained against.
+    """

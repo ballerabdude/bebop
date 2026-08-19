@@ -65,6 +65,9 @@ export function MotorBenchScreen({
   const [confirmDialog, setConfirmDialog] = useState<ConfirmRequest | null>(
     null,
   );
+  // Firmware summary from the last "Zero all actuators" run (includes
+  // per-joint verification failures, if any). Cleared on the next run.
+  const [zeroAllResult, setZeroAllResult] = useState<string | null>(null);
 
   // -------------------------------------------------------------- lifecycle
   //
@@ -371,6 +374,58 @@ export function MotorBenchScreen({
     [refreshAfter],
   );
 
+  // Guided batch zero-calibration. One gesture re-zeroes every actuator
+  // with the robot in the reference pose (face-flat, legs straight).
+  // Destructive flash write on all motors, so confirm first. The
+  // firmware's summary (including verification failures) is shown in
+  // the card so a motor that ignored SET_ZERO can't fail silently.
+  const zeroAll = useCallback(
+    async (motorCount: number) => {
+      const ok = await requestConfirm({
+        title: `Zero all ${motorCount} actuators?`,
+        confirmLabel: "Zero all",
+        tone: "danger",
+        body: (
+          <>
+            <p>
+              Every motor&rsquo;s <span className="font-mono text-text">current</span>{" "}
+              physical position becomes its new{" "}
+              <span className="font-mono text-text">0 rad</span> reference,
+              persisted to flash.
+            </p>
+            <p>
+              Only continue with the robot in the reference pose:{" "}
+              <span className="font-semibold text-text">
+                face-flat on a hard floor, both legs straight
+              </span>{" "}
+              (straightedge along torso&ndash;thigh&ndash;shank).
+            </p>
+            <p className="font-semibold text-text">
+              This cannot be undone except by re-zeroing again.
+            </p>
+          </>
+        ),
+      });
+      if (!ok) return;
+      const t = transportRef.current;
+      if (!t) return;
+      setBusy("zero-all");
+      setError(null);
+      setZeroAllResult(null);
+      try {
+        const summary = await t.setMechanicalZeroAll();
+        setZeroAllResult(summary);
+        const s = await t.getSnapshot();
+        setSnapshot(s);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [requestConfirm],
+  );
+
   const resetEStop = useCallback(
     () => refreshAfter("reset", () => transportRef.current!.resetEStop()),
     [refreshAfter],
@@ -674,6 +729,21 @@ export function MotorBenchScreen({
         onToggleArm={toggleMotor}
       />
 
+      {/* Guided batch zero-calibration. For the "motor lost its stored
+          zero after a power cycle" case: one gesture re-zeroes every
+          actuator from the face-flat reference pose, with the firmware
+          verifying each motor actually took the write. Per-joint
+          re-zero for one-off fixes stays on the motor rows below. */}
+      <ZeroCalibrationCard
+        motorCount={motors.length}
+        armedCount={armedCount}
+        estopLatched={estopLatched}
+        busy={busy}
+        result={zeroAllResult}
+        onDisableAll={() => setAll(false)}
+        onZeroAll={() => zeroAll(motors.length)}
+      />
+
       {/* Motor table. On md+ this is a true 6-column grid (joint, limits,
           and four numeric readouts). On phones we collapse to a stacked
           card per joint so nothing overflows the viewport horizontally
@@ -867,6 +937,126 @@ const MOTOR_HEADER =
   "hidden md:grid md:grid-cols-[minmax(180px,2fr)_minmax(240px,3fr)_88px_88px_88px_72px] gap-3";
 const MOTOR_GRID =
   "flex flex-col gap-2.5 md:grid md:grid-cols-[minmax(180px,2fr)_minmax(240px,3fr)_88px_88px_88px_72px] md:gap-3 md:items-center";
+
+/// Guided batch zero-calibration card. Walks the operator through the
+/// three steps (disable all → reference pose → zero all) and shows the
+/// firmware's per-joint verification summary. Needed because Robstride
+/// motors intermittently lose their stored origin across power cycles;
+/// re-zeroing is a pre-flight routine, not just a reassembly step.
+function ZeroCalibrationCard({
+  motorCount,
+  armedCount,
+  estopLatched,
+  busy,
+  result,
+  onDisableAll,
+  onZeroAll,
+}: {
+  motorCount: number;
+  armedCount: number;
+  estopLatched: boolean;
+  busy: string | null;
+  result: string | null;
+  onDisableAll: () => void;
+  onZeroAll: () => void;
+}) {
+  const ready = motorCount > 0 && armedCount === 0 && !estopLatched;
+  const verifyFailed = result?.includes("VERIFY FAILED") ?? false;
+
+  return (
+    <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev px-3.5 py-3 space-y-2.5">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-wider text-text-dim">
+            Zero calibration
+          </div>
+          <div className="text-[13px] text-text font-semibold mt-0.5">
+            Re-zero all actuators from the reference pose
+          </div>
+        </div>
+        <span
+          className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+            estopLatched
+              ? "border-danger/40 bg-danger/10 text-danger"
+              : ready
+                ? "border-success/40 bg-success/10 text-success"
+                : "border-yellow-500/40 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300"
+          }`}
+        >
+          {estopLatched
+            ? "E-STOP latched"
+            : ready
+              ? "Ready to zero"
+              : `${armedCount} motor${armedCount === 1 ? "" : "s"} armed`}
+        </span>
+      </div>
+
+      <ol className="text-[12px] text-text-dim leading-relaxed list-decimal list-inside space-y-1">
+        <li>
+          <span className="text-text font-medium">Disable all motors</span>{" "}
+          so the joints move freely.
+        </li>
+        <li>
+          Lay the robot{" "}
+          <span className="text-text font-medium">
+            face-flat on a hard floor, both legs straight
+          </span>{" "}
+          (straightedge along torso&ndash;thigh&ndash;shank). Every joint is
+          at mechanical zero in this pose — no eyeballing angles.
+        </li>
+        <li>
+          <span className="text-text font-medium">Zero all actuators</span> —
+          writes the new origin to every motor&rsquo;s flash in one shot.
+        </li>
+      </ol>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="secondary"
+          onClick={onDisableAll}
+          disabled={!!busy || armedCount === 0}
+          className="py-2! text-sm!"
+        >
+          Disable all
+        </Button>
+        <Button
+          onClick={onZeroAll}
+          loading={busy === "zero-all"}
+          disabled={!ready || !!busy}
+          className="bg-danger! text-white! hover:bg-[#e94a50]! py-2! text-sm!"
+        >
+          Zero all actuators
+        </Button>
+      </div>
+
+      {result ? (
+        <div
+          className={`rounded-[var(--radius-card)] border px-3 py-2 text-[12px] leading-relaxed ${
+            verifyFailed
+              ? "border-yellow-500/40 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300"
+              : "border-success/40 bg-success/10 text-success"
+          }`}
+        >
+          {result}
+          {verifyFailed ? (
+            <div className="mt-1 text-text-dim">
+              Flagged joints either ignored SET_ZERO or weren&rsquo;t at the
+              reference pose. Reposition and run again; a joint that fails
+              repeatedly has likely lost its flash origin and needs a
+              per-joint re-zero from the row below.
+            </div>
+          ) : (
+            <div className="mt-1 text-text-dim">
+              Verify: stand the robot up with both soles flat — every joint
+              in the table below should read &asymp;0&nbsp;rad at your
+              nominal stance.
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 /// Composite "run policy" affordance + live status. See call site for
 /// state-by-state behaviour. Lifted out of the main render so the JSX of

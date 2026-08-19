@@ -129,11 +129,33 @@ cd /workspace/bebop_bot/sim   # where train_bebop.py + bebop_training/ live
 
 These IDs come from [`bebop_training/__init__.py`](bebop_training/__init__.py):
 
-| Task ID                          | Cfg                            | What it trains                                                       |
-|----------------------------------|--------------------------------|----------------------------------------------------------------------|
-| `Isaac-BebopV2-Flat-v0`          | `BebopV2FlatBalanceCfg`        | Stand in place AND recover from random pushes (merged task).         |
-| `Isaac-BebopV2-Locomotion-v0`    | `BebopV2FlatLocomotionCfg`     | Velocity tracking with light pushes.                                 |
-| `Isaac-Bebop-Flat-v0`            | `BebopFlatBalanceCfg`          | Legacy V1 stand-only task (kept for reference).                      |
+| Task ID                                | Cfg                            | What it trains                                                       |
+|----------------------------------------|--------------------------------|----------------------------------------------------------------------|
+| `Isaac-BebopV2-Standing-v0`            | `BebopV2StandingCfg`           | Minimal quiet-standing baseline (zero velocity command).             |
+| `Isaac-BebopV2-Standing-FixedGain-v0`  | `BebopV2StandingFixedGainCfg`  | Standing with kp/kd structurally frozen at midpoints.                |
+| `Isaac-BebopV2-Standing-Push-v0`       | `BebopV2StandingPushCfg`       | Standing + mid-episode pushes with a magnitude curriculum.           |
+| `Isaac-BebopV2-Standing-Push-ActNet-v0`| `BebopV2StandingPushActNetCfg` | Push-stand with the learned torque-response actuator (td-b05f58).    |
+| `Isaac-BebopV2-Mirror-v0`              | `BebopV2MirrorCfg`             | Visual hardware telemetry mirror (not for RL training).              |
+
+### Actuator-net (learned torque response)
+
+The `ActNet` task swaps each `DCMotorCfg` group for a hybrid actuator
+([`bebop_training/envs/bebop_v2_actuator_net.py`](bebop_training/envs/bebop_v2_actuator_net.py)):
+analytic PD from the policy's live gains, then a learned cmd→realized-torque
+response net (3×64 softsign MLP per Robstride motor model), then the usual
+DC speed-torque envelope as a hard rail. Train the nets from the sysid logs
+and smoke-test the integration before training:
+
+```sh
+# inside the Isaac Lab container, CWD=/workspace/bebop_bot/sim
+/workspace/isaaclab/isaaclab.sh -p bebop_training/tools/actuator_net_fit.py
+/workspace/isaaclab/isaaclab.sh -p scripts/verify_actuator_net.py --headless
+```
+
+The fit tool reads `bebop-sysid-logs/` and writes TorchScript nets +
+`meta.json` (with net-vs-baseline RMSE) to `bebop_training/assets/actuator_nets/`.
+Policy I/O is unchanged, so ActNet checkpoints deploy through the normal
+ONNX path.
 
 ### Retraining after a sim-to-real fix
 

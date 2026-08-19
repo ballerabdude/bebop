@@ -155,7 +155,8 @@ def main() -> None:
         print(f"  ONNX output shape: {out_shape}  (env act_dim = {act_dim})")
         print(
             "  NOTE: bebop-linux/src/config.rs expects "
-            "OBS_DIM=36, ACTION_DIM=8 for Bebop V2."
+            "OBS_DIM=49, ACTION_DIM=24 for Bebop V2 "
+            "(dims::OBS_DIM / 3*NUM_JOINTS)."
         )
     except ImportError:
         print("  (install onnxruntime to print I/O shape sanity check)")

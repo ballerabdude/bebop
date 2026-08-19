@@ -38,6 +38,18 @@ pub enum SupervisorEvent {
     MotorDisarmed { joint: String },
 }
 
+/// Per-joint outcome of [`Supervisor::set_mechanical_zero_all`].
+#[derive(Debug)]
+pub struct ZeroAllOutcome {
+    pub joint_name: String,
+    /// SET_ZERO write error, if the write failed for this joint.
+    pub error: Option<anyhow::Error>,
+    /// Fresh feedback position (URDF frame) sampled after the post-zero
+    /// settle window. `None` when no feedback has ever been received
+    /// for the joint (motor offline — also a verification failure).
+    pub position_after_rad: Option<f32>,
+}
+
 pub struct Supervisor {
     cfg: Arc<RobotConfig>,
     bus_pool: Arc<BusPool>,
@@ -542,6 +554,91 @@ impl Supervisor {
         }
         info!(joint, "mechanical zero set");
         Ok(())
+    }
+
+    /// Settle window after a batch SET_ZERO: the RX thread needs a few
+    /// feedback periods to overwrite the optimistically-zeroed cached
+    /// position with the motor's authoritative post-zero reading before
+    /// we sample it for verification.
+    pub const ZERO_VERIFY_SETTLE_MS: u64 = 150;
+    /// Post-zero verification tolerance (rad). After SET_ZERO + settle,
+    /// a motor whose fresh feedback still reads outside this band did
+    /// not honour the write (Robstride motors intermittently drop the
+    /// stored origin across power cycles — the exact failure this batch
+    /// path exists to catch) — or the joint isn't actually at the
+    /// reference pose. Either way the operator must see it.
+    pub const ZERO_VERIFY_TOLERANCE_RAD: f32 = 0.05;
+
+    /// Batch re-zero of every actuator for the guided zero-calibration
+    /// flow (robot placed in the reference pose — face-flat, legs
+    /// straight — with all joints disarmed). One operator gesture
+    /// re-zeroes everything, so the origins can't end up mixed across
+    /// joints that lost flash at different power cycles.
+    ///
+    /// Preconditions are checked for ALL joints *before* any SET_ZERO
+    /// is sent (atomic refusal): no E-STOP, every joint disarmed, every
+    /// CAN bus healthy. After the writes + a settle window, each
+    /// joint's fresh feedback position is sampled into the returned
+    /// outcomes for verification against [`Self::ZERO_VERIFY_TOLERANCE_RAD`].
+    pub fn set_mechanical_zero_all(&self) -> Result<Vec<ZeroAllOutcome>> {
+        if self.estop_active() {
+            return Err(anyhow!(
+                "cannot re-zero actuators while E-STOP is latched; reset first"
+            ));
+        }
+        let mut armed = Vec::new();
+        let mut unhealthy = Vec::new();
+        for (idx, entry) in self.motors.iter().enumerate() {
+            let is_armed = entry
+                .lock()
+                .map(|g| g.armed)
+                .map_err(|p| anyhow!("motor mutex poisoned: {p}"))?;
+            if is_armed {
+                armed.push(self.cfg.joints[idx].name.clone());
+            }
+            let bus = &self.cfg.joints[idx].can_bus;
+            if !self.bus_pool.is_healthy(bus) {
+                unhealthy.push(format!("{} ({bus})", self.cfg.joints[idx].name));
+            }
+        }
+        if !armed.is_empty() {
+            return Err(anyhow!(
+                "refusing to re-zero all: joints still armed: {}. Disarm all first.",
+                armed.join(", ")
+            ));
+        }
+        if !unhealthy.is_empty() {
+            return Err(anyhow!(
+                "refusing to re-zero all: unhealthy CAN bus for: {}. \
+                 Verify motors are powered + wired (ERROR-ACTIVE).",
+                unhealthy.join(", ")
+            ));
+        }
+
+        let mut outcomes = Vec::with_capacity(self.motors.len());
+        for idx in 0..self.motors.len() {
+            let name = self.cfg.joints[idx].name.clone();
+            let error = self.set_mechanical_zero(&name).err();
+            outcomes.push(ZeroAllOutcome {
+                joint_name: name,
+                error,
+                position_after_rad: None,
+            });
+        }
+
+        // Let post-zero feedback frames land, then sample fresh
+        // positions for verification. `motor.state.position` is already
+        // direction-corrected (URDF frame) at the RX boundary.
+        std::thread::sleep(Duration::from_millis(Self::ZERO_VERIFY_SETTLE_MS));
+        for (idx, outcome) in outcomes.iter_mut().enumerate() {
+            if let Ok(g) = self.motors[idx].lock() {
+                if g.last_rx.is_some() {
+                    outcome.position_after_rad = Some(g.motor.state.position);
+                }
+            }
+        }
+        info!("mechanical zero set for all actuators");
+        Ok(outcomes)
     }
 
     pub fn arm_all(&self) -> Vec<(String, anyhow::Error)> {
