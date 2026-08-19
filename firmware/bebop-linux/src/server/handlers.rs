@@ -7,6 +7,7 @@
 use crate::imu::ImuShared;
 use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
+use crate::drive::Twist;
 use crate::mode::Mode;
 use crate::safety::limits::BreachReason;
 use crate::safety::Supervisor;
@@ -200,6 +201,64 @@ pub fn handle_client_message(
                 }
                 Err(_) => error_response(request_id, "policy_control mutex poisoned".into()),
             }
+        }
+        P::SetVelocityCommand(req) => {
+            sup.set_cmd_vel(Twist {
+                vx: req.linear_x,
+                wz: req.angular_z,
+            });
+            ack(
+                request_id,
+                format!(
+                    "drive twist -> vx {:.3} m/s, wz {:.3} rad/s",
+                    req.linear_x, req.angular_z
+                ),
+            )
+        }
+        P::SetWheelEnabled(req) => {
+            let result = if req.enabled {
+                sup.arm_wheel(&req.wheel_name)
+            } else {
+                sup.disarm_wheel(&req.wheel_name)
+            };
+            match result {
+                Ok(()) => ack(
+                    request_id,
+                    format!(
+                        "{} {}",
+                        if req.enabled { "armed" } else { "disarmed" },
+                        req.wheel_name
+                    ),
+                ),
+                Err(e) => error_response(request_id, fmt_err(&e)),
+            }
+        }
+        P::SetAllWheelsEnabled(req) => {
+            let errs = if req.enabled {
+                sup.arm_all_wheels()
+            } else {
+                sup.disarm_all_wheels()
+            };
+            if errs.is_empty() {
+                ack(
+                    request_id,
+                    format!(
+                        "all wheels {}",
+                        if req.enabled { "armed" } else { "disarmed" }
+                    ),
+                )
+            } else {
+                let msg = errs
+                    .iter()
+                    .map(|(n, e)| format!("{n}: {:#}", e))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                error_response(request_id, format!("partial failure: {msg}"))
+            }
+        }
+        P::ResetOdometry(_) => {
+            sup.reset_odometry();
+            ack(request_id, "odometry reset".into())
         }
     }
 }

@@ -72,6 +72,18 @@ message ClientRuntimeMessage {
     // power cycle, so this flow is part of normal pre-flight, not just
     // reassembly.
     SetMechanicalZeroAll set_mechanical_zero_all = 13;
+    // Wheeled differential-drive chassis commands (no-op on the humanoid,
+    // which has no `wheels:`/`drive:` in its YAML).
+    //
+    // Drive a twist (body-frame forward + yaw rate) into the wheel axes;
+    // the firmware clamps, slew-limits, and converts to per-wheel velocity.
+    SetVelocityCommand   set_velocity_command   = 14;
+    // Arm/disarm a single ODrive wheel (name matches the `wheels:` YAML).
+    SetWheelEnabled      set_wheel_enabled      = 15;
+    // Arm/disarm every configured wheel at once.
+    SetAllWheelsEnabled  set_all_wheels_enabled = 16;
+    // Reset the wheel-encoder odometry pose to the origin.
+    ResetOdometry        reset_odometry         = 17;
   }
   reserved 12;
   reserved "set_policy_capture";
@@ -152,6 +164,52 @@ message MotorState {
   float  vel_max       = 22;
   float  tau_max       = 23;
   float  temp_max      = 24;
+}
+
+// ---------------------------------------------------------------------------
+// ODrive wheel state (wheeled differential-drive chassis)
+// ---------------------------------------------------------------------------
+
+// One entry per configured wheel. Positions/velocities are already in robot
+// frame (the per-wheel `direction` sign applied), so a positive velocity is
+// forward for both wheels.
+message WheelState {
+  string name           = 1;   // matches config YAML `wheels[].name`
+  string can_interface  = 2;
+  uint32 node_id        = 3;   // ODrive node id (0..63)
+
+  bool   armed             = 5;
+  // True if no encoder/heartbeat within `feedback_timeout_ms`.
+  bool   feedback_stale    = 6;
+  // True once at least one encoder/heartbeat frame has been decoded.
+  bool   position_received = 15;
+  // Axis error word from the heartbeat (0 = healthy).
+  uint32 error_code        = 7;
+
+  // Cumulative wheel angle (rad, unbounded) and angular velocity (rad/s).
+  float  position_rad      = 10;
+  float  velocity_rad_s    = 11;
+  // Most recent commanded velocity (rad/s), post clamp + slew.
+  float  target_velocity_rad_s = 14;
+
+  // Hard velocity limit from the YAML config (rad/s).
+  float  vel_max           = 22;
+}
+
+// Differential-drive summary: the operator twist actually in effect plus the
+// wheel-encoder odometry pose. `present` is false on the humanoid (no
+// `drive:` block).
+message DriveState {
+  bool  present = 1;
+
+  // Operator twist command (body frame), clamped/slewed by the firmware.
+  float cmd_linear_x  = 2;
+  float cmd_angular_z = 3;
+
+  // Wheel-encoder odometry pose (m, m, rad). Reset via ResetOdometry.
+  float odom_x     = 10;
+  float odom_y     = 11;
+  float odom_theta = 12;
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +318,10 @@ message TelemetryFrame {
   // `policy_io.present = false` when no policy was loaded at boot.
   // Optional so old clients can still decode the frame.
   PolicyIoStats policy_io = 14;
+  // ODrive wheel state (empty on the humanoid).
+  repeated WheelState wheels = 15;
+  // Differential-drive summary; `present=false` without a `drive:` block.
+  DriveState drive = 16;
 }
 
 // One-shot reply to GetSnapshot — same content as TelemetryFrame.
@@ -273,6 +335,8 @@ message Snapshot {
   PowerStats power      = 12;
   ImuStats imu          = 13;
   PolicyIoStats policy_io = 14;
+  repeated WheelState wheels = 15;
+  DriveState drive = 16;
 }
 
 message BusStatusUpdate {
@@ -300,6 +364,27 @@ message SetMotorEnabled {
 message SetAllMotorsEnabled {
   bool enabled = 1;
 }
+
+// Drive a twist into the wheeled chassis. `linear_x` (m/s forward) and
+// `angular_z` (rad/s yaw, + left) are body-frame; the firmware converts to
+// per-wheel velocity via the `drive:` geometry and slews/clamps each tick.
+message SetVelocityCommand {
+  float linear_x  = 1;
+  float angular_z = 2;
+}
+
+// Arm/disarm a single ODrive wheel. `wheel_name` matches a `wheels:[]` key
+// in the robot YAML; arming sets velocity mode + closed-loop control.
+message SetWheelEnabled {
+  string wheel_name = 1;
+  bool   enabled    = 2;
+}
+
+message SetAllWheelsEnabled {
+  bool enabled = 1;
+}
+
+message ResetOdometry {}
 
 message SetMode {
   Mode mode = 1;

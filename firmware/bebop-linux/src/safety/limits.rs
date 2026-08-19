@@ -1,6 +1,7 @@
 //! Per-motor runtime state and limit-breach types.
 
-use crate::config::JointConfig;
+use crate::config::{JointConfig, WheelConfig};
+use crate::odrive::ODriveWheel;
 use crate::robstride::RobstrideMotor;
 use std::time::Instant;
 
@@ -217,4 +218,84 @@ impl MotorRuntimeState {
             temp_max: h.temp_max,
         }
     }
+}
+
+/// Runtime state owned by the supervisor for a single ODrive wheel.
+///
+/// Wraps [`ODriveWheel`] (protocol framing + cached feedback) and adds
+/// supervisor-only fields: the armed flag, the feedback-clock timestamp,
+/// and the last *commanded* velocity (for slew limiting / telemetry).
+/// Mirrors [`MotorRuntimeState`] for the joint path.
+#[derive(Debug)]
+pub struct WheelRuntimeState {
+    pub wheel_cfg: WheelConfig,
+    pub wheel: ODriveWheel,
+    pub armed: bool,
+    /// Wall-clock of the last encoder/heartbeat frame. `None` until the
+    /// first frame arrives.
+    pub last_rx: Option<Instant>,
+    /// Most recently commanded wheel velocity (robot frame, rad/s), used
+    /// for the per-tick slew limiter and telemetry.
+    pub last_target_vel: f32,
+}
+
+impl WheelRuntimeState {
+    pub fn new(wheel_cfg: WheelConfig) -> Self {
+        let wheel = ODriveWheel::new(wheel_cfg.node_id);
+        Self {
+            wheel_cfg,
+            wheel,
+            armed: false,
+            last_rx: None,
+            last_target_vel: 0.0,
+        }
+    }
+
+    /// Whether feedback hasn't arrived within `feedback_timeout_ms`.
+    pub fn feedback_stale(&self, now: Instant) -> bool {
+        match self.last_rx {
+            None => false,
+            Some(t) => {
+                let elapsed_ms = now.duration_since(t).as_secs_f32() * 1000.0;
+                elapsed_ms > self.wheel_cfg.feedback_timeout_ms
+            }
+        }
+    }
+
+    pub fn snapshot(&self, now: Instant) -> WheelSnapshot {
+        // `state.position` / `state.velocity` are already in robot frame:
+        // the supervisor applies `direction` at the RX boundary (see
+        // `Supervisor::on_wheel_encoder`), mirroring the joint path.
+        WheelSnapshot {
+            name: self.wheel_cfg.name.clone(),
+            can_interface: self.wheel_cfg.can_interface.clone(),
+            node_id: self.wheel_cfg.node_id,
+            armed: self.armed,
+            feedback_stale: self.feedback_stale(now),
+            position_received: self.last_rx.is_some(),
+            has_error: self.wheel.state.has_error,
+            error_code: self.wheel.state.error_code,
+            position: self.wheel.state.position,
+            velocity: self.wheel.state.velocity,
+            target_velocity: self.last_target_vel,
+            vel_max: self.wheel_cfg.vel_max,
+        }
+    }
+}
+
+/// Read-only wheel snapshot for telemetry.
+#[derive(Debug, Clone)]
+pub struct WheelSnapshot {
+    pub name: String,
+    pub can_interface: String,
+    pub node_id: u8,
+    pub armed: bool,
+    pub feedback_stale: bool,
+    pub position_received: bool,
+    pub has_error: bool,
+    pub error_code: u32,
+    pub position: f32,
+    pub velocity: f32,
+    pub target_velocity: f32,
+    pub vel_max: f32,
 }

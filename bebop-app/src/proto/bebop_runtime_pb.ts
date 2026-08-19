@@ -22,7 +22,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file bebop_runtime.proto.
  */
 export const file_bebop_runtime: GenFile = /*@__PURE__*/
-  fileDesc("ChNiZWJvcF9ydW50aW1lLnByb3RvEhBiZWJvcC5ydW50aW1lLnYxIsoGChRDbGllbnRSdW50aW1lTWVzc2FnZRISCgpyZXF1ZXN0X2lkGGQgASgNEkMKE3N1YnNjcmliZV90ZWxlbWV0cnkYASABKAsyJC5iZWJvcC5ydW50aW1lLnYxLlN1YnNjcmliZVRlbGVtZXRyeUgAEkcKFXVuc3Vic2NyaWJlX3RlbGVtZXRyeRgCIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVUZWxlbWV0cnlIABI1CgxnZXRfc25hcHNob3QYAyABKAsyHS5iZWJvcC5ydW50aW1lLnYxLkdldFNuYXBzaG90SAASPgoRc2V0X21vdG9yX2VuYWJsZWQYBCABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldE1vdG9yRW5hYmxlZEgAEkcKFnNldF9hbGxfbW90b3JzX2VuYWJsZWQYBSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbE1vdG9yc0VuYWJsZWRIABItCghzZXRfbW9kZRgGIAEoCzIZLmJlYm9wLnJ1bnRpbWUudjEuU2V0TW9kZUgAEjkKDmVtZXJnZW5jeV9zdG9wGAcgASgLMh8uYmVib3AucnVudGltZS52MS5FbWVyZ2VuY3lTdG9wSAASMwoLcmVzZXRfZXN0b3AYCCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlJlc2V0RVN0b3BIABI8ChBzZXRfbW90b3JfdGFyZ2V0GAkgASgLMiAuYmVib3AucnVudGltZS52MS5TZXRNb3RvclRhcmdldEgAEkIKE3NldF9tZWNoYW5pY2FsX3plcm8YCiABKAsyIy5iZWJvcC5ydW50aW1lLnYxLlNldE1lY2hhbmljYWxaZXJvSAASPwoSc2V0X3BvbGljeV9kcnlfcnVuGAsgASgLMiEuYmVib3AucnVudGltZS52MS5TZXRQb2xpY3lEcnlSdW5IABJJChdzZXRfbWVjaGFuaWNhbF96ZXJvX2FsbBgNIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuU2V0TWVjaGFuaWNhbFplcm9BbGxIAEIJCgdwYXlsb2FkSgQIDBANUhJzZXRfcG9saWN5X2NhcHR1cmUilQMKFFNlcnZlclJ1bnRpbWVNZXNzYWdlEhIKCnJlcXVlc3RfaWQYZCABKA0SJAoDYWNrGAEgASgLMhUuYmVib3AucnVudGltZS52MS5BY2tIABIoCgVlcnJvchgCIAEoCzIXLmJlYm9wLnJ1bnRpbWUudjEuRXJyb3JIABIuCghzbmFwc2hvdBgDIAEoCzIaLmJlYm9wLnJ1bnRpbWUudjEuU25hcHNob3RIABI1Cgl0ZWxlbWV0cnkYBCABKAsyIC5iZWJvcC5ydW50aW1lLnYxLlRlbGVtZXRyeUZyYW1lSAASNQoMbW9kZV9jaGFuZ2VkGAUgASgLMh0uYmVib3AucnVudGltZS52MS5Nb2RlQ2hhbmdlZEgAEjcKDWVzdG9wX2xhdGNoZWQYBiABKAsyHi5iZWJvcC5ydW50aW1lLnYxLkVTdG9wTGF0Y2hlZEgAEjcKCmJ1c19zdGF0dXMYByABKAsyIS5iZWJvcC5ydW50aW1lLnYxLkJ1c1N0YXR1c1VwZGF0ZUgAQgkKB3BheWxvYWQigQMKCk1vdG9yU3RhdGUSEgoKam9pbnRfbmFtZRgBIAEoCRIVCg1jYW5faW50ZXJmYWNlGAIgASgJEhAKCG1vdG9yX2lkGAMgASgNEg0KBW1vZGVsGAQgASgJEg0KBWFybWVkGAUgASgIEhYKDmZlZWRiYWNrX3N0YWxlGAYgASgIEhIKCmZhdWx0X2JpdHMYByABKA0SFAoMcG9zaXRpb25fcmFkGAogASgCEhYKDnZlbG9jaXR5X3JhZF9zGAsgASgCEhEKCXRvcnF1ZV9ubRgMIAEoAhIVCg10ZW1wZXJhdHVyZV9jGA0gASgCEhkKEXBvc2l0aW9uX3JlY2VpdmVkGA8gASgIEhsKE3RhcmdldF9wb3NpdGlvbl9yYWQYDiABKAISEwoLcG9zX21pbl9yYWQYFCABKAISEwoLcG9zX21heF9yYWQYFSABKAISDwoHdmVsX21heBgWIAEoAhIPCgd0YXVfbWF4GBcgASgCEhAKCHRlbXBfbWF4GBggASgCIkEKCEJ1c0VudHJ5EhUKDWNhbl9pbnRlcmZhY2UYASABKAkSDQoFc3RhdGUYAiABKAkSDwoHaGVhbHRoeRgDIAEoCCLpBAoKUG93ZXJTdGF0cxIPCgdwcmVzZW50GAEgASgIEhUKDWNhbl9pbnRlcmZhY2UYAiABKAkSEAoIcG93ZXJfaWQYAyABKA0SGAoQZmlybXdhcmVfdmVyc2lvbhgEIAEoCRIXCg9zdGF0dXNfcmVjZWl2ZWQYCiABKAgSFAoMc3RhdHVzX3N0YWxlGAsgASgIEhoKEmxhc3Rfc3RhdHVzX2FnZV9tcxgMIAEoDRIZChFiYXR0ZXJ5X3ZvbHRhZ2VfdhgUIAEoAhIXCg9tb3Rvcl92b2x0YWdlX3YYFSABKAISGwoTYm9hcmRfdGVtcGVyYXR1cmVfYxgWIAEoAhISCgpmYXVsdF9iaXRzGB4gASgNEhkKEWZhdWx0X2Rlc2NyaXB0aW9uGB8gASgJEhMKC3JhaWxfMTJ2X29uGCAgASgIEhUKDXNvZnRfc3RhcnRfb24YISABKAgSFQoNbW90b3JfcmFpbF9vbhgiIAEoCBITCgtyYWlsXzI0dl9vbhgjIAEoCBIUCgxjdXJyZW50X2FsX2EYKCABKAISFAoMY3VycmVudF9hcl9hGCkgASgCEhQKDGN1cnJlbnRfbGxfYRgqIAEoAhIUCgxjdXJyZW50X2xyX2EYKyABKAISHQoVdG90YWxfbW90b3JfY3VycmVudF9hGCwgASgCEhUKDWJhdHRlcnlfY2VsbHMYMiABKA0SGwoTcGFja19mdWxsX3ZvbHRhZ2VfdhgzIAEoAhIcChRwYWNrX2VtcHR5X3ZvbHRhZ2Vfdhg0IAEoAhIbChNzdGF0ZV9vZl9jaGFyZ2VfcGN0GDUgASgCItwCCg5UZWxlbWV0cnlGcmFtZRIUCgxob3N0X3VuaXhfbXMYASABKAQSJAoEbW9kZRgCIAEoDjIWLmJlYm9wLnJ1bnRpbWUudjEuTW9kZRIVCg1lc3RvcF9sYXRjaGVkGAMgASgIEhQKDGVzdG9wX3JlYXNvbhgEIAEoCRIsCgZtb3RvcnMYCiADKAsyHC5iZWJvcC5ydW50aW1lLnYxLk1vdG9yU3RhdGUSKQoFYnVzZXMYCyADKAsyGi5iZWJvcC5ydW50aW1lLnYxLkJ1c0VudHJ5EisKBXBvd2VyGAwgASgLMhwuYmVib3AucnVudGltZS52MS5Qb3dlclN0YXRzEicKA2ltdRgNIAEoCzIaLmJlYm9wLnJ1bnRpbWUudjEuSW11U3RhdHMSMgoJcG9saWN5X2lvGA4gASgLMh8uYmVib3AucnVudGltZS52MS5Qb2xpY3lJb1N0YXRzItYCCghTbmFwc2hvdBIUCgxob3N0X3VuaXhfbXMYASABKAQSJAoEbW9kZRgCIAEoDjIWLmJlYm9wLnJ1bnRpbWUudjEuTW9kZRIVCg1lc3RvcF9sYXRjaGVkGAMgASgIEhQKDGVzdG9wX3JlYXNvbhgEIAEoCRIsCgZtb3RvcnMYCiADKAsyHC5iZWJvcC5ydW50aW1lLnYxLk1vdG9yU3RhdGUSKQoFYnVzZXMYCyADKAsyGi5iZWJvcC5ydW50aW1lLnYxLkJ1c0VudHJ5EisKBXBvd2VyGAwgASgLMhwuYmVib3AucnVudGltZS52MS5Qb3dlclN0YXRzEicKA2ltdRgNIAEoCzIaLmJlYm9wLnJ1bnRpbWUudjEuSW11U3RhdHMSMgoJcG9saWN5X2lvGA4gASgLMh8uYmVib3AucnVudGltZS52MS5Qb2xpY3lJb1N0YXRzIjwKD0J1c1N0YXR1c1VwZGF0ZRIpCgVidXNlcxgBIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkiJQoSU3Vic2NyaWJlVGVsZW1ldHJ5Eg8KB3JhdGVfaHoYASABKA0iFgoUVW5zdWJzY3JpYmVUZWxlbWV0cnkiDQoLR2V0U25hcHNob3QiNgoPU2V0TW90b3JFbmFibGVkEhIKCmpvaW50X25hbWUYASABKAkSDwoHZW5hYmxlZBgCIAEoCCImChNTZXRBbGxNb3RvcnNFbmFibGVkEg8KB2VuYWJsZWQYASABKAgiLwoHU2V0TW9kZRIkCgRtb2RlGAEgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlIh8KDUVtZXJnZW5jeVN0b3ASDgoGcmVhc29uGAEgASgJIgwKClJlc2V0RVN0b3AiOgoOU2V0TW90b3JUYXJnZXQSEgoKam9pbnRfbmFtZRgBIAEoCRIUCgxwb3NpdGlvbl9yYWQYAiABKAIiJwoRU2V0TWVjaGFuaWNhbFplcm8SEgoKam9pbnRfbmFtZRgBIAEoCSIWChRTZXRNZWNoYW5pY2FsWmVyb0FsbCIiCg9TZXRQb2xpY3lEcnlSdW4SDwoHZW5hYmxlZBgBIAEoCCIiCgNBY2sSCgoCb2sYASABKAgSDwoHbWVzc2FnZRgCIAEoCSIYCgVFcnJvchIPCgdtZXNzYWdlGAEgASgJIjMKC01vZGVDaGFuZ2VkEiQKBG1vZGUYASABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUiHgoMRVN0b3BMYXRjaGVkEg4KBnJlYXNvbhgBIAEoCSLOAQoISW11U3RhdHMSDwoHcHJlc2VudBgBIAEoCBIQCghyZWNlaXZlZBgKIAEoCBINCgVzdGFsZRgLIAEoCBIaChJsYXN0X3VwZGF0ZV9hZ2VfbXMYDCABKA0SFAoMcXVhdGVybmlvbl94GBQgASgCEhQKDHF1YXRlcm5pb25feRgVIAEoAhIUCgxxdWF0ZXJuaW9uX3oYFiABKAISFAoMcXVhdGVybmlvbl93GBcgASgCEhwKFGhlYWRpbmdfYWNjdXJhY3lfcmFkGBggASgCIrUCCg1Qb2xpY3lJb1N0YXRzEg8KB3ByZXNlbnQYASABKAgSDgoGYWN0aXZlGAIgASgIEhAKCGltdV9saXZlGAMgASgIEg8KB2RyeV9ydW4YBSABKAgSFgoOY2FwdHVyZV9hY3RpdmUYBiABKAgSFAoMY2FwdHVyZV9wYXRoGAcgASgJEhQKDGNhcHR1cmVfcm93cxgIIAEoBBIXCg9jYXB0dXJlX2Ryb3BwZWQYCSABKAQSEwoLb2JzZXJ2YXRpb24YCiADKAISEgoKcmF3X2FjdGlvbhgLIAMoAhIcChRwb3NpdGlvbl90YXJnZXRzX3JhZBgUIAMoAhIKCgJrcBgVIAMoAhIKCgJrZBgWIAMoAhITCgtqb2ludF9uYW1lcxgeIAMoCUoECAQQBVIJZ3lyb19saXZlKlIKBE1vZGUSFAoQTU9ERV9VTlNQRUNJRklFRBAAEg0KCU1PREVfSURMRRABEhAKDE1PREVfRElBTF9JThACEhMKD01PREVfUlVOX1BPTElDWRADYgZwcm90bzM");
+  fileDesc("ChNiZWJvcF9ydW50aW1lLnByb3RvEhBiZWJvcC5ydW50aW1lLnYxItQIChRDbGllbnRSdW50aW1lTWVzc2FnZRISCgpyZXF1ZXN0X2lkGGQgASgNEkMKE3N1YnNjcmliZV90ZWxlbWV0cnkYASABKAsyJC5iZWJvcC5ydW50aW1lLnYxLlN1YnNjcmliZVRlbGVtZXRyeUgAEkcKFXVuc3Vic2NyaWJlX3RlbGVtZXRyeRgCIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVUZWxlbWV0cnlIABI1CgxnZXRfc25hcHNob3QYAyABKAsyHS5iZWJvcC5ydW50aW1lLnYxLkdldFNuYXBzaG90SAASPgoRc2V0X21vdG9yX2VuYWJsZWQYBCABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldE1vdG9yRW5hYmxlZEgAEkcKFnNldF9hbGxfbW90b3JzX2VuYWJsZWQYBSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbE1vdG9yc0VuYWJsZWRIABItCghzZXRfbW9kZRgGIAEoCzIZLmJlYm9wLnJ1bnRpbWUudjEuU2V0TW9kZUgAEjkKDmVtZXJnZW5jeV9zdG9wGAcgASgLMh8uYmVib3AucnVudGltZS52MS5FbWVyZ2VuY3lTdG9wSAASMwoLcmVzZXRfZXN0b3AYCCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlJlc2V0RVN0b3BIABI8ChBzZXRfbW90b3JfdGFyZ2V0GAkgASgLMiAuYmVib3AucnVudGltZS52MS5TZXRNb3RvclRhcmdldEgAEkIKE3NldF9tZWNoYW5pY2FsX3plcm8YCiABKAsyIy5iZWJvcC5ydW50aW1lLnYxLlNldE1lY2hhbmljYWxaZXJvSAASPwoSc2V0X3BvbGljeV9kcnlfcnVuGAsgASgLMiEuYmVib3AucnVudGltZS52MS5TZXRQb2xpY3lEcnlSdW5IABJJChdzZXRfbWVjaGFuaWNhbF96ZXJvX2FsbBgNIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuU2V0TWVjaGFuaWNhbFplcm9BbGxIABJEChRzZXRfdmVsb2NpdHlfY29tbWFuZBgOIAEoCzIkLmJlYm9wLnJ1bnRpbWUudjEuU2V0VmVsb2NpdHlDb21tYW5kSAASPgoRc2V0X3doZWVsX2VuYWJsZWQYDyABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldFdoZWVsRW5hYmxlZEgAEkcKFnNldF9hbGxfd2hlZWxzX2VuYWJsZWQYECABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbFdoZWVsc0VuYWJsZWRIABI5Cg5yZXNldF9vZG9tZXRyeRgRIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUmVzZXRPZG9tZXRyeUgAQgkKB3BheWxvYWRKBAgMEA1SEnNldF9wb2xpY3lfY2FwdHVyZSKVAwoUU2VydmVyUnVudGltZU1lc3NhZ2USEgoKcmVxdWVzdF9pZBhkIAEoDRIkCgNhY2sYASABKAsyFS5iZWJvcC5ydW50aW1lLnYxLkFja0gAEigKBWVycm9yGAIgASgLMhcuYmVib3AucnVudGltZS52MS5FcnJvckgAEi4KCHNuYXBzaG90GAMgASgLMhouYmVib3AucnVudGltZS52MS5TbmFwc2hvdEgAEjUKCXRlbGVtZXRyeRgEIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuVGVsZW1ldHJ5RnJhbWVIABI1Cgxtb2RlX2NoYW5nZWQYBSABKAsyHS5iZWJvcC5ydW50aW1lLnYxLk1vZGVDaGFuZ2VkSAASNwoNZXN0b3BfbGF0Y2hlZBgGIAEoCzIeLmJlYm9wLnJ1bnRpbWUudjEuRVN0b3BMYXRjaGVkSAASNwoKYnVzX3N0YXR1cxgHIAEoCzIhLmJlYm9wLnJ1bnRpbWUudjEuQnVzU3RhdHVzVXBkYXRlSABCCQoHcGF5bG9hZCKBAwoKTW90b3JTdGF0ZRISCgpqb2ludF9uYW1lGAEgASgJEhUKDWNhbl9pbnRlcmZhY2UYAiABKAkSEAoIbW90b3JfaWQYAyABKA0SDQoFbW9kZWwYBCABKAkSDQoFYXJtZWQYBSABKAgSFgoOZmVlZGJhY2tfc3RhbGUYBiABKAgSEgoKZmF1bHRfYml0cxgHIAEoDRIUCgxwb3NpdGlvbl9yYWQYCiABKAISFgoOdmVsb2NpdHlfcmFkX3MYCyABKAISEQoJdG9ycXVlX25tGAwgASgCEhUKDXRlbXBlcmF0dXJlX2MYDSABKAISGQoRcG9zaXRpb25fcmVjZWl2ZWQYDyABKAgSGwoTdGFyZ2V0X3Bvc2l0aW9uX3JhZBgOIAEoAhITCgtwb3NfbWluX3JhZBgUIAEoAhITCgtwb3NfbWF4X3JhZBgVIAEoAhIPCgd2ZWxfbWF4GBYgASgCEg8KB3RhdV9tYXgYFyABKAISEAoIdGVtcF9tYXgYGCABKAIi9gEKCldoZWVsU3RhdGUSDAoEbmFtZRgBIAEoCRIVCg1jYW5faW50ZXJmYWNlGAIgASgJEg8KB25vZGVfaWQYAyABKA0SDQoFYXJtZWQYBSABKAgSFgoOZmVlZGJhY2tfc3RhbGUYBiABKAgSGQoRcG9zaXRpb25fcmVjZWl2ZWQYDyABKAgSEgoKZXJyb3JfY29kZRgHIAEoDRIUCgxwb3NpdGlvbl9yYWQYCiABKAISFgoOdmVsb2NpdHlfcmFkX3MYCyABKAISHQoVdGFyZ2V0X3ZlbG9jaXR5X3JhZF9zGA4gASgCEg8KB3ZlbF9tYXgYFiABKAIifgoKRHJpdmVTdGF0ZRIPCgdwcmVzZW50GAEgASgIEhQKDGNtZF9saW5lYXJfeBgCIAEoAhIVCg1jbWRfYW5ndWxhcl96GAMgASgCEg4KBm9kb21feBgKIAEoAhIOCgZvZG9tX3kYCyABKAISEgoKb2RvbV90aGV0YRgMIAEoAiJBCghCdXNFbnRyeRIVCg1jYW5faW50ZXJmYWNlGAEgASgJEg0KBXN0YXRlGAIgASgJEg8KB2hlYWx0aHkYAyABKAgi6QQKClBvd2VyU3RhdHMSDwoHcHJlc2VudBgBIAEoCBIVCg1jYW5faW50ZXJmYWNlGAIgASgJEhAKCHBvd2VyX2lkGAMgASgNEhgKEGZpcm13YXJlX3ZlcnNpb24YBCABKAkSFwoPc3RhdHVzX3JlY2VpdmVkGAogASgIEhQKDHN0YXR1c19zdGFsZRgLIAEoCBIaChJsYXN0X3N0YXR1c19hZ2VfbXMYDCABKA0SGQoRYmF0dGVyeV92b2x0YWdlX3YYFCABKAISFwoPbW90b3Jfdm9sdGFnZV92GBUgASgCEhsKE2JvYXJkX3RlbXBlcmF0dXJlX2MYFiABKAISEgoKZmF1bHRfYml0cxgeIAEoDRIZChFmYXVsdF9kZXNjcmlwdGlvbhgfIAEoCRITCgtyYWlsXzEydl9vbhggIAEoCBIVCg1zb2Z0X3N0YXJ0X29uGCEgASgIEhUKDW1vdG9yX3JhaWxfb24YIiABKAgSEwoLcmFpbF8yNHZfb24YIyABKAgSFAoMY3VycmVudF9hbF9hGCggASgCEhQKDGN1cnJlbnRfYXJfYRgpIAEoAhIUCgxjdXJyZW50X2xsX2EYKiABKAISFAoMY3VycmVudF9scl9hGCsgASgCEh0KFXRvdGFsX21vdG9yX2N1cnJlbnRfYRgsIAEoAhIVCg1iYXR0ZXJ5X2NlbGxzGDIgASgNEhsKE3BhY2tfZnVsbF92b2x0YWdlX3YYMyABKAISHAoUcGFja19lbXB0eV92b2x0YWdlX3YYNCABKAISGwoTc3RhdGVfb2ZfY2hhcmdlX3BjdBg1IAEoAiK3AwoOVGVsZW1ldHJ5RnJhbWUSFAoMaG9zdF91bml4X21zGAEgASgEEiQKBG1vZGUYAiABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUSFQoNZXN0b3BfbGF0Y2hlZBgDIAEoCBIUCgxlc3RvcF9yZWFzb24YBCABKAkSLAoGbW90b3JzGAogAygLMhwuYmVib3AucnVudGltZS52MS5Nb3RvclN0YXRlEikKBWJ1c2VzGAsgAygLMhouYmVib3AucnVudGltZS52MS5CdXNFbnRyeRIrCgVwb3dlchgMIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuUG93ZXJTdGF0cxInCgNpbXUYDSABKAsyGi5iZWJvcC5ydW50aW1lLnYxLkltdVN0YXRzEjIKCXBvbGljeV9pbxgOIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUG9saWN5SW9TdGF0cxIsCgZ3aGVlbHMYDyADKAsyHC5iZWJvcC5ydW50aW1lLnYxLldoZWVsU3RhdGUSKwoFZHJpdmUYECABKAsyHC5iZWJvcC5ydW50aW1lLnYxLkRyaXZlU3RhdGUisQMKCFNuYXBzaG90EhQKDGhvc3RfdW5peF9tcxgBIAEoBBIkCgRtb2RlGAIgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlEhUKDWVzdG9wX2xhdGNoZWQYAyABKAgSFAoMZXN0b3BfcmVhc29uGAQgASgJEiwKBm1vdG9ycxgKIAMoCzIcLmJlYm9wLnJ1bnRpbWUudjEuTW90b3JTdGF0ZRIpCgVidXNlcxgLIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkSKwoFcG93ZXIYDCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlBvd2VyU3RhdHMSJwoDaW11GA0gASgLMhouYmVib3AucnVudGltZS52MS5JbXVTdGF0cxIyCglwb2xpY3lfaW8YDiABKAsyHy5iZWJvcC5ydW50aW1lLnYxLlBvbGljeUlvU3RhdHMSLAoGd2hlZWxzGA8gAygLMhwuYmVib3AucnVudGltZS52MS5XaGVlbFN0YXRlEisKBWRyaXZlGBAgASgLMhwuYmVib3AucnVudGltZS52MS5Ecml2ZVN0YXRlIjwKD0J1c1N0YXR1c1VwZGF0ZRIpCgVidXNlcxgBIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkiJQoSU3Vic2NyaWJlVGVsZW1ldHJ5Eg8KB3JhdGVfaHoYASABKA0iFgoUVW5zdWJzY3JpYmVUZWxlbWV0cnkiDQoLR2V0U25hcHNob3QiNgoPU2V0TW90b3JFbmFibGVkEhIKCmpvaW50X25hbWUYASABKAkSDwoHZW5hYmxlZBgCIAEoCCImChNTZXRBbGxNb3RvcnNFbmFibGVkEg8KB2VuYWJsZWQYASABKAgiOQoSU2V0VmVsb2NpdHlDb21tYW5kEhAKCGxpbmVhcl94GAEgASgCEhEKCWFuZ3VsYXJfehgCIAEoAiI2Cg9TZXRXaGVlbEVuYWJsZWQSEgoKd2hlZWxfbmFtZRgBIAEoCRIPCgdlbmFibGVkGAIgASgIIiYKE1NldEFsbFdoZWVsc0VuYWJsZWQSDwoHZW5hYmxlZBgBIAEoCCIPCg1SZXNldE9kb21ldHJ5Ii8KB1NldE1vZGUSJAoEbW9kZRgBIAEoDjIWLmJlYm9wLnJ1bnRpbWUudjEuTW9kZSIfCg1FbWVyZ2VuY3lTdG9wEg4KBnJlYXNvbhgBIAEoCSIMCgpSZXNldEVTdG9wIjoKDlNldE1vdG9yVGFyZ2V0EhIKCmpvaW50X25hbWUYASABKAkSFAoMcG9zaXRpb25fcmFkGAIgASgCIicKEVNldE1lY2hhbmljYWxaZXJvEhIKCmpvaW50X25hbWUYASABKAkiFgoUU2V0TWVjaGFuaWNhbFplcm9BbGwiIgoPU2V0UG9saWN5RHJ5UnVuEg8KB2VuYWJsZWQYASABKAgiIgoDQWNrEgoKAm9rGAEgASgIEg8KB21lc3NhZ2UYAiABKAkiGAoFRXJyb3ISDwoHbWVzc2FnZRgBIAEoCSIzCgtNb2RlQ2hhbmdlZBIkCgRtb2RlGAEgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlIh4KDEVTdG9wTGF0Y2hlZBIOCgZyZWFzb24YASABKAkizgEKCEltdVN0YXRzEg8KB3ByZXNlbnQYASABKAgSEAoIcmVjZWl2ZWQYCiABKAgSDQoFc3RhbGUYCyABKAgSGgoSbGFzdF91cGRhdGVfYWdlX21zGAwgASgNEhQKDHF1YXRlcm5pb25feBgUIAEoAhIUCgxxdWF0ZXJuaW9uX3kYFSABKAISFAoMcXVhdGVybmlvbl96GBYgASgCEhQKDHF1YXRlcm5pb25fdxgXIAEoAhIcChRoZWFkaW5nX2FjY3VyYWN5X3JhZBgYIAEoAiK1AgoNUG9saWN5SW9TdGF0cxIPCgdwcmVzZW50GAEgASgIEg4KBmFjdGl2ZRgCIAEoCBIQCghpbXVfbGl2ZRgDIAEoCBIPCgdkcnlfcnVuGAUgASgIEhYKDmNhcHR1cmVfYWN0aXZlGAYgASgIEhQKDGNhcHR1cmVfcGF0aBgHIAEoCRIUCgxjYXB0dXJlX3Jvd3MYCCABKAQSFwoPY2FwdHVyZV9kcm9wcGVkGAkgASgEEhMKC29ic2VydmF0aW9uGAogAygCEhIKCnJhd19hY3Rpb24YCyADKAISHAoUcG9zaXRpb25fdGFyZ2V0c19yYWQYFCADKAISCgoCa3AYFSADKAISCgoCa2QYFiADKAISEwoLam9pbnRfbmFtZXMYHiADKAlKBAgEEAVSCWd5cm9fbGl2ZSpSCgRNb2RlEhQKEE1PREVfVU5TUEVDSUZJRUQQABINCglNT0RFX0lETEUQARIQCgxNT0RFX0RJQUxfSU4QAhITCg9NT0RFX1JVTl9QT0xJQ1kQA2IGcHJvdG8z");
 
 /**
  * Client (operator app) -> server (bebop-linux) on the robot.
@@ -154,6 +154,42 @@ export type ClientRuntimeMessage = Message<"bebop.runtime.v1.ClientRuntimeMessag
      */
     value: SetMechanicalZeroAll;
     case: "setMechanicalZeroAll";
+  } | {
+    /**
+     * Wheeled differential-drive chassis commands (no-op on the humanoid,
+     * which has no `wheels:`/`drive:` in its YAML).
+     *
+     * Drive a twist (body-frame forward + yaw rate) into the wheel axes;
+     * the firmware clamps, slew-limits, and converts to per-wheel velocity.
+     *
+     * @generated from field: bebop.runtime.v1.SetVelocityCommand set_velocity_command = 14;
+     */
+    value: SetVelocityCommand;
+    case: "setVelocityCommand";
+  } | {
+    /**
+     * Arm/disarm a single ODrive wheel (name matches the `wheels:` YAML).
+     *
+     * @generated from field: bebop.runtime.v1.SetWheelEnabled set_wheel_enabled = 15;
+     */
+    value: SetWheelEnabled;
+    case: "setWheelEnabled";
+  } | {
+    /**
+     * Arm/disarm every configured wheel at once.
+     *
+     * @generated from field: bebop.runtime.v1.SetAllWheelsEnabled set_all_wheels_enabled = 16;
+     */
+    value: SetAllWheelsEnabled;
+    case: "setAllWheelsEnabled";
+  } | {
+    /**
+     * Reset the wheel-encoder odometry pose to the origin.
+     *
+     * @generated from field: bebop.runtime.v1.ResetOdometry reset_odometry = 17;
+     */
+    value: ResetOdometry;
+    case: "resetOdometry";
   } | { case: undefined; value?: undefined };
 };
 
@@ -365,6 +401,143 @@ export const MotorStateSchema: GenMessage<MotorState> = /*@__PURE__*/
   messageDesc(file_bebop_runtime, 2);
 
 /**
+ * One entry per configured wheel. Positions/velocities are already in robot
+ * frame (the per-wheel `direction` sign applied), so a positive velocity is
+ * forward for both wheels.
+ *
+ * @generated from message bebop.runtime.v1.WheelState
+ */
+export type WheelState = Message<"bebop.runtime.v1.WheelState"> & {
+  /**
+   * matches config YAML `wheels[].name`
+   *
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * @generated from field: string can_interface = 2;
+   */
+  canInterface: string;
+
+  /**
+   * ODrive node id (0..63)
+   *
+   * @generated from field: uint32 node_id = 3;
+   */
+  nodeId: number;
+
+  /**
+   * @generated from field: bool armed = 5;
+   */
+  armed: boolean;
+
+  /**
+   * True if no encoder/heartbeat within `feedback_timeout_ms`.
+   *
+   * @generated from field: bool feedback_stale = 6;
+   */
+  feedbackStale: boolean;
+
+  /**
+   * True once at least one encoder/heartbeat frame has been decoded.
+   *
+   * @generated from field: bool position_received = 15;
+   */
+  positionReceived: boolean;
+
+  /**
+   * Axis error word from the heartbeat (0 = healthy).
+   *
+   * @generated from field: uint32 error_code = 7;
+   */
+  errorCode: number;
+
+  /**
+   * Cumulative wheel angle (rad, unbounded) and angular velocity (rad/s).
+   *
+   * @generated from field: float position_rad = 10;
+   */
+  positionRad: number;
+
+  /**
+   * @generated from field: float velocity_rad_s = 11;
+   */
+  velocityRadS: number;
+
+  /**
+   * Most recent commanded velocity (rad/s), post clamp + slew.
+   *
+   * @generated from field: float target_velocity_rad_s = 14;
+   */
+  targetVelocityRadS: number;
+
+  /**
+   * Hard velocity limit from the YAML config (rad/s).
+   *
+   * @generated from field: float vel_max = 22;
+   */
+  velMax: number;
+};
+
+/**
+ * Describes the message bebop.runtime.v1.WheelState.
+ * Use `create(WheelStateSchema)` to create a new message.
+ */
+export const WheelStateSchema: GenMessage<WheelState> = /*@__PURE__*/
+  messageDesc(file_bebop_runtime, 3);
+
+/**
+ * Differential-drive summary: the operator twist actually in effect plus the
+ * wheel-encoder odometry pose. `present` is false on the humanoid (no
+ * `drive:` block).
+ *
+ * @generated from message bebop.runtime.v1.DriveState
+ */
+export type DriveState = Message<"bebop.runtime.v1.DriveState"> & {
+  /**
+   * @generated from field: bool present = 1;
+   */
+  present: boolean;
+
+  /**
+   * Operator twist command (body frame), clamped/slewed by the firmware.
+   *
+   * @generated from field: float cmd_linear_x = 2;
+   */
+  cmdLinearX: number;
+
+  /**
+   * @generated from field: float cmd_angular_z = 3;
+   */
+  cmdAngularZ: number;
+
+  /**
+   * Wheel-encoder odometry pose (m, m, rad). Reset via ResetOdometry.
+   *
+   * @generated from field: float odom_x = 10;
+   */
+  odomX: number;
+
+  /**
+   * @generated from field: float odom_y = 11;
+   */
+  odomY: number;
+
+  /**
+   * @generated from field: float odom_theta = 12;
+   */
+  odomTheta: number;
+};
+
+/**
+ * Describes the message bebop.runtime.v1.DriveState.
+ * Use `create(DriveStateSchema)` to create a new message.
+ */
+export const DriveStateSchema: GenMessage<DriveState> = /*@__PURE__*/
+  messageDesc(file_bebop_runtime, 4);
+
+/**
  * @generated from message bebop.runtime.v1.BusEntry
  */
 export type BusEntry = Message<"bebop.runtime.v1.BusEntry"> & {
@@ -394,7 +567,7 @@ export type BusEntry = Message<"bebop.runtime.v1.BusEntry"> & {
  * Use `create(BusEntrySchema)` to create a new message.
  */
 export const BusEntrySchema: GenMessage<BusEntry> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 3);
+  messageDesc(file_bebop_runtime, 5);
 
 /**
  * One frame per snapshot/telemetry frame, holding the latest cached
@@ -585,7 +758,7 @@ export type PowerStats = Message<"bebop.runtime.v1.PowerStats"> & {
  * Use `create(PowerStatsSchema)` to create a new message.
  */
 export const PowerStatsSchema: GenMessage<PowerStats> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 4);
+  messageDesc(file_bebop_runtime, 6);
 
 /**
  * @generated from message bebop.runtime.v1.TelemetryFrame
@@ -647,6 +820,20 @@ export type TelemetryFrame = Message<"bebop.runtime.v1.TelemetryFrame"> & {
    * @generated from field: bebop.runtime.v1.PolicyIoStats policy_io = 14;
    */
   policyIo?: PolicyIoStats | undefined;
+
+  /**
+   * ODrive wheel state (empty on the humanoid).
+   *
+   * @generated from field: repeated bebop.runtime.v1.WheelState wheels = 15;
+   */
+  wheels: WheelState[];
+
+  /**
+   * Differential-drive summary; `present=false` without a `drive:` block.
+   *
+   * @generated from field: bebop.runtime.v1.DriveState drive = 16;
+   */
+  drive?: DriveState | undefined;
 };
 
 /**
@@ -654,7 +841,7 @@ export type TelemetryFrame = Message<"bebop.runtime.v1.TelemetryFrame"> & {
  * Use `create(TelemetryFrameSchema)` to create a new message.
  */
 export const TelemetryFrameSchema: GenMessage<TelemetryFrame> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 5);
+  messageDesc(file_bebop_runtime, 7);
 
 /**
  * One-shot reply to GetSnapshot — same content as TelemetryFrame.
@@ -706,6 +893,16 @@ export type Snapshot = Message<"bebop.runtime.v1.Snapshot"> & {
    * @generated from field: bebop.runtime.v1.PolicyIoStats policy_io = 14;
    */
   policyIo?: PolicyIoStats | undefined;
+
+  /**
+   * @generated from field: repeated bebop.runtime.v1.WheelState wheels = 15;
+   */
+  wheels: WheelState[];
+
+  /**
+   * @generated from field: bebop.runtime.v1.DriveState drive = 16;
+   */
+  drive?: DriveState | undefined;
 };
 
 /**
@@ -713,7 +910,7 @@ export type Snapshot = Message<"bebop.runtime.v1.Snapshot"> & {
  * Use `create(SnapshotSchema)` to create a new message.
  */
 export const SnapshotSchema: GenMessage<Snapshot> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 6);
+  messageDesc(file_bebop_runtime, 8);
 
 /**
  * @generated from message bebop.runtime.v1.BusStatusUpdate
@@ -730,7 +927,7 @@ export type BusStatusUpdate = Message<"bebop.runtime.v1.BusStatusUpdate"> & {
  * Use `create(BusStatusUpdateSchema)` to create a new message.
  */
 export const BusStatusUpdateSchema: GenMessage<BusStatusUpdate> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 7);
+  messageDesc(file_bebop_runtime, 9);
 
 /**
  * @generated from message bebop.runtime.v1.SubscribeTelemetry
@@ -749,7 +946,7 @@ export type SubscribeTelemetry = Message<"bebop.runtime.v1.SubscribeTelemetry"> 
  * Use `create(SubscribeTelemetrySchema)` to create a new message.
  */
 export const SubscribeTelemetrySchema: GenMessage<SubscribeTelemetry> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 8);
+  messageDesc(file_bebop_runtime, 10);
 
 /**
  * @generated from message bebop.runtime.v1.UnsubscribeTelemetry
@@ -762,7 +959,7 @@ export type UnsubscribeTelemetry = Message<"bebop.runtime.v1.UnsubscribeTelemetr
  * Use `create(UnsubscribeTelemetrySchema)` to create a new message.
  */
 export const UnsubscribeTelemetrySchema: GenMessage<UnsubscribeTelemetry> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 9);
+  messageDesc(file_bebop_runtime, 11);
 
 /**
  * @generated from message bebop.runtime.v1.GetSnapshot
@@ -775,7 +972,7 @@ export type GetSnapshot = Message<"bebop.runtime.v1.GetSnapshot"> & {
  * Use `create(GetSnapshotSchema)` to create a new message.
  */
 export const GetSnapshotSchema: GenMessage<GetSnapshot> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 10);
+  messageDesc(file_bebop_runtime, 12);
 
 /**
  * @generated from message bebop.runtime.v1.SetMotorEnabled
@@ -797,7 +994,7 @@ export type SetMotorEnabled = Message<"bebop.runtime.v1.SetMotorEnabled"> & {
  * Use `create(SetMotorEnabledSchema)` to create a new message.
  */
 export const SetMotorEnabledSchema: GenMessage<SetMotorEnabled> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 11);
+  messageDesc(file_bebop_runtime, 13);
 
 /**
  * @generated from message bebop.runtime.v1.SetAllMotorsEnabled
@@ -814,7 +1011,88 @@ export type SetAllMotorsEnabled = Message<"bebop.runtime.v1.SetAllMotorsEnabled"
  * Use `create(SetAllMotorsEnabledSchema)` to create a new message.
  */
 export const SetAllMotorsEnabledSchema: GenMessage<SetAllMotorsEnabled> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 12);
+  messageDesc(file_bebop_runtime, 14);
+
+/**
+ * Drive a twist into the wheeled chassis. `linear_x` (m/s forward) and
+ * `angular_z` (rad/s yaw, + left) are body-frame; the firmware converts to
+ * per-wheel velocity via the `drive:` geometry and slews/clamps each tick.
+ *
+ * @generated from message bebop.runtime.v1.SetVelocityCommand
+ */
+export type SetVelocityCommand = Message<"bebop.runtime.v1.SetVelocityCommand"> & {
+  /**
+   * @generated from field: float linear_x = 1;
+   */
+  linearX: number;
+
+  /**
+   * @generated from field: float angular_z = 2;
+   */
+  angularZ: number;
+};
+
+/**
+ * Describes the message bebop.runtime.v1.SetVelocityCommand.
+ * Use `create(SetVelocityCommandSchema)` to create a new message.
+ */
+export const SetVelocityCommandSchema: GenMessage<SetVelocityCommand> = /*@__PURE__*/
+  messageDesc(file_bebop_runtime, 15);
+
+/**
+ * Arm/disarm a single ODrive wheel. `wheel_name` matches a `wheels:[]` key
+ * in the robot YAML; arming sets velocity mode + closed-loop control.
+ *
+ * @generated from message bebop.runtime.v1.SetWheelEnabled
+ */
+export type SetWheelEnabled = Message<"bebop.runtime.v1.SetWheelEnabled"> & {
+  /**
+   * @generated from field: string wheel_name = 1;
+   */
+  wheelName: string;
+
+  /**
+   * @generated from field: bool enabled = 2;
+   */
+  enabled: boolean;
+};
+
+/**
+ * Describes the message bebop.runtime.v1.SetWheelEnabled.
+ * Use `create(SetWheelEnabledSchema)` to create a new message.
+ */
+export const SetWheelEnabledSchema: GenMessage<SetWheelEnabled> = /*@__PURE__*/
+  messageDesc(file_bebop_runtime, 16);
+
+/**
+ * @generated from message bebop.runtime.v1.SetAllWheelsEnabled
+ */
+export type SetAllWheelsEnabled = Message<"bebop.runtime.v1.SetAllWheelsEnabled"> & {
+  /**
+   * @generated from field: bool enabled = 1;
+   */
+  enabled: boolean;
+};
+
+/**
+ * Describes the message bebop.runtime.v1.SetAllWheelsEnabled.
+ * Use `create(SetAllWheelsEnabledSchema)` to create a new message.
+ */
+export const SetAllWheelsEnabledSchema: GenMessage<SetAllWheelsEnabled> = /*@__PURE__*/
+  messageDesc(file_bebop_runtime, 17);
+
+/**
+ * @generated from message bebop.runtime.v1.ResetOdometry
+ */
+export type ResetOdometry = Message<"bebop.runtime.v1.ResetOdometry"> & {
+};
+
+/**
+ * Describes the message bebop.runtime.v1.ResetOdometry.
+ * Use `create(ResetOdometrySchema)` to create a new message.
+ */
+export const ResetOdometrySchema: GenMessage<ResetOdometry> = /*@__PURE__*/
+  messageDesc(file_bebop_runtime, 18);
 
 /**
  * @generated from message bebop.runtime.v1.SetMode
@@ -831,7 +1109,7 @@ export type SetMode = Message<"bebop.runtime.v1.SetMode"> & {
  * Use `create(SetModeSchema)` to create a new message.
  */
 export const SetModeSchema: GenMessage<SetMode> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 13);
+  messageDesc(file_bebop_runtime, 19);
 
 /**
  * Latches the supervisor into E-STOP and disables every motor. Persists
@@ -851,7 +1129,7 @@ export type EmergencyStop = Message<"bebop.runtime.v1.EmergencyStop"> & {
  * Use `create(EmergencyStopSchema)` to create a new message.
  */
 export const EmergencyStopSchema: GenMessage<EmergencyStop> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 14);
+  messageDesc(file_bebop_runtime, 20);
 
 /**
  * @generated from message bebop.runtime.v1.ResetEStop
@@ -864,7 +1142,7 @@ export type ResetEStop = Message<"bebop.runtime.v1.ResetEStop"> & {
  * Use `create(ResetEStopSchema)` to create a new message.
  */
 export const ResetEStopSchema: GenMessage<ResetEStop> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 15);
+  messageDesc(file_bebop_runtime, 21);
 
 /**
  * Set the hold-target for a single armed motor (DialIn mode only). The
@@ -894,7 +1172,7 @@ export type SetMotorTarget = Message<"bebop.runtime.v1.SetMotorTarget"> & {
  * Use `create(SetMotorTargetSchema)` to create a new message.
  */
 export const SetMotorTargetSchema: GenMessage<SetMotorTarget> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 16);
+  messageDesc(file_bebop_runtime, 22);
 
 /**
  * Re-zero a single motor's mechanical origin. The supervisor sends the
@@ -928,7 +1206,7 @@ export type SetMechanicalZero = Message<"bebop.runtime.v1.SetMechanicalZero"> & 
  * Use `create(SetMechanicalZeroSchema)` to create a new message.
  */
 export const SetMechanicalZeroSchema: GenMessage<SetMechanicalZero> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 17);
+  messageDesc(file_bebop_runtime, 23);
 
 /**
  * Re-zero every actuator at once. See `ClientRuntimeMessage.set_mechanical_zero_all`
@@ -949,7 +1227,7 @@ export type SetMechanicalZeroAll = Message<"bebop.runtime.v1.SetMechanicalZeroAl
  * Use `create(SetMechanicalZeroAllSchema)` to create a new message.
  */
 export const SetMechanicalZeroAllSchema: GenMessage<SetMechanicalZeroAll> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 18);
+  messageDesc(file_bebop_runtime, 24);
 
 /**
  * Toggle the policy dry-run flag. See `ClientRuntimeMessage.set_policy_dry_run`
@@ -970,7 +1248,7 @@ export type SetPolicyDryRun = Message<"bebop.runtime.v1.SetPolicyDryRun"> & {
  * Use `create(SetPolicyDryRunSchema)` to create a new message.
  */
 export const SetPolicyDryRunSchema: GenMessage<SetPolicyDryRun> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 19);
+  messageDesc(file_bebop_runtime, 25);
 
 /**
  * @generated from message bebop.runtime.v1.Ack
@@ -992,7 +1270,7 @@ export type Ack = Message<"bebop.runtime.v1.Ack"> & {
  * Use `create(AckSchema)` to create a new message.
  */
 export const AckSchema: GenMessage<Ack> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 20);
+  messageDesc(file_bebop_runtime, 26);
 
 /**
  * @generated from message bebop.runtime.v1.Error
@@ -1009,7 +1287,7 @@ export type Error = Message<"bebop.runtime.v1.Error"> & {
  * Use `create(ErrorSchema)` to create a new message.
  */
 export const ErrorSchema: GenMessage<Error> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 21);
+  messageDesc(file_bebop_runtime, 27);
 
 /**
  * @generated from message bebop.runtime.v1.ModeChanged
@@ -1026,7 +1304,7 @@ export type ModeChanged = Message<"bebop.runtime.v1.ModeChanged"> & {
  * Use `create(ModeChangedSchema)` to create a new message.
  */
 export const ModeChangedSchema: GenMessage<ModeChanged> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 22);
+  messageDesc(file_bebop_runtime, 28);
 
 /**
  * @generated from message bebop.runtime.v1.EStopLatched
@@ -1043,7 +1321,7 @@ export type EStopLatched = Message<"bebop.runtime.v1.EStopLatched"> & {
  * Use `create(EStopLatchedSchema)` to create a new message.
  */
 export const EStopLatchedSchema: GenMessage<EStopLatched> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 23);
+  messageDesc(file_bebop_runtime, 29);
 
 /**
  * Latest fused orientation reading from the optional BNO080/BNO085 IMU.
@@ -1141,7 +1419,7 @@ export type ImuStats = Message<"bebop.runtime.v1.ImuStats"> & {
  * Use `create(ImuStatsSchema)` to create a new message.
  */
 export const ImuStatsSchema: GenMessage<ImuStats> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 24);
+  messageDesc(file_bebop_runtime, 30);
 
 /**
  * Latest observation/action snapshot from [`PolicyRunner`]. Published at
@@ -1294,7 +1572,7 @@ export type PolicyIoStats = Message<"bebop.runtime.v1.PolicyIoStats"> & {
  * Use `create(PolicyIoStatsSchema)` to create a new message.
  */
 export const PolicyIoStatsSchema: GenMessage<PolicyIoStats> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 25);
+  messageDesc(file_bebop_runtime, 31);
 
 /**
  * @generated from enum bebop.runtime.v1.Mode

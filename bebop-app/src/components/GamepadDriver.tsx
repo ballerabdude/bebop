@@ -17,12 +17,11 @@
 // existing runtime-WS calls the operator uses for click-and-drag dial-in.
 // No firmware or agent change is required.
 //
-// We don't try to drive *body velocity* (xvel/yvel/angvel) from here —
-// that path is owned by the on-robot agent (`controller::teleop::tick`)
-// and shipping it from the app would need a new runtime WS message in
-// `bebop-linux`. Once that exists, this component can grow a "drive"
-// mode that streams velocity at the same cadence as it streams target
-// position today.
+// We don't drive *body velocity* from here — on a wheeled chassis that
+// job belongs to the sibling `GamepadDrive` component, which streams
+// twists over the runtime WS `SetVelocityCommand` message. This
+// component stays legged-robot-only (per-joint dial-in); the motor
+// bench mounts exactly one of the two depending on the chassis.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -409,7 +408,7 @@ export function GamepadDriver({
   );
 }
 
-function Hint({ chord, label }: { chord: string; label: string }) {
+export function Hint({ chord, label }: { chord: string; label: string }) {
   return (
     <span className="inline-flex items-center gap-1 whitespace-nowrap">
       <kbd className="text-[10px] font-mono px-1 py-0.5 rounded border border-border bg-bg-elev-2 text-text">
@@ -445,7 +444,7 @@ function StickIndicator({ value }: { value: number }) {
   );
 }
 
-function ControllerIcon() {
+export function ControllerIcon() {
   return (
     <svg
       width="14"
@@ -486,7 +485,7 @@ function clampNumber(v: number, lo: number, hi: number): number {
 /// GAMEPAD Vendor: 2dc8 Product: 6003)") down to just the human name.
 /// Browsers vary in how they format this; we strip any trailing
 /// parenthesised section, which catches Chromium and Safari.
-function prettifyGamepadId(id: string): string {
+export function prettifyGamepadId(id: string): string {
   if (!id) return "Gamepad";
   const open = id.indexOf("(");
   return (open > 0 ? id.slice(0, open) : id).trim();

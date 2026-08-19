@@ -19,11 +19,13 @@
 
 pub mod can_interface;
 pub mod config;
+pub mod drive;
 pub mod imu;
 pub mod imu_serial;
 pub mod logging;
 pub mod mode;
 pub mod observation;
+pub mod odrive;
 pub mod policy;
 pub mod policy_capture;
 pub mod policy_control;

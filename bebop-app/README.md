@@ -22,9 +22,10 @@ Today:
   agent control surface (`WsAgentTransport`).
 * **Motor bench** — live per-joint telemetry, dial-in slider with
   re-zero affordance, power-board card, sticky toolbar with E-STOP.
-* **Bluetooth gamepad dial-in** — pair an 8BitDo / DualSense / Xbox /
-  Switch Pro pad to your phone or laptop, drive the active joint's
-  target with the left stick. See [Bluetooth controllers](#bluetooth-controllers).
+* **Bluetooth gamepad dial-in & drive** — pair an 8BitDo / DualSense /
+  Xbox / Switch Pro pad to your phone or laptop; drive the active
+  joint's target with the left stick (legged), or drive the wheeled
+  chassis directly. See [Bluetooth controllers](#bluetooth-controllers).
 * **Robot-side gamepad pairing** — pair a controller to the robot's
   BlueZ stack for body-velocity teleop forwarded to `bebop-linux`
   over UDP. Owned by `jetson-agent/bebop-agent/src/controller/`; the
@@ -35,9 +36,6 @@ Planned:
 * Re-pair / switch between multiple robots owned by the same user.
 * Manage robot settings after initial provisioning.
 * Surface logs and diagnostics for support escalations.
-* Body-velocity drive teleop from the phone-paired controller (would
-  need a new runtime / agent WS message; today the app-side gamepad
-  drives joint targets only).
 
 ## Architecture
 
@@ -86,16 +84,17 @@ agent. On this side the bindings come from:
 
 ## Bluetooth controllers
 
-There are two distinct BT-controller flows and they connect at
+There are three distinct BT-controller flows and they connect at
 different layers:
 
-| Flow                 | Pairs to                | Drives                                                                | Where it lives                                       |
-| -------------------- | ----------------------- | --------------------------------------------------------------------- | ---------------------------------------------------- |
-| Robot-side teleop    | The robot (BlueZ)       | Body velocity (xvel/yvel/angvel) → bebop-linux UDP                    | `jetson-agent/bebop-agent/src/controller/`           |
-| App-side dial-in     | Your phone / laptop     | Per-joint target position via the existing runtime WS `setMotorTarget`| `src/input/`, `src/components/GamepadDriver.tsx`     |
+| Flow                 | Pairs to                | Drives                                                                 | Where it lives                                       |
+| -------------------- | ----------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------- |
+| Robot-side teleop    | The robot (BlueZ)       | Body velocity (xvel/yvel/angvel) → bebop-linux UDP                     | `jetson-agent/bebop-agent/src/controller/`           |
+| App-side dial-in     | Your phone / laptop     | Per-joint target position via the runtime WS `setMotorTarget` (legged) | `src/input/`, `src/components/GamepadDriver.tsx`     |
+| App-side drive       | Your phone / laptop     | Body twist (vx, wz) via the runtime WS `SetVelocityCommand` (wheeled)  | `src/input/`, `src/components/GamepadDrive.tsx`      |
 
-The app-side flow uses the [Web Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API)
-and works with any pad the browser/WebView surfaces. The pad never
+The app-side flows use the [Web Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API)
+and work with any pad the browser/WebView surfaces. The pad never
 touches the robot's BT stack; it stays paired to the device running
 bebop-app.
 
@@ -131,6 +130,34 @@ card appears with these bindings (chord names shown as
 * **L3 (left-stick click)** — arm / disarm the active joint
 * **B / Circle** — latch the runtime E-STOP
 * **A / Cross** — clear a latched E-STOP
+
+### Drive mode (wheeled chassis)
+
+On a wheeled robot (firmware `drive:` config), the controller card
+becomes a drive bridge instead of a joint dial-in: it streams body
+twists over the same runtime WS path (`SetVelocityCommand`) as the
+on-screen joystick and the WASD keyboard drive, so no firmware change
+is involved. Bindings (chord names shown as `standard / dinput`
+where they differ):
+
+* **Sticks** — drive, in one of two layouts. Toggle on the card; the
+  choice is persisted per device and *split* is the default:
+  * *Split* — left stick ↕ = forward/back, right stick ↔ = turn
+  * *Arcade* — the left stick does both (up = forward, right = turn
+    right), matching the on-screen joystick
+* **RT / R2** held — deadman; release to halt immediately. Trigger
+  pressure also scales the request: just clearing the threshold
+  creeps (~64% of the soft limit), a full pull reaches it
+  (1.0 m/s · 2.0 rad/s)
+* **L3 (left-stick click)** — arm / disarm all wheels
+* **B / Circle** — latch the runtime E-STOP
+* **A / Cross** — clear a latched E-STOP
+
+The firmware holds the last commanded twist until told otherwise, so
+the bridge owns stopping: deadman release, E-STOP latch, pad
+disconnect, leaving the motor-bench screen, hiding the tab, or any
+interruption of the gamepad poll loop (250 ms watchdog) all enqueue a
+zero twist exactly once per drive cycle.
 
 ### Tuning the dial-in rate
 

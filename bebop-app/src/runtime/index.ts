@@ -3,10 +3,12 @@ export type { RuntimeConnectionState } from "./wsTransport";
 export { getOrCreateRuntimeTransport, disposeRuntimeTransport } from "./cache";
 export type {
   BusView,
+  DriveView,
   ImuView,
   MotorView,
   PolicyIoView,
   PowerView,
   RuntimeMode,
   RuntimeSnapshot,
+  WheelView,
 } from "./types";

@@ -1,0 +1,77 @@
+# ============================================================================
+# Bebop differential-drive (wheeled) configuration.
+#
+# Initial wheeled chassis: two ODrive BotWheels driven by ODrive S1
+# controllers over CAN, no legged joints. The humanoid `bebop_v2.yaml` has
+# `joints:` for the Robstride MIT-mode actuators; this file replaces them
+# with `wheels:` + `drive:`.
+#
+# Velocity control: the firmware commands each wheel's `Set_Input_Vel`
+# (turns/s) after converting the operator twist (vx, wz) through the
+# differential-drive geometry below.
+# ============================================================================
+
+# ODrive BotWheel axes. `node_id` is the ODrive "simple" CAN node id
+# (0..=63) — set the same value over USB with:
+#     odrivetool:  odrv0.axis0.config.can.node_id = 1
+# or let the firmware assign it at boot via the Address (0x06) message.
+wheels:
+  left:
+    can_interface: can2
+    node_id: 36
+    # Motor→robot sign. Wheels are driven by the S1's velocity loop; the
+    # differential-drive layer assumes "+ = forward" for both wheels. Flip
+    # to -1 when a wheel's motor is wired reversed (a passive spin-back
+    # check on the bench confirms the sign).
+    direction: -1.0
+    # Wheel angular-velocity hard limit (rad/s). 20 rad/s on a 0.05 m wheel
+    # ≈ 1 m/s. E-STOP trips if a commanded speed ever exceeds this.
+    vel_max: 20.0
+    # Optional torque feed-forward clamp (Nm) — currently unused (0).
+    torque_limit: 0.0
+    # E-STOP if no encoder (10 ms) / heartbeat (100 ms) arrives within this.
+    feedback_timeout_ms: 250
+
+  right:
+    can_interface: can2
+    node_id: 46
+    direction: -1.0
+    vel_max: 20.0
+    torque_limit: 0.0
+    feedback_timeout_ms: 250
+
+# Differential-drive geometry. `track_width` is the full left-right wheel
+# spacing; the firmware stores the half-track.
+drive:
+  left_wheel: left
+  right_wheel: right
+  wheel_radius: 0.05       # m
+  track_width: 0.30        # m
+
+# ============================================================================
+# Power board (Robstride PowerBoard) — battery / rail telemetry
+# ----------------------------------------------------------------------------
+# Same board and pack as the humanoid V2 wiring: the PowerBoard lives on
+# its own CAN bus (can4) at address 0xAA, polled at 1 Hz for the Type-03
+# status frame. The parser auto-registers `can4` alongside the wheels'
+# `can2` in the bus pool, so no separate `can_interfaces:` list is needed.
+#
+# Battery: the 13s2p Li-ion NMC pack (26× Molicel INR21700-P45B) shared
+# with Bebop V2 — 54.6 V full → 39.0 V empty, linear V→SOC interpolation
+# in the operator app. See bebop_v2.yaml's `power:` block for the full
+# chemistry notes; delete this block to run wheel bring-up without a
+# power board attached (the runtime comes up cleanly and the app hides
+# the battery card).
+# ============================================================================
+power:
+  can_interface: can4
+  power_id: 170             # Robstride PowerBoard default address 0xAA (param 6006)
+  poll_interval_ms: 1000    # 1 Hz status polling — keeps the bus quiet
+  battery_cells: 13         # 13s series count (2p adds capacity, not voltage) → 4.20 V × 13 = 54.6 V full
+  cell_full_voltage: 4.20   # Molicel P45B (Li-ion NMC) full-charge voltage
+  cell_empty_voltage: 3.00  # conservative empty anchor (P45B datasheet cutoff is 2.50 V)
+
+server:
+  bind_addr: 0.0.0.0:9090
+  telemetry_default_hz: 30
+  telemetry_max_hz: 100

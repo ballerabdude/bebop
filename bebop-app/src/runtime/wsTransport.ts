@@ -31,6 +31,10 @@ import {
   SetMotorEnabledSchema,
   SetMotorTargetSchema,
   SetPolicyDryRunSchema,
+  SetVelocityCommandSchema,
+  SetWheelEnabledSchema,
+  SetAllWheelsEnabledSchema,
+  ResetOdometrySchema,
   SubscribeTelemetrySchema,
   UnsubscribeTelemetrySchema,
   type ClientRuntimeMessage,
@@ -42,15 +46,19 @@ import {
   type PowerStats as ProtoPowerStats,
   type ImuStats as ProtoImuStats,
   type PolicyIoStats as ProtoPolicyIoStats,
+  type WheelState as ProtoWheelState,
+  type DriveState as ProtoDriveState,
 } from "../proto/bebop_runtime_pb";
 import type {
   BusView,
+  DriveView,
   ImuView,
   MotorView,
   PolicyIoView,
   PowerView,
   RuntimeMode,
   RuntimeSnapshot,
+  WheelView,
 } from "./types";
 
 const DEFAULT_PORT = 9090;
@@ -469,6 +477,47 @@ export class RuntimeTransport {
     });
   }
 
+  // -------------------------------------------------------------- drive
+
+  /// Drive a twist (body frame) into the differential-drive chassis.
+  /// `linearX` (m/s forward) and `angularZ` (rad/s yaw, + left). The
+  /// firmware clamps + slew-limits and converts to per-wheel velocity;
+  /// send (0, 0) to stop. No-op on the humanoid (no `drive:` block).
+  async setVelocityCommand(linearX: number, angularZ: number): Promise<void> {
+    await this.requestAck({
+      case: "setVelocityCommand",
+      value: create(SetVelocityCommandSchema, {
+        linearX,
+        angularZ,
+      }),
+    });
+  }
+
+  /// Arm/disarm a single ODrive wheel. `wheelName` matches a `wheels:[]`
+  /// key; arming sets velocity mode + closed-loop control.
+  async setWheelEnabled(wheelName: string, enabled: boolean): Promise<void> {
+    await this.requestAck({
+      case: "setWheelEnabled",
+      value: create(SetWheelEnabledSchema, { wheelName, enabled }),
+    });
+  }
+
+  /// Arm/disarm every configured wheel at once.
+  async setAllWheelsEnabled(enabled: boolean): Promise<void> {
+    await this.requestAck({
+      case: "setAllWheelsEnabled",
+      value: create(SetAllWheelsEnabledSchema, { enabled }),
+    });
+  }
+
+  /// Reset the wheel-encoder odometry pose to the origin.
+  async resetOdometry(): Promise<void> {
+    await this.requestAck({
+      case: "resetOdometry",
+      value: create(ResetOdometrySchema, {}),
+    });
+  }
+
   // -------------------------------------------------------------- internals
   private async requestAck(payload: ClientPayload): Promise<void> {
     const reply = await this.request(payload);
@@ -564,11 +613,52 @@ function snapshotFromProto(s: Snapshot | TelemetryFrame): RuntimeSnapshot {
     estopReason: s.estopReason,
     motors: s.motors.map(motorFromProto),
     buses: s.buses.map(busFromProto),
+    wheels: s.wheels.map(wheelFromProto),
+    drive: driveFromProto(s.drive),
     power: powerFromProto(s.power),
     imu: imuFromProto(s.imu),
     policyIo: policyIoFromProto(s.policyIo),
   };
 }
+
+function wheelFromProto(w: ProtoWheelState): WheelView {
+  return {
+    name: w.name,
+    canInterface: w.canInterface,
+    nodeId: w.nodeId,
+    armed: w.armed,
+    feedbackStale: w.feedbackStale,
+    positionReceived: w.positionReceived,
+    errorCode: w.errorCode,
+    position: w.positionRad,
+    velocity: w.velocityRadS,
+    targetVelocity: w.targetVelocityRadS,
+    velMax: w.velMax,
+  };
+}
+
+function driveFromProto(d: ProtoDriveState | undefined): DriveView {
+  if (!d) {
+    return EMPTY_DRIVE_VIEW;
+  }
+  return {
+    present: d.present,
+    cmdLinearX: d.cmdLinearX,
+    cmdAngularZ: d.cmdAngularZ,
+    odomX: d.odomX,
+    odomY: d.odomY,
+    odomTheta: d.odomTheta,
+  };
+}
+
+const EMPTY_DRIVE_VIEW: DriveView = {
+  present: false,
+  cmdLinearX: 0,
+  cmdAngularZ: 0,
+  odomX: 0,
+  odomY: 0,
+  odomTheta: 0,
+};
 
 function imuFromProto(p: ProtoImuStats | undefined): ImuView {
   // Older firmware (or a decode where the field is absent) collapses to

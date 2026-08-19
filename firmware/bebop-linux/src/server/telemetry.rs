@@ -34,6 +34,38 @@ fn motor_state_to_proto(m: &MotorSnapshot) -> proto::MotorState {
     }
 }
 
+fn wheel_state_to_proto(w: &crate::safety::limits::WheelSnapshot) -> proto::WheelState {
+    proto::WheelState {
+        name: w.name.clone(),
+        can_interface: w.can_interface.clone(),
+        node_id: w.node_id as u32,
+        armed: w.armed,
+        feedback_stale: w.feedback_stale,
+        position_received: w.position_received,
+        error_code: w.error_code,
+        position_rad: w.position,
+        velocity_rad_s: w.velocity,
+        target_velocity_rad_s: w.target_velocity,
+        vel_max: w.vel_max,
+    }
+}
+
+fn build_drive_state(sup: &Arc<Supervisor>) -> proto::DriveState {
+    if !sup.has_drive() {
+        return proto::DriveState { present: false, ..Default::default() };
+    }
+    let twist = sup.cmd_vel();
+    let (x, y, theta) = sup.odometry_pose();
+    proto::DriveState {
+        present: true,
+        cmd_linear_x: twist.vx,
+        cmd_angular_z: twist.wz,
+        odom_x: x,
+        odom_y: y,
+        odom_theta: theta,
+    }
+}
+
 fn collect_buses(sup: &Arc<Supervisor>) -> Vec<proto::BusEntry> {
     sup.cfg()
         .can_interfaces
@@ -227,6 +259,7 @@ pub fn build_snapshot(
     policy_io: &PolicyIoShared,
 ) -> proto::Snapshot {
     let motors = sup.snapshot_motors();
+    let wheels = sup.snapshot_wheels();
     let mode_proto = sup.mode().as_proto() as i32;
     let estop_latched = sup.estop_active();
     let estop_reason = sup.estop_reason_human().unwrap_or_default();
@@ -240,6 +273,8 @@ pub fn build_snapshot(
         power: Some(build_power_stats(sup)),
         imu: Some(build_imu_stats(imu, imu_present)),
         policy_io: Some(build_policy_io_stats(policy_io)),
+        wheels: wheels.iter().map(wheel_state_to_proto).collect(),
+        drive: Some(build_drive_state(sup)),
     }
 }
 
@@ -250,6 +285,7 @@ pub fn build_telemetry(
     policy_io: &PolicyIoShared,
 ) -> proto::TelemetryFrame {
     let motors = sup.snapshot_motors();
+    let wheels = sup.snapshot_wheels();
     let mode_proto = sup.mode().as_proto() as i32;
     let estop_latched = sup.estop_active();
     let estop_reason = sup.estop_reason_human().unwrap_or_default();
@@ -263,6 +299,8 @@ pub fn build_telemetry(
         power: Some(build_power_stats(sup)),
         imu: Some(build_imu_stats(imu, imu_present)),
         policy_io: Some(build_policy_io_stats(policy_io)),
+        wheels: wheels.iter().map(wheel_state_to_proto).collect(),
+        drive: Some(build_drive_state(sup)),
     }
 }
 

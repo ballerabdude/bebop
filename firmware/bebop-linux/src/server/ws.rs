@@ -265,7 +265,9 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 }
                 SupervisorEvent::EStopReset
                 | SupervisorEvent::MotorArmed { .. }
-                | SupervisorEvent::MotorDisarmed { .. } => None,
+                | SupervisorEvent::MotorDisarmed { .. }
+                | SupervisorEvent::WheelArmed { .. }
+                | SupervisorEvent::WheelDisarmed { .. } => None,
             };
             if let Some(p) = payload {
                 let msg = proto::ServerRuntimeMessage {

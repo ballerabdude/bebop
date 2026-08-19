@@ -13,11 +13,15 @@
 //!
 //! Drop on the supervisor disables every motor on every bus three times.
 
-use crate::config::{JointCommand, RobotConfig, SafetyLimits};
+use crate::config::{DiffDriveConfig, JointCommand, RobotConfig, SafetyLimits};
+use crate::drive::{twist_to_wheel_angular, Odometry, Twist};
 use crate::mode::Mode;
+use crate::odrive::{self, ODriveWheel};
 use crate::powerboard;
 use crate::safety::bus_pool::{read_can_state, BusPool};
-use crate::safety::limits::{BreachReason, MotorRuntimeState, MotorSnapshot};
+use crate::safety::limits::{
+    BreachReason, MotorRuntimeState, MotorSnapshot, WheelRuntimeState, WheelSnapshot,
+};
 use crate::safety::power_monitor::{PowerBoardSnapshot, PowerMonitor};
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
@@ -28,6 +32,12 @@ use tracing::{debug, error, info, warn};
 
 const TICK_RATE_HZ: u64 = 100;
 
+/// Per-tick wheel-velocity slew cap (rad/s per tick at 100 Hz). Analogous
+/// to `max_pos_step_per_tick` on the joint path: whatever twist the
+/// operator requests, the commanded wheel speed can change no faster than
+/// this, so a full-reverse command ramps instead of snapping.
+const WHEEL_VEL_SLEW_RAD_S_PER_TICK: f32 = 1.0;
+
 /// Async event broadcast to interested subscribers (server, logger, etc.).
 #[derive(Debug, Clone)]
 pub enum SupervisorEvent {
@@ -36,6 +46,8 @@ pub enum SupervisorEvent {
     EStopReset,
     MotorArmed { joint: String },
     MotorDisarmed { joint: String },
+    WheelArmed { wheel: String },
+    WheelDisarmed { wheel: String },
 }
 
 /// Per-joint outcome of [`Supervisor::set_mechanical_zero_all`].
@@ -61,6 +73,21 @@ pub struct Supervisor {
     by_can_id: HashMap<(String, u8), usize>,
     /// Lookup: joint name -> motors[index]
     by_name: HashMap<String, usize>,
+    /// One `Mutex<WheelRuntimeState>` per ODrive wheel (empty on the
+    /// humanoid). Parallel to `motors`; wheels are velocity-controlled so
+    /// they don't share the joint slew/hold machinery.
+    wheels: Vec<Arc<Mutex<WheelRuntimeState>>>,
+    /// Lookup: `(can_interface, node_id) -> wheels[index]`.
+    by_odrive_id: HashMap<(String, u8), usize>,
+    /// Lookup: wheel name -> wheels[index].
+    by_wheel_name: HashMap<String, usize>,
+    /// Differential-drive geometry; `Some` on a wheeled chassis.
+    drive: Option<DiffDriveConfig>,
+    /// Latest operator twist command (body frame). Written by the WS
+    /// handler; read by `tick_drive`.
+    cmd_vel: Arc<Mutex<Twist>>,
+    /// Dead-reckoning pose integrator (wheel-encoder-only odometry).
+    odometry: Arc<Mutex<Odometry>>,
     /// Power-board monitor: `Some` iff `cfg.power` is set. Owns the
     /// cached battery / VBUS snapshot exposed through telemetry.
     power: Option<Arc<PowerMonitor>>,
@@ -85,10 +112,19 @@ impl Supervisor {
             by_name.insert(joint.name.clone(), i);
             motors.push(Arc::new(Mutex::new(MotorRuntimeState::new(joint.clone()))));
         }
+        let mut wheels = Vec::with_capacity(cfg.wheels.len());
+        let mut by_odrive_id = HashMap::new();
+        let mut by_wheel_name = HashMap::new();
+        for (i, wheel) in cfg.wheels.iter().enumerate() {
+            by_odrive_id.insert((wheel.can_interface.clone(), wheel.node_id), i);
+            by_wheel_name.insert(wheel.name.clone(), i);
+            wheels.push(Arc::new(Mutex::new(WheelRuntimeState::new(wheel.clone()))));
+        }
         let power = cfg
             .power
             .as_ref()
             .map(|p| Arc::new(PowerMonitor::new(p.clone())));
+        let drive = cfg.drive.clone();
         let (events, _rx) = tokio::sync::broadcast::channel(64);
         Self {
             cfg,
@@ -96,6 +132,12 @@ impl Supervisor {
             motors,
             by_can_id,
             by_name,
+            wheels,
+            by_odrive_id,
+            by_wheel_name,
+            drive,
+            cmd_vel: Arc::new(Mutex::new(Twist::default())),
+            odometry: Arc::new(Mutex::new(Odometry::default())),
             power,
             mode: Arc::new(AtomicU8::new(Mode::Idle as u8)),
             estop: Arc::new(AtomicBool::new(false)),
@@ -186,6 +228,170 @@ impl Supervisor {
             .collect()
     }
 
+    pub fn snapshot_wheels(&self) -> Vec<WheelSnapshot> {
+        let now = Instant::now();
+        self.wheels
+            .iter()
+            .map(|w| {
+                w.lock()
+                    .map(|g| g.snapshot(now))
+                    .unwrap_or_else(|p| p.into_inner().snapshot(now))
+            })
+            .collect()
+    }
+
+    /// Whether a differential-drive chassis is configured.
+    pub fn has_drive(&self) -> bool {
+        self.drive.is_some()
+    }
+
+    /// Copy of the differential-drive geometry, if any.
+    pub fn drive_config(&self) -> Option<DiffDriveConfig> {
+        self.drive.clone()
+    }
+
+    /// Set the operator twist command (body frame) consumed by
+    /// [`Self::tick_drive`]. Callable from the WS handler thread.
+    pub fn set_cmd_vel(&self, twist: Twist) {
+        if let Ok(mut g) = self.cmd_vel.lock() {
+            *g = twist;
+        }
+    }
+
+    /// Read the latest twist command.
+    pub fn cmd_vel(&self) -> Twist {
+        self.cmd_vel.lock().map(|g| *g).unwrap_or_default()
+    }
+
+    /// Read the odometry pose as `(x, y, theta)` (m, m, rad).
+    pub fn odometry_pose(&self) -> (f32, f32, f32) {
+        let g = self.odometry.lock().map(|o| *o).unwrap_or_default();
+        (g.x, g.y, g.theta)
+    }
+
+    /// Reset the odometry pose to the origin.
+    pub fn reset_odometry(&self) {
+        if let Ok(mut o) = self.odometry.lock() {
+            o.reset();
+        }
+    }
+
+    // ---------------------------------------------------------------- wheel arm / disarm
+
+    /// Enable (closed-loop) a single wheel. Mirrors [`Self::arm`] for the
+    /// joint path but skips the position-envelope check (wheels are
+    /// continuous-rotation). Sets velocity mode before engaging the loop.
+    pub fn arm_wheel(&self, wheel: &str) -> Result<()> {
+        if self.estop_active() {
+            return Err(anyhow!("cannot arm while E-STOP is latched"));
+        }
+        if !matches!(self.mode(), Mode::DialIn | Mode::RunPolicy) {
+            return Err(anyhow!(
+                "arming is only allowed in DialIn or RunPolicy mode (currently {:?})",
+                self.mode()
+            ));
+        }
+        let idx = *self
+            .by_wheel_name
+            .get(wheel)
+            .ok_or_else(|| anyhow!("unknown wheel {wheel:?}"))?;
+        let entry = self.wheels[idx].clone();
+        let cfg = self.cfg.wheels[idx].clone();
+
+        if !self.bus_pool.is_healthy(&cfg.can_interface) {
+            return Err(anyhow!(
+                "refusing to arm {wheel}: bus {} is not healthy",
+                cfg.can_interface
+            ));
+        }
+        let can = self
+            .bus_pool
+            .get(&cfg.can_interface)
+            .ok_or_else(|| anyhow!("no bus pool entry for {}", cfg.can_interface))?
+            .clone();
+
+        // Clear any latched ODrive axis error *before* re-enabling. The S1
+        // refuses to enter CLOSED_LOOP_CONTROL with a latched disarm error
+        // (e.g. MOTOR_DISARMED_ABS_POSITION 0x04000000 from a rapid
+        // direction reversal), so without this the operator can't recover
+        // from a fault by re-arming — the axis stays in IDLE and the
+        // enable silently fails.
+        {
+            let g = entry.lock().unwrap();
+            if let Err(e) = g.wheel.clear_errors(&can) {
+                debug!(wheel, error = %e, "clear_errors TX failed; continuing to enable");
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        {
+            let g = entry.lock().unwrap();
+            // Velocity mode first, then engage closed-loop control.
+            g.wheel.set_velocity_mode(&can).with_context(|| {
+                format!("{}: failed to set velocity mode on {}", wheel, cfg.can_interface)
+            })?;
+            g.wheel.enable(&can).with_context(|| {
+                format!(
+                    "{}: failed to enable ODrive node {} on {}",
+                    wheel, cfg.node_id, cfg.can_interface
+                )
+            })?;
+        }
+        {
+            let mut g = entry.lock().unwrap();
+            g.last_target_vel = 0.0;
+            g.armed = true;
+        }
+        info!(wheel, "armed");
+        let _ = self.events.send(SupervisorEvent::WheelArmed {
+            wheel: wheel.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Disable (idle) a single wheel.
+    pub fn disarm_wheel(&self, wheel: &str) -> Result<()> {
+        let idx = *self
+            .by_wheel_name
+            .get(wheel)
+            .ok_or_else(|| anyhow!("unknown wheel {wheel:?}"))?;
+        let entry = &self.wheels[idx];
+        let cfg = self.cfg.wheels[idx].clone();
+        let can = match self.bus_pool.get(&cfg.can_interface) {
+            Some(c) => c.clone(),
+            None => return Err(anyhow!("no bus pool entry for {}", cfg.can_interface)),
+        };
+        if let Ok(g) = entry.lock() {
+            let _ = g.wheel.disable(&can);
+        }
+        if let Ok(mut g) = entry.lock() {
+            g.armed = false;
+            g.last_target_vel = 0.0;
+        }
+        info!(wheel, "disarmed");
+        let _ = self.events.send(SupervisorEvent::WheelDisarmed {
+            wheel: wheel.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Enable every configured wheel.
+    pub fn arm_all_wheels(&self) -> Vec<(String, anyhow::Error)> {
+        let names: Vec<String> = self.cfg.wheels.iter().map(|w| w.name.clone()).collect();
+        names
+            .into_iter()
+            .filter_map(|n| self.arm_wheel(&n).err().map(|e| (n, e)))
+            .collect()
+    }
+
+    /// Disable every configured wheel.
+    pub fn disarm_all_wheels(&self) -> Vec<(String, anyhow::Error)> {
+        let names: Vec<String> = self.cfg.wheels.iter().map(|w| w.name.clone()).collect();
+        names
+            .into_iter()
+            .filter_map(|n| self.disarm_wheel(&n).err().map(|e| (n, e)))
+            .collect()
+    }
+
     // ---------------------------------------------------------------- mode transitions
 
     pub fn set_mode(&self, requested: Mode) -> Result<()> {
@@ -212,6 +418,8 @@ impl Supervisor {
                 "mode change {:?} -> {:?}",
                 prev, requested
             )));
+            // Wheels mirror the joint arm-state transition.
+            let _ = self.disarm_all_wheels();
         }
         self.mode.store(requested as u8, Ordering::SeqCst);
         info!(?prev, ?requested, "mode changed");
@@ -247,6 +455,12 @@ impl Supervisor {
                 g.armed = false;
             }
         }
+        for entry in &self.wheels {
+            if let Ok(mut g) = entry.lock() {
+                g.armed = false;
+                g.last_target_vel = 0.0;
+            }
+        }
         let _ = self.events.send(SupervisorEvent::EStopLatched(human));
     }
 
@@ -258,7 +472,20 @@ impl Supervisor {
         if let Ok(mut g) = self.estop_reason.lock() {
             *g = None;
         }
-        info!("E-STOP latch cleared by operator");
+        // Clear latched ODrive axis errors on every wheel so the operator
+        // doesn't have to "Enable wheels" just to clear a fault before
+        // re-arming. Without this, the S1 refuses to re-enter
+        // CLOSED_LOOP_CONTROL with a latched disarm error (e.g.
+        // MOTOR_DISARMED_ABS_POSITION 0x04000000 from a rapid reversal).
+        for wheel in &self.cfg.wheels {
+            if let Some(can) = self.bus_pool.get(&wheel.can_interface) {
+                let axis = ODriveWheel::new(wheel.node_id);
+                if let Err(e) = axis.clear_errors(can) {
+                    debug!(wheel = %wheel.name, error = %e, "clear_errors on reset_estop failed");
+                }
+            }
+        }
+        info!("E-STOP latch cleared by operator (ODrive errors cleared)");
         let _ = self.events.send(SupervisorEvent::EStopReset);
         true
     }
@@ -690,6 +917,12 @@ impl Supervisor {
                 let _ = motor.disable(can);
             }
         }
+        for wheel in &self.cfg.wheels {
+            if let Some(can) = self.bus_pool.get(&wheel.can_interface) {
+                let axis = ODriveWheel::new(wheel.node_id);
+                let _ = axis.disable(can);
+            }
+        }
     }
 
     // ---------------------------------------------------------------- safe TX
@@ -833,6 +1066,63 @@ impl Supervisor {
         self.check_feedback(idx, fb);
     }
 
+    /// Look up the wheel index for a `(can_interface, node_id)` pair.
+    pub fn wheel_index(&self, can_iface: &str, node_id: u8) -> Option<usize> {
+        self.by_odrive_id
+            .get(&(can_iface.to_string(), node_id))
+            .copied()
+    }
+
+    /// Called by the bus RX thread for each ODrive encoder-estimate frame
+    /// (`cmd_id = 0x09`). Refreshes the watchdog clock and applies the
+    /// per-wheel `direction` sign at the RX boundary so `state.velocity`
+    /// (rad/s) and `state.position` (rad) are robot-frame everywhere above
+    /// the driver.
+    pub fn on_wheel_encoder(
+        &self,
+        can_iface: &str,
+        fb: &crate::can_interface::ODriveEncoderFeedback,
+    ) {
+        let Some(idx) = self.wheel_index(can_iface, fb.node_id) else {
+            return;
+        };
+        let dir = self.cfg.wheels[idx].direction;
+        if let Ok(mut g) = self.wheels[idx].lock() {
+            g.wheel.process_encoder(fb);
+            if dir != 1.0 {
+                g.wheel.state.position *= dir;
+                g.wheel.state.velocity *= dir;
+            }
+            g.last_rx = Some(Instant::now());
+        }
+    }
+
+    /// Called by the bus RX thread for each ODrive heartbeat frame
+    /// (`cmd_id = 0x01`). Maintains `is_enabled` / fault state and the
+    /// watchdog clock. Latches E-STOP when the axis reports an error.
+    pub fn on_wheel_heartbeat(&self, can_iface: &str, hb: &crate::can_interface::ODriveHeartbeat) {
+        let Some(idx) = self.wheel_index(can_iface, hb.node_id) else {
+            return;
+        };
+        let name = self.cfg.wheels[idx].name.clone();
+        if let Ok(mut g) = self.wheels[idx].lock() {
+            g.wheel.process_heartbeat(hb);
+            g.last_rx = Some(Instant::now());
+            if g.wheel.state.has_error {
+                let desc = g
+                    .wheel
+                    .fault_description()
+                    .unwrap_or_else(|| "axis error".to_string());
+                drop(g);
+                self.trigger_estop(BreachReason::MotorFault {
+                    joint: name,
+                    bits: 0,
+                    description: desc,
+                });
+            }
+        }
+    }
+
     /// Called by the bus RX thread for each Robstride fault-feedback
     /// frame (`cmd_type == 0x15`) from a known motor. Used to be
     /// silently dropped, which let the motor scream "I'm faulted" for
@@ -967,9 +1257,118 @@ impl Supervisor {
                 return;
             }
         }
+        // Wheel watchdog: same rule, keyed on encoder/heartbeat liveness.
+        for idx in 0..self.wheels.len() {
+            let (armed, last_rx, name, timeout) = {
+                let g = match self.wheels[idx].lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                (
+                    g.armed,
+                    g.last_rx,
+                    g.wheel_cfg.name.clone(),
+                    g.wheel_cfg.feedback_timeout_ms,
+                )
+            };
+            if !armed {
+                continue;
+            }
+            let Some(t) = last_rx else { continue };
+            let elapsed_ms = now.duration_since(t).as_secs_f32() * 1000.0;
+            if elapsed_ms > timeout {
+                self.trigger_estop(BreachReason::FeedbackWatchdog {
+                    joint: name,
+                    elapsed_ms,
+                    timeout_ms: timeout,
+                });
+                return;
+            }
+        }
     }
 
     // ---------------------------------------------------------------- 100 Hz tick
+
+    /// One 100 Hz drive tick for the wheeled chassis. Applies the operator's
+    /// twist command to armed wheels (slew-limited, velocity-clamped) and
+    /// integrates wheel-encoder odometry. No-op on a chassis with no
+    /// `drive:` config (the humanoid).
+    ///
+    /// Called from the main control loop every tick, in all powered modes,
+    /// so the feedback stream stays alive and odometry accumulates.
+    pub fn tick_drive(&self) {
+        let Some(drive) = self.drive.clone() else {
+            return;
+        };
+        if self.estop_active() {
+            return;
+        }
+        let armed_any = self.wheels.iter().any(|w| w.lock().map(|g| g.armed).unwrap_or(false));
+        if !armed_any {
+            return;
+        }
+
+        // Resolve left/right wheel indices by name.
+        let (Some(&li), Some(&ri)) = (
+            self.by_wheel_name.get(&drive.left_wheel),
+            self.by_wheel_name.get(&drive.right_wheel),
+        ) else {
+            return;
+        };
+
+        let twist = self.cmd_vel();
+        let dt = 1.0 / TICK_RATE_HZ as f32;
+        let (vl_des, vr_des) = twist_to_wheel_angular(twist.vx, twist.wz, &drive);
+
+        // Command + integrate each wheel. Use the structuring helper on the
+        // two known indices so left/right share one code path.
+        self.drive_one_wheel(li, vl_des, dt);
+        self.drive_one_wheel(ri, vr_des, dt);
+
+        // Odometry from *measured* robot-frame wheel velocities.
+        let (vl_meas, vr_meas) = (
+            self.wheels[li].lock().map(|g| g.wheel.state.velocity).unwrap_or(0.0),
+            self.wheels[ri].lock().map(|g| g.wheel.state.velocity).unwrap_or(0.0),
+        );
+        if let Ok(mut odom) = self.odometry.lock() {
+            odom.step(vl_meas, vr_meas, dt, &drive);
+        }
+    }
+
+    /// Clamp + slew + TX a single wheel's velocity command (robot frame,
+    /// rad/s). Updates `last_target_vel` for the slew limiter.
+    fn drive_one_wheel(&self, idx: usize, vel_des: f32, _dt: f32) {
+        let (cfg, can) = {
+            let c = &self.cfg.wheels[idx];
+            let can = match self.bus_pool.get(&c.can_interface) {
+                Some(c) => c.clone(),
+                None => return,
+            };
+            (c.clone(), can)
+        };
+        let mut target = vel_des.clamp(-cfg.vel_max, cfg.vel_max);
+        let mut entry = match self.wheels[idx].lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if !entry.armed {
+            return;
+        }
+        // Slew-limit the commanded change to WHEEL_VEL_SLEW_RAD_S_PER_TICK.
+        let prev = entry.last_target_vel;
+        target = target.max(prev - WHEEL_VEL_SLEW_RAD_S_PER_TICK).min(prev + WHEEL_VEL_SLEW_RAD_S_PER_TICK);
+        entry.last_target_vel = target;
+
+        // Convert robot-frame rad/s -> motor-frame turns/s (direction sign).
+        let motor_turns_s = cfg.direction * target * (1.0 / odrive::TWO_PI);
+        if let Err(e) = entry.wheel.send_velocity(&can, motor_turns_s, 0.0) {
+            drop(entry);
+            self.trigger_estop(BreachReason::BusError {
+                can_interface: cfg.can_interface,
+                message: e.to_string(),
+            });
+        }
+    }
 
     /// Periodic hold-gain TX for every armed motor in DialIn mode. Keeps
     /// the motor's own watchdog alive and re-asserts our slew-limited
@@ -1342,6 +1741,26 @@ pub fn spawn_rx_threads(
                                             );
                                             consumed = true;
                                         }
+                                    }
+                                }
+                            }
+                            // ODrive wheels speak standard 11-bit frames and
+                            // cyclic heartbeat (0x01) + encoder (0x09). Route
+                            // by node id before falling through to the power
+                            // board.
+                            if !consumed {
+                                if let Some(hb) = frame.parse_odrive_heartbeat() {
+                                    if sup.wheel_index(&iface, hb.node_id).is_some() {
+                                        sup.on_wheel_heartbeat(&iface, &hb);
+                                        consumed = true;
+                                    }
+                                }
+                            }
+                            if !consumed {
+                                if let Some(enc) = frame.parse_odrive_encoder() {
+                                    if sup.wheel_index(&iface, enc.node_id).is_some() {
+                                        sup.on_wheel_encoder(&iface, &enc);
+                                        consumed = true;
                                     }
                                 }
                             }

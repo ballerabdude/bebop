@@ -340,6 +340,10 @@ async fn main() -> Result<()> {
 
                 sup_tick.run_watchdog();
                 sup_tick.tick_telemetry_probe();
+                // Wheeled chassis: apply the operator twist + integrate
+                // odometry every tick (no-op on the legged humanoid, which
+                // has no `drive:` config).
+                sup_tick.tick_drive();
                 if sup_tick.mode() == Mode::DialIn {
                     sup_tick.tick_dial_in_hold();
                 }

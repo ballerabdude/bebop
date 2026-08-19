@@ -330,6 +330,45 @@ pub struct JointConfig {
     pub direction: f32,
 }
 
+/// Configuration for a single ODrive BotWheel (velocity-controlled,
+/// continuous rotation). Unlike [`JointConfig`] a wheel has no position
+/// envelope, no kp/kd — the ODrive runs its own velocity loop and we
+/// command a `rev/s` setpoint with an optional torque feed-forward.
+#[derive(Debug, Clone)]
+pub struct WheelConfig {
+    pub name: String,
+    pub can_interface: String,
+    /// ODrive `node_id` (0..=63; distinct from Robstride's 1..=255).
+    pub node_id: u8,
+    /// Motor→robot rotation sign (`+1` / `-1`), mirroring
+    /// [`JointConfig::direction`]. Applied at the wheel⇄robot boundary so
+    /// feedback and setpoints speak the URDF/sim forward convention.
+    pub direction: f32,
+    /// Wheel angular-velocity hard limit (rad/s). E-STOP breaker.
+    pub vel_max: f32,
+    /// Optional torque feed-forward clamp (Nm). Applies to the
+    /// `Input_Torque_FF` field on `Set_Input_Vel`; currently the policy
+    /// path leaves it at 0.
+    pub torque_limit: f32,
+    /// E-STOP if no encoder/heartbeat arrives within this many ms.
+    pub feedback_timeout_ms: f32,
+}
+
+/// Differential-drive geometry + wheel naming. The twist→wheel and
+/// wheel→odometry transforms in [`crate::drive`] key off this.
+#[derive(Debug, Clone)]
+pub struct DiffDriveConfig {
+    /// Name of the left wheel (must match a [`WheelConfig::name`]).
+    pub left_wheel: String,
+    /// Name of the right wheel (must match a [`WheelConfig::name`]).
+    pub right_wheel: String,
+    /// Wheel radius in metres.
+    pub wheel_radius: f32,
+    /// Half the left-right wheel spacing (metres). "Track" here is the
+    /// *half*-track: `omega = (v_r - v_l) / (2 * half_track)`.
+    pub half_track: f32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub bind_addr: String,
@@ -357,8 +396,9 @@ impl Default for ServerConfig {
 /// are used purely for the operator-facing "fuel gauge" (state-of-charge
 /// linear-interp from voltage). The defaults applied when YAML omits these
 /// fields are 13 cells × 4.20 V / 3.00 V (a generic Li-ion NMC pack);
-/// Bebop V2 itself ships with a 13s LFP pack, see `bebop_v2.yaml` for the
-/// matching 3.45 V / 2.70 V endpoints.
+/// Bebop V2 and the wheeled chassis both ship with the 13s2p NMC pack,
+/// see `bebop_v2.yaml` / `bebop_wheeled.yaml` for the matching 4.20 V /
+/// 3.00 V endpoints.
 #[derive(Debug, Clone)]
 pub struct PowerBoardConfig {
     pub can_interface: String,
@@ -400,6 +440,12 @@ impl PowerBoardConfig {
 #[derive(Debug, Clone)]
 pub struct RobotConfig {
     pub joints: Vec<JointConfig>,
+    /// ODrive wheel actuators (empty on the legged humanoid). Mutually
+    /// exclusive with `joints` in practice — see `drive` below.
+    pub wheels: Vec<WheelConfig>,
+    /// Differential-drive geometry; `Some` on a wheeled chassis, `None`
+    /// on the humanoid. References wheel names in `wheels`.
+    pub drive: Option<DiffDriveConfig>,
     pub can_interfaces: Vec<String>,
     pub server: ServerConfig,
     pub power: Option<PowerBoardConfig>,
@@ -630,8 +676,117 @@ impl RobotConfig {
             });
         }
 
-        if joints.is_empty() {
-            return Err(anyhow!("config has no joints"));
+        // ----- Wheels (ODrive BotWheel) -----------------------------------
+        // Parse the optional `wheels:` mapping. A wheeled chassis has
+        // wheels (and usually no `joints`); the humanoid has `joints` and
+        // no `wheels`. At least one of the two must be present.
+        let mut wheels = Vec::new();
+        let mut seen_wheel_names: HashSet<String> = HashSet::new();
+        let mut seen_wheel_pairs: HashSet<(String, u8)> = HashSet::new();
+        for (key, value) in raw.wheels.iter() {
+            let name = key
+                .as_str()
+                .ok_or_else(|| anyhow!("wheel key must be a string"))?
+                .to_string();
+            let raw_wheel: RawWheel = serde_yaml::from_value(value.clone())
+                .with_context(|| format!("parse wheel {name:?}"))?;
+
+            if !seen_wheel_names.insert(name.clone()) {
+                return Err(anyhow!("duplicate wheel name {name:?} in config"));
+            }
+
+            let can_bus = raw_wheel
+                .can_interface
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| anyhow!("wheel {name:?}: missing can_interface"))?;
+
+            let node_id = raw_wheel
+                .node_id
+                .ok_or_else(|| anyhow!("wheel {name:?}: missing node_id"))?;
+            if node_id > 0x3F {
+                return Err(anyhow!(
+                    "wheel {name:?}: node_id {node_id} out of range [0, 63]"
+                ));
+            }
+            if !seen_wheel_pairs.insert((can_bus.clone(), node_id as u8)) {
+                return Err(anyhow!(
+                    "wheel {name:?}: duplicate (can_interface, node_id) = ({can_bus:?}, {node_id})"
+                ));
+            }
+            interfaces.insert(can_bus.clone());
+
+            let vel_max = raw_wheel.vel_max.ok_or_else(|| {
+                anyhow!("wheel {name:?}: missing vel_max (rad/s)")
+            })?;
+            if vel_max <= 0.0 {
+                return Err(anyhow!("wheel {name:?}: vel_max must be > 0"));
+            }
+            let torque_limit = raw_wheel.torque_limit.unwrap_or(0.0);
+            let feedback_timeout_ms = raw_wheel.feedback_timeout_ms.unwrap_or(100.0);
+            if feedback_timeout_ms <= 0.0 {
+                return Err(anyhow!(
+                    "wheel {name:?}: feedback_timeout_ms must be > 0"
+                ));
+            }
+            let direction = raw_wheel.direction.unwrap_or(1.0);
+            validate_direction(&name, direction)?;
+
+            wheels.push(WheelConfig {
+                name,
+                can_interface: can_bus,
+                node_id: node_id as u8,
+                direction,
+                vel_max,
+                torque_limit,
+                feedback_timeout_ms,
+            });
+        }
+
+        // ----- Differential drive -----------------------------------------
+        // Optional; only meaningful when `wheels` is populated.
+        let drive = raw
+            .drive
+            .map(|d| -> Result<DiffDriveConfig> {
+                let left_wheel = d
+                    .left_wheel
+                    .ok_or_else(|| anyhow!("drive.left_wheel is required"))?;
+                let right_wheel = d
+                    .right_wheel
+                    .ok_or_else(|| anyhow!("drive.right_wheel is required"))?;
+                let wheel_radius = d
+                    .wheel_radius
+                    .ok_or_else(|| anyhow!("drive.wheel_radius is required"))?;
+                let track_width = d
+                    .track_width
+                    .ok_or_else(|| anyhow!("drive.track_width is required"))?;
+                if wheel_radius <= 0.0 {
+                    return Err(anyhow!("drive.wheel_radius must be > 0"));
+                }
+                if track_width <= 0.0 {
+                    return Err(anyhow!("drive.track_width must be > 0"));
+                }
+                Ok(DiffDriveConfig {
+                    left_wheel,
+                    right_wheel,
+                    wheel_radius,
+                    half_track: track_width / 2.0,
+                })
+            })
+            .transpose()
+            .context("invalid `drive:` section")?;
+
+        if joints.is_empty() && wheels.is_empty() {
+            return Err(anyhow!("config has neither joints nor wheels"));
+        }
+        if let Some(d) = &drive {
+            for wn in [&d.left_wheel, &d.right_wheel] {
+                if !wheels.iter().any(|w| &w.name == wn) {
+                    return Err(anyhow!(
+                        "drive references wheel {wn:?} not present in `wheels:`"
+                    ));
+                }
+            }
         }
 
         let server = raw
@@ -788,6 +943,8 @@ impl RobotConfig {
 
         Ok(Self {
             joints,
+            wheels,
+            drive,
             can_interfaces,
             server,
             power,
@@ -806,6 +963,14 @@ impl RobotConfig {
 
     pub fn num_joints(&self) -> usize {
         self.joints.len()
+    }
+
+    pub fn get_wheel(&self, name: &str) -> Option<&WheelConfig> {
+        self.wheels.iter().find(|w| w.name == name)
+    }
+
+    pub fn num_wheels(&self) -> usize {
+        self.wheels.len()
     }
 }
 
@@ -845,6 +1010,9 @@ struct RawConfig {
     /// on so that `index` reflects the file ordering.
     #[serde(default)]
     joints: serde_yaml::Mapping,
+    #[serde(default)]
+    wheels: serde_yaml::Mapping,
+    drive: Option<RawDrive>,
     server: Option<RawServer>,
     power: Option<RawPower>,
     imu: Option<RawImu>,
@@ -965,6 +1133,26 @@ struct RawPower {
     battery_cells: Option<u32>,
     cell_full_voltage: Option<f32>,
     cell_empty_voltage: Option<f32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawWheel {
+    can_interface: Option<String>,
+    node_id: Option<u32>,
+    direction: Option<f32>,
+    vel_max: Option<f32>,
+    torque_limit: Option<f32>,
+    feedback_timeout_ms: Option<f32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawDrive {
+    left_wheel: Option<String>,
+    right_wheel: Option<String>,
+    /// Left-right wheel separation (metres). The config expresses the full
+    /// track; we store the half-track in [`DiffDriveConfig`].
+    track_width: Option<f32>,
+    wheel_radius: Option<f32>,
 }
 
 /// Parse one of `"+x"`, `"-x"`, `"+y"`, `"-y"`, `"+z"`, `"-z"` (a leading
@@ -1129,7 +1317,7 @@ fn merge_policy_gain_clamps(
 fn validate_direction(joint_name: &str, direction: f32) -> Result<()> {
     if (direction - 1.0).abs() > 1e-6 && (direction + 1.0).abs() > 1e-6 {
         return Err(anyhow!(
-            "joint {joint_name:?}: direction must be +1 or -1 (got {direction})"
+            "actuator {joint_name:?}: direction must be +1 or -1 (got {direction})"
         ));
     }
     Ok(())
@@ -1313,6 +1501,31 @@ joints:
             );
         }
     }
+
+    #[test]
+    fn shipped_bebop_wheeled_yaml_parses_power_block() {
+        // Guards the deployed wheeled config: the chassis reuses the V2
+        // power board (can4, addr 0xAA) and 13s NMC pack, and the parser
+        // must auto-register both `can2` (wheels) and `can4` (power) in
+        // the bus pool — the YAML deliberately carries no explicit
+        // `can_interfaces:` list. Losing the `power:` block silently
+        // hides the operator app's battery card (present=false).
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/bebop_wheeled.yaml");
+        let cfg = RobotConfig::from_yaml(&path).expect("load shipped bebop_wheeled.yaml");
+        assert_eq!(cfg.num_joints(), 0);
+        assert_eq!(cfg.num_wheels(), 2);
+        assert!(cfg.drive.is_some());
+        let power = cfg.power.as_ref().expect("power block present");
+        assert_eq!(power.can_interface, "can4");
+        assert_eq!(power.power_id, 170);
+        assert_eq!(power.poll_interval_ms, 1000);
+        assert_eq!(power.battery_cells, 13);
+        assert!((power.cell_full_voltage - 4.20).abs() < 1e-6);
+        assert!((power.cell_empty_voltage - 3.00).abs() < 1e-6);
+        assert!(cfg.can_interfaces.contains(&"can2".to_string()));
+        assert!(cfg.can_interfaces.contains(&"can4".to_string()));
+    }
 }
 
 #[cfg(test)]
@@ -1431,5 +1644,115 @@ mod imu_mount_tests {
             err.to_string().contains("missing sensor_x"),
             "unexpected error: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    fn write_temp_config(body: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let unique = format!(
+            "bebop_wheel_test_{}_{}.yaml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        path.push(unique);
+        let mut f = std::fs::File::create(&path).expect("create temp config");
+        f.write_all(body.as_bytes()).expect("write temp config");
+        path
+    }
+
+    const DIFF_DRIVE: &str = r#"
+wheels:
+  left:
+    can_interface: can0
+    node_id: 1
+    vel_max: 20.0
+  right:
+    can_interface: can0
+    node_id: 2
+    direction: -1
+    vel_max: 20.0
+drive:
+  left_wheel: left
+  right_wheel: right
+  wheel_radius: 0.05
+  track_width: 0.30
+"#;
+
+    #[test]
+    fn parses_wheels_without_joints() {
+        let path = write_temp_config(DIFF_DRIVE);
+        let cfg = RobotConfig::from_yaml(&path).expect("load wheeled config");
+        assert_eq!(cfg.num_joints(), 0);
+        assert_eq!(cfg.num_wheels(), 2);
+        assert!(cfg.get_wheel("left").is_some());
+        assert_eq!(cfg.get_wheel("right").unwrap().direction, -1.0);
+        assert_eq!(cfg.get_wheel("left").unwrap().direction, 1.0);
+        let d = cfg.drive.as_ref().expect("drive parsed");
+        assert_eq!(d.left_wheel, "left");
+        assert_eq!(d.right_wheel, "right");
+        assert!((d.half_track - 0.15).abs() < 1e-6);
+        assert!((d.wheel_radius - 0.05).abs() < 1e-6);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn rejects_config_with_neither_joints_nor_wheels() {
+        let path = write_temp_config("server:\n  bind_addr: 0.0.0.0:9090\n");
+        let err = RobotConfig::from_yaml(&path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("neither joints nor wheels"),
+            "unexpected error: {err:#}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn rejects_drive_reference_to_unknown_wheel() {
+        let body = r#"
+wheels:
+  left:
+    can_interface: can0
+    node_id: 1
+    vel_max: 20.0
+drive:
+  left_wheel: left
+  right_wheel: missing
+  wheel_radius: 0.05
+  track_width: 0.30
+"#;
+        let path = write_temp_config(body);
+        let err = RobotConfig::from_yaml(&path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not present in `wheels:`"),
+            "unexpected error: {err:#}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn rejects_odrive_node_id_out_of_range() {
+        let body = r#"
+wheels:
+  left:
+    can_interface: can0
+    node_id: 64
+    vel_max: 20.0
+"#;
+        let path = write_temp_config(body);
+        let err = RobotConfig::from_yaml(&path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("out of range [0, 63]"),
+            "unexpected error: {err:#}"
+        );
+        std::fs::remove_file(&path).ok();
     }
 }

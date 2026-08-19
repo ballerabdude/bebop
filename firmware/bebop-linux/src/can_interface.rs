@@ -210,7 +210,11 @@ impl ReceivedFrame {
         })
     }
 
-    /// Parse as ODrive encoder estimate frame
+    /// Parse as ODrive encoder estimate frame.
+    ///
+    /// ODrive uses standard 11-bit IDs split as `(node_id << 5) | cmd_id`:
+    /// `node_id` in bits 5..=10, `cmd_id` in bits 0..=4. See
+    /// [`crate::odrive::make_can_id`] for the inverse.
     pub fn parse_odrive_encoder(&self) -> Option<ODriveEncoderFeedback> {
         if self.is_extended || self.data.len() < 8 {
             return None;
@@ -492,5 +496,88 @@ mod tests {
             (observed_inflation - expected_inflation).abs() < 0.05,
             "buggy decode inflation: expected ~{expected_inflation:.2}×, observed {observed_inflation:.2}× (true={true_nm}, buggy={buggy})",
         );
+    }
+
+    fn odrive_frame(cmd_id: u8, node_id: u8, data: Vec<u8>) -> ReceivedFrame {
+        ReceivedFrame {
+            id: ((node_id as u32) << 5) | (cmd_id as u32),
+            is_extended: false,
+            data,
+        }
+    }
+
+    #[test]
+    fn odrive_encoder_parses_exact_bit_split() {
+        // 3 turns, 0.25 turns/s as little-endian f32.
+        let mut data = Vec::new();
+        data.extend_from_slice(&3.0_f32.to_le_bytes());
+        data.extend_from_slice(&0.25_f32.to_le_bytes());
+
+        let fb = odrive_frame(0x09, 2, data)
+            .parse_odrive_encoder()
+            .expect("should parse encoder frame");
+        assert_eq!(fb.node_id, 2);
+        // parser converts rev -> rad (× 2π).
+        assert!((fb.position - 3.0 * 2.0 * std::f32::consts::PI).abs() < 1e-4);
+        assert!((fb.velocity - 0.25 * 2.0 * std::f32::consts::PI).abs() < 1e-5);
+    }
+
+    #[test]
+    fn odrive_encoder_live_golden_node_36() {
+        // Live frame 0x489 from the robot: node 36 encoder, ~1.739 rev.
+        let mut data = vec![0u8; 8];
+        data[0..4].copy_from_slice(&1.7394562_f32.to_le_bytes());
+        let ok = odrive_frame(0x09, 36, data)
+            .parse_odrive_encoder()
+            .is_some();
+        assert!(ok);
+    }
+
+    #[test]
+    fn odrive_heartbeat_live_golden_idle() {
+        // Live frame 0x481 from the robot: node 36 heartbeat, axis IDLE (1).
+        let mut data = vec![0u8; 8];
+        data[4] = 1; // IDLE
+        let hb = odrive_frame(0x01, 36, data)
+            .parse_odrive_heartbeat()
+            .expect("should parse heartbeat");
+        assert_eq!(hb.node_id, 36);
+        assert_eq!(hb.axis_state, 1);
+    }
+
+    #[test]
+    fn odrive_encoder_ignores_wrong_cmd() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1.0_f32.to_le_bytes());
+        data.extend_from_slice(&1.0_f32.to_le_bytes());
+        assert!(odrive_frame(0x07, 2, data).parse_odrive_encoder().is_none());
+    }
+
+    #[test]
+    fn odrive_encoder_ignores_extended_ids() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1.0_f32.to_le_bytes());
+        data.extend_from_slice(&1.0_f32.to_le_bytes());
+        let mut frame = odrive_frame(0x09, 2, data);
+        frame.is_extended = true;
+        assert!(frame.parse_odrive_encoder().is_none());
+    }
+
+    #[test]
+    fn odrive_heartbeat_parses_exact_bit_split() {
+        let axis_error = 1u32 << 31;
+        let mut data = vec![0u8; 8];
+        data[0..4].copy_from_slice(&axis_error.to_le_bytes());
+        data[4] = 8; // CLOSED_LOOP_CONTROL
+        data[5] = 0; // procedure result
+        data[6] = 1; // trajectory done flag
+
+        let hb = odrive_frame(0x01, 5, data)
+            .parse_odrive_heartbeat()
+            .expect("should parse heartbeat");
+        assert_eq!(hb.node_id, 5);
+        assert_eq!(hb.axis_error, 1 << 31);
+        assert_eq!(hb.axis_state, 8);
+        assert!(hb.trajectory_done);
     }
 }

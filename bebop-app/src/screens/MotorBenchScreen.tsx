@@ -2,9 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 
 import { GamepadDriver } from "../components/GamepadDriver";
+import {
+  DRIVE_MAX_ANGULAR,
+  DRIVE_MAX_LINEAR,
+  GamepadDrive,
+} from "../components/GamepadDrive";
 import { Banner, Button, Spinner } from "../components/ui";
 import { getOrCreateRuntimeTransport } from "../runtime";
 import type {
+  DriveView,
   ImuView,
   MotorView,
   PolicyIoView,
@@ -12,6 +18,7 @@ import type {
   RuntimeConnectionState,
   RuntimeMode,
   RuntimeSnapshot,
+  WheelView,
 } from "../runtime";
 import type { RuntimeTransport } from "../runtime";
 
@@ -234,6 +241,64 @@ export function MotorBenchScreen({
       ),
     [refreshAfter],
   );
+
+  const toggleWheel = useCallback(
+    (wheel: string, enabled: boolean) =>
+      refreshAfter(`wheel:${wheel}`, () =>
+        transportRef.current!.setWheelEnabled(wheel, enabled),
+      ),
+    [refreshAfter],
+  );
+
+  const setAllWheels = useCallback(
+    (enabled: boolean) =>
+      refreshAfter(`all-wheels:${enabled}`, () =>
+        transportRef.current!.setAllWheelsEnabled(enabled),
+      ),
+    [refreshAfter],
+  );
+
+  const resetOdom = useCallback(
+    () => refreshAfter("odom-reset", () => transportRef.current!.resetOdometry()),
+    [refreshAfter],
+  );
+
+  // Throttled twist sender. The joystick can emit dozens of moves per
+  // second; keep a single in-flight request and always send the latest
+  // (vx, wz) so the firmware sees a continuous stream without queueing
+  // one request per pointerm move. On release we send (0, 0) to stop.
+  const twistInFlightRef = useRef(false);
+  const twistPendingRef = useRef<{ vx: number; wz: number } | null>(null);
+
+  const sendTwist = useCallback(async (vx: number, wz: number) => {
+    const t = transportRef.current;
+    if (!t) return;
+    const payload = { vx, wz };
+    if (twistInFlightRef.current) {
+      twistPendingRef.current = payload;
+      return;
+    }
+    twistInFlightRef.current = true;
+    try {
+      await t.setVelocityCommand(vx, wz);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      twistInFlightRef.current = false;
+      const next = twistPendingRef.current;
+      twistPendingRef.current = null;
+      if (next) {
+        void Promise.resolve().then(() => sendTwist(next.vx, next.wz));
+      }
+    }
+  }, []);
+
+  // One-shot "stop": enqueue a (0,0) twist that supersedes anything
+  // mid-flight, so releasing the joystick always halts the robot.
+  const stopDrive = useCallback(() => {
+    twistPendingRef.current = { vx: 0, wz: 0 };
+    void sendTwist(0, 0);
+  }, [sendTwist]);
 
   // "Run policy" composite action: switch to RUN_POLICY mode first, then
   // arm every joint. Order matters — the firmware's `arm()` only accepts
@@ -470,6 +535,8 @@ export function MotorBenchScreen({
 
   const motors = snapshot?.motors ?? [];
   const buses = snapshot?.buses ?? [];
+  const wheels = snapshot?.wheels ?? [];
+  const drive = snapshot?.drive;
   const power = snapshot?.power;
   const imu = snapshot?.imu;
   const policyIo = snapshot?.policyIo;
@@ -477,6 +544,8 @@ export function MotorBenchScreen({
   const estopLatched = snapshot?.estopLatched ?? false;
   const estopReason = snapshot?.estopReason ?? "";
   const armedCount = motors.filter((m) => m.armed).length;
+  // True when driving a differential-drive chassis (no legged joints).
+  const wheeled = !!drive?.present && motors.length === 0;
 
   return (
     <div className="flex flex-col gap-3">
@@ -568,7 +637,7 @@ export function MotorBenchScreen({
             <div className="flex gap-2 flex-1 lg:flex-none">
               <Button
                 variant="secondary"
-                onClick={() => setAll(true)}
+                onClick={() => (wheeled ? setAllWheels(true) : setAll(true))}
                 disabled={
                   !!busy ||
                   (mode !== "DIAL_IN" && mode !== "RUN_POLICY") ||
@@ -580,7 +649,7 @@ export function MotorBenchScreen({
               </Button>
               <Button
                 variant="secondary"
-                onClick={() => setAll(false)}
+                onClick={() => (wheeled ? setAllWheels(false) : setAll(false))}
                 disabled={!!busy}
                 className="flex-1 lg:flex-none py-2.5! text-sm!"
               >
@@ -653,11 +722,47 @@ export function MotorBenchScreen({
         </div>
       ) : null}
 
+      {/* Differential-drive control. Rendered when the firmware reports a
+          `drive:` config (a wheeled chassis). The hub holds the arm
+          controls, live wheel telemetry, odometry, and the drive joystick.
+          On a wheeled robot the joint-specific cards below are hidden. */}
+      {wheeled && drive ? (
+        <>
+          <DriveCard
+            drive={drive}
+            wheels={wheels}
+            mode={mode}
+            estopLatched={estopLatched}
+            busy={busy}
+            onToggleWheel={toggleWheel}
+            onSetAllWheels={setAllWheels}
+            onTwist={sendTwist}
+            onStop={stopDrive}
+            onResetOdom={resetOdom}
+          />
+
+          {/* Bluetooth-gamepad drive bridge. Streams twists through the
+              same `sendTwist` coalescer as the joystick above, so the
+              throttling / in-flight logic stays in one place. Renders
+              nothing when no pad is connected to the phone / laptop. */}
+          <GamepadDrive
+            wheels={wheels}
+            mode={mode}
+            estopLatched={estopLatched}
+            onTwist={sendTwist}
+            onStop={stopDrive}
+            onEStop={eStop}
+            onResetEStop={resetEStop}
+            onSetAllWheels={setAllWheels}
+          />
+        </>
+      ) : null}
+
       {/* Dial-in cheat sheet. Shows only in DialIn mode, summarising the
           discovery loop the YAML is structured around. The intent is to
           remind the operator that the slider is bounded by the *current*
           envelope and that widening the envelope is a YAML edit. */}
-      {mode === "DIAL_IN" && !estopLatched ? (
+      {!wheeled && mode === "DIAL_IN" && !estopLatched ? (
         <div className="rounded-[var(--radius-card)] border border-accent/30 bg-accent/5 px-3.5 py-2.5 text-[12px] text-text-dim leading-relaxed">
           <span className="text-text font-semibold">Position dial-in:</span>{" "}
           arm a joint, then drag the position bar to drive it. The slider
@@ -683,7 +788,7 @@ export function MotorBenchScreen({
               one-tap "Enable all" so the operator can recover without
               re-reading the toolbar.
             - RunPolicy with everything armed: green confirmation. */}
-      {!estopLatched && mode !== "UNSPECIFIED" ? (
+      {!wheeled && !estopLatched && mode !== "UNSPECIFIED" ? (
         <PolicyBanner
           mode={mode}
           armedCount={armedCount}
@@ -701,7 +806,7 @@ export function MotorBenchScreen({
           in DIAL_IN / RUN_POLICY and auto-rotates segments by size; the
           card below just surfaces the live file + lets the operator
           download finished segments. */}
-      {policyIo?.present ? (
+      {!wheeled && policyIo?.present ? (
         <PolicyCaptureControls
           policyIo={policyIo}
           busyDryRun={busy === "dry-run:true" || busy === "dry-run:false"}
@@ -719,66 +824,72 @@ export function MotorBenchScreen({
           users that aren't using a controller. Wired to the same
           callbacks the click-and-drag dial uses so the throttling /
           coalescing logic stays in one place. */}
-      <GamepadDriver
-        motors={motors}
-        mode={mode}
-        estopLatched={estopLatched}
-        onSetTarget={sendTarget}
-        onEStop={eStop}
-        onResetEStop={resetEStop}
-        onToggleArm={toggleMotor}
-      />
+      {!wheeled ? (
+        <GamepadDriver
+          motors={motors}
+          mode={mode}
+          estopLatched={estopLatched}
+          onSetTarget={sendTarget}
+          onEStop={eStop}
+          onResetEStop={resetEStop}
+          onToggleArm={toggleMotor}
+        />
+      ) : null}
 
       {/* Guided batch zero-calibration. For the "motor lost its stored
           zero after a power cycle" case: one gesture re-zeroes every
           actuator from the face-flat reference pose, with the firmware
           verifying each motor actually took the write. Per-joint
           re-zero for one-off fixes stays on the motor rows below. */}
-      <ZeroCalibrationCard
-        motorCount={motors.length}
-        armedCount={armedCount}
-        estopLatched={estopLatched}
-        busy={busy}
-        result={zeroAllResult}
-        onDisableAll={() => setAll(false)}
-        onZeroAll={() => zeroAll(motors.length)}
-      />
+      {!wheeled ? (
+        <ZeroCalibrationCard
+          motorCount={motors.length}
+          armedCount={armedCount}
+          estopLatched={estopLatched}
+          busy={busy}
+          result={zeroAllResult}
+          onDisableAll={() => setAll(false)}
+          onZeroAll={() => zeroAll(motors.length)}
+        />
+      ) : null}
 
       {/* Motor table. On md+ this is a true 6-column grid (joint, limits,
           and four numeric readouts). On phones we collapse to a stacked
           card per joint so nothing overflows the viewport horizontally
           and tap targets stay generous. The header row is hidden on
           mobile because each row labels its own readouts inline. */}
-      <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev overflow-hidden">
-        <div className={MOTOR_HEADER + " px-3 py-2 text-[11px] uppercase tracking-wider text-text-dim border-b border-border"}>
-          <div>Joint</div>
-          <div>Limits</div>
-          <div className="text-right">Pos (rad)</div>
-          <div className="text-right">Vel (rad/s)</div>
-          <div className="text-right">Tau (Nm)</div>
-          <div className="text-right">T (°C)</div>
-        </div>
-        {motors.length === 0 ? (
-          <div className="px-3 py-4 text-sm text-text-dim">
-            No motors reported.
+      {!wheeled ? (
+        <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev overflow-hidden">
+          <div className={MOTOR_HEADER + " px-3 py-2 text-[11px] uppercase tracking-wider text-text-dim border-b border-border"}>
+            <div>Joint</div>
+            <div>Limits</div>
+            <div className="text-right">Pos (rad)</div>
+            <div className="text-right">Vel (rad/s)</div>
+            <div className="text-right">Tau (Nm)</div>
+            <div className="text-right">T (°C)</div>
           </div>
-        ) : (
-          motors.map((m) => (
-            <MotorRow
-              key={m.jointName}
-              motor={m}
-              busy={busy === `motor:${m.jointName}`}
-              zeroBusy={busy === `zero:${m.jointName}`}
-              dialIn={mode === "DIAL_IN"}
-              runPolicy={mode === "RUN_POLICY"}
-              estopLatched={estopLatched}
-              onToggle={(enabled) => toggleMotor(m.jointName, enabled)}
-              onSetTarget={(value) => sendTarget(m.jointName, value)}
-              onReZero={() => reZero(m.jointName, m.position)}
-            />
-          ))
-        )}
-      </div>
+          {motors.length === 0 ? (
+            <div className="px-3 py-4 text-sm text-text-dim">
+              No motors reported.
+            </div>
+          ) : (
+            motors.map((m) => (
+              <MotorRow
+                key={m.jointName}
+                motor={m}
+                busy={busy === `motor:${m.jointName}`}
+                zeroBusy={busy === `zero:${m.jointName}`}
+                dialIn={mode === "DIAL_IN"}
+                runPolicy={mode === "RUN_POLICY"}
+                estopLatched={estopLatched}
+                onToggle={(enabled) => toggleMotor(m.jointName, enabled)}
+                onSetTarget={(value) => sendTarget(m.jointName, value)}
+                onReZero={() => reZero(m.jointName, m.position)}
+              />
+            ))
+          )}
+        </div>
+      ) : null}
 
       <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 mt-2">
         {onOpenControllers ? (
@@ -2623,4 +2734,367 @@ function pctOfMax(value: number, max: number): number {
 
 function fmt(v: number): string {
   return v >= 0 ? `+${v.toFixed(2)}` : v.toFixed(2);
+}
+
+// ---------------------------------------------------------------------------
+// Differential drive
+// ---------------------------------------------------------------------------
+// `DRIVE_MAX_LINEAR` / `DRIVE_MAX_ANGULAR` (the soft limits the joystick
+// scales to) live in `components/GamepadDrive.tsx`, shared with the
+// gamepad drive bridge.
+
+/// Differential-drive hub: arm controls, live wheel telemetry, odometry,
+/// and the drive joystick. Shown only when the firmware reports a `drive:`
+/// config (a wheeled chassis with no legged joints).
+function DriveCard({
+  drive,
+  wheels,
+  mode,
+  estopLatched,
+  busy,
+  onToggleWheel,
+  onSetAllWheels,
+  onTwist,
+  onStop,
+  onResetOdom,
+}: {
+  drive: DriveView;
+  wheels: WheelView[];
+  mode: RuntimeMode;
+  estopLatched: boolean;
+  busy: string | null;
+  onToggleWheel: (wheel: string, enabled: boolean) => void;
+  onSetAllWheels: (enabled: boolean) => void;
+  onTwist: (vx: number, wz: number) => void;
+  onStop: () => void;
+  onResetOdom: () => void;
+}) {
+  const armedWheelCount = wheels.filter((w) => w.armed).length;
+  const allArmed = wheels.length > 0 && armedWheelCount === wheels.length;
+  const canDrive =
+    !estopLatched && (mode === "DIAL_IN" || mode === "RUN_POLICY") && armedWheelCount > 0;
+
+  return (
+    <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev px-3.5 py-3 space-y-4">
+      {/* Header row: title + arming controls. */}
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-wider text-text-dim">
+            Differential drive
+          </div>
+          <div className="text-[13px] text-text font-semibold mt-0.5">
+            {wheels.length} wheel{wheels.length === 1 ? "" : "s"} ·{" "}
+            {armedWheelCount} armed
+          </div>
+        </div>
+        <div className="flex gap-2 shrink-0">
+          <Button
+            variant="secondary"
+            onClick={() => onSetAllWheels(true)}
+            disabled={
+              !!busy ||
+              allArmed ||
+              (mode !== "DIAL_IN" && mode !== "RUN_POLICY") ||
+              estopLatched ||
+              wheels.length === 0
+            }
+            className="py-2! text-sm!"
+          >
+            Enable wheels
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => onSetAllWheels(false)}
+            disabled={!!busy || armedWheelCount === 0}
+            className="py-2! text-sm!"
+          >
+            Disable wheels
+          </Button>
+        </div>
+      </div>
+
+      {!canDrive ? (
+        <div className="rounded-[var(--radius-card)] border border-accent/30 bg-accent/5 px-3 py-2 text-[12px] text-text-dim leading-relaxed">
+          {estopLatched
+            ? "E-STOP is latched — reset it before driving."
+            : mode !== "DIAL_IN" && mode !== "RUN_POLICY"
+              ? "Switch to Dial-in (or Policy) mode, then enable the wheels to drive."
+              : "Enable the wheels to drive."}
+        </div>
+      ) : null}
+
+      {/* Joystick + telemetry side by side on desktop, stacked on phones. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
+        <DriveJoystick onTwist={onTwist} onStop={onStop} disabled={!canDrive} />
+
+        <div className="space-y-3">
+          {/* Wheels */}
+          <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev-2/40 px-3 py-2.5 space-y-2">
+            {wheels.length === 0 ? (
+              <div className="text-[12px] text-text-dim">No wheels reported.</div>
+            ) : (
+              wheels.map((w) => (
+                <WheelRow
+                  key={w.name}
+                  wheel={w}
+                  busy={busy === `wheel:${w.name}`}
+                  estopLatched={estopLatched}
+                  canArm={mode === "DIAL_IN" || mode === "RUN_POLICY"}
+                  onToggle={(enabled) => onToggleWheel(w.name, enabled)}
+                />
+              ))
+            )}
+          </div>
+
+          {/* Odometry */}
+          <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev-2/40 px-3 py-2.5">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-[11px] uppercase tracking-wider text-text-dim">
+                Odometry (wheel encoders)
+              </div>
+              <Button
+                variant="ghost"
+                onClick={onResetOdom}
+                disabled={busy === "odom-reset"}
+                className="py-1! px-2! text-[12px]!"
+              >
+                Reset pose
+              </Button>
+            </div>
+            <div className="font-mono text-[13px] text-text leading-relaxed">
+              <div>x&nbsp;&nbsp;{fmt(drive.odomX)}&nbsp;m</div>
+              <div>y&nbsp;&nbsp;{fmt(drive.odomY)}&nbsp;m</div>
+              <div>θ&nbsp;&nbsp;{fmt((drive.odomTheta * 180) / Math.PI)}°</div>
+            </div>
+            <div className="text-[11px] text-text-dim mt-1.5">
+              cmd vx {fmt(drive.cmdLinearX)} m/s · ω {fmt(drive.cmdAngularZ)} rad/s
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WheelRow({
+  wheel,
+  busy,
+  estopLatched,
+  canArm,
+  onToggle,
+}: {
+  wheel: WheelView;
+  busy: boolean;
+  estopLatched: boolean;
+  canArm: boolean;
+  onToggle: (enabled: boolean) => void;
+}) {
+  const stale = !wheel.positionReceived || wheel.feedbackStale;
+  const faulted = wheel.errorCode !== 0;
+  return (
+    <div className="flex items-center gap-2.5">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={wheel.armed}
+        aria-label={`Arm ${wheel.name}`}
+        onClick={() => onToggle(!wheel.armed)}
+        disabled={busy || estopLatched || (!wheel.armed && !canArm)}
+        className={`relative shrink-0 w-9 h-5 rounded-full border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+          wheel.armed ? "bg-success border-success" : "bg-bg-elev border-border"
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-white shadow transition-transform ${
+            wheel.armed ? "translate-x-4" : "translate-x-0"
+          }`}
+          aria-hidden
+        />
+      </button>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="text-[13px] text-text font-medium truncate">
+            {wheel.name}
+          </span>
+          <span className="text-[11px] text-text-dim">id {wheel.nodeId}</span>
+          {faulted ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-danger/40 bg-danger/10 text-danger">
+              error
+            </span>
+          ) : stale ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-yellow-500/40 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300">
+              stale
+            </span>
+          ) : null}
+        </div>
+        <div className="text-[11px] text-text-dim font-mono">
+          vel {fmt(wheel.velocity)} rad/s · target {fmt(wheel.targetVelocity)}
+        </div>
+      </div>
+      <div className="text-right text-[12px] text-text-dim font-mono shrink-0">
+        {wheel.velocity >= 0 ? "+" : ""}
+        {wheel.velocity.toFixed(2)}
+        <span className="text-text-dim/70"> rad/s</span>
+      </div>
+    </div>
+  );
+}
+
+/// Virtual differential-drive joystick. Drag the knob from the centre:
+/// up/down maps to forward/reverse, left/right to turn while/while. Release
+/// snaps back and stops the robot. WASD / arrow keys do the same for
+/// keyboard operators, and releasing all drive keys also stops.
+function DriveJoystick({
+  onTwist,
+  onStop,
+  disabled,
+}: {
+  onTwist: (vx: number, wz: number) => void;
+  onStop: () => void;
+  disabled: boolean;
+}) {
+  const padRef = useRef<HTMLDivElement | null>(null);
+  const draggingRef = useRef(false);
+  const [knob, setKnob] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  const apply = useCallback(
+    (nx: number, ny: number) => {
+      // Joystick convention: up = forward, right = turn right (+wz = left turn).
+      const vx = -ny * DRIVE_MAX_LINEAR;
+      const wz = -nx * DRIVE_MAX_ANGULAR;
+      setKnob({ x: nx, y: ny });
+      onTwist(vx, wz);
+    },
+    [onTwist],
+  );
+
+  const release = useCallback(() => {
+    draggingRef.current = false;
+    setKnob({ x: 0, y: 0 });
+    onStop();
+  }, [onStop]);
+
+  const handleMove = useCallback(
+    (clientX: number, clientY: number) => {
+      const pad = padRef.current;
+      if (!pad) return;
+      const rect = pad.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const radius = rect.width / 2;
+      let nx = (clientX - cx) / radius;
+      let ny = (clientY - cy) / radius;
+      const mag = Math.hypot(nx, ny);
+      if (mag > 1) {
+        nx /= mag;
+        ny /= mag;
+      }
+      apply(nx, ny);
+    },
+    [apply],
+  );
+
+  // Keyboard drive: WASD + arrow keys. Held keys compose a twist; releasing
+  // the last drive key stops. Independent of the joystick, so either input
+  // works and the most recent event wins.
+  useEffect(() => {
+    const keys = new Set<string>();
+    const forward = ["w", "arrowup"];
+    const back = ["s", "arrowdown"];
+    const left = ["a", "arrowleft"];
+    const right = ["d", "arrowright"];
+
+    const compute = () => {
+      let vx = 0;
+      let wz = 0;
+      if (forward.some((k) => keys.has(k))) vx += DRIVE_MAX_LINEAR;
+      if (back.some((k) => keys.has(k))) vx -= DRIVE_MAX_LINEAR;
+      if (left.some((k) => keys.has(k))) wz += DRIVE_MAX_ANGULAR;
+      if (right.some((k) => keys.has(k))) wz -= DRIVE_MAX_ANGULAR;
+      return { vx, wz };
+    };
+
+    const isDriveKey = (k: string) =>
+      forward.includes(k) ||
+      back.includes(k) ||
+      left.includes(k) ||
+      right.includes(k);
+
+    const onKeyDown = (e: { key: string; preventDefault: () => void }) => {
+      const k = e.key.toLowerCase();
+      if (!isDriveKey(k)) return;
+      e.preventDefault();
+      keys.add(k);
+      const { vx, wz } = compute();
+      onTwist(vx, wz);
+    };
+    const onKeyUp = (e: { key: string }) => {
+      const k = e.key.toLowerCase();
+      if (!isDriveKey(k)) return;
+      keys.delete(k);
+      if (keys.size === 0) {
+        onStop();
+      } else {
+        const { vx, wz } = compute();
+        onTwist(vx, wz);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [onTwist, onStop]);
+
+  const knobPx = padRef.current ? padRef.current.offsetWidth / 2 : 88;
+
+  return (
+    <div className="flex flex-col items-center gap-2">
+      <div
+        ref={padRef}
+        className={`relative w-44 h-44 rounded-full border border-border bg-bg-elev-2/60 select-none touch-none ${
+          disabled ? "opacity-40 cursor-not-allowed" : "cursor-grab active:cursor-grabbing"
+        }`}
+        onPointerDown={(e) => {
+          if (disabled) return;
+          draggingRef.current = true;
+          e.currentTarget.setPointerCapture(e.pointerId);
+          handleMove(e.clientX, e.clientY);
+        }}
+        onPointerMove={(e) => {
+          if (!draggingRef.current) return;
+          handleMove(e.clientX, e.clientY);
+        }}
+        onPointerUp={release}
+        onPointerCancel={release}
+      >
+        {/* Cardinal markers */}
+        <span className="absolute left-1/2 top-2 -translate-x-1/2 text-[10px] text-text-dim">
+          fwd
+        </span>
+        <span className="absolute left-1/2 bottom-2 -translate-x-1/2 text-[10px] text-text-dim">
+          rev
+        </span>
+        <span className="absolute top-1/2 left-2 -translate-y-1/2 text-[10px] text-text-dim">
+          L
+        </span>
+        <span className="absolute top-1/2 right-2 -translate-y-1/2 text-[10px] text-text-dim">
+          R
+        </span>
+        {/* Knob */}
+        <div
+          className="absolute w-10 h-10 -translate-x-1/2 -translate-y-1/2 rounded-full bg-accent shadow-md"
+          style={{
+            left: `calc(50% + ${(knob.x * knobPx).toFixed(1)}px)`,
+            top: `calc(50% + ${(knob.y * knobPx).toFixed(1)}px)`,
+          }}
+          aria-hidden
+        />
+      </div>
+      <div className="text-[11px] text-text-dim">
+        Drag to drive · WASD / arrows
+      </div>
+    </div>
+  );
 }

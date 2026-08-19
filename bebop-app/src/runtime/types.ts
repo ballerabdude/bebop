@@ -33,6 +33,34 @@ export interface BusView {
   healthy: boolean;
 }
 
+/// One ODrive wheel telemetry view. Positions/velocities are already in
+/// robot frame (the per-wheel `direction` sign applied), so a positive
+/// velocity is "forward" for both wheels.
+export interface WheelView {
+  name: string;
+  canInterface: string;
+  nodeId: number;
+  armed: boolean;
+  feedbackStale: boolean;
+  positionReceived: boolean;
+  errorCode: number;
+  position: number; // cumulative rad, unbounded
+  velocity: number; // rad/s
+  targetVelocity: number; // rad/s, post clamp + slew
+  velMax: number; // rad/s
+}
+
+/// Differential-drive summary: the operator twist in effect plus the
+/// wheel-encoder odometry pose. `present` is false on the humanoid.
+export interface DriveView {
+  present: boolean;
+  cmdLinearX: number; // m/s
+  cmdAngularZ: number; // rad/s
+  odomX: number; // m
+  odomY: number; // m
+  odomTheta: number; // rad
+}
+
 /// Power-board telemetry view. Mirrors the firmware's `PowerStats`
 /// proto with friendlier field names and a `present` flag the UI can
 /// use to decide whether to render the power card at all.
@@ -100,6 +128,10 @@ export interface RuntimeSnapshot {
   estopReason: string;
   motors: MotorView[];
   buses: BusView[];
+  /// ODrive wheels (empty on the legged humanoid).
+  wheels: WheelView[];
+  /// Differential-drive summary; `drive.present === false` on the humanoid.
+  drive: DriveView;
   /// Always present in the view layer; `power.present === false` when
   /// the firmware has no `power:` block configured.
   power: PowerView;
