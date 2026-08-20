@@ -147,8 +147,7 @@ where they differ):
     right), matching the on-screen joystick
 * **RT / R2** held — deadman; release to halt immediately. Trigger
   pressure also scales the request: just clearing the threshold
-  creeps (~64% of the soft limit), a full pull reaches it
-  (1.0 m/s · 2.0 rad/s)
+  creeps (~64% of the profile's soft limit), a full pull reaches it
 * **L3 (left-stick click)** — arm / disarm all wheels
 * **B / Circle** — latch the runtime E-STOP
 * **A / Cross** — clear a latched E-STOP
@@ -159,23 +158,53 @@ disconnect, leaving the motor-bench screen, hiding the tab, or any
 interruption of the gamepad poll loop (250 ms watchdog) all enqueue a
 zero twist exactly once per drive cycle.
 
+### Control profiles
+
+How sensitive the controls feel is a per-device setting switched in
+the app — pickers live on the controllers screen, the drive card, and
+both gamepad cards. A profile sizes every app-side input path at once
+(gamepad sticks, the on-screen drive joystick, and the WASD keyboard
+drive); the choice persists in localStorage under
+`bebop.controlProfile`. Defined in `src/input/profile.ts`:
+
+| Profile    | Stick deadzone | Expo | Drive limits        | Dial-in rate |
+| ---------- | -------------- | ---- | ------------------- | ------------ |
+| Gentle     | 18%            | 0.5  | 0.5 m/s · 1.0 rad/s | 1.0 rad/s    |
+| Standard   | 12%            | —    | 1.0 m/s · 2.0 rad/s | 2.0 rad/s    |
+| Sport      | 8%             | —    | 1.5 m/s · 3.0 rad/s | 3.0 rad/s    |
+
+*Standard* reproduces the historical hard-coded values exactly, so
+nothing changes for existing operators until they pick another
+preset. *Gentle* widens the deadzone and adds expo stick shaping
+(`(1-e)·x + e·x³`, the same curve as the ROS2 pilot node's `expo`
+param) for fine centre control; *Sport* narrows the deadzone and lifts
+the soft limits. The firmware still clamps twists to each wheel's
+`vel_max` and dial-in steps to `slew.max_pos_step_per_tick`, so a
+faster profile can't exceed the robot's hard ceilings.
+
+Robot-side teleop (pad paired to the robot's BlueZ) is *not* covered —
+its deadzone / max-vel knobs are agent config in
+`/etc/bebop/agent.toml` (`[controller]`).
+
 ### Tuning the dial-in rate
 
 Two coordinated knobs decide how fast a stick deflection moves the
 joint target:
 
-| Knob                              | Lives in                                              | Notes                                                                                       |
-| --------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `FULL_RATE_RAD_S`                 | `src/components/GamepadDriver.tsx`                    | Per-second rate at full stick + full trigger. Currently `1.5` rad/s (~86°/s).               |
-| `slew.max_pos_step_per_tick`      | `firmware/bebop-linux/config/bebop_v2.yaml`           | Hard ceiling enforced on the firmware side at 100 Hz. Default `0.005` rad → `0.5` rad/s cap. |
+| Knob                              | Lives in                                              | Notes                                                                                        |
+| --------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `dialInRate`                      | `src/input/profile.ts` (active control profile)       | Per-second rate at full stick + full trigger. `Standard` = `2.0` rad/s (~115°/s).              |
+| `slew.max_pos_step_per_tick`      | `firmware/bebop-linux/config/bebop_v2.yaml`           | Hard ceiling enforced on the firmware side at 100 Hz. Default `0.030` rad → `3.0` rad/s cap.   |
 
-The firmware silently clamps at its slew cap, so any
-`FULL_RATE_RAD_S` above `max_pos_step_per_tick × 100` just feels
-capped. To genuinely move faster:
+The firmware silently clamps at its slew cap, so any `dialInRate`
+above `max_pos_step_per_tick × 100` just feels capped. To genuinely
+move faster:
 
 1. Bump `slew.max_pos_step_per_tick` in the firmware YAML and
    restart `bebop-linux`.
-2. Bump `FULL_RATE_RAD_S` to the same ceiling on the app side.
+2. Bump the dial-in rate on the app side — either switch to a faster
+   control profile or edit the preset in `src/input/profile.ts` to
+   the same ceiling.
 3. Watch the per-joint **Δ** chip in the motor row while you push
    the stick — if it grows on aggressive moves, the joint can't
    actually keep up at the new rate and you'll start wearing the PD

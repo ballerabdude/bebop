@@ -25,24 +25,24 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { subscribeGamepad, useGamepad } from "../input";
+import { getActiveControlProfile, subscribeGamepad, useGamepad } from "../input";
 import type { GamepadSnapshot, LogicalSnapshot } from "../input";
 import type { MotorView, RuntimeMode } from "../runtime";
+import { ControlProfilePicker } from "./ControlProfilePicker";
 
-/// Maximum target rate at full stick deflection + full trigger
-/// pressure (rad/s). The hook polls at RAF (~60 Hz on most platforms)
-/// and integrates delta-time, so the actual on-wire rate matches this
-/// regardless of polling jitter.
-///
-/// Coupled with the firmware's `slew.max_pos_step_per_tick` in
-/// `firmware/bebop-linux/config/bebop_v2.yaml`. The firmware enforces
-/// a hard ceiling of `max_pos_step_per_tick × 100 Hz`; values here
-/// above that ceiling get silently clamped per tick. The default
-/// firmware cap is `0.005` rad/tick → `0.5` rad/s; this constant sits
-/// above that intentionally so the rate is responsive on a robot
-/// running a relaxed slew cap, and harmlessly clamps on a stock one.
-/// See the README's "Tuning the dial-in rate" section.
-const FULL_RATE_RAD_S = 2.0;
+// Maximum target rate at full stick deflection + full trigger
+// pressure (rad/s) comes from the active control profile
+// (`../input/profile.ts`) — the picker below switches presets at
+// runtime. The hook polls at RAF (~60 Hz on most platforms) and
+// integrates delta-time, so the actual on-wire rate matches the
+// profile regardless of polling jitter.
+//
+// Coupled with the firmware's `slew.max_pos_step_per_tick` in
+// `firmware/bebop-linux/config/bebop_v2.yaml`. The firmware enforces
+// a hard ceiling of `max_pos_step_per_tick × 100 Hz`; profile rates
+// above that ceiling get silently clamped per tick. The default
+// firmware cap is `0.030` rad/tick → `3` rad/s. See the README's
+// "Tuning the dial-in rate" section.
 
 interface GamepadDriverProps {
   motors: MotorView[];
@@ -226,10 +226,12 @@ export function GamepadDriver({
       // Stick magnitude maps linearly to a per-second rad rate. The
       // trigger doubles as a "go faster" gain so the user can hold
       // it lightly to creep and pull it deeper for full-rate moves.
-      // Scale: half-pulled trigger is creep speed (FULL_RATE * 0.4),
-      // full pull is FULL_RATE.
+      // Scale: half-pulled trigger is creep speed (full rate × 0.4),
+      // full pull is the profile's dial-in rate. Read per tick so a
+      // picker change applies to the very next frame.
+      const dialInRate = getActiveControlProfile().dialInRate;
       const triggerGain = 0.4 + 0.6 * Math.min(1, Math.max(0, trigger));
-      const delta = stick * FULL_RATE_RAD_S * triggerGain * dt;
+      const delta = stick * dialInRate * triggerGain * dt;
       const next = clampNumber(
         targetRef.current + delta,
         motor.posMin,
@@ -363,6 +365,7 @@ export function GamepadDriver({
           <span className="text-text-dim">Stick</span>
           <StickIndicator value={stickY} />
         </div>
+        <ControlProfilePicker />
         {driveBlockReason ? (
           <span
             className="text-[11px] text-yellow-700 dark:text-yellow-300"

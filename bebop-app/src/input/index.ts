@@ -11,6 +11,15 @@ export {
 } from "./mapping";
 export type { LogicalIntent, LogicalMapping } from "./mapping";
 export {
+  applyExpo,
+  getActiveControlProfile,
+  setActiveControlProfile,
+  useControlProfile,
+  CONTROL_PROFILES,
+  DEFAULT_PROFILE_ID,
+} from "./profile";
+export type { ControlProfile, ControlProfileId } from "./profile";
+export {
   subscribeGamepad,
   useGamepad,
   useGamepadCallback,

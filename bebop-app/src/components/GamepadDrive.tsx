@@ -24,17 +24,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import { subscribeGamepad, useGamepad } from "../input";
+import { getActiveControlProfile, subscribeGamepad, useGamepad } from "../input";
 import type { GamepadSnapshot, LogicalSnapshot } from "../input";
 import type { RuntimeMode, WheelView } from "../runtime";
 import { ControllerIcon, Hint, prettifyGamepadId } from "./GamepadDriver";
+import { ControlProfilePicker } from "./ControlProfilePicker";
 
-/// Soft limits the drive UI scales the joystick to. The firmware clamps to
-/// each wheel's `vel_max` regardless, so these only bound what the operator
-/// can request with a full stick deflection. Shared with the on-screen
-/// `DriveJoystick` / WASD keyboard drive in `MotorBenchScreen`.
-export const DRIVE_MAX_LINEAR = 1.0; // m/s
-export const DRIVE_MAX_ANGULAR = 2.0; // rad/s (+ = left turn)
+// Drive soft limits come from the active control profile
+// (`../input/profile.ts`) — switched at runtime from the picker on
+// this card. The firmware clamps to each wheel's `vel_max`
+// regardless, so the profile only bounds what the operator can
+// request with a full stick deflection. Shared with the on-screen
+// `DriveJoystick` / WASD keyboard drive in `MotorBenchScreen`.
 
 /// Stick layout. `split` (default): left stick ↕ drives, right stick ↔
 /// turns. `arcade`: the left stick does both, matching the on-screen
@@ -245,10 +246,13 @@ export function GamepadDrive({
 
     // Stick convention matches the on-screen pad: up = forward,
     // right = turn right (+wz = left turn, hence the sign flip).
+    // Limits come from the active profile; read per tick so a picker
+    // change applies to the very next frame.
+    const profile = getActiveControlProfile();
     const gain = 0.4 + 0.6 * Math.min(1, Math.max(0, trigger));
     const turnStick = layoutRef.current === "arcade" ? snap.lx : snap.rx;
-    const vx = canDrive ? snap.ly * DRIVE_MAX_LINEAR * gain : 0;
-    const wz = canDrive ? -turnStick * DRIVE_MAX_ANGULAR * gain : 0;
+    const vx = canDrive ? snap.ly * profile.maxLinear * gain : 0;
+    const wz = canDrive ? -turnStick * profile.maxAngular * gain : 0;
 
     if (canDrive) {
       const last = lastSentRef.current;
@@ -361,9 +365,10 @@ export function GamepadDrive({
         </div>
       </div>
 
-      {/* Layout toggle + live twist readout. The readout shows what the
-          pad is *requesting* (local), so it stays responsive even when
-          telemetry lags; the DriveCard shows what the firmware acked. */}
+      {/* Layout toggle + control profile + live twist readout. The
+          readout shows what the pad is *requesting* (local), so it
+          stays responsive even when telemetry lags; the DriveCard
+          shows what the firmware acked. */}
       <div className="flex items-center gap-3 flex-wrap text-[12px]">
         <div
           className="flex items-center gap-1 p-0.5 rounded-lg border border-border bg-bg-elev-2"
@@ -382,6 +387,7 @@ export function GamepadDrive({
             Arcade
           </LayoutOption>
         </div>
+        <ControlProfilePicker />
         <span className="text-text-dim">
           cmd{" "}
           <span className="font-mono text-text">{fmt(twistView.vx)}</span> m/s

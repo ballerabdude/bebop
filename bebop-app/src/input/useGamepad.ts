@@ -10,8 +10,9 @@
 //      paired in a generic HID gamepad mode (X-input on 8BitDo,
 //      "Bluetooth" on DualSense). Non-standard pads are still surfaced,
 //      but the caller is warned via `snapshot.standard === false`.
-//   2. Apply a radial deadzone to the sticks and an axial deadzone to
-//      the triggers. Defaults are conservative; callers can override.
+//   2. Apply a radial deadzone + expo curve to the sticks and an axial
+//      deadzone to the triggers, all sized by the active control
+//      profile (`./profile.ts`).
 //   3. Compute rising-edge bits for buttons so consumers can wire
 //      "tap to do X" actions without tracking previous frames.
 //   4. Forward the snapshot to all subscribed listeners. We use a
@@ -42,13 +43,12 @@ import {
   readBoolSource,
   type LogicalMapping,
 } from "./mapping";
+import { applyExpo, getActiveControlProfile } from "./profile";
 import type { ButtonIndex, GamepadSnapshot, LogicalSnapshot } from "./types";
 
-/// Stick/trigger deadzones. These are intentionally small — the motor
-/// bench layers an additional STEP_RAD-scaled rate on top, and the user
-/// expects a stick at rest to do absolutely nothing.
-const DEFAULT_STICK_DEADZONE = 0.12;
-const DEFAULT_TRIGGER_DEADZONE = 0.05;
+// Stick/trigger deadzones come from the active control profile
+// (`./profile.ts`), not constants — the user can switch presets at
+// runtime and the poller picks the new values up on the next tick.
 
 type Listener = (snap: GamepadSnapshot) => void;
 
@@ -123,18 +123,26 @@ function buildSnapshot(pad: Gamepad): GamepadSnapshot {
   //   axes[3] = right stick Y
   //   buttons[6].value = left trigger  (0 rest, 1 full)
   //   buttons[7].value = right trigger
-  const [lx, ly] = applyStickDeadzone(
+  const profile = getActiveControlProfile();
+  const [lx0, ly0] = applyStickDeadzone(
     pad.axes[0] ?? 0,
     -(pad.axes[1] ?? 0),
-    DEFAULT_STICK_DEADZONE,
+    profile.stickDeadzone,
   );
-  const [rx, ry] = applyStickDeadzone(
+  const [rx0, ry0] = applyStickDeadzone(
     pad.axes[2] ?? 0,
     -(pad.axes[3] ?? 0),
-    DEFAULT_STICK_DEADZONE,
+    profile.stickDeadzone,
   );
-  const lt = applyAxialDeadzone(pad.buttons[6]?.value ?? 0, DEFAULT_TRIGGER_DEADZONE);
-  const rt = applyAxialDeadzone(pad.buttons[7]?.value ?? 0, DEFAULT_TRIGGER_DEADZONE);
+  // Expo shaping runs after the deadzone rescale so the curve still
+  // spans the full [-1, 1] range (deadzone shrinks it, expo would
+  // only soften it further).
+  const lx = applyExpo(lx0, profile.expo);
+  const ly = applyExpo(ly0, profile.expo);
+  const rx = applyExpo(rx0, profile.expo);
+  const ry = applyExpo(ry0, profile.expo);
+  const lt = applyAxialDeadzone(pad.buttons[6]?.value ?? 0, profile.triggerDeadzone);
+  const rt = applyAxialDeadzone(pad.buttons[7]?.value ?? 0, profile.triggerDeadzone);
 
   const buttons = pad.buttons.map((b) => b.pressed);
   const buttonValues = pad.buttons.map((b) => b.value);

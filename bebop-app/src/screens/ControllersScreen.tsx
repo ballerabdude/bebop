@@ -5,6 +5,7 @@ import type {
   ControllerStatus,
   DiscoveredController,
 } from "../ble";
+import { ControlProfilePicker } from "../components/ControlProfilePicker";
 import { Banner, Button, Card, Spinner } from "../components/ui";
 
 interface ControllersScreenProps {
@@ -142,6 +143,17 @@ export function ControllersScreen({
       </p>
 
       {error ? <Banner tone="error">{error}</Banner> : null}
+
+      {/* Control-sensitivity profile --------------------------------- */}
+      {/* Applies to the *app-side* input paths (gamepad paired to this
+          phone / laptop, the on-screen drive joystick, and WASD). The
+          robot-side teleop knobs above are agent config
+          (`/etc/bebop/agent.toml`), not app state. */}
+      <Card>
+        <div className="py-1">
+          <ControlProfilePicker full />
+        </div>
+      </Card>
 
       {/* Currently paired controller --------------------------------- */}
       {loadingStatus ? (
