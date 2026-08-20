@@ -413,8 +413,7 @@ pub fn spawn_imu_thread(
         let Ok(chip) = Chip::new(rst_chip) else {
             return false;
         };
-        let Ok(rst) =
-            chip.request_lines(Options::output([rst_line]).consumer("bebop-imu-reset"))
+        let Ok(rst) = chip.request_lines(Options::output([rst_line]).consumer("bebop-imu-reset"))
         else {
             return false;
         };
@@ -537,8 +536,7 @@ pub fn spawn_imu_thread(
                 Ok(imu) => {
                     info!(
                         attempt,
-                        period_ms,
-                        "IMU: bring-up succeeded; AR/VR-stabilized RV (0x28) subscribed"
+                        period_ms, "IMU: bring-up succeeded; AR/VR-stabilized RV (0x28) subscribed"
                     );
                     break imu;
                 }
@@ -564,7 +562,7 @@ pub fn spawn_imu_thread(
                             BRINGUP_BACKOFF_MAX_MS,
                             BRINGUP_PERIODIC_INFO_EVERY
                         );
-                    } else if attempt % BRINGUP_PERIODIC_INFO_EVERY == 0 {
+                    } else if attempt.is_multiple_of(BRINGUP_PERIODIC_INFO_EVERY) {
                         info!(
                             attempt,
                             error = %msg,
@@ -579,8 +577,7 @@ pub fn spawn_imu_thread(
                         );
                         return;
                     }
-                    backoff =
-                        (backoff * 2).min(Duration::from_millis(BRINGUP_BACKOFF_MAX_MS));
+                    backoff = (backoff * 2).min(Duration::from_millis(BRINGUP_BACKOFF_MAX_MS));
                 }
             }
         };

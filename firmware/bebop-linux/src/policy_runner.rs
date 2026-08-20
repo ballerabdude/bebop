@@ -472,11 +472,8 @@ impl PolicyRunner {
         //    supervisor's `safe_send_ctrl` then additionally clamps
         //    position to per-joint `pos_min..pos_max` and slew-limits
         //    per tick before pushing the MIT-mode CAN frame.
-        let mut decoded = decode_policy_action(
-            &action,
-            &self.default_positions,
-            &self.policy_gain_clamps,
-        );
+        let mut decoded =
+            decode_policy_action(&action, &self.default_positions, &self.policy_gain_clamps);
         self.gain_ema.apply(&mut decoded);
 
         // Per-tick policy I/O is now captured to MCAP (see
@@ -484,15 +481,7 @@ impl PolicyRunner {
         // file under the capture dir for Foxglove playback / plotting.
 
         if let Ok(mut g) = self.policy_io.lock() {
-            g.publish_tick(
-                self.imu_was_live,
-                dry_run,
-                &obs,
-                &action,
-                &decoded.targets,
-                &decoded.kp,
-                &decoded.kd,
-            );
+            g.publish_tick(self.imu_was_live, dry_run, &obs, &action, &decoded);
         }
 
         // 7b) Capture (RunPolicy: obs + raw action + decoded action). We

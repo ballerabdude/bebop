@@ -232,34 +232,33 @@ async fn main() -> Result<()> {
 
     let policy_io_for_runner = policy_io_shared.clone();
     let policy_control_for_runner = policy_control_shared.clone();
-    let policy_runner: Arc<Mutex<Option<PolicyRunner>>> =
-        match PolicyRunner::new(
-            supervisor.clone(),
-            imu_shared.clone(),
-            policy_io_for_runner,
-            policy_control_for_runner,
-            capture_handle.clone(),
-            &policy_path,
-        ) {
-            Ok(pr) => {
-                if let Ok(mut g) = policy_io_shared.lock() {
-                    g.set_present(true);
-                }
-                info!(model = %policy_path.display(), "policy loaded; RunPolicy mode is available");
-                Arc::new(Mutex::new(Some(pr)))
+    let policy_runner: Arc<Mutex<Option<PolicyRunner>>> = match PolicyRunner::new(
+        supervisor.clone(),
+        imu_shared.clone(),
+        policy_io_for_runner,
+        policy_control_for_runner,
+        capture_handle.clone(),
+        &policy_path,
+    ) {
+        Ok(pr) => {
+            if let Ok(mut g) = policy_io_shared.lock() {
+                g.set_present(true);
             }
-            Err(e) => {
-                if let Ok(mut g) = policy_io_shared.lock() {
-                    g.set_present(false);
-                }
-                warn!(
-                    model = %policy_path.display(),
-                    error = %e,
-                    "policy not loaded; RunPolicy mode will be a no-op"
-                );
-                Arc::new(Mutex::new(None))
+            info!(model = %policy_path.display(), "policy loaded; RunPolicy mode is available");
+            Arc::new(Mutex::new(Some(pr)))
+        }
+        Err(e) => {
+            if let Ok(mut g) = policy_io_shared.lock() {
+                g.set_present(false);
             }
-        };
+            warn!(
+                model = %policy_path.display(),
+                error = %e,
+                "policy not loaded; RunPolicy mode will be a no-op"
+            );
+            Arc::new(Mutex::new(None))
+        }
+    };
 
     // Periodic supervisor tick: hold-cycle TX in DialIn mode, RunPolicy
     // inference + TX in RunPolicy mode, watchdog every cycle.

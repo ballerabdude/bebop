@@ -653,10 +653,7 @@ impl RobotConfig {
             );
             validate_policy_gain_clamps(&name, &model, &policy_gain_clamps)?;
 
-            let direction = raw_joint
-                .direction
-                .or(defaults.direction)
-                .unwrap_or(1.0);
+            let direction = raw_joint.direction.or(defaults.direction).unwrap_or(1.0);
             validate_direction(&name, direction)?;
 
             let index = joints.len();
@@ -716,18 +713,16 @@ impl RobotConfig {
             }
             interfaces.insert(can_bus.clone());
 
-            let vel_max = raw_wheel.vel_max.ok_or_else(|| {
-                anyhow!("wheel {name:?}: missing vel_max (rad/s)")
-            })?;
+            let vel_max = raw_wheel
+                .vel_max
+                .ok_or_else(|| anyhow!("wheel {name:?}: missing vel_max (rad/s)"))?;
             if vel_max <= 0.0 {
                 return Err(anyhow!("wheel {name:?}: vel_max must be > 0"));
             }
             let torque_limit = raw_wheel.torque_limit.unwrap_or(0.0);
             let feedback_timeout_ms = raw_wheel.feedback_timeout_ms.unwrap_or(100.0);
             if feedback_timeout_ms <= 0.0 {
-                return Err(anyhow!(
-                    "wheel {name:?}: feedback_timeout_ms must be > 0"
-                ));
+                return Err(anyhow!("wheel {name:?}: feedback_timeout_ms must be > 0"));
             }
             let direction = raw_wheel.direction.unwrap_or(1.0);
             validate_direction(&name, direction)?;
@@ -895,12 +890,16 @@ impl RobotConfig {
                 // only when `source: spi`, otherwise default to 0 (unused).
                 let (int_line, rst_line) = if source == ImuSource::Spi {
                     let int_line = raw_imu.int_line.ok_or_else(|| {
-                        anyhow!("imu.int_line is required for source: spi \
-                                 (GPIO line offset within `int_chip`)")
+                        anyhow!(
+                            "imu.int_line is required for source: spi \
+                                 (GPIO line offset within `int_chip`)"
+                        )
                     })?;
                     let rst_line = raw_imu.rst_line.ok_or_else(|| {
-                        anyhow!("imu.rst_line is required for source: spi \
-                                 (GPIO line offset within `rst_chip`)")
+                        anyhow!(
+                            "imu.rst_line is required for source: spi \
+                                 (GPIO line offset within `rst_chip`)"
+                        )
                     })?;
                     (int_line, rst_line)
                 } else {
@@ -1510,8 +1509,7 @@ joints:
         // the bus pool — the YAML deliberately carries no explicit
         // `can_interfaces:` list. Losing the `power:` block silently
         // hides the operator app's battery card (present=false).
-        let path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/bebop_wheeled.yaml");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/bebop_wheeled.yaml");
         let cfg = RobotConfig::from_yaml(&path).expect("load shipped bebop_wheeled.yaml");
         assert_eq!(cfg.num_joints(), 0);
         assert_eq!(cfg.num_wheels(), 2);

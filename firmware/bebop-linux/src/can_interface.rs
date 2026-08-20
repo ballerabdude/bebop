@@ -273,7 +273,6 @@ impl ReceivedFrame {
             trajectory_done,
         })
     }
-
 }
 
 /// MIT-mode style uint16 → float decode.
@@ -490,7 +489,8 @@ mod tests {
         // Correct decode lands within 1 LSB of truth.
         assert!((correct - true_nm).abs() <= (rs02.torque_max - rs02.torque_min) / 65535.0);
         // Wrong decode is inflated by the ratio of the full-scales (~7.06×).
-        let expected_inflation = (rs04.torque_max - rs04.torque_min) / (rs02.torque_max - rs02.torque_min);
+        let expected_inflation =
+            (rs04.torque_max - rs04.torque_min) / (rs02.torque_max - rs02.torque_min);
         let observed_inflation = buggy / true_nm;
         assert!(
             (observed_inflation - expected_inflation).abs() < 0.05,

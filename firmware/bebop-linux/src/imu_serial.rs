@@ -84,7 +84,8 @@ fn parse_frame(buf: &[u8]) -> Option<ParsedFrame> {
     if expected != actual {
         return None;
     }
-    let f32_at = |off: usize| f32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+    let f32_at =
+        |off: usize| f32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
     Some(ParsedFrame {
         quat_xyzw: [f32_at(10), f32_at(14), f32_at(18), f32_at(22)],
         gyro_xyz: [f32_at(26), f32_at(30), f32_at(34)],
@@ -264,8 +265,7 @@ pub fn spawn_imu_serial_thread(
                                 quat_normalize_xyzw(quat_mul_xyzw(q_world_sensor, mount_quat))
                             };
 
-                            let omega_body =
-                                rotate_vec_by_quat_xyzw(frame.gyro_xyz, mount_quat);
+                            let omega_body = rotate_vec_by_quat_xyzw(frame.gyro_xyz, mount_quat);
 
                             if let Ok(mut g) = shared.lock() {
                                 g.quaternion = Some(q_world_body);

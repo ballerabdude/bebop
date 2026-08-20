@@ -537,9 +537,9 @@ mod tests {
         raw[2 * NUM_JOINTS + 1] = -3.0;
 
         let decoded = decode_policy_action(&raw, &defaults, &clamps);
-        for i in 0..NUM_JOINTS {
-            assert!((decoded.kp[i] - clamps[i].kp_max).abs() < 1e-5);
-            assert!((decoded.kd[i] - clamps[i].kd_min).abs() < 1e-5);
+        for ((&dkp, &dkd), clamp) in decoded.kp.iter().zip(&decoded.kd).zip(&clamps) {
+            assert!((dkp - clamp.kp_max).abs() < 1e-5);
+            assert!((dkd - clamp.kd_min).abs() < 1e-5);
         }
     }
 
@@ -581,18 +581,28 @@ mod tests {
         let mut ema = GainEma::new(0.08, &clamps);
         let mut decoded = DecodedAction::default();
         // Command kp_max on every joint (a step from the midpoint seed).
-        for i in 0..NUM_JOINTS {
-            decoded.kp[i] = clamps[i].kp_max;
-            decoded.kd[i] = clamps[i].kd_max;
+        for ((kp, kd), clamp) in decoded
+            .kp
+            .iter_mut()
+            .zip(decoded.kd.iter_mut())
+            .zip(&clamps)
+        {
+            *kp = clamp.kp_max;
+            *kd = clamp.kd_max;
         }
         // After tau = 0.08 s = 8 ticks the error should be ~1/e, i.e. the
         // output covers ~63.2% of the step from mid to max.
         for _ in 0..8 {
             ema.apply(&mut decoded);
             // Re-issue the same step command each tick (apply consumed it).
-            for i in 0..NUM_JOINTS {
-                decoded.kp[i] = clamps[i].kp_max;
-                decoded.kd[i] = clamps[i].kd_max;
+            for ((kp, kd), clamp) in decoded
+                .kp
+                .iter_mut()
+                .zip(decoded.kd.iter_mut())
+                .zip(&clamps)
+            {
+                *kp = clamp.kp_max;
+                *kd = clamp.kd_max;
             }
         }
         let kp_mid = 0.5 * (clamps[0].kp_min + clamps[0].kp_max);
@@ -613,7 +623,11 @@ mod tests {
         // ~6.5% of the full swing, i.e. ~15x attenuation.
         let mut high = true;
         for _ in 0..2000 {
-            let v = if high { clamps[0].kp_max } else { clamps[0].kp_min };
+            let v = if high {
+                clamps[0].kp_max
+            } else {
+                clamps[0].kp_min
+            };
             high = !high;
             for i in 0..NUM_JOINTS {
                 decoded.kp[i] = v;
@@ -634,9 +648,14 @@ mod tests {
         let clamps = default_clamps();
         let mut ema = GainEma::new(0.0, &clamps);
         let mut decoded = DecodedAction::default();
-        for i in 0..NUM_JOINTS {
-            decoded.kp[i] = clamps[i].kp_max;
-            decoded.kd[i] = clamps[i].kd_min;
+        for ((kp, kd), clamp) in decoded
+            .kp
+            .iter_mut()
+            .zip(decoded.kd.iter_mut())
+            .zip(&clamps)
+        {
+            *kp = clamp.kp_max;
+            *kd = clamp.kd_min;
         }
         let before = decoded;
         ema.apply(&mut decoded);

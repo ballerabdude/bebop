@@ -65,11 +65,31 @@ struct ChanInfo {
 }
 
 const CHANNELS: &[ChanInfo] = &[
-    ChanInfo { topic: "/joint_states",   schema_name: ros2_msgs::JOINT_STATE_SCHEMA_NAME,   schema_data: ros2_msgs::JOINT_STATE_SCHEMA },
-    ChanInfo { topic: "/imu",            schema_name: ros2_msgs::IMU_SCHEMA_NAME,            schema_data: ros2_msgs::IMU_SCHEMA },
-    ChanInfo { topic: "/policy/status",  schema_name: ros2_msgs::POLICY_STATUS_SCHEMA_NAME,  schema_data: ros2_msgs::POLICY_STATUS_SCHEMA },
-    ChanInfo { topic: "/policy/observation", schema_name: ros2_msgs::OBSERVATION_SCHEMA_NAME, schema_data: ros2_msgs::OBSERVATION_SCHEMA },
-    ChanInfo { topic: "/policy/action",  schema_name: ros2_msgs::POLICY_ACTION_SCHEMA_NAME,  schema_data: ros2_msgs::POLICY_ACTION_SCHEMA },
+    ChanInfo {
+        topic: "/joint_states",
+        schema_name: ros2_msgs::JOINT_STATE_SCHEMA_NAME,
+        schema_data: ros2_msgs::JOINT_STATE_SCHEMA,
+    },
+    ChanInfo {
+        topic: "/imu",
+        schema_name: ros2_msgs::IMU_SCHEMA_NAME,
+        schema_data: ros2_msgs::IMU_SCHEMA,
+    },
+    ChanInfo {
+        topic: "/policy/status",
+        schema_name: ros2_msgs::POLICY_STATUS_SCHEMA_NAME,
+        schema_data: ros2_msgs::POLICY_STATUS_SCHEMA,
+    },
+    ChanInfo {
+        topic: "/policy/observation",
+        schema_name: ros2_msgs::OBSERVATION_SCHEMA_NAME,
+        schema_data: ros2_msgs::OBSERVATION_SCHEMA,
+    },
+    ChanInfo {
+        topic: "/policy/action",
+        schema_name: ros2_msgs::POLICY_ACTION_SCHEMA_NAME,
+        schema_data: ros2_msgs::POLICY_ACTION_SCHEMA,
+    },
 ];
 
 const CDR_ENCODING: &str = "cdr";
@@ -139,7 +159,10 @@ impl CaptureHandle {
             Ok(()) => true,
             Err(TrySendError::Full(cmd)) => match self.tx.send(cmd) {
                 Ok(()) => true,
-                Err(_) => { self.closed.store(true, Ordering::Relaxed); false }
+                Err(_) => {
+                    self.closed.store(true, Ordering::Relaxed);
+                    false
+                }
             },
             Err(TrySendError::Disconnected(_)) => {
                 self.closed.store(true, Ordering::Relaxed);
@@ -163,7 +186,11 @@ pub fn spawn_capture_thread(
     let (tx, rx) = mpsc::sync_channel::<CaptureCommand>(SAMPLE_CHANNEL_CAPACITY);
     let closed = Arc::new(AtomicBool::new(false));
     let dropped_total = Arc::new(AtomicU64::new(0));
-    let handle = CaptureHandle { tx, closed: closed.clone(), dropped_total: dropped_total.clone() };
+    let handle = CaptureHandle {
+        tx,
+        closed: closed.clone(),
+        dropped_total: dropped_total.clone(),
+    };
     let join = std::thread::Builder::new()
         .name("policy-capture".to_string())
         .spawn(move || run_writer(rx, capture_dir, policy_io, dropped_total, closed))
@@ -195,15 +222,17 @@ impl OpenCapture {
     }
 
     fn post_message(&mut self, ch_idx: usize, log_time: u64, enc: &CdrEncoder) -> Result<()> {
-        self.writer.write_to_known_channel(
-            &mcap::records::MessageHeader {
-                channel_id: self.channel_ids[ch_idx],
-                sequence: self.rows as u32,
-                log_time,
-                publish_time: log_time,
-            },
-            enc.as_bytes(),
-        ).context("mcap: write_to_known_channel")?;
+        self.writer
+            .write_to_known_channel(
+                &mcap::records::MessageHeader {
+                    channel_id: self.channel_ids[ch_idx],
+                    sequence: self.rows as u32,
+                    log_time,
+                    publish_time: log_time,
+                },
+                enc.as_bytes(),
+            )
+            .context("mcap: write_to_known_channel")?;
         Ok(())
     }
 
@@ -218,28 +247,52 @@ impl OpenCapture {
         // each JointState entry to the matching URDF joint. These MUST match
         // the joint names in bebopv2.urdf (and observation::JOINT_NAMES).
         enc.write_u32(JOINT_NAMES.len() as u32);
-        for n in &JOINT_NAMES { enc.write_string(n); }
+        for n in &JOINT_NAMES {
+            enc.write_string(n);
+        }
         enc.write_u32(data.joint_pos_rad.len() as u32);
-        for &v in &data.joint_pos_rad { enc.write_f64(v as f64); }
+        for &v in &data.joint_pos_rad {
+            enc.write_f64(v as f64);
+        }
         enc.write_u32(data.joint_vel_rad_s.len() as u32);
-        for &v in &data.joint_vel_rad_s { enc.write_f64(v as f64); }
+        for &v in &data.joint_vel_rad_s {
+            enc.write_f64(v as f64);
+        }
         enc.write_u32(data.joint_torque_nm.len() as u32);
-        for &v in &data.joint_torque_nm { enc.write_f64(v as f64); }
+        for &v in &data.joint_torque_nm {
+            enc.write_f64(v as f64);
+        }
         self.post_message(0, data.wall_time_ns, &enc)
     }
 
     fn write_imu(&mut self, data: &TickSample) -> Result<()> {
         let mut enc = CdrEncoder::with_capacity(256);
         Self::write_header(&mut enc, "imu_link", data.wall_time_ns);
-        let (qx, qy, qz, qw) = (data.quaternion[0] as f64, data.quaternion[1] as f64, data.quaternion[2] as f64, data.quaternion[3] as f64);
-        enc.write_f64(qx); enc.write_f64(qy); enc.write_f64(qz); enc.write_f64(qw);
-        for _ in 0..9 { enc.write_f64(0.0); }
+        let (qx, qy, qz, qw) = (
+            data.quaternion[0] as f64,
+            data.quaternion[1] as f64,
+            data.quaternion[2] as f64,
+            data.quaternion[3] as f64,
+        );
+        enc.write_f64(qx);
+        enc.write_f64(qy);
+        enc.write_f64(qz);
+        enc.write_f64(qw);
+        for _ in 0..9 {
+            enc.write_f64(0.0);
+        }
         enc.write_f64(data.angular_velocity[0] as f64);
         enc.write_f64(data.angular_velocity[1] as f64);
         enc.write_f64(data.angular_velocity[2] as f64);
-        for _ in 0..9 { enc.write_f64(0.0); }
-        for _ in 0..3 { enc.write_f64(0.0); }
-        for _ in 0..9 { enc.write_f64(0.0); }
+        for _ in 0..9 {
+            enc.write_f64(0.0);
+        }
+        for _ in 0..3 {
+            enc.write_f64(0.0);
+        }
+        for _ in 0..9 {
+            enc.write_f64(0.0);
+        }
         self.post_message(1, data.wall_time_ns, &enc)
     }
 
@@ -257,17 +310,28 @@ impl OpenCapture {
         let mut enc = CdrEncoder::with_capacity(256);
         Self::write_header(&mut enc, "", data.wall_time_ns);
         enc.write_u32(data.observation.len() as u32);
-        for &v in &data.observation { enc.write_u32(v.to_bits()); }
+        for &v in &data.observation {
+            enc.write_u32(v.to_bits());
+        }
         self.post_message(3, data.wall_time_ns, &enc)
     }
 
     fn write_action(&mut self, data: &TickSample) -> Result<()> {
-        if data.raw_action.is_empty() { return Ok(()); }
+        if data.raw_action.is_empty() {
+            return Ok(());
+        }
         let mut enc = CdrEncoder::with_capacity(192);
         Self::write_header(&mut enc, "", data.wall_time_ns);
-        for arr in &[&data.raw_action, &data.position_targets_rad, &data.kp, &data.kd] {
+        for arr in &[
+            &data.raw_action,
+            &data.position_targets_rad,
+            &data.kp,
+            &data.kd,
+        ] {
             enc.write_u32(arr.len() as u32);
-            for &v in *arr { enc.write_u32(v.to_bits()); }
+            for &v in *arr {
+                enc.write_u32(v.to_bits());
+            }
         }
         self.post_message(4, data.wall_time_ns, &enc)
     }
@@ -294,7 +358,8 @@ fn open_capture(dir: &Path) -> Result<OpenCapture> {
     let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let filename = format!("policy_capture_{stamp}.mcap");
     let path = dir.join(filename);
-    let file = fs::File::create(&path).with_context(|| format!("create file {}", path.display()))?;
+    let file =
+        fs::File::create(&path).with_context(|| format!("create file {}", path.display()))?;
     let buf = BufWriter::with_capacity(64 * 1024, file);
     let mut writer = mcap::Writer::with_options(
         buf,
@@ -302,7 +367,8 @@ fn open_capture(dir: &Path) -> Result<OpenCapture> {
             .compression(Some(mcap::Compression::Zstd))
             .profile(ROS2_PROFILE)
             .library(format!("bebop-linux mcap {}", mcap::VERSION)),
-    ).context("mcap: create writer")?;
+    )
+    .context("mcap: create writer")?;
 
     let mut channel_ids = [0u16; 5];
     for (i, ch) in CHANNELS.iter().enumerate() {
@@ -310,15 +376,30 @@ fn open_capture(dir: &Path) -> Result<OpenCapture> {
             .add_schema(ch.schema_name, ROS2MSG_ENCODING, ch.schema_data.as_bytes())
             .context("mcap: add_schema")?;
         let mut metadata = BTreeMap::new();
-        metadata.insert("offered_qos_profiles".to_string(), "reliability: reliable\ndurability: volatile\n".to_string());
-        let cid = writer.add_channel(schema_id, ch.topic, CDR_ENCODING, &metadata).context("mcap: add_channel")?;
+        metadata.insert(
+            "offered_qos_profiles".to_string(),
+            "reliability: reliable\ndurability: volatile\n".to_string(),
+        );
+        let cid = writer
+            .add_channel(schema_id, ch.topic, CDR_ENCODING, &metadata)
+            .context("mcap: add_channel")?;
         channel_ids[i] = cid;
         info!(topic = %ch.topic, schema = %ch.schema_name, channel_id = cid, "capture: registered channel");
     }
-    Ok(OpenCapture { path, writer, channel_ids, rows: 0, last_flush: Instant::now() })
+    Ok(OpenCapture {
+        path,
+        writer,
+        channel_ids,
+        rows: 0,
+        last_flush: Instant::now(),
+    })
 }
 
-fn publish_status(policy_io: &PolicyIoShared, open: Option<&OpenCapture>, dropped_total: &AtomicU64) {
+fn publish_status(
+    policy_io: &PolicyIoShared,
+    open: Option<&OpenCapture>,
+    dropped_total: &AtomicU64,
+) {
     if let Ok(mut g) = policy_io.lock() {
         let dropped = dropped_total.load(Ordering::Relaxed);
         match open {
@@ -329,24 +410,50 @@ fn publish_status(policy_io: &PolicyIoShared, open: Option<&OpenCapture>, droppe
 }
 
 fn prune(dir: &Path, budget: u64, keep: &Path) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
-    struct Seg { path: PathBuf, size: u64, mtime: SystemTime }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    struct Seg {
+        path: PathBuf,
+        size: u64,
+        mtime: SystemTime,
+    }
     let mut segs: Vec<Seg> = Vec::new();
     let mut total: u64 = 0;
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("policy_capture_") && n.ends_with(".mcap")) { continue; }
+        if !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("policy_capture_") && n.ends_with(".mcap"))
+        {
+            continue;
+        }
         let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() { continue; }
+        if !meta.is_file() {
+            continue;
+        }
         total += meta.len();
-        segs.push(Seg { path, size: meta.len(), mtime: meta.modified().unwrap_or(UNIX_EPOCH) });
+        segs.push(Seg {
+            path,
+            size: meta.len(),
+            mtime: meta.modified().unwrap_or(UNIX_EPOCH),
+        });
     }
-    if total <= budget { return }
+    if total <= budget {
+        return;
+    }
     segs.sort_by_key(|s| s.mtime);
     for seg in segs {
-        if total <= budget { break }
-        if seg.path == keep { continue }
-        if fs::remove_file(&seg.path).is_ok() { total = total.saturating_sub(seg.size); }
+        if total <= budget {
+            break;
+        }
+        if seg.path == keep {
+            continue;
+        }
+        if fs::remove_file(&seg.path).is_ok() {
+            total = total.saturating_sub(seg.size);
+        }
     }
 }
 
@@ -364,7 +471,9 @@ fn run_writer(
     loop {
         match rx.recv_timeout(FLUSH_INTERVAL) {
             Ok(CaptureCommand::Open) => {
-                if open.is_some() { continue }
+                if open.is_some() {
+                    continue;
+                }
                 match open_capture(&capture_dir) {
                     Ok(c) => {
                         info!(path = %c.path.display(), "capture: opened (ros2 MCAP)");
@@ -377,7 +486,9 @@ fn run_writer(
                         let msg = format!("{e:#}");
                         let now = Instant::now();
                         let should_log = match last_open_error.as_ref() {
-                            Some((t, prev)) => prev != &msg || now.duration_since(*t) >= OPEN_ERROR_LOG_BACKOFF,
+                            Some((t, prev)) => {
+                                prev != &msg || now.duration_since(*t) >= OPEN_ERROR_LOG_BACKOFF
+                            }
                             None => true,
                         };
                         if should_log {
@@ -443,14 +554,21 @@ fn run_writer(
                 }
             }
             Ok(CaptureCommand::Shutdown) => {
-                if let Some(c) = open.take() { let _ = c.finish(); }
+                if let Some(c) = open.take() {
+                    let _ = c.finish();
+                }
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if let Some(c) = open.as_mut() { let _ = c.flush_if_due(); publish_status(&policy_io, Some(c), &dropped_total); }
+                if let Some(c) = open.as_mut() {
+                    let _ = c.flush_if_due();
+                    publish_status(&policy_io, Some(c), &dropped_total);
+                }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                if let Some(c) = open.take() { let _ = c.finish(); }
+                if let Some(c) = open.take() {
+                    let _ = c.finish();
+                }
                 break;
             }
         }
@@ -522,7 +640,9 @@ mod tests {
             let msg = msg.expect("decode message");
             topics.push(msg.channel.topic.clone());
             if let Some(s) = msg.channel.schema.as_ref() {
-                if !schema_names.contains(&s.name) { schema_names.push(s.name.clone()); }
+                if !schema_names.contains(&s.name) {
+                    schema_names.push(s.name.clone());
+                }
             }
         }
 

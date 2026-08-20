@@ -96,9 +96,7 @@ impl PolicyIoSnapshot {
         dry_run: bool,
         observation: &[f32],
         raw_action: &[f32],
-        position_targets_rad: &[f32; NUM_JOINTS],
-        kp: &[f32; NUM_JOINTS],
-        kd: &[f32; NUM_JOINTS],
+        decoded: &crate::observation::DecodedAction,
     ) {
         self.active = true;
         self.imu_live = imu_live;
@@ -107,9 +105,9 @@ impl PolicyIoSnapshot {
         self.observation.extend_from_slice(observation);
         self.raw_action.clear();
         self.raw_action.extend_from_slice(raw_action);
-        self.position_targets_rad = *position_targets_rad;
-        self.kp = *kp;
-        self.kd = *kd;
+        self.position_targets_rad = decoded.targets;
+        self.kp = decoded.kp;
+        self.kd = decoded.kd;
     }
 
     /// Update capture-state fields without touching the per-tick I/O

@@ -4,11 +4,11 @@
 //! The corresponding `ServerRuntimeMessage` is returned for the caller to
 //! write back to the WS sink.
 
+use crate::drive::Twist;
 use crate::imu::ImuShared;
+use crate::mode::Mode;
 use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
-use crate::drive::Twist;
-use crate::mode::Mode;
 use crate::safety::limits::BreachReason;
 use crate::safety::Supervisor;
 use bebop_proto::runtime::v1 as proto;
@@ -169,8 +169,7 @@ pub fn handle_client_message(
                             None => format!("{} (no feedback)", o.joint_name),
                         })
                         .collect();
-                    let mut msg =
-                        format!("all {} actuators re-zeroed", outcomes.len());
+                    let mut msg = format!("all {} actuators re-zeroed", outcomes.len());
                     if !unverified.is_empty() {
                         msg.push_str(&format!(
                             "; VERIFY FAILED (post-zero |pos| > {:.2} rad — motor may have ignored SET_ZERO, or joint not at the reference pose): {}",

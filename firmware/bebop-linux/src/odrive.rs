@@ -209,7 +209,12 @@ impl ODriveWheel {
     /// Command a wheel velocity in `turns/s` with an optional torque
     /// feed-forward in Nm. `Set_Input_Vel` payload is two little-endian
     /// `float32`: `Input_Vel` (rev/s) then `Input_Torque_FF` (Nm).
-    pub fn send_velocity(&self, can: &CanInterface, turns_per_s: f32, torque_ff_nm: f32) -> Result<()> {
+    pub fn send_velocity(
+        &self,
+        can: &CanInterface,
+        turns_per_s: f32,
+        torque_ff_nm: f32,
+    ) -> Result<()> {
         let mut data = [0u8; 8];
         data[0..4].copy_from_slice(&turns_per_s.to_le_bytes());
         data[4..8].copy_from_slice(&torque_ff_nm.to_le_bytes());
@@ -263,11 +268,20 @@ impl ODriveWheel {
             (axis_error::INVALID_STATE, "INVALID_STATE"),
             (axis_error::DC_BUS_UNDER_VOLTAGE, "DC_BUS_UNDER_VOLTAGE"),
             (axis_error::DC_BUS_OVER_VOLTAGE, "DC_BUS_OVER_VOLTAGE"),
-            (axis_error::CURRENT_MEASUREMENT_TIMEOUT, "CURRENT_MEASUREMENT_TIMEOUT"),
-            (axis_error::BRAKE_RESISTOR_DISARMED, "BRAKE_RESISTOR_DISARMED"),
+            (
+                axis_error::CURRENT_MEASUREMENT_TIMEOUT,
+                "CURRENT_MEASUREMENT_TIMEOUT",
+            ),
+            (
+                axis_error::BRAKE_RESISTOR_DISARMED,
+                "BRAKE_RESISTOR_DISARMED",
+            ),
             (axis_error::MOTOR_DISARMED, "MOTOR_DISARMED"),
             (axis_error::MOTOR_FAILED, "MOTOR_FAILED"),
-            (axis_error::SENSORLESS_ESTIMATOR_FAILED, "SENSORLESS_ESTIMATOR_FAILED"),
+            (
+                axis_error::SENSORLESS_ESTIMATOR_FAILED,
+                "SENSORLESS_ESTIMATOR_FAILED",
+            ),
             (axis_error::ENCODER_FAILED, "ENCODER_FAILED"),
             (axis_error::CONTROLLER_FAILED, "CONTROLLER_FAILED"),
             (axis_error::WATCHDOG_TIMER_EXPIRED, "WATCHDOG_TIMER_EXPIRED"),
@@ -275,17 +289,32 @@ impl ODriveWheel {
             (axis_error::OVER_TEMP, "OVER_TEMP"),
             (axis_error::UNKNOWN_POSITION, "UNKNOWN_POSITION"),
             (axis_error::DC_BUS_OVER_CURRENT, "DC_BUS_OVER_CURRENT"),
-            (axis_error::CURRENT_LIMIT_VIOLATION, "CURRENT_LIMIT_VIOLATION"),
+            (
+                axis_error::CURRENT_LIMIT_VIOLATION,
+                "CURRENT_LIMIT_VIOLATION",
+            ),
             (axis_error::MOTOR_OVER_TEMP, "MOTOR_OVER_TEMP"),
             (axis_error::INVERTER_OVER_TEMP, "INVERTER_OVER_TEMP"),
-            (axis_error::VELOCITY_LIMIT_VIOLATION, "VELOCITY_LIMIT_VIOLATION"),
-            (axis_error::POSITION_LIMIT_VIOLATION, "POSITION_LIMIT_VIOLATION"),
+            (
+                axis_error::VELOCITY_LIMIT_VIOLATION,
+                "VELOCITY_LIMIT_VIOLATION",
+            ),
+            (
+                axis_error::POSITION_LIMIT_VIOLATION,
+                "POSITION_LIMIT_VIOLATION",
+            ),
             (
                 axis_error::MOTOR_DISARMED_CPU_POSITION_LINEARITY,
                 "MOTOR_DISARMED_CPU_POSITION_LINEARITY",
             ),
-            (axis_error::MOTOR_DISARMED_ABS_POSITION, "MOTOR_DISARMED_ABS_POSITION"),
-            (axis_error::MOTOR_DISARMED_UNRESOLVED, "MOTOR_DISARMED_UNRESOLVED"),
+            (
+                axis_error::MOTOR_DISARMED_ABS_POSITION,
+                "MOTOR_DISARMED_ABS_POSITION",
+            ),
+            (
+                axis_error::MOTOR_DISARMED_UNRESOLVED,
+                "MOTOR_DISARMED_UNRESOLVED",
+            ),
         ];
         let mut names: Vec<&str> = KNOWN_BITS
             .iter()
@@ -367,7 +396,10 @@ mod tests {
         assert!(!wheel.state.is_enabled);
         assert!(wheel.state.has_error);
         assert_eq!(wheel.state.error_code, axis_error::ESTOP_REQUESTED);
-        assert!(wheel.fault_description().unwrap().contains("ESTOP_REQUESTED"));
+        assert!(wheel
+            .fault_description()
+            .unwrap()
+            .contains("ESTOP_REQUESTED"));
     }
 
     #[test]

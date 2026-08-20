@@ -1,8 +1,8 @@
 //! Build telemetry / snapshot frames from the supervisor's current state.
 
 use crate::imu::ImuShared;
-use crate::policy_io::{self, PolicyIoShared};
 use crate::mode::Mode;
+use crate::policy_io::{self, PolicyIoShared};
 use crate::powerboard::describe_faults;
 use crate::safety::limits::MotorSnapshot;
 use crate::safety::power_monitor::PowerBoardSnapshot;
@@ -52,7 +52,10 @@ fn wheel_state_to_proto(w: &crate::safety::limits::WheelSnapshot) -> proto::Whee
 
 fn build_drive_state(sup: &Arc<Supervisor>) -> proto::DriveState {
     if !sup.has_drive() {
-        return proto::DriveState { present: false, ..Default::default() };
+        return proto::DriveState {
+            present: false,
+            ..Default::default()
+        };
     }
     let twist = sup.cmd_vel();
     let (x, y, theta) = sup.odometry_pose();
@@ -248,7 +251,10 @@ fn build_policy_io_stats(policy_io: &PolicyIoShared) -> proto::PolicyIoStats {
         position_targets_rad: snapshot.position_targets_rad.to_vec(),
         kp: snapshot.kp.to_vec(),
         kd: snapshot.kd.to_vec(),
-        joint_names: policy_io::joint_names().iter().map(|s| s.to_string()).collect(),
+        joint_names: policy_io::joint_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     }
 }
 

@@ -529,8 +529,7 @@ impl Excitation {
         let f1 = self.chirp_f1;
         let dur = self.chirp_duration;
         // Instantaneous phase of a linear chirp: 2π (f0 t + (f1-f0) t²/2dur).
-        let phase =
-            2.0 * std::f32::consts::PI * (f0 * t + 0.5 * (f1 - f0) * t * t / dur);
+        let phase = 2.0 * std::f32::consts::PI * (f0 * t + 0.5 * (f1 - f0) * t * t / dur);
         Some(JointCommand {
             position: fb_pos,
             velocity: 0.0,
@@ -630,7 +629,9 @@ fn check_immediate(
         return Some(format!(
             "motor fault (code 0x{:X}: {})",
             st.error_code,
-            motor.fault_description().unwrap_or_else(|| "unknown".into())
+            motor
+                .fault_description()
+                .unwrap_or_else(|| "unknown".into())
         ));
     }
     if st.last_update_ms != 0 {
@@ -663,7 +664,10 @@ fn check_limit(motor: &RobstrideMotor, lim: &EffLimits) -> Option<String> {
         return Some(format!("torque {:.2} Nm exceeds limit", st.torque));
     }
     if st.temperature > lim.temp_max && st.temperature <= TEMP_SANE_MAX_C {
-        return Some(format!("temperature {:.1} °C exceeds limit", st.temperature));
+        return Some(format!(
+            "temperature {:.1} °C exceeds limit",
+            st.temperature
+        ));
     }
     None
 }
@@ -804,8 +808,8 @@ fn run(args: Args, stop: Arc<AtomicBool>) -> Result<RunOutcome> {
         maneuver.as_str().replace('-', "_"),
         stamp
     ));
-    let file = File::create(&csv_path)
-        .with_context(|| format!("create CSV {}", csv_path.display()))?;
+    let file =
+        File::create(&csv_path).with_context(|| format!("create CSV {}", csv_path.display()))?;
     let mut csv = BufWriter::new(file);
     writeln!(
         csv,

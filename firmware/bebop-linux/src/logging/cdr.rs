@@ -21,7 +21,11 @@ pub struct CdrEncoder {
 
 impl CdrEncoder {
     pub fn with_capacity(cap: usize) -> Self {
-        Self { buf: Vec::with_capacity(cap), pos: 0, body_start: 0 }
+        Self {
+            buf: Vec::with_capacity(cap),
+            pos: 0,
+            body_start: 0,
+        }
     }
 
     pub fn write_header(&mut self) {
@@ -115,6 +119,11 @@ impl CdrEncoder {
         self.pos
     }
 
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.pos == 0
+    }
+
     fn write_u32_le_raw(&mut self, value: u32) {
         self.buf.extend_from_slice(&value.to_le_bytes());
         self.pos += 4;
@@ -159,7 +168,9 @@ mod tests {
         e.write_f64(std::f64::consts::PI);
         let bytes = e.as_bytes();
         assert_eq!(bytes.len(), 8);
-        let val = f64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let val = f64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
         assert!((val - std::f64::consts::PI).abs() < 1e-15);
     }
 
@@ -242,7 +253,7 @@ mod tests {
         e.write_header(); // 4-byte encapsulation, body starts here
         e.write_u32(1); // body offset 0..4
         e.write_f64(2.0); // aligned to body offset 8
-        // 4 (header) + 4 (u32) + 4 (pad) + 8 (f64) = 20
+                          // 4 (header) + 4 (u32) + 4 (pad) + 8 (f64) = 20
         assert_eq!(e.len(), 20);
     }
 

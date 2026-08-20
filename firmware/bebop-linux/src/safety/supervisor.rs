@@ -25,7 +25,7 @@ use crate::safety::limits::{
 use crate::safety::power_monitor::{PowerBoardSnapshot, PowerMonitor};
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -151,9 +151,7 @@ impl Supervisor {
     /// A WS client subscribed to telemetry. When the first subscriber
     /// connects we immediately probe all disarmed motors for feedback.
     pub fn inc_telemetry_subscribers(&self) -> u32 {
-        let prev = self
-            .telemetry_subscribers
-            .fetch_add(1, Ordering::SeqCst);
+        let prev = self.telemetry_subscribers.fetch_add(1, Ordering::SeqCst);
         if prev == 0 {
             for idx in 0..self.motors.len() {
                 self.refresh_one_telemetry_probe(idx);
@@ -327,7 +325,10 @@ impl Supervisor {
             let g = entry.lock().unwrap();
             // Velocity mode first, then engage closed-loop control.
             g.wheel.set_velocity_mode(&can).with_context(|| {
-                format!("{}: failed to set velocity mode on {}", wheel, cfg.can_interface)
+                format!(
+                    "{}: failed to set velocity mode on {}",
+                    wheel, cfg.can_interface
+                )
             })?;
             g.wheel.enable(&can).with_context(|| {
                 format!(
@@ -1303,7 +1304,10 @@ impl Supervisor {
         if self.estop_active() {
             return;
         }
-        let armed_any = self.wheels.iter().any(|w| w.lock().map(|g| g.armed).unwrap_or(false));
+        let armed_any = self
+            .wheels
+            .iter()
+            .any(|w| w.lock().map(|g| g.armed).unwrap_or(false));
         if !armed_any {
             return;
         }
@@ -1327,8 +1331,14 @@ impl Supervisor {
 
         // Odometry from *measured* robot-frame wheel velocities.
         let (vl_meas, vr_meas) = (
-            self.wheels[li].lock().map(|g| g.wheel.state.velocity).unwrap_or(0.0),
-            self.wheels[ri].lock().map(|g| g.wheel.state.velocity).unwrap_or(0.0),
+            self.wheels[li]
+                .lock()
+                .map(|g| g.wheel.state.velocity)
+                .unwrap_or(0.0),
+            self.wheels[ri]
+                .lock()
+                .map(|g| g.wheel.state.velocity)
+                .unwrap_or(0.0),
         );
         if let Ok(mut odom) = self.odometry.lock() {
             odom.step(vl_meas, vr_meas, dt, &drive);
@@ -1356,7 +1366,9 @@ impl Supervisor {
         }
         // Slew-limit the commanded change to WHEEL_VEL_SLEW_RAD_S_PER_TICK.
         let prev = entry.last_target_vel;
-        target = target.max(prev - WHEEL_VEL_SLEW_RAD_S_PER_TICK).min(prev + WHEEL_VEL_SLEW_RAD_S_PER_TICK);
+        target = target
+            .max(prev - WHEEL_VEL_SLEW_RAD_S_PER_TICK)
+            .min(prev + WHEEL_VEL_SLEW_RAD_S_PER_TICK);
         entry.last_target_vel = target;
 
         // Convert robot-frame rad/s -> motor-frame turns/s (direction sign).
@@ -1428,9 +1440,7 @@ impl Supervisor {
         if self.telemetry_subscribers() == 0 || self.estop_active() {
             return;
         }
-        let n = self
-            .telemetry_probe_counter
-            .fetch_add(1, Ordering::Relaxed);
+        let n = self.telemetry_probe_counter.fetch_add(1, Ordering::Relaxed);
         // Re-assert enable + active reporting for ONE motor per tick (round-
         // robin). The old code hit all 8 disarmed motors in a single tick
         // once per second, which occasionally blocked ~24 ms on the CAN
