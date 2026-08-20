@@ -84,6 +84,12 @@ message ClientRuntimeMessage {
     SetAllWheelsEnabled  set_all_wheels_enabled = 16;
     // Reset the wheel-encoder odometry pose to the origin.
     ResetOdometry        reset_odometry         = 17;
+    // Run the ODrive FULL_CALIBRATION_SEQUENCE on one disarmed wheel
+    // (motor + encoder offset; the axis spins for ~20-30 s). Recovers a
+    // wheel whose encoder calibration was lost. Result is NOT saved to
+    // the S1's NVM — it must be re-run after a power cycle, or persisted
+    // once via `odrivetool` → `save_configuration()` over USB.
+    CalibrateWheel       calibrate_wheel        = 18;
   }
   reserved 12;
   reserved "set_policy_capture";
@@ -194,6 +200,12 @@ message WheelState {
 
   // Hard velocity limit from the YAML config (rad/s).
   float  vel_max           = 22;
+
+  // Raw ODrive AxisState from the heartbeat (0 = UNSPECIFIED, 1 = IDLE,
+  // 8 = CLOSED_LOOP_CONTROL; any calibration state in 3..=11). Lets the
+  // operator see "armed but axis still IDLE" — the silent-enable-fail
+  // mode that hides an uncalibrated encoder.
+  uint32 axis_state      = 23;
 }
 
 // Differential-drive summary: the operator twist actually in effect plus the
@@ -382,6 +394,14 @@ message SetWheelEnabled {
 
 message SetAllWheelsEnabled {
   bool enabled = 1;
+}
+
+// Run the ODrive FULL_CALIBRATION_SEQUENCE (motor + encoder offset) on
+// one disarmed wheel. The axis spins for ~20-30 s; watch `wheel.axis_state`
+// transition IDLE -> CALIBRATION -> IDLE. See the field comment on
+// `calibrate_wheel` for the persistence caveat.
+message CalibrateWheel {
+  string wheel_name = 1;
 }
 
 message ResetOdometry {}

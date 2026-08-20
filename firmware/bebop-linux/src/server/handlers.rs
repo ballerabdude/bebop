@@ -259,6 +259,16 @@ pub fn handle_client_message(
             sup.reset_odometry();
             ack(request_id, "odometry reset".into())
         }
+        P::CalibrateWheel(req) => match sup.calibrate_wheel(&req.wheel_name) {
+            Ok(()) => ack(
+                request_id,
+                format!(
+                    "full calibration started on {} (axis spins ~20-30 s; NOT saved to S1 NVM — re-run after power cycle)",
+                    req.wheel_name
+                ),
+            ),
+            Err(e) => error_response(request_id, fmt_err(&e)),
+        },
     }
 }
 

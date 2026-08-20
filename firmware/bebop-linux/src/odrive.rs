@@ -132,11 +132,17 @@ pub fn make_can_id(cmd_id: u8, node_id: u8) -> u16 {
 }
 
 /// A single ODrive axis (one BotWheel). Holds the protocol node id and the
-/// latest decoded feedback in `state`.
+/// latest decoded feedback in `state`. `axis_state` mirrors the raw
+/// [`axis_state`] enum value from the last heartbeat so telemetry can
+/// distinguish "armed but axis still IDLE" (the silent-enable-fail mode
+/// of an uncalibrated encoder) from a healthy CLOSED_LOOP axis.
 #[derive(Debug)]
 pub struct ODriveWheel {
     pub node_id: u8,
     pub state: JointState,
+    /// Raw ODrive AxisState from the heartbeat; 0 = UNSPECIFIED,
+    /// 1 = IDLE, 8 = CLOSED_LOOP_CONTROL, 3..=11 = calibration states.
+    pub axis_state: u8,
 }
 
 impl ODriveWheel {
@@ -144,6 +150,7 @@ impl ODriveWheel {
         Self {
             node_id,
             state: JointState::default(),
+            axis_state: 0,
         }
     }
 
@@ -201,6 +208,16 @@ impl ODriveWheel {
         self.request_axis_state(can, axis_state::IDLE)
     }
 
+    /// Request FULL_CALIBRATION_SEQUENCE (motor + encoder offset). The
+    /// axis spins for ~20-30 s and must be supervisor-side disarmed.
+    /// Used to recover a wheel whose encoder calibration was lost
+    /// (symptom: `pos_estimate = NaN` on CAN, arm ack succeeds, axis
+    /// stays IDLE and ignores velocity commands). CAN has no
+    /// "save configuration" message, so the result dies on power cycle.
+    pub fn calibrate(&self, can: &CanInterface) -> Result<()> {
+        self.request_axis_state(can, axis_state::FULL_CALIBRATION_SEQUENCE)
+    }
+
     /// Clear latched axis errors (no payload).
     pub fn clear_errors(&self, can: &CanInterface) -> Result<()> {
         self.send_standard(can, cmd::CLEAR_ERRORS, &[0u8; 8])
@@ -237,12 +254,13 @@ impl ODriveWheel {
     }
 
     /// Decode a heartbeat frame into `state.is_enabled` / `has_error` /
-    /// `error_code`, and refresh the feedback clock (heartbeat is part of
-    /// the watchdog liveness signal too).
+    /// `error_code` / `axis_state`, and refresh the feedback clock
+    /// (heartbeat is part of the watchdog liveness signal too).
     pub fn process_heartbeat(&mut self, hb: &ODriveHeartbeat) {
         if hb.node_id != self.node_id {
             return;
         }
+        self.axis_state = hb.axis_state;
         self.state.is_enabled = hb.axis_state == axis_state::CLOSED_LOOP_CONTROL as u8;
         self.state.has_error = hb.axis_error != 0;
         self.state.error_code = hb.axis_error;

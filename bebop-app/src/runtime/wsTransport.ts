@@ -35,6 +35,7 @@ import {
   SetWheelEnabledSchema,
   SetAllWheelsEnabledSchema,
   ResetOdometrySchema,
+  CalibrateWheelSchema,
   SubscribeTelemetrySchema,
   UnsubscribeTelemetrySchema,
   type ClientRuntimeMessage,
@@ -510,6 +511,17 @@ export class RuntimeTransport {
     });
   }
 
+  /// Run the ODrive FULL_CALIBRATION_SEQUENCE on one wheel (~20-30 s spin).
+  /// The axis must be disarmed first. Recovers a lost encoder calibration —
+  /// the CAN result is NOT saved to the S1's NVM, so it must be re-run
+  /// after a power cycle (or persisted once via `odrivetool` over USB).
+  async calibrateWheel(wheelName: string): Promise<void> {
+    await this.requestAck({
+      case: "calibrateWheel",
+      value: create(CalibrateWheelSchema, { wheelName }),
+    });
+  }
+
   /// Reset the wheel-encoder odometry pose to the origin.
   async resetOdometry(): Promise<void> {
     await this.requestAck({
@@ -634,6 +646,7 @@ function wheelFromProto(w: ProtoWheelState): WheelView {
     velocity: w.velocityRadS,
     targetVelocity: w.targetVelocityRadS,
     velMax: w.velMax,
+    axisState: w.axisState,
   };
 }
 

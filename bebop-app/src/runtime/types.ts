@@ -48,6 +48,10 @@ export interface WheelView {
   velocity: number; // rad/s
   targetVelocity: number; // rad/s, post clamp + slew
   velMax: number; // rad/s
+  /// Raw ODrive AxisState from the heartbeat; 1 = IDLE, 8 = CLOSED_LOOP,
+  /// 3..=11 = calibration states. Lets the UI flag "armed but axis still
+  /// IDLE" — the silent-enable-fail mode of a lost encoder calibration.
+  axisState: number;
 }
 
 /// Differential-drive summary: the operator twist in effect plus the

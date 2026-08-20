@@ -2,11 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 
 import { GamepadDriver } from "../components/GamepadDriver";
-import {
-  DRIVE_MAX_ANGULAR,
-  DRIVE_MAX_LINEAR,
-  GamepadDrive,
-} from "../components/GamepadDrive";
+import { GamepadDrive } from "../components/GamepadDrive";
+import { ControlProfilePicker } from "../components/ControlProfilePicker";
+import { useControlProfile } from "../input";
 import { Banner, Button, Spinner } from "../components/ui";
 import { getOrCreateRuntimeTransport } from "../runtime";
 import type {
@@ -255,6 +253,12 @@ export function MotorBenchScreen({
       refreshAfter(`all-wheels:${enabled}`, () =>
         transportRef.current!.setAllWheelsEnabled(enabled),
       ),
+    [refreshAfter],
+  );
+
+  const calibrateWheel = useCallback(
+    (wheel: string) =>
+      refreshAfter(`calib:${wheel}`, () => transportRef.current!.calibrateWheel(wheel)),
     [refreshAfter],
   );
 
@@ -736,6 +740,7 @@ export function MotorBenchScreen({
             busy={busy}
             onToggleWheel={toggleWheel}
             onSetAllWheels={setAllWheels}
+            onCalibrateWheel={calibrateWheel}
             onTwist={sendTwist}
             onStop={stopDrive}
             onResetOdom={resetOdom}
@@ -2739,9 +2744,10 @@ function fmt(v: number): string {
 // ---------------------------------------------------------------------------
 // Differential drive
 // ---------------------------------------------------------------------------
-// `DRIVE_MAX_LINEAR` / `DRIVE_MAX_ANGULAR` (the soft limits the joystick
-// scales to) live in `components/GamepadDrive.tsx`, shared with the
-// gamepad drive bridge.
+// Drive soft limits (the values the joystick / WASD / gamepad bridge
+// scale to) come from the active control profile in
+// `src/input/profile.ts`, switchable from the picker in the DriveCard
+// header and on the gamepad bridge cards.
 
 /// Differential-drive hub: arm controls, live wheel telemetry, odometry,
 /// and the drive joystick. Shown only when the firmware reports a `drive:`
@@ -2754,6 +2760,7 @@ function DriveCard({
   busy,
   onToggleWheel,
   onSetAllWheels,
+  onCalibrateWheel,
   onTwist,
   onStop,
   onResetOdom,
@@ -2765,6 +2772,7 @@ function DriveCard({
   busy: string | null;
   onToggleWheel: (wheel: string, enabled: boolean) => void;
   onSetAllWheels: (enabled: boolean) => void;
+  onCalibrateWheel: (wheel: string) => void;
   onTwist: (vx: number, wz: number) => void;
   onStop: () => void;
   onResetOdom: () => void;
@@ -2787,7 +2795,10 @@ function DriveCard({
             {armedWheelCount} armed
           </div>
         </div>
-        <div className="flex gap-2 shrink-0">
+        <div className="flex gap-2 shrink-0 items-center">
+          {/* Sensitivity for the on-screen joystick + WASD drive (the
+              gamepad bridge cards carry their own picker). */}
+          <ControlProfilePicker />
           <Button
             variant="secondary"
             onClick={() => onSetAllWheels(true)}
@@ -2838,9 +2849,11 @@ function DriveCard({
                   key={w.name}
                   wheel={w}
                   busy={busy === `wheel:${w.name}`}
+                  calibrating={busy === `calib:${w.name}`}
                   estopLatched={estopLatched}
                   canArm={mode === "DIAL_IN" || mode === "RUN_POLICY"}
                   onToggle={(enabled) => onToggleWheel(w.name, enabled)}
+                  onCalibrate={() => onCalibrateWheel(w.name)}
                 />
               ))
             )}
@@ -2879,18 +2892,30 @@ function DriveCard({
 function WheelRow({
   wheel,
   busy,
+  calibrating,
   estopLatched,
   canArm,
   onToggle,
+  onCalibrate,
 }: {
   wheel: WheelView;
   busy: boolean;
+  calibrating: boolean;
   estopLatched: boolean;
   canArm: boolean;
   onToggle: (enabled: boolean) => void;
+  onCalibrate: () => void;
 }) {
   const stale = !wheel.positionReceived || wheel.feedbackStale;
   const faulted = wheel.errorCode !== 0;
+  // ODrive AxisState (raw, from heartbeat). Calibration states are 3..=11
+  // (FULL_CALIBRATION_SEQUENCE .. ENCODER_HALL_POLARITY_CALIBRATION));
+  // 8 = CLOSED_LOOP_CONTROL, 1 = IDLE.
+  const calibrationRunning = wheel.axisState >= 3 && wheel.axisState <= 11;
+  // The silent-enable-fail mode that hid a lost encoder calibration: the
+  // supervisor ack'd the arm but the axis refused to go closed-loop, so the
+  // wheel sat dead with no axis error. Surface it loudly.
+  const armedButNotClosedLoop = wheel.armed && wheel.axisState !== 8;
   return (
     <div className="flex items-center gap-2.5">
       <button
@@ -2921,6 +2946,14 @@ function WheelRow({
             <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-danger/40 bg-danger/10 text-danger">
               error
             </span>
+          ) : calibrationRunning ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-accent/40 bg-accent/10 text-accent">
+              calibrating
+            </span>
+          ) : armedButNotClosedLoop ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-danger/40 bg-danger/10 text-danger">
+              axis not closed-loop
+            </span>
           ) : stale ? (
             <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-yellow-500/40 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300">
               stale
@@ -2931,10 +2964,26 @@ function WheelRow({
           vel {fmt(wheel.velocity)} rad/s · target {fmt(wheel.targetVelocity)}
         </div>
       </div>
-      <div className="text-right text-[12px] text-text-dim font-mono shrink-0">
-        {wheel.velocity >= 0 ? "+" : ""}
-        {wheel.velocity.toFixed(2)}
-        <span className="text-text-dim/70"> rad/s</span>
+      <div className="flex items-center gap-2 shrink-0">
+        <div className="text-right text-[12px] text-text-dim font-mono">
+          {wheel.velocity >= 0 ? "+" : ""}
+          {wheel.velocity.toFixed(2)}
+          <span className="text-text-dim/70"> rad/s</span>
+        </div>
+        {/* CAN full calibration (motor + encoder offset). Only offered on a
+            disarmed wheel — the axis spins for ~20-30 s. Not saved to S1 NVM:
+            re-run after a power cycle (or persist via odrivetool over USB). */}
+        {!wheel.armed ? (
+          <Button
+            variant="ghost"
+            onClick={onCalibrate}
+            disabled={calibrating || estopLatched || calibrationRunning}
+            className="py-1! px-2! text-[12px]!"
+            title="Run ODrive full calibration (axis spins ~20-30 s)"
+          >
+            {calibrationRunning ? "Cal…" : "Calibrate"}
+          </Button>
+        ) : null}
       </div>
     </div>
   );
@@ -2956,16 +3005,17 @@ function DriveJoystick({
   const padRef = useRef<HTMLDivElement | null>(null);
   const draggingRef = useRef(false);
   const [knob, setKnob] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const profile = useControlProfile();
 
   const apply = useCallback(
     (nx: number, ny: number) => {
       // Joystick convention: up = forward, right = turn right (+wz = left turn).
-      const vx = -ny * DRIVE_MAX_LINEAR;
-      const wz = -nx * DRIVE_MAX_ANGULAR;
+      const vx = -ny * profile.maxLinear;
+      const wz = -nx * profile.maxAngular;
       setKnob({ x: nx, y: ny });
       onTwist(vx, wz);
     },
-    [onTwist],
+    [onTwist, profile],
   );
 
   const release = useCallback(() => {
@@ -2996,8 +3046,11 @@ function DriveJoystick({
 
   // Keyboard drive: WASD + arrow keys. Held keys compose a twist; releasing
   // the last drive key stops. Independent of the joystick, so either input
-  // works and the most recent event wins.
+  // works and the most recent event wins. Limits follow the active control
+  // profile, so the effect re-binds when the user switches presets.
   useEffect(() => {
+    const maxLinear = profile.maxLinear;
+    const maxAngular = profile.maxAngular;
     const keys = new Set<string>();
     const forward = ["w", "arrowup"];
     const back = ["s", "arrowdown"];
@@ -3007,10 +3060,10 @@ function DriveJoystick({
     const compute = () => {
       let vx = 0;
       let wz = 0;
-      if (forward.some((k) => keys.has(k))) vx += DRIVE_MAX_LINEAR;
-      if (back.some((k) => keys.has(k))) vx -= DRIVE_MAX_LINEAR;
-      if (left.some((k) => keys.has(k))) wz += DRIVE_MAX_ANGULAR;
-      if (right.some((k) => keys.has(k))) wz -= DRIVE_MAX_ANGULAR;
+      if (forward.some((k) => keys.has(k))) vx += maxLinear;
+      if (back.some((k) => keys.has(k))) vx -= maxLinear;
+      if (left.some((k) => keys.has(k))) wz += maxAngular;
+      if (right.some((k) => keys.has(k))) wz -= maxAngular;
       return { vx, wz };
     };
 
@@ -3045,7 +3098,7 @@ function DriveJoystick({
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [onTwist, onStop]);
+  }, [onTwist, onStop, profile]);
 
   const knobPx = padRef.current ? padRef.current.offsetWidth / 2 : 88;
 

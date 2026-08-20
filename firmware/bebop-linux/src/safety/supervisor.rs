@@ -384,6 +384,61 @@ impl Supervisor {
             .collect()
     }
 
+    /// Run the ODrive FULL_CALIBRATION_SEQUENCE on one wheel (motor +
+    /// encoder offset). The axis spins for ~20-30 s. Mirror of
+    /// [`Self::arm_wheel`]'s gates minus the mode gate (calibration is a
+    /// bench-recovery operation; locking it to DialIn would just get in
+    /// the way), plus "wheel must be disarmed". Clears latched axis errors
+    /// first, like arm does, so a stuck fault can't veto the request.
+    pub fn calibrate_wheel(&self, wheel: &str) -> Result<()> {
+        if self.estop_active() {
+            return Err(anyhow!("cannot calibrate while E-STOP is latched"));
+        }
+        let idx = *self
+            .by_wheel_name
+            .get(wheel)
+            .ok_or_else(|| anyhow!("unknown wheel {wheel:?}"))?;
+        let entry = self.wheels[idx].clone();
+        let cfg = self.cfg.wheels[idx].clone();
+
+        let armed = entry.lock().map(|g| g.armed).unwrap_or(true);
+        if armed {
+            return Err(anyhow!(
+                "disarm {wheel} before calibrating (the calibration spins the axis)"
+            ));
+        }
+        if !self.bus_pool.is_healthy(&cfg.can_interface) {
+            return Err(anyhow!(
+                "refusing to calibrate {wheel}: bus {} is not healthy",
+                cfg.can_interface
+            ));
+        }
+        let can = self
+            .bus_pool
+            .get(&cfg.can_interface)
+            .ok_or_else(|| anyhow!("no bus pool entry for {}", cfg.can_interface))?
+            .clone();
+
+        {
+            let g = entry.lock().unwrap();
+            if let Err(e) = g.wheel.clear_errors(&can) {
+                debug!(wheel, error = %e, "clear_errors TX failed; continuing to calibrate");
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        {
+            let g = entry.lock().unwrap();
+            g.wheel.calibrate(&can).with_context(|| {
+                format!(
+                    "{}: failed to request full calibration on ODrive node {} on {}",
+                    wheel, cfg.node_id, cfg.can_interface
+                )
+            })?;
+        }
+        info!(wheel, "full calibration requested (axis spins ~20-30 s)");
+        Ok(())
+    }
+
     /// Disable every configured wheel.
     pub fn disarm_all_wheels(&self) -> Vec<(String, anyhow::Error)> {
         let names: Vec<String> = self.cfg.wheels.iter().map(|w| w.name.clone()).collect();

@@ -47,6 +47,7 @@ fn wheel_state_to_proto(w: &crate::safety::limits::WheelSnapshot) -> proto::Whee
         velocity_rad_s: w.velocity,
         target_velocity_rad_s: w.target_velocity,
         vel_max: w.vel_max,
+        axis_state: w.axis_state as u32,
     }
 }
 

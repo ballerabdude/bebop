@@ -279,6 +279,11 @@ impl WheelRuntimeState {
             velocity: self.wheel.state.velocity,
             target_velocity: self.last_target_vel,
             vel_max: self.wheel_cfg.vel_max,
+            // Raw ODrive AxisState (0 UNSPECIFIED → 11) so the operator UI
+            // can distinguish "armed but axis still IDLE" (e.g. a wheel
+            // with a lost encoder calibration silently refuses to go
+            // closed-loop, dead-wheel symptom without any axis error).
+            axis_state: self.wheel.axis_state,
         }
     }
 }
@@ -298,4 +303,6 @@ pub struct WheelSnapshot {
     pub velocity: f32,
     pub target_velocity: f32,
     pub vel_max: f32,
+    /// Raw ODrive AxisState from the heartbeat; 1 = IDLE, 8 = CLOSED_LOOP.
+    pub axis_state: u8,
 }
