@@ -23,7 +23,7 @@ wheels:
     # differential-drive layer assumes "+ = forward" for both wheels. Flip
     # to -1 when a wheel's motor is wired reversed (a passive spin-back
     # check on the bench confirms the sign).
-    direction: -1.0
+    direction: 1.0
     # Wheel angular-velocity hard limit (rad/s). 20 rad/s on a 0.05 m wheel
     # ≈ 1 m/s. E-STOP trips if a commanded speed ever exceeds this.
     vel_max: 20.0

@@ -86,34 +86,39 @@ pub mod input {
     pub const PASSTHROUGH: u32 = 1;
 }
 
-/// ODrive `AxisError` bit definitions (firmware 0.6.x). Used by
-/// [`ODriveWheel::fault_description`] to decode the heartbeat's
-/// `axis_error` word. Only the common / recoverable bits are named;
-/// unrecognised bits fall through to a hex dump.
+/// ODrive `AxisError` bit definitions. The heartbeat's byte 0-3 field is
+/// `<axis>.active_errors | <axis>.disarm_reason`, decoded as a single
+/// u32. In current firmware (0.6.x, S1) this is the `ODrive.Error` enum —
+/// a flat set of flags replacing the older split Axis/Motor/Controller
+/// errors. These definitions come from the API reference
+/// (`com.odriverobotics.ODrive.Error`).
+/// Used by [`ODriveWheel::fault_description`] to decode the heartbeat's
+/// `axis_error` word. Recognised bits are named; unrecognised bits fall
+/// through to a hex dump appended as `UNKNOWN`.
 pub mod axis_error {
-    pub const INVALID_STATE: u32 = 1 << 0;
-    pub const DC_BUS_UNDER_VOLTAGE: u32 = 1 << 1;
-    pub const DC_BUS_OVER_VOLTAGE: u32 = 1 << 2;
-    pub const CURRENT_MEASUREMENT_TIMEOUT: u32 = 1 << 3;
-    pub const BRAKE_RESISTOR_DISARMED: u32 = 1 << 4;
-    pub const MOTOR_DISARMED: u32 = 1 << 5;
-    pub const MOTOR_FAILED: u32 = 1 << 6;
-    pub const SENSORLESS_ESTIMATOR_FAILED: u32 = 1 << 7;
-    pub const ENCODER_FAILED: u32 = 1 << 8;
-    pub const CONTROLLER_FAILED: u32 = 1 << 9;
-    pub const WATCHDOG_TIMER_EXPIRED: u32 = 1 << 11;
-    pub const ESTOP_REQUESTED: u32 = 1 << 14;
-    pub const OVER_TEMP: u32 = 1 << 16;
-    pub const UNKNOWN_POSITION: u32 = 1 << 17;
-    pub const DC_BUS_OVER_CURRENT: u32 = 1 << 18;
-    pub const CURRENT_LIMIT_VIOLATION: u32 = 1 << 20;
-    pub const MOTOR_OVER_TEMP: u32 = 1 << 21;
-    pub const INVERTER_OVER_TEMP: u32 = 1 << 22;
-    pub const VELOCITY_LIMIT_VIOLATION: u32 = 1 << 23;
-    pub const POSITION_LIMIT_VIOLATION: u32 = 1 << 24;
-    pub const MOTOR_DISARMED_CPU_POSITION_LINEARITY: u32 = 1 << 25;
-    pub const MOTOR_DISARMED_ABS_POSITION: u32 = 1 << 26;
-    pub const MOTOR_DISARMED_UNRESOLVED: u32 = 1 << 27;
+    pub const INITIALIZING: u32 = 1 << 0;
+    pub const SYSTEM_LEVEL: u32 = 1 << 1;
+    pub const TIMING_ERROR: u32 = 1 << 2;
+    pub const MISSING_ESTIMATE: u32 = 1 << 3;
+    pub const BAD_CONFIG: u32 = 1 << 4;
+    pub const DRV_FAULT: u32 = 1 << 5;
+    pub const MISSING_INPUT: u32 = 1 << 6;
+    pub const DC_BUS_OVER_VOLTAGE: u32 = 1 << 8;
+    pub const DC_BUS_UNDER_VOLTAGE: u32 = 1 << 9;
+    pub const DC_BUS_OVER_CURRENT: u32 = 1 << 10;
+    pub const DC_BUS_OVER_REGEN_CURRENT: u32 = 1 << 11;
+    pub const CURRENT_LIMIT_VIOLATION: u32 = 1 << 12;
+    pub const MOTOR_OVER_TEMP: u32 = 1 << 13;
+    pub const INVERTER_OVER_TEMP: u32 = 1 << 14;
+    pub const VELOCITY_LIMIT_VIOLATION: u32 = 1 << 15;
+    pub const POSITION_LIMIT_VIOLATION: u32 = 1 << 16;
+    pub const REQUESTED_CURRENT_TOO_HIGH: u32 = 1 << 17;
+    pub const WATCHDOG_TIMER_EXPIRED: u32 = 1 << 24;
+    pub const ESTOP_REQUESTED: u32 = 1 << 25;
+    pub const SPINOUT_DETECTED: u32 = 1 << 26;
+    pub const BRAKE_RESISTOR_DISARMED: u32 = 1 << 27;
+    pub const THERMISTOR_DISCONNECTED: u32 = 1 << 28;
+    pub const CALIBRATION_ERROR: u32 = 1 << 30;
 }
 
 /// Broadcast / unaddressed node id.
@@ -273,66 +278,42 @@ impl ODriveWheel {
         now.saturating_sub(self.state.last_update_ms) < max_age_ms
     }
 
-    /// Human-readable axis-error description. Decodes the ODrive `AxisError`
-    /// bit field from the heartbeat; recognised bits are named, any
-    /// remaining bits are surfaced as `UNKNOWN` so nothing is silently
-    /// dropped.
+    /// Human-readable axis-error description. Decodes the ODrive
+    /// `ODrive.Error` bit field from the heartbeat (`.active_errors |
+    /// .disarm_reason`); recognised bits are named, any remaining bits
+    /// are surfaced as `UNKNOWN` so nothing is silently dropped.
     pub fn fault_description(&self) -> Option<String> {
         let e = self.state.error_code;
         if e == 0 {
             return None;
         }
         const KNOWN_BITS: &[(u32, &str)] = &[
-            (axis_error::INVALID_STATE, "INVALID_STATE"),
-            (axis_error::DC_BUS_UNDER_VOLTAGE, "DC_BUS_UNDER_VOLTAGE"),
+            (axis_error::INITIALIZING, "INITIALIZING"),
+            (axis_error::SYSTEM_LEVEL, "SYSTEM_LEVEL"),
+            (axis_error::TIMING_ERROR, "TIMING_ERROR"),
+            (axis_error::MISSING_ESTIMATE, "MISSING_ESTIMATE"),
+            (axis_error::BAD_CONFIG, "BAD_CONFIG"),
+            (axis_error::DRV_FAULT, "DRV_FAULT"),
+            (axis_error::MISSING_INPUT, "MISSING_INPUT"),
             (axis_error::DC_BUS_OVER_VOLTAGE, "DC_BUS_OVER_VOLTAGE"),
-            (
-                axis_error::CURRENT_MEASUREMENT_TIMEOUT,
-                "CURRENT_MEASUREMENT_TIMEOUT",
-            ),
-            (
-                axis_error::BRAKE_RESISTOR_DISARMED,
-                "BRAKE_RESISTOR_DISARMED",
-            ),
-            (axis_error::MOTOR_DISARMED, "MOTOR_DISARMED"),
-            (axis_error::MOTOR_FAILED, "MOTOR_FAILED"),
-            (
-                axis_error::SENSORLESS_ESTIMATOR_FAILED,
-                "SENSORLESS_ESTIMATOR_FAILED",
-            ),
-            (axis_error::ENCODER_FAILED, "ENCODER_FAILED"),
-            (axis_error::CONTROLLER_FAILED, "CONTROLLER_FAILED"),
-            (axis_error::WATCHDOG_TIMER_EXPIRED, "WATCHDOG_TIMER_EXPIRED"),
-            (axis_error::ESTOP_REQUESTED, "ESTOP_REQUESTED"),
-            (axis_error::OVER_TEMP, "OVER_TEMP"),
-            (axis_error::UNKNOWN_POSITION, "UNKNOWN_POSITION"),
+            (axis_error::DC_BUS_UNDER_VOLTAGE, "DC_BUS_UNDER_VOLTAGE"),
             (axis_error::DC_BUS_OVER_CURRENT, "DC_BUS_OVER_CURRENT"),
-            (
-                axis_error::CURRENT_LIMIT_VIOLATION,
-                "CURRENT_LIMIT_VIOLATION",
-            ),
+            (axis_error::DC_BUS_OVER_REGEN_CURRENT, "DC_BUS_OVER_REGEN_CURRENT"),
+            (axis_error::CURRENT_LIMIT_VIOLATION, "CURRENT_LIMIT_VIOLATION"),
             (axis_error::MOTOR_OVER_TEMP, "MOTOR_OVER_TEMP"),
             (axis_error::INVERTER_OVER_TEMP, "INVERTER_OVER_TEMP"),
+            (axis_error::VELOCITY_LIMIT_VIOLATION, "VELOCITY_LIMIT_VIOLATION"),
+            (axis_error::POSITION_LIMIT_VIOLATION, "POSITION_LIMIT_VIOLATION"),
             (
-                axis_error::VELOCITY_LIMIT_VIOLATION,
-                "VELOCITY_LIMIT_VIOLATION",
+                axis_error::REQUESTED_CURRENT_TOO_HIGH,
+                "REQUESTED_CURRENT_TOO_HIGH",
             ),
-            (
-                axis_error::POSITION_LIMIT_VIOLATION,
-                "POSITION_LIMIT_VIOLATION",
-            ),
-            (
-                axis_error::MOTOR_DISARMED_CPU_POSITION_LINEARITY,
-                "MOTOR_DISARMED_CPU_POSITION_LINEARITY",
-            ),
-            (
-                axis_error::MOTOR_DISARMED_ABS_POSITION,
-                "MOTOR_DISARMED_ABS_POSITION",
-            ),
-            (
-                axis_error::MOTOR_DISARMED_UNRESOLVED,
-                "MOTOR_DISARMED_UNRESOLVED",
-            ),
+            (axis_error::WATCHDOG_TIMER_EXPIRED, "WATCHDOG_TIMER_EXPIRED"),
+            (axis_error::ESTOP_REQUESTED, "ESTOP_REQUESTED"),
+            (axis_error::SPINOUT_DETECTED, "SPINOUT_DETECTED"),
+            (axis_error::BRAKE_RESISTOR_DISARMED, "BRAKE_RESISTOR_DISARMED"),
+            (axis_error::THERMISTOR_DISCONNECTED, "THERMISTOR_DISCONNECTED"),
+            (axis_error::CALIBRATION_ERROR, "CALIBRATION_ERROR"),
         ];
         let mut names: Vec<&str> = KNOWN_BITS
             .iter()
@@ -452,25 +433,40 @@ mod tests {
     }
 
     #[test]
-    fn fault_description_decodes_motor_disarmed_abs_position() {
-        // 0x04000000 = bit 26 = MOTOR_DISARMED_ABS_POSITION (the spinout /
-        // aggressive-reversal disarm seen on the bench).
+    fn fault_description_decodes_spinout_detected() {
+        // 0x04000000 = bit 26 = SPINOUT_DETECTED (firmware 0.6.x;
+        // previously mis-decoded as "MOTOR_DISARMED_ABS_POSITION").
         let mut wheel = ODriveWheel::new(1);
-        wheel.state.error_code = 0x0400_0000;
+        wheel.state.error_code = axis_error::SPINOUT_DETECTED;
         let desc = wheel.fault_description().unwrap();
         assert!(
-            desc.contains("MOTOR_DISARMED_ABS_POSITION"),
-            "expected MOTOR_DISARMED_ABS_POSITION in {desc}"
+            desc.contains("SPINOUT_DETECTED"),
+            "expected SPINOUT_DETECTED in {desc}"
         );
         assert!(desc.contains("0x04000000"));
     }
 
     #[test]
+    fn fault_description_decodes_thermistor_disconnected() {
+        // 0x10000000 = bit 28 = THERMISTOR_DISCONNECTED (persistent system
+        // error — can't be cleared via clear_errors() while the hardware/config
+        // issue remains).
+        let mut wheel = ODriveWheel::new(1);
+        wheel.state.error_code = axis_error::THERMISTOR_DISCONNECTED;
+        let desc = wheel.fault_description().unwrap();
+        assert!(
+            desc.contains("THERMISTOR_DISCONNECTED"),
+            "expected THERMISTOR_DISCONNECTED in {desc}"
+        );
+        assert!(desc.contains("0x10000000"));
+    }
+
+    #[test]
     fn fault_description_decodes_multiple_bits() {
         let mut wheel = ODriveWheel::new(1);
-        wheel.state.error_code = axis_error::MOTOR_DISARMED | axis_error::ENCODER_FAILED;
+        wheel.state.error_code = axis_error::MISSING_ESTIMATE | axis_error::DRV_FAULT;
         let desc = wheel.fault_description().unwrap();
-        assert!(desc.contains("MOTOR_DISARMED"));
-        assert!(desc.contains("ENCODER_FAILED"));
+        assert!(desc.contains("MISSING_ESTIMATE"));
+        assert!(desc.contains("DRV_FAULT"));
     }
 }

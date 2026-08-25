@@ -2908,10 +2908,13 @@ function WheelRow({
 }) {
   const stale = !wheel.positionReceived || wheel.feedbackStale;
   const faulted = wheel.errorCode !== 0;
-  // ODrive AxisState (raw, from heartbeat). Calibration states are 3..=11
-  // (FULL_CALIBRATION_SEQUENCE .. ENCODER_HALL_POLARITY_CALIBRATION));
-  // 8 = CLOSED_LOOP_CONTROL, 1 = IDLE.
-  const calibrationRunning = wheel.axisState >= 3 && wheel.axisState <= 11;
+  // ODrive AxisState (raw, from heartbeat). Calibration states are 3..=12
+  // minus 8 = CLOSED_LOOP_CONTROL (FULL_CALIBRATION_SEQUENCE(3),
+  // MOTOR_CALIBRATION(4), SENSOR_CALIBRATION(5), ENCODER_INDEX_SEARCH(6),
+  // ENCODER_OFFSET_CALIBRATION(7), LOCKIN_SPIN(9), ENCODER_DIR_FIND(10),
+  // HOMING(11), ENCODER_HALL_POLARITY_CALIBRATION(12)). 1 = IDLE.
+  const calibrationRunning =
+    wheel.axisState >= 3 && wheel.axisState <= 12 && wheel.axisState !== 8;
   // The silent-enable-fail mode that hid a lost encoder calibration: the
   // supervisor ack'd the arm but the axis refused to go closed-loop, so the
   // wheel sat dead with no axis error. Surface it loudly.

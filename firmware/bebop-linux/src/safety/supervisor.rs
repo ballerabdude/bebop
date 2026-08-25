@@ -310,10 +310,10 @@ impl Supervisor {
 
         // Clear any latched ODrive axis error *before* re-enabling. The S1
         // refuses to enter CLOSED_LOOP_CONTROL with a latched disarm error
-        // (e.g. MOTOR_DISARMED_ABS_POSITION 0x04000000 from a rapid
-        // direction reversal), so without this the operator can't recover
-        // from a fault by re-arming — the axis stays in IDLE and the
-        // enable silently fails.
+        // (e.g. SPINOUT_DETECTED 0x04000000 from a rapid direction
+        // reversal), so without this the operator can't recover from a
+        // fault by re-arming — the axis stays in IDLE and the enable
+        // silently fails.
         {
             let g = entry.lock().unwrap();
             if let Err(e) = g.wheel.clear_errors(&can) {
@@ -532,7 +532,10 @@ impl Supervisor {
         // doesn't have to "Enable wheels" just to clear a fault before
         // re-arming. Without this, the S1 refuses to re-enter
         // CLOSED_LOOP_CONTROL with a latched disarm error (e.g.
-        // MOTOR_DISARMED_ABS_POSITION 0x04000000 from a rapid reversal).
+        // SPINOUT_DETECTED 0x04000000 from a rapid reversal).
+        // Note: persistent errors like THERMISTOR_DISCONNECTED
+        // (0x10000000 — enabled but unwired motor thermistor) won't clear
+        // here; they require a hardware/config fix at the ODrive.
         for wheel in &self.cfg.wheels {
             if let Some(can) = self.bus_pool.get(&wheel.can_interface) {
                 let axis = ODriveWheel::new(wheel.node_id);
