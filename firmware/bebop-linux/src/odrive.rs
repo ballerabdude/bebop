@@ -298,12 +298,24 @@ impl ODriveWheel {
             (axis_error::DC_BUS_OVER_VOLTAGE, "DC_BUS_OVER_VOLTAGE"),
             (axis_error::DC_BUS_UNDER_VOLTAGE, "DC_BUS_UNDER_VOLTAGE"),
             (axis_error::DC_BUS_OVER_CURRENT, "DC_BUS_OVER_CURRENT"),
-            (axis_error::DC_BUS_OVER_REGEN_CURRENT, "DC_BUS_OVER_REGEN_CURRENT"),
-            (axis_error::CURRENT_LIMIT_VIOLATION, "CURRENT_LIMIT_VIOLATION"),
+            (
+                axis_error::DC_BUS_OVER_REGEN_CURRENT,
+                "DC_BUS_OVER_REGEN_CURRENT",
+            ),
+            (
+                axis_error::CURRENT_LIMIT_VIOLATION,
+                "CURRENT_LIMIT_VIOLATION",
+            ),
             (axis_error::MOTOR_OVER_TEMP, "MOTOR_OVER_TEMP"),
             (axis_error::INVERTER_OVER_TEMP, "INVERTER_OVER_TEMP"),
-            (axis_error::VELOCITY_LIMIT_VIOLATION, "VELOCITY_LIMIT_VIOLATION"),
-            (axis_error::POSITION_LIMIT_VIOLATION, "POSITION_LIMIT_VIOLATION"),
+            (
+                axis_error::VELOCITY_LIMIT_VIOLATION,
+                "VELOCITY_LIMIT_VIOLATION",
+            ),
+            (
+                axis_error::POSITION_LIMIT_VIOLATION,
+                "POSITION_LIMIT_VIOLATION",
+            ),
             (
                 axis_error::REQUESTED_CURRENT_TOO_HIGH,
                 "REQUESTED_CURRENT_TOO_HIGH",
@@ -311,8 +323,14 @@ impl ODriveWheel {
             (axis_error::WATCHDOG_TIMER_EXPIRED, "WATCHDOG_TIMER_EXPIRED"),
             (axis_error::ESTOP_REQUESTED, "ESTOP_REQUESTED"),
             (axis_error::SPINOUT_DETECTED, "SPINOUT_DETECTED"),
-            (axis_error::BRAKE_RESISTOR_DISARMED, "BRAKE_RESISTOR_DISARMED"),
-            (axis_error::THERMISTOR_DISCONNECTED, "THERMISTOR_DISCONNECTED"),
+            (
+                axis_error::BRAKE_RESISTOR_DISARMED,
+                "BRAKE_RESISTOR_DISARMED",
+            ),
+            (
+                axis_error::THERMISTOR_DISCONNECTED,
+                "THERMISTOR_DISCONNECTED",
+            ),
             (axis_error::CALIBRATION_ERROR, "CALIBRATION_ERROR"),
         ];
         let mut names: Vec<&str> = KNOWN_BITS
