@@ -4,7 +4,7 @@ import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { GamepadDriver } from "../components/GamepadDriver";
 import { GamepadDrive } from "../components/GamepadDrive";
 import { ControlProfilePicker } from "../components/ControlProfilePicker";
-import { useControlProfile } from "../input";
+import { DriveJoystick } from "../components/DriveJoystick";
 import { Banner, Button, Spinner } from "../components/ui";
 import { getOrCreateRuntimeTransport } from "../runtime";
 import type {
@@ -36,6 +36,9 @@ interface MotorBenchProps {
    *  stream (`GET /video`). Available on both connection paths — the
    *  endpoint only needs the runtime's host/port. */
   onOpenVideo?: () => void;
+  /** When provided, render a "Teleop" link to the combined live-video +
+   *  drive screen. Available on both connection paths. */
+  onOpenTeleop?: () => void;
 }
 
 const MODE_LABEL: Record<RuntimeMode, string> = {
@@ -52,6 +55,7 @@ export function MotorBenchScreen({
   onBack,
   onOpenControllers,
   onOpenVideo,
+  onOpenTeleop,
 }: MotorBenchProps) {
   const transportRef = useRef<RuntimeTransport | null>(null);
   const [connecting, setConnecting] = useState(true);
@@ -902,6 +906,11 @@ export function MotorBenchScreen({
       ) : null}
 
       <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 mt-2">
+        {onOpenTeleop ? (
+          <Button variant="secondary" onClick={onOpenTeleop}>
+            Teleop · live video &amp; drive
+          </Button>
+        ) : null}
         {onOpenControllers ? (
           <Button variant="ghost" onClick={onOpenControllers}>
             Bluetooth controller
@@ -2757,7 +2766,8 @@ function fmt(v: number): string {
 // Drive soft limits (the values the joystick / WASD / gamepad bridge
 // scale to) come from the active control profile in
 // `src/input/profile.ts`, switchable from the picker in the DriveCard
-// header and on the gamepad bridge cards.
+// header and on the gamepad bridge cards. The joystick itself lives in
+// `src/components/DriveJoystick.tsx` (shared with the teleop screen).
 
 /// Differential-drive hub: arm controls, live wheel telemetry, odometry,
 /// and the drive joystick. Shown only when the firmware reports a `drive:`
@@ -3002,165 +3012,3 @@ function WheelRow({
   );
 }
 
-/// Virtual differential-drive joystick. Drag the knob from the centre:
-/// up/down maps to forward/reverse, left/right to turn while/while. Release
-/// snaps back and stops the robot. WASD / arrow keys do the same for
-/// keyboard operators, and releasing all drive keys also stops.
-function DriveJoystick({
-  onTwist,
-  onStop,
-  disabled,
-}: {
-  onTwist: (vx: number, wz: number) => void;
-  onStop: () => void;
-  disabled: boolean;
-}) {
-  const padRef = useRef<HTMLDivElement | null>(null);
-  const draggingRef = useRef(false);
-  const [knob, setKnob] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const profile = useControlProfile();
-
-  const apply = useCallback(
-    (nx: number, ny: number) => {
-      // Joystick convention: up = forward, right = turn right (+wz = left turn).
-      const vx = -ny * profile.maxLinear;
-      const wz = -nx * profile.maxAngular;
-      setKnob({ x: nx, y: ny });
-      onTwist(vx, wz);
-    },
-    [onTwist, profile],
-  );
-
-  const release = useCallback(() => {
-    draggingRef.current = false;
-    setKnob({ x: 0, y: 0 });
-    onStop();
-  }, [onStop]);
-
-  const handleMove = useCallback(
-    (clientX: number, clientY: number) => {
-      const pad = padRef.current;
-      if (!pad) return;
-      const rect = pad.getBoundingClientRect();
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-      const radius = rect.width / 2;
-      let nx = (clientX - cx) / radius;
-      let ny = (clientY - cy) / radius;
-      const mag = Math.hypot(nx, ny);
-      if (mag > 1) {
-        nx /= mag;
-        ny /= mag;
-      }
-      apply(nx, ny);
-    },
-    [apply],
-  );
-
-  // Keyboard drive: WASD + arrow keys. Held keys compose a twist; releasing
-  // the last drive key stops. Independent of the joystick, so either input
-  // works and the most recent event wins. Limits follow the active control
-  // profile, so the effect re-binds when the user switches presets.
-  useEffect(() => {
-    const maxLinear = profile.maxLinear;
-    const maxAngular = profile.maxAngular;
-    const keys = new Set<string>();
-    const forward = ["w", "arrowup"];
-    const back = ["s", "arrowdown"];
-    const left = ["a", "arrowleft"];
-    const right = ["d", "arrowright"];
-
-    const compute = () => {
-      let vx = 0;
-      let wz = 0;
-      if (forward.some((k) => keys.has(k))) vx += maxLinear;
-      if (back.some((k) => keys.has(k))) vx -= maxLinear;
-      if (left.some((k) => keys.has(k))) wz += maxAngular;
-      if (right.some((k) => keys.has(k))) wz -= maxAngular;
-      return { vx, wz };
-    };
-
-    const isDriveKey = (k: string) =>
-      forward.includes(k) ||
-      back.includes(k) ||
-      left.includes(k) ||
-      right.includes(k);
-
-    const onKeyDown = (e: { key: string; preventDefault: () => void }) => {
-      const k = e.key.toLowerCase();
-      if (!isDriveKey(k)) return;
-      e.preventDefault();
-      keys.add(k);
-      const { vx, wz } = compute();
-      onTwist(vx, wz);
-    };
-    const onKeyUp = (e: { key: string }) => {
-      const k = e.key.toLowerCase();
-      if (!isDriveKey(k)) return;
-      keys.delete(k);
-      if (keys.size === 0) {
-        onStop();
-      } else {
-        const { vx, wz } = compute();
-        onTwist(vx, wz);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
-    };
-  }, [onTwist, onStop, profile]);
-
-  const knobPx = padRef.current ? padRef.current.offsetWidth / 2 : 88;
-
-  return (
-    <div className="flex flex-col items-center gap-2">
-      <div
-        ref={padRef}
-        className={`relative w-44 h-44 rounded-full border border-border bg-bg-elev-2/60 select-none touch-none ${
-          disabled ? "opacity-40 cursor-not-allowed" : "cursor-grab active:cursor-grabbing"
-        }`}
-        onPointerDown={(e) => {
-          if (disabled) return;
-          draggingRef.current = true;
-          e.currentTarget.setPointerCapture(e.pointerId);
-          handleMove(e.clientX, e.clientY);
-        }}
-        onPointerMove={(e) => {
-          if (!draggingRef.current) return;
-          handleMove(e.clientX, e.clientY);
-        }}
-        onPointerUp={release}
-        onPointerCancel={release}
-      >
-        {/* Cardinal markers */}
-        <span className="absolute left-1/2 top-2 -translate-x-1/2 text-[10px] text-text-dim">
-          fwd
-        </span>
-        <span className="absolute left-1/2 bottom-2 -translate-x-1/2 text-[10px] text-text-dim">
-          rev
-        </span>
-        <span className="absolute top-1/2 left-2 -translate-y-1/2 text-[10px] text-text-dim">
-          L
-        </span>
-        <span className="absolute top-1/2 right-2 -translate-y-1/2 text-[10px] text-text-dim">
-          R
-        </span>
-        {/* Knob */}
-        <div
-          className="absolute w-10 h-10 -translate-x-1/2 -translate-y-1/2 rounded-full bg-accent shadow-md"
-          style={{
-            left: `calc(50% + ${(knob.x * knobPx).toFixed(1)}px)`,
-            top: `calc(50% + ${(knob.y * knobPx).toFixed(1)}px)`,
-          }}
-          aria-hidden
-        />
-      </div>
-      <div className="text-[11px] text-text-dim">
-        Drag to drive · WASD / arrows
-      </div>
-    </div>
-  );
-}

@@ -10,6 +10,7 @@ import { DashboardScreen } from "./screens/DashboardScreen";
 import { DirectControllersScreen } from "./screens/DirectControllersScreen";
 import { MotorBenchScreen } from "./screens/MotorBenchScreen";
 import { ScanScreen } from "./screens/ScanScreen";
+import { TeleopScreen } from "./screens/TeleopScreen";
 import { VideoScreen } from "./screens/VideoScreen";
 import { WelcomeScreen } from "./screens/WelcomeScreen";
 import { WifiScreen } from "./screens/WifiScreen";
@@ -36,7 +37,12 @@ type Step =
   // the BLE motor bench (robot IP from WifiStatus), `direct-video` from
   // the IP-only motor bench (endpoint from ConnectByIpScreen).
   | "video"
-  | "direct-video";
+  | "direct-video"
+  // Combined live-video + driving teleop on both connection paths.
+  // `teleop` is reached from the dashboard / BLE motor bench,
+  // `direct-teleop` from the IP-only motor bench.
+  | "teleop"
+  | "direct-teleop";
 
 const SETUP_ORDER: Step[] = ["welcome", "scan", "wifi", "config", "dashboard"];
 
@@ -49,6 +55,7 @@ function isSetupStep(s: Step): boolean {
 // truncate and the toolbar can lay out horizontally on desktop.
 function containerWidth(step: Step): string {
   if (step === "motors" || step === "direct-motors") return "max-w-6xl";
+  if (step === "teleop" || step === "direct-teleop") return "max-w-6xl";
   if (step === "dashboard") return "max-w-3xl";
   return "max-w-[520px]";
 }
@@ -78,10 +85,13 @@ function App() {
   const resumeStarted = useRef(false);
   // Where the controllers screen should send the user when they tap
   // "Back". Set whenever we transition into `controllers` so the back
-  // button mirrors the entry point (dashboard vs. motor bench).
-  const [controllersReturn, setControllersReturn] = useState<
-    "dashboard" | "motors"
-  >("dashboard");
+  // button mirrors the entry point (dashboard, motor bench, teleop).
+  const [controllersReturn, setControllersReturn] = useState<Step>(
+    "dashboard",
+  );
+  // Same idea for the teleop screen: back should return to wherever it
+  // was opened from (dashboard, motor bench, or IP-only motor bench).
+  const [teleopReturn, setTeleopReturn] = useState<Step>("dashboard");
 
   const setupIdx = SETUP_ORDER.indexOf(step);
   const progress =
@@ -140,7 +150,9 @@ function App() {
             step === "motors" ||
             step === "direct-motors" ||
             step === "controllers" ||
-            step === "direct-controllers"
+            step === "direct-controllers" ||
+            step === "teleop" ||
+            step === "direct-teleop"
               ? "Bebop"
               : "Bebop · Setup"}
           </div>
@@ -223,6 +235,10 @@ function App() {
             onReconfigure={() => setStep("wifi-reconfig")}
             onDisconnect={reset}
             onOpenMotors={() => setStep("motors")}
+            onOpenTeleop={() => {
+              setTeleopReturn("dashboard");
+              setStep("teleop");
+            }}
             onOpenControllers={() => {
               setControllersReturn("dashboard");
               setStep("controllers");
@@ -237,7 +253,9 @@ function App() {
             backLabel={
               controllersReturn === "motors"
                 ? "Back to motor bench"
-                : "Back to dashboard"
+                : controllersReturn === "teleop"
+                  ? "Back to teleop"
+                  : "Back to dashboard"
             }
           />
         ) : null}
@@ -251,6 +269,10 @@ function App() {
               setStep("controllers");
             }}
             onOpenVideo={() => setStep("video")}
+            onOpenTeleop={() => {
+              setTeleopReturn("motors");
+              setStep("teleop");
+            }}
           />
         ) : null}
 
@@ -259,15 +281,28 @@ function App() {
             robotIp={directIp.ip}
             runtimePort={directIp.port}
             onBack={() => setStep("connect-ip")}
-            onOpenControllers={() => setStep("direct-controllers")}
+            onOpenControllers={() => {
+              setControllersReturn("direct-motors");
+              setStep("direct-controllers");
+            }}
             onOpenVideo={() => setStep("direct-video")}
+            onOpenTeleop={() => {
+              setTeleopReturn("direct-motors");
+              setStep("direct-teleop");
+            }}
           />
         ) : null}
 
         {!resuming && step === "direct-controllers" && directIp ? (
           <DirectControllersScreen
             robotIp={directIp.ip}
-            onBack={() => setStep("direct-motors")}
+            onBack={() =>
+              setStep(
+                controllersReturn === "direct-teleop"
+                  ? "direct-teleop"
+                  : "direct-motors",
+              )
+            }
           />
         ) : null}
 
@@ -285,6 +320,37 @@ function App() {
             runtimePort={directIp.port}
             onBack={() => setStep("direct-motors")}
             backLabel="Back to motor bench"
+          />
+        ) : null}
+
+        {!resuming && step === "teleop" && wifi?.ipAddress ? (
+          <TeleopScreen
+            robotIp={wifi.ipAddress}
+            onBack={() => setStep(teleopReturn)}
+            backLabel={
+              teleopReturn === "motors" ? "Back to motor bench" : "Back to dashboard"
+            }
+            onOpenControllers={() => {
+              setControllersReturn("teleop");
+              setStep("controllers");
+            }}
+          />
+        ) : null}
+
+        {!resuming && step === "direct-teleop" && directIp ? (
+          <TeleopScreen
+            robotIp={directIp.ip}
+            runtimePort={directIp.port}
+            onBack={() => setStep(teleopReturn)}
+            backLabel={
+              teleopReturn === "direct-motors"
+                ? "Back to motor bench"
+                : "Back to dashboard"
+            }
+            onOpenControllers={() => {
+              setControllersReturn("direct-teleop");
+              setStep("direct-controllers");
+            }}
           />
         ) : null}
       </section>

@@ -127,15 +127,22 @@ export interface ImuView {
 }
 
 /// Camera gimbal telemetry view. Mirrors the firmware's `CameraState`
-/// proto (OBSBOT Tiny 2 over standard UVC pan/tilt controls). Always
-/// present in the view layer; `present === false` when the firmware has
-/// no `video:` block configured — the UI should hide the PTZ controls.
-/// Pose is the *actual* read-back pose (the gimbal occasionally applies
-/// its own horizon compensation, so never assume the commanded target).
+/// proto. Always present in the view layer; `present === false` when the
+/// firmware has no `video:` block configured — the UI should hide the
+/// PTZ controls. Pose is the *actual* read-back pose (the gimbal
+/// occasionally applies its own horizon compensation, so never assume
+/// the commanded target).
 export interface CameraView {
   present: boolean;
-  /// Degrees; pan + = right, tilt + = up, 0/0 = power-on center.
-  /// OBSBOT Tiny 2 range: pan ±130° / ±90°.
+  /// Degrees, raw UVC pan/tilt units. The proto doc claims
+  /// "pan + = right", but on the OBSBOT Tiny 2 measured hardware it
+  /// is the opposite: increasing UVC pan turns the camera LEFT (and
+  /// the read-back follows). `useCameraPtz` negates pan commands at
+  /// the single place they're generated so every input path (pad,
+  /// I/J/K/L keys, the gamepad's right stick) drives the camera the
+  /// way the operator pushes; these read-back values therefore match
+  /// what was commanded, in the camera's own space. Tilt is
+  /// unquirky (+ = up). OBSBOT Tiny 2 range: pan ±130° / ±90°.
   panDeg: number;
   tiltDeg: number;
   /// True while the actual pose differs from the last commanded target

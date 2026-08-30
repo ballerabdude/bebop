@@ -16,6 +16,8 @@ interface DashboardProps {
   onDisconnect: () => void;
   onOpenMotors: () => void;
   onOpenControllers: () => void;
+  /** Opens the combined live-video + drive teleop screen. */
+  onOpenTeleop: () => void;
 }
 
 /// Live dashboard shown after initial setup succeeds. Stays connected via
@@ -27,6 +29,7 @@ export function DashboardScreen({
   onDisconnect,
   onOpenMotors,
   onOpenControllers,
+  onOpenTeleop,
 }: DashboardProps) {
   const [info, setInfo] = useState<DeviceInfo | null>(null);
   const [app, setApp] = useState<AppStatus | null>(null);
@@ -347,12 +350,24 @@ export function DashboardScreen({
       </Card>
 
       <div className="mt-auto pt-4 flex flex-col gap-3">
-        <Button
-          onClick={onOpenMotors}
-          disabled={!currentWifi.connected || !currentWifi.ipAddress}
-        >
-          Open motor bench
-        </Button>
+        {/* Teleop is the primary "use the robot" action — drive while
+            watching the live camera. Same reachability rule as the
+            motor bench: needs the robot on Wi-Fi with a known IP. */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <Button
+            onClick={onOpenTeleop}
+            disabled={!currentWifi.connected || !currentWifi.ipAddress}
+          >
+            Drive robot
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={onOpenMotors}
+            disabled={!currentWifi.connected || !currentWifi.ipAddress}
+          >
+            Open motor bench
+          </Button>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           <Button variant="secondary" onClick={onOpenControllers}>
             Bluetooth controller

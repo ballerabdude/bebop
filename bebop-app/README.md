@@ -22,6 +22,23 @@ Today:
   agent control surface (`WsAgentTransport`).
 * **Motor bench** — live per-joint telemetry, dial-in slider with
   re-zero affordance, power-board card, sticky toolbar with E-STOP.
+* **Live video** — the firmware's MJPEG feed (`GET /video`) with
+  operator PTZ controls (on-screen pad + WASD) and the optional
+  navigable-path mask overlay.
+* **Teleop** — live video and driving in one screen (`TeleopScreen`),
+  the primary way to operate a wheeled robot: the feed front and
+  center, a sticky HUD (link / mode / wheels / battery / camera pose /
+  E-STOP), a one-tap "Start driving" quick-start (switches to Dial-in
+  + arms every wheel), and every input path side by side — on-screen
+  joystick, WASD / arrows, paired gamepad, and I / J / K / L to aim
+  the camera while WASD drives. With a controller connected the
+  on-screen drive pads hide and the right stick takes over the
+  camera. The video container follows the stream's negotiated aspect
+  (the UVC driver may not serve exactly what the YAML asks for) so
+  the nav overlay always lands on video pixels. On phones the screen
+  opens in a fullscreen layout — video edge-to-edge with the drive
+  and camera pads floating over it; desktops use the page layout with
+  an explicit Fullscreen button.
 * **Bluetooth gamepad dial-in & drive** — pair an 8BitDo / DualSense /
   Xbox / Switch Pro pad to your phone or laptop; drive the active
   joint's target with the left stick (legged), or drive the wheeled
@@ -137,7 +154,8 @@ On a wheeled robot (firmware `drive:` config), the controller card
 becomes a drive bridge instead of a joint dial-in: it streams body
 twists over the same runtime WS path (`SetVelocityCommand`) as the
 on-screen joystick and the WASD keyboard drive, so no firmware change
-is involved. Bindings (chord names shown as `standard / dinput`
+is involved. The gamepad card appears on both the motor bench and the
+teleop screen. Bindings (chord names shown as `standard / dinput`
 where they differ):
 
 * **Sticks** — drive, in one of two layouts. Toggle on the card; the
@@ -145,6 +163,11 @@ where they differ):
   * *Split* — left stick ↕ = forward/back, right stick ↔ = turn
   * *Arcade* — the left stick does both (up = forward, right = turn
     right), matching the on-screen joystick
+  * On the teleop screen with a camera, the right stick aims the
+    camera instead (pan ↔, tilt ↕ at the on-screen pad's rates;
+    centred = hold), the layout locks to *arcade*, and the on-screen
+    drive pad hides while a controller is connected. Camera aim is
+    not deadman- or mode-gated — it works from any mode.
 * **RT / R2** held — deadman; release to halt immediately. Trigger
   pressure also scales the request: just clearing the threshold
   creeps (~64% of the profile's soft limit), a full pull reaches it
@@ -185,6 +208,23 @@ faster profile can't exceed the robot's hard ceilings.
 Robot-side teleop (pad paired to the robot's BlueZ) is *not* covered —
 its deadzone / max-vel knobs are agent config in
 `/etc/bebop/agent.toml` (`[controller]`).
+
+### Keyboard chords per screen
+
+The app has two keyboard-operated surfaces, and their chords are
+deliberately disjoint so both can be live at once:
+
+| Screen      | Drive (vx / wz)  | Camera PTZ      |
+| ----------- | ---------------- | --------------- |
+| Video       | —                | WASD + arrows   |
+| Teleop      | WASD + arrows    | I / J / K / L   |
+
+On the teleop screen the drive chord owns WASD + arrows, so the camera
+pad takes the home row around it — the same physical position as the
+right stick on a gamepad. Every pad also stops-on-exit: keys held at
+unmount, at a `disabled` flip (E-STOP, mode change), or at the
+fullscreen toggle enqueue a stop/hold exactly once, so a gesture can
+never outlive its screen.
 
 ### Tuning the dial-in rate
 
@@ -263,10 +303,15 @@ bebop-app/
 │   ├── proto/            # Generated protobuf bindings (npm run gen-proto)
 │   │   ├── bebop_pb.ts            # Agent envelope (BLE + WS-agent)
 │   │   └── bebop_runtime_pb.ts    # bebop-linux runtime envelope
-│   ├── components/       # Shared UI primitives + GamepadDriver
+│   ├── components/       # Shared UI primitives + input bridges
+│   │   ├── VideoFeed.tsx          # MJPEG feed + nav overlay (video/teleop)
+│   │   ├── DriveJoystick.tsx      # Differential-drive pad (bench/teleop)
+│   │   ├── PtzJoystick.tsx        # Camera pad, keyset-configurable
+│   │   ├── useCameraPtz.ts        # PTZ rate-integration + coalesced send
+│   │   └── GamepadDriver/Drive    # Bluetooth pad → dial-in / drive bridges
 │   └── screens/          # Welcome, Scan, Wifi, Config, Done, Dashboard,
-│                         # ConnectByIp, MotorBench, Controllers,
-│                         # DirectControllers
+│                         # ConnectByIp, MotorBench, Teleop, Video,
+│                         # Controllers, DirectControllers
 ├── src-tauri/            # Rust / Tauri shell
 │   ├── src/ble/          # Tauri commands + btleplug-based BLE central
 │   └── src/lib.rs        # invoke_handler + managed state registration
