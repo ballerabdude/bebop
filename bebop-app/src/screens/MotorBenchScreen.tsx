@@ -32,6 +32,10 @@ interface MotorBenchProps {
    *  controller subsystem lives behind `BebopTransport` (which the
    *  IP-only path doesn't have). */
   onOpenControllers?: () => void;
+  /** When provided, render a "Live video" link to the firmware's MJPEG
+   *  stream (`GET /video`). Available on both connection paths — the
+   *  endpoint only needs the runtime's host/port. */
+  onOpenVideo?: () => void;
 }
 
 const MODE_LABEL: Record<RuntimeMode, string> = {
@@ -47,6 +51,7 @@ export function MotorBenchScreen({
   runtimePort = 9090,
   onBack,
   onOpenControllers,
+  onOpenVideo,
 }: MotorBenchProps) {
   const transportRef = useRef<RuntimeTransport | null>(null);
   const [connecting, setConnecting] = useState(true);
@@ -900,6 +905,11 @@ export function MotorBenchScreen({
         {onOpenControllers ? (
           <Button variant="ghost" onClick={onOpenControllers}>
             Bluetooth controller
+          </Button>
+        ) : null}
+        {onOpenVideo ? (
+          <Button variant="ghost" onClick={onOpenVideo}>
+            Live video
           </Button>
         ) : null}
         <Button variant="ghost" onClick={onBack}>

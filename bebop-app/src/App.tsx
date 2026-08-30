@@ -10,6 +10,7 @@ import { DashboardScreen } from "./screens/DashboardScreen";
 import { DirectControllersScreen } from "./screens/DirectControllersScreen";
 import { MotorBenchScreen } from "./screens/MotorBenchScreen";
 import { ScanScreen } from "./screens/ScanScreen";
+import { VideoScreen } from "./screens/VideoScreen";
 import { WelcomeScreen } from "./screens/WelcomeScreen";
 import { WifiScreen } from "./screens/WifiScreen";
 import "./App.css";
@@ -30,7 +31,12 @@ type Step =
   // default) so the IP-only path can pair gamepads too.
   | "connect-ip"
   | "direct-motors"
-  | "direct-controllers";
+  | "direct-controllers"
+  // Live camera view on both connection paths. `video` is reached from
+  // the BLE motor bench (robot IP from WifiStatus), `direct-video` from
+  // the IP-only motor bench (endpoint from ConnectByIpScreen).
+  | "video"
+  | "direct-video";
 
 const SETUP_ORDER: Step[] = ["welcome", "scan", "wifi", "config", "dashboard"];
 
@@ -244,6 +250,7 @@ function App() {
               setControllersReturn("motors");
               setStep("controllers");
             }}
+            onOpenVideo={() => setStep("video")}
           />
         ) : null}
 
@@ -253,6 +260,7 @@ function App() {
             runtimePort={directIp.port}
             onBack={() => setStep("connect-ip")}
             onOpenControllers={() => setStep("direct-controllers")}
+            onOpenVideo={() => setStep("direct-video")}
           />
         ) : null}
 
@@ -260,6 +268,23 @@ function App() {
           <DirectControllersScreen
             robotIp={directIp.ip}
             onBack={() => setStep("direct-motors")}
+          />
+        ) : null}
+
+        {!resuming && step === "video" && wifi?.ipAddress ? (
+          <VideoScreen
+            robotIp={wifi.ipAddress}
+            onBack={() => setStep("motors")}
+            backLabel="Back to motor bench"
+          />
+        ) : null}
+
+        {!resuming && step === "direct-video" && directIp ? (
+          <VideoScreen
+            robotIp={directIp.ip}
+            runtimePort={directIp.port}
+            onBack={() => setStep("direct-motors")}
+            backLabel="Back to motor bench"
           />
         ) : null}
       </section>

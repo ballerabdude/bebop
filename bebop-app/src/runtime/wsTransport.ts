@@ -25,6 +25,7 @@ import {
   ResetEStopSchema,
   ServerRuntimeMessageSchema,
   SetAllMotorsEnabledSchema,
+  SetCameraPoseSchema,
   SetMechanicalZeroSchema,
   SetMechanicalZeroAllSchema,
   SetModeSchema,
@@ -38,6 +39,8 @@ import {
   CalibrateWheelSchema,
   SubscribeTelemetrySchema,
   UnsubscribeTelemetrySchema,
+  SubscribeNavSchema,
+  UnsubscribeNavSchema,
   type ClientRuntimeMessage,
   type Snapshot,
   type ServerRuntimeMessage,
@@ -45,16 +48,22 @@ import {
   type MotorState as ProtoMotorState,
   type BusEntry as ProtoBusEntry,
   type PowerStats as ProtoPowerStats,
+  type CameraState as ProtoCameraState,
   type ImuStats as ProtoImuStats,
+  type NavState as ProtoNavState,
+  type NavMaskFrame as ProtoNavMaskFrame,
   type PolicyIoStats as ProtoPolicyIoStats,
   type WheelState as ProtoWheelState,
   type DriveState as ProtoDriveState,
 } from "../proto/bebop_runtime_pb";
 import type {
   BusView,
+  CameraView,
   DriveView,
   ImuView,
   MotorView,
+  NavMaskView,
+  NavView,
   PolicyIoView,
   PowerView,
   RuntimeMode,
@@ -76,6 +85,10 @@ type PendingResolver = (msg: ServerRuntimeMessage) => void;
 type TelemetryListener = (snapshot: RuntimeSnapshot) => void;
 type EStopListener = (reason: string) => void;
 type ModeListener = (mode: RuntimeMode) => void;
+/// Nav-mask pushes are high-rate (~10 Hz × 14 KB) and are consumed by
+/// the video overlay's draw loop directly — they deliberately do NOT
+/// flow through the `RuntimeSnapshot` state machine like telemetry.
+type NavMaskListener = (mask: NavMaskView) => void;
 
 /// Lifecycle of the underlying WebSocket exposed to consumers.
 ///
@@ -97,6 +110,7 @@ export class RuntimeTransport {
   private telemetryListeners = new Set<TelemetryListener>();
   private estopListeners = new Set<EStopListener>();
   private modeListeners = new Set<ModeListener>();
+  private navMaskListeners = new Set<NavMaskListener>();
   private connectionStateListeners = new Set<ConnectionStateListener>();
 
   /// Last (host, port) the caller asked us to open. Stashed so the
@@ -117,6 +131,9 @@ export class RuntimeTransport {
   /// caller has not subscribed (or has explicitly unsubscribed) and
   /// we should NOT re-issue `SubscribeTelemetry` on reconnect.
   private subscribedRateHz: number | null = null;
+  /// Last subscribed nav-mask rate, so an auto-reconnect transparently
+  /// resumes the overlay stream (same pattern as telemetry).
+  private subscribedNavRateHz: number | null = null;
   private connectionState: RuntimeConnectionState = "disconnected";
 
   /** Open the socket and resolve once we get the `open` event.
@@ -214,6 +231,12 @@ export class RuntimeTransport {
             /* surfaced via reconnect loop */
           });
         }
+        const navRate = this.subscribedNavRateHz;
+        if (navRate !== null) {
+          void this.subscribeNav(navRate).catch(() => {
+            /* surfaced via reconnect loop */
+          });
+        }
         resolve();
       };
       ws.onerror = () => {
@@ -269,6 +292,7 @@ export class RuntimeTransport {
       this.reconnectTimer = null;
     }
     this.subscribedRateHz = null;
+    this.subscribedNavRateHz = null;
     this.endpoint = null;
     const ws = this.ws;
     this.ws = null;
@@ -339,6 +363,10 @@ export class RuntimeTransport {
     this.telemetryListeners.add(cb);
     return () => this.telemetryListeners.delete(cb);
   }
+  onNavMask(cb: NavMaskListener): () => void {
+    this.navMaskListeners.add(cb);
+    return () => this.navMaskListeners.delete(cb);
+  }
   onEStopLatched(cb: EStopListener): () => void {
     this.estopListeners.add(cb);
     return () => this.estopListeners.delete(cb);
@@ -379,6 +407,25 @@ export class RuntimeTransport {
     await this.requestAck({
       case: "unsubscribeTelemetry",
       value: create(UnsubscribeTelemetrySchema, {}),
+    });
+  }
+
+  /// Subscribe to the pushed nav-mask frames (the video overlay feed).
+  /// Rate hint is an upper bound — the firmware only pushes new masks,
+  /// so a rate above the model's own inference rate just idles.
+  async subscribeNav(rateHz = 10): Promise<void> {
+    await this.requestAck({
+      case: "subscribeNav",
+      value: create(SubscribeNavSchema, { rateHz }),
+    });
+    this.subscribedNavRateHz = rateHz;
+  }
+
+  async unsubscribeNav(): Promise<void> {
+    this.subscribedNavRateHz = null;
+    await this.requestAck({
+      case: "unsubscribeNav",
+      value: create(UnsubscribeNavSchema, {}),
     });
   }
 
@@ -522,6 +569,25 @@ export class RuntimeTransport {
     });
   }
 
+  // -------------------------------------------------------------- camera
+
+  /// Command the camera gimbal to an absolute pan/tilt pose in degrees
+  /// (pan + = right, tilt + = up; 0/0 = power-on center). The firmware
+  /// clamps to the camera's UVC limits (OBSBOT Tiny 2: pan ±130°, tilt
+  /// ±90°) and is deliberately NOT mode-gated — PTZ look-around is safe
+  /// in any mode (dataset recording included). The settled pose arrives
+  /// via telemetry (`camera` field of the snapshot views); a 30° move
+  /// takes ~0.5-0.7 s, so relative jogging should read the latest pose
+  /// from a snapshot rather than tracking locally.
+  async setCameraPose(panDeg: number, tiltDeg: number): Promise<void> {
+    await this.requestAck({
+      case: "setCameraPose",
+      value: create(SetCameraPoseSchema, { panDeg, tiltDeg }),
+    });
+  }
+
+  // -------------------------------------------------------------- misc
+
   /// Reset the wheel-encoder odometry pose to the origin.
   async resetOdometry(): Promise<void> {
     await this.requestAck({
@@ -604,6 +670,11 @@ export class RuntimeTransport {
       case "modeChanged":
         for (const cb of this.modeListeners) cb(modeFromProto(msg.payload.value.mode));
         break;
+      case "navMask":
+        for (const cb of this.navMaskListeners) {
+          cb(navMaskFromProto(msg.payload.value));
+        }
+        break;
       case "snapshot":
       case "ack":
       case "error":
@@ -629,7 +700,56 @@ function snapshotFromProto(s: Snapshot | TelemetryFrame): RuntimeSnapshot {
     drive: driveFromProto(s.drive),
     power: powerFromProto(s.power),
     imu: imuFromProto(s.imu),
+    camera: cameraFromProto(s.camera),
+    nav: navFromProto(s.nav),
     policyIo: policyIoFromProto(s.policyIo),
+  };
+}
+
+function navFromProto(p: ProtoNavState | undefined): NavView {
+  // Absent field (older firmware) collapses to "no nav runner".
+  if (!p) {
+    return EMPTY_NAV_VIEW;
+  }
+  return {
+    present: p.present,
+    received: p.received,
+    maskHz: p.maskHz,
+    provider: p.provider,
+    seq: Number(p.seq),
+    tsUs: Number(p.tsUs),
+    fracBlocked: p.fracBlocked,
+    fracNavigable: p.fracNavigable,
+    fracCaution: p.fracCaution,
+  };
+}
+
+const EMPTY_NAV_VIEW: NavView = {
+  present: false,
+  received: false,
+  maskHz: 0,
+  provider: "",
+  seq: 0,
+  tsUs: 0,
+  fracBlocked: 0,
+  fracNavigable: 0,
+  fracCaution: 0,
+};
+
+function navMaskFromProto(m: ProtoNavMaskFrame): NavMaskView {
+  return {
+    seq: Number(m.seq),
+    tsUs: Number(m.tsUs),
+    width: m.width,
+    height: m.height,
+    // protoc-gen-es hands us the wire `bytes` as a Uint8Array view over
+    // its own buffer — copy-free, valid for the listener's lifetime.
+    grid: m.grid,
+    fracBlocked: m.fracBlocked,
+    fracNavigable: m.fracNavigable,
+    fracCaution: m.fracCaution,
+    maskHz: m.maskHz,
+    provider: m.provider,
   };
 }
 
@@ -697,6 +817,27 @@ const EMPTY_IMU_VIEW: ImuView = {
   lastUpdateAgeMs: 0,
   quaternion: [0, 0, 0, 1],
   headingAccuracyRad: 0,
+};
+
+function cameraFromProto(c: ProtoCameraState | undefined): CameraView {
+  // Absent field (older firmware, or a decode where it never arrived)
+  // collapses to "no camera configured" — the UI hides the PTZ controls.
+  if (!c) {
+    return EMPTY_CAMERA_VIEW;
+  }
+  return {
+    present: c.present,
+    panDeg: c.panDeg,
+    tiltDeg: c.tiltDeg,
+    moving: c.moving,
+  };
+}
+
+const EMPTY_CAMERA_VIEW: CameraView = {
+  present: false,
+  panDeg: 0,
+  tiltDeg: 0,
+  moving: false,
 };
 
 function policyIoFromProto(p: ProtoPolicyIoStats | undefined): PolicyIoView {
