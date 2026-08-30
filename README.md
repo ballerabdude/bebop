@@ -36,6 +36,7 @@ of Bebop robots — plus the customer-facing companion app.
 | `jetson-agent/`     | Rust workspace + on-device deployables. `bebop-agent` daemon, `bebop-proto` (BLE wire format), `deploy/` (systemd + install scripts), and `robot-app/` (the container the agent supervises). |
 | `bebop-app/`        | Customer-facing companion app (Tauri 2 + React + TypeScript). Desktop / iOS / Android.                                    |
 | `firmware/`         | Embedded C++ firmware (PlatformIO): `bebop-linux/` and `bebop-locomotion/`. C/C++ tooling pinned via `firmware/.clangd`.  |
+| `bebop-vision/`     | Robot vision stack: SAM 3.1 teacher pipeline (dataset auto-labeling + distillation) and the SegFormer navigable-path student, sector planner, and drive tooling. See `bebop-vision/README.md`. |
 | `sim/`              | Isaac Sim / Isaac Lab containers, the `bebop_training` Python RL extension, and `usd/` scene assets. Runs off-robot on a workstation with an NVIDIA GPU. |
 | `ros2/`             | ROS 2 Jazzy workspace used on the dev workstation: `src/bebop_pilot`, `src/bebopv2_description` (URDF), and the dev container under `docker/`. |
 | `docs/`             | Cross-cutting docs: architecture, BLE protocol, OTA flow, onboarding, hardware reference.                                 |

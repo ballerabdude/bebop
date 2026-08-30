@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bebop-vision"
+version = "0.1.0"
+description = "Video perception pipeline for the bebop robot: navigable-path prediction + teacher tooling"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "opencv-python>=4.10.0",
+    "protobuf>=4.25",
+    "torch>=2.5",
+    "transformers>=4.55",
+    "websockets>=12",
+]
+
+[project.optional-dependencies]
+teacher = [
+    "einops",
+    "huggingface_hub>=0.26.0",
+    "onnx",
+    "pillow>=10",
+    "pycocotools",
+    "tensorrt>=11.0",
+    "sam3 @ git+https://github.com/facebookresearch/sam3.git",
+]
+
+[tool.setuptools.packages.find]
+include = ["bebop_vision*"]
