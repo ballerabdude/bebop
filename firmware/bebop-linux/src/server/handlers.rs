@@ -31,6 +31,7 @@ fn fmt_err(e: &anyhow::Error) -> String {
 /// (Ack / Error / Snapshot / etc.) — or `None` for messages that don't
 /// produce a response (e.g. SubscribeTelemetry, where the response is the
 /// telemetry stream itself).
+#[allow(clippy::too_many_arguments)]
 pub fn handle_client_message(
     sup: &Arc<Supervisor>,
     imu: &ImuShared,

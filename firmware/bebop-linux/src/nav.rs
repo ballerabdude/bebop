@@ -215,18 +215,16 @@ impl NavModel {
 fn preprocess(jpeg: &[u8], out: &mut Vec<f32>) -> Result<()> {
     let mut decoder = zune_jpeg::JpegDecoder::new(jpeg);
     let pixels = decoder.decode().context("decode camera JPEG")?;
-    let (w, h) = decoder
+    let (sw, sh) = decoder
         .dimensions()
         .context("camera JPEG reported no dimensions")?;
-    if w == 0 || h == 0 {
+    if sw == 0 || sh == 0 {
         return Err(anyhow::anyhow!("camera JPEG has zero dimensions"));
     }
     out.clear();
     out.resize(3 * INPUT_SIZE * INPUT_SIZE, 0.0);
 
     let src = &pixels;
-    let sw = w as usize;
-    let sh = h as usize;
     let x_ratio = sw as f32 / INPUT_SIZE as f32;
     let y_ratio = sh as f32 / INPUT_SIZE as f32;
 
@@ -280,7 +278,7 @@ fn preprocess(jpeg: &[u8], out: &mut Vec<f32>) -> Result<()> {
 /// Argmax the `[3, 128, 128]` logits into a 128×128 label map, compute
 /// per-class fractions, and nearest-resample to the published
 /// `MASK_W × MASK_H` grid. Returns `(grid, blocked, navigable, caution)`.
-fn postprocess(logits: &[f32], grid: &mut Vec<u8>) -> (f32, f32, f32) {
+fn postprocess(logits: &[f32], grid: &mut [u8]) -> (f32, f32, f32) {
     const N: usize = LOGIT_SIZE * LOGIT_SIZE;
     debug_assert_eq!(logits.len(), 3 * N);
     let mut labels = [0u8; N];
