@@ -89,7 +89,17 @@ message ClientRuntimeMessage {
     // wheel whose encoder calibration was lost. Result is NOT saved to
     // the S1's NVM — it must be re-run after a power cycle, or persisted
     // once via `odrivetool` → `save_configuration()` over USB.
-    CalibrateWheel       calibrate_wheel        = 18;
+    CalibrateWheel       calibrate_wheel       = 18;
+    // Command the camera gimbal (see `video:` in the robot YAML) to an
+    // absolute pan/tilt pose in degrees. Ungated by mode on purpose:
+    // moving the camera is not safety-relevant, and PTZ look-around
+    // during dataset recording (any mode) is a core workflow.
+    SetCameraPose        set_camera_pose       = 19;
+    // Subscribe to the pushed navigable-path mask frames (see `NavState` /
+    // `NavMaskFrame`). Subscribe-gated like telemetry: nothing is pushed
+    // until asked for. Used by the operator app's video overlay.
+    SubscribeNav         subscribe_nav         = 20;
+    UnsubscribeNav       unsubscribe_nav       = 21;
   }
   reserved 12;
   reserved "set_policy_capture";
@@ -109,6 +119,9 @@ message ServerRuntimeMessage {
     ModeChanged         mode_changed    = 5;
     EStopLatched        estop_latched   = 6;
     BusStatusUpdate     bus_status      = 7;
+    // Navigable-path mask grid (low-res label map for the live video
+    // overlay). Pushed only to clients that sent `subscribe_nav`.
+    NavMaskFrame        nav_mask        = 8;
   }
 }
 
@@ -224,6 +237,22 @@ message DriveState {
   float odom_theta = 12;
 }
 
+// Camera gimbal state (OBSBOT Tiny 2, standard UVC pan/tilt controls).
+// `present = false` when the runtime has no `video:` config, or when the
+// camera hasn't been heard from since boot. Pose is the *actual* pose
+// read back from the camera (never the assumed target — the gimbal
+// occasionally applies its own horizon compensation).
+message CameraState {
+  bool  present  = 1;
+  // Actual gimbal pose in degrees (pan + = right, tilt + = up,
+  // 0/0 = power-on center). OBSBOT Tiny 2 range: pan ±130°, tilt ±90°.
+  float pan_deg  = 2;
+  float tilt_deg = 3;
+  // True while the actual pose differs from the last commanded target
+  // by more than ~1 degree on either axis (gimbal still slewing).
+  bool  moving   = 4;
+}
+
 // ---------------------------------------------------------------------------
 // CAN bus health
 // ---------------------------------------------------------------------------
@@ -334,6 +363,13 @@ message TelemetryFrame {
   repeated WheelState wheels = 15;
   // Differential-drive summary; `present=false` without a `drive:` block.
   DriveState drive = 16;
+  // Camera gimbal state (OBSBOT Tiny 2 PTZ). Default instance
+  // (`present=false`) on robots without a `video:` config.
+  CameraState camera = 17;
+  // Navigable-path inference summary (the `nav:` model). Default
+  // instance (`present=false`) when the robot has no `nav:` config or
+  // the model failed to load. Optional so old clients still decode.
+  NavState nav = 18;
 }
 
 // One-shot reply to GetSnapshot — same content as TelemetryFrame.
@@ -349,6 +385,8 @@ message Snapshot {
   PolicyIoStats policy_io = 14;
   repeated WheelState wheels = 15;
   DriveState drive = 16;
+  CameraState camera = 17;
+  NavState nav = 18;
 }
 
 message BusStatusUpdate {
@@ -402,6 +440,17 @@ message SetAllWheelsEnabled {
 // `calibrate_wheel` for the persistence caveat.
 message CalibrateWheel {
   string wheel_name = 1;
+}
+
+// Command the camera gimbal to an absolute pan/tilt pose in degrees
+// (pan + = right, tilt + = up; 0/0 = power-on center). The firmware
+// clamps to the camera's UVC-reported limits (OBSBOT Tiny 2: pan ±130°,
+// tilt ±90°, 1° step — see the recon notes in `video.rs`) and reads
+// back the settled pose in telemetry / snapshot. Motion takes ~0.5-0.7 s
+// for a 30° move at default gimbal speed.
+message SetCameraPose {
+  float pan_deg  = 1;
+  float tilt_deg = 2;
 }
 
 message ResetOdometry {}
@@ -625,4 +674,83 @@ message PolicyIoStats {
 
   // Policy slot joint names (same order as the 8-element slices above).
   repeated string joint_names   = 30;
+}
+
+// ---------------------------------------------------------------------------
+// Navigable-path inference (nav runner)
+// ---------------------------------------------------------------------------
+//
+// The nav runner is the firmware-side consumer of the SegFormer
+// navigable-path student model (`navseg.onnx`, exported from
+// `bebop-vision`). It subscribes to the camera hub's MJPEG broadcast,
+// decodes + preprocesses each frame, runs ONNX inference (CUDA EP when
+// the loaded libonnxruntime supports it, CPU otherwise), and publishes:
+//
+//   - `NavState` — a summary embedded in every telemetry/snapshot frame
+//     (mask rate, class fractions) so dashboards can show "nav: 12 Hz,
+//     51% navigable" without subscribing to the grid.
+//   - `NavMaskFrame` — the low-res label grid itself, pushed at the
+//     subscribed rate so the operator app can overlay navigable /
+//     caution regions on the live video playback. Subscribe-gated.
+//
+// Label semantics (matching `bebop_vision.labelnav` / the training data):
+//   0 = blocked, 1 = navigable, 2 = caution.
+
+// Subscribe to pushed `NavMaskFrame`s. Nothing is pushed until this is
+// sent; `UnsubscribeNav` stops the stream. Mirrors the telemetry
+// subscription pattern.
+message SubscribeNav {
+  // Rate hint in Hz. The server clamps to the nav runner's own rate —
+  // asking for more than the model produces just re-sends the newest
+  // grid, so this is an upper bound on overlay update frequency.
+  uint32 rate_hz = 1;
+}
+
+message UnsubscribeNav {}
+
+// Navigable-path inference summary, embedded in telemetry + snapshots.
+message NavState {
+  // True iff `navseg.onnx` loaded and the runner thread is up.
+  bool  present        = 1;
+  // True once the first mask has been produced.
+  bool  received       = 2;
+  // Measured inference rate (EMA over the runner loop), Hz.
+  float mask_hz        = 3;
+  // Which execution provider is serving the model ("cuda" / "cpu").
+  string provider      = 4;
+  // Camera frame sequence number the latest mask was computed from.
+  uint64 seq           = 10;
+  // Camera capture timestamp of that frame (µs since epoch — matches the
+  // `X-Timestamp-Us` part header on `GET /video`, so consumers can align
+  // masks with frames).
+  uint64 ts_us         = 11;
+  // Fractions of the (128×128 argmax) label map per class, 0..1.
+  float frac_blocked   = 20;
+  float frac_navigable = 21;
+  float frac_caution   = 22;
+}
+
+// One pushed navigable-path label grid, for the live video overlay.
+// The grid covers the whole camera frame (the model is fed a square
+// 512×512 resize of the full frame, so the grid maps 1:1 onto the
+// frame's aspect regardless of its resolution).
+message NavMaskFrame {
+  // Camera frame sequence number this mask was computed from.
+  uint64 seq = 1;
+  // Camera capture timestamp (µs since epoch; matches `NavState.ts_us`).
+  uint64 ts_us = 2;
+  // Grid dimensions: `grid.len() == width * height`. 160×90 (16:9).
+  uint32 width  = 3;
+  uint32 height = 4;
+  // Row-major label map, one byte per cell: 0 = blocked, 1 = navigable,
+  // 2 = caution. Cell (x, y) covers the frame rectangle
+  // [x/width, (x+1)/width) × [y/height, (y+1)/height) of the frame.
+  bytes  grid = 5;
+  // Summary stats (same values as `NavState`) so overlay consumers get
+  // everything in one message without a separate telemetry join.
+  float frac_blocked   = 10;
+  float frac_navigable = 11;
+  float frac_caution   = 12;
+  float mask_hz        = 13;
+  string provider      = 14;
 }
