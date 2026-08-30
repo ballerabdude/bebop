@@ -153,8 +153,7 @@ impl NavModel {
                 .commit_from_file(path)
                 .map_err(anyhow::Error::from)
         };
-        let cuda_available =
-            ort::ep::CUDA::default().is_available().unwrap_or(false);
+        let cuda_available = ort::ep::CUDA::default().is_available().unwrap_or(false);
         let (session, provider) = if !cuda_available {
             info!(
                 "nav: CUDA EP not compiled into the loaded libonnxruntime; \
@@ -165,9 +164,7 @@ impl NavModel {
             let cuda_session = (|| -> Result<Session> {
                 Ok(Session::builder()?
                     .with_optimization_level(GraphOptimizationLevel::Level3)?
-                    .with_execution_providers(
-                        [ort::ep::CUDA::default().with_device_id(0).build()],
-                    )?
+                    .with_execution_providers([ort::ep::CUDA::default().with_device_id(0).build()])?
                     .commit_from_file(path)?)
             })();
             match cuda_session {
@@ -198,8 +195,8 @@ impl NavModel {
     pub fn infer(&mut self, input: &[f32]) -> Result<Vec<f32>> {
         debug_assert_eq!(input.len(), 3 * INPUT_SIZE * INPUT_SIZE);
         let shape = [1_usize, 3, INPUT_SIZE, INPUT_SIZE];
-        let tensor = Tensor::from_array((shape, input.to_vec()))
-            .context("build nav input tensor")?;
+        let tensor =
+            Tensor::from_array((shape, input.to_vec())).context("build nav input tensor")?;
         let outputs = self
             .session
             .run(ort::inputs![tensor])
@@ -306,12 +303,15 @@ fn postprocess(logits: &[f32], grid: &mut Vec<u8>) -> (f32, f32, f32) {
     let xr = LOGIT_SIZE as f32 / MASK_W as f32;
     let yr = LOGIT_SIZE as f32 / MASK_H as f32;
     for gy in 0..MASK_H {
-        let sy = ((gy as f32 + 0.5) * yr - 0.5).round().clamp(0.0, (LOGIT_SIZE - 1) as f32) as usize;
+        let sy = ((gy as f32 + 0.5) * yr - 0.5)
+            .round()
+            .clamp(0.0, (LOGIT_SIZE - 1) as f32) as usize;
         let src_row = sy * LOGIT_SIZE;
         let dst_row = gy * MASK_W;
         for gx in 0..MASK_W {
-            let sx =
-                ((gx as f32 + 0.5) * xr - 0.5).round().clamp(0.0, (LOGIT_SIZE - 1) as f32) as usize;
+            let sx = ((gx as f32 + 0.5) * xr - 0.5)
+                .round()
+                .clamp(0.0, (LOGIT_SIZE - 1) as f32) as usize;
             grid[dst_row + gx] = labels[src_row + sx];
         }
     }
@@ -401,7 +401,11 @@ pub fn spawn_nav_runner(
                     .map(|logits| {
                         let (b, na, ca) = postprocess(&logits, &mut grid);
                         let dt = started.elapsed().as_secs_f32().max(1e-3);
-                        hz_ema = if hz_ema == 0.0 { 1.0 / dt } else { 0.9 * hz_ema + 0.1 / dt };
+                        hz_ema = if hz_ema == 0.0 {
+                            1.0 / dt
+                        } else {
+                            0.9 * hz_ema + 0.1 / dt
+                        };
                         let _ = hub.tx.send_replace(Some(Arc::new(NavFrame {
                             seq: frame.seq,
                             ts_us: frame.ts_us,
@@ -483,10 +487,13 @@ mod tests {
         }
         let xr = src as f32 / dst as f32;
         for gy in 0..dst {
-            let sy = ((gy as f32 + 0.5) * xr - 0.5).round().clamp(0.0, (src - 1) as f32) as usize;
+            let sy = ((gy as f32 + 0.5) * xr - 0.5)
+                .round()
+                .clamp(0.0, (src - 1) as f32) as usize;
             for gx in 0..dst {
-                let sx =
-                    ((gx as f32 + 0.5) * xr - 0.5).round().clamp(0.0, (src - 1) as f32) as usize;
+                let sx = ((gx as f32 + 0.5) * xr - 0.5)
+                    .round()
+                    .clamp(0.0, (src - 1) as f32) as usize;
                 grid[gy * dst + gx] = labels[sy * src + sx];
             }
         }

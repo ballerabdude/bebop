@@ -25,10 +25,10 @@ use crate::server::handlers::{encode, handle_client_message};
 use crate::server::telemetry::{build_telemetry, telemetry_envelope};
 use crate::video::VideoHub;
 use anyhow::Result;
+use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{header, StatusCode};
-use axum::body::{Body, Bytes};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
@@ -153,7 +153,10 @@ async fn video_stream(State(state): State<AppState>) -> Response {
                 // Slow consumer: skip whatever queued up and continue
                 // from the newest frame instead of backlogging.
                 Ok(Err(broadcast::error::RecvError::Lagged(dropped))) => {
-                    debug!(dropped, "video subscriber lagged; resyncing to newest frame");
+                    debug!(
+                        dropped,
+                        "video subscriber lagged; resyncing to newest frame"
+                    );
                     continue;
                 }
                 Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => return None,

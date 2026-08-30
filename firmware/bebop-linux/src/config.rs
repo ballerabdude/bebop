@@ -994,8 +994,9 @@ impl RobotConfig {
         let video = raw
             .video
             .map(|v| -> Result<VideoConfig> {
-                let device =
-                    v.device.ok_or_else(|| anyhow!("video.device is required"))?;
+                let device = v
+                    .device
+                    .ok_or_else(|| anyhow!("video.device is required"))?;
                 let width = v.width.unwrap_or(1280);
                 let height = v.height.unwrap_or(720);
                 let fps = v.fps.unwrap_or(30);
@@ -1005,7 +1006,12 @@ impl RobotConfig {
                 if fps == 0 || fps > 60 {
                     return Err(anyhow!("video.fps must be in [1, 60]; got {fps}"));
                 }
-                Ok(VideoConfig { device, width, height, fps })
+                Ok(VideoConfig {
+                    device,
+                    width,
+                    height,
+                    fps,
+                })
             })
             .transpose()
             .context("invalid `video:` section")?;
@@ -1018,7 +1024,9 @@ impl RobotConfig {
                     return Err(anyhow!("nav.rate_hz must be in [1, 30]; got {rate_hz}"));
                 }
                 if video.is_none() {
-                    return Err(anyhow!("`nav:` requires a `video:` block (no camera to run on)"));
+                    return Err(anyhow!(
+                        "`nav:` requires a `video:` block (no camera to run on)"
+                    ));
                 }
                 Ok(NavConfig { rate_hz })
             })

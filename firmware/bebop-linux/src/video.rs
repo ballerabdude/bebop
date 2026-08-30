@@ -91,7 +91,10 @@ impl VideoHub {
     pub fn spawn(cfg: VideoConfig) -> VideoHub {
         let (tx, _) = broadcast::channel(cfg.queue_depth());
         let ptz = Arc::new(Ptz::open(&cfg.device));
-        let hub = VideoHub { tx: tx.clone(), ptz: ptz.clone() };
+        let hub = VideoHub {
+            tx: tx.clone(),
+            ptz: ptz.clone(),
+        };
         std::thread::Builder::new()
             .name("video-capture".into())
             .spawn(move || capture_loop(cfg, tx, ptz))

@@ -134,7 +134,9 @@ impl Ptz {
                 info!(device = %ptz.device, "camera gimbal ready (UVC pan/tilt)");
                 *ptz.inner.lock().expect("ptz mutex poisoned") = Some(inner);
             }
-            Err(e) => warn!(device = %ptz.device, error = %e, "camera gimbal not available yet; will retry on use"),
+            Err(e) => {
+                warn!(device = %ptz.device, error = %e, "camera gimbal not available yet; will retry on use")
+            }
         }
         ptz
     }
@@ -148,8 +150,10 @@ impl Ptz {
         let result = (|| -> anyhow::Result<PtzInner> {
             let pan = query_axis(fd, CID_PAN_ABSOLUTE)?;
             let tilt = query_axis(fd, CID_TILT_ABSOLUTE)?;
-            let (pan_units, tilt_units) =
-                (read_ctrl(fd, CID_PAN_ABSOLUTE)?, read_ctrl(fd, CID_TILT_ABSOLUTE)?);
+            let (pan_units, tilt_units) = (
+                read_ctrl(fd, CID_PAN_ABSOLUTE)?,
+                read_ctrl(fd, CID_TILT_ABSOLUTE)?,
+            );
             Ok(PtzInner {
                 fd,
                 pan,
@@ -177,7 +181,10 @@ impl Ptz {
     /// rate-limited (`OPEN_RETRY_PERIOD`): pose stamping + telemetry
     /// call this at ~60 Hz combined, and a missing camera must not turn
     /// that into an open/ioctl storm.
-    fn with_inner<T>(&self, f: impl FnOnce(&mut PtzInner) -> std::io::Result<T>) -> std::io::Result<T> {
+    fn with_inner<T>(
+        &self,
+        f: impl FnOnce(&mut PtzInner) -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
         let mut guard = self.inner.lock().expect("ptz mutex poisoned");
         if guard.is_none() {
             {
@@ -304,13 +311,13 @@ fn query_axis(fd: i32, id: u32) -> anyhow::Result<Axis> {
     };
     let rc = unsafe { libc::ioctl(fd, VIDIOC_QUERYCTRL, &mut qc as *mut V4l2QueryCtrl) };
     if rc < 0 {
-        anyhow::bail!(
-            "QUERYCTRL({id:#x}): {}",
-            std::io::Error::last_os_error()
-        );
+        anyhow::bail!("QUERYCTRL({id:#x}): {}", std::io::Error::last_os_error());
     }
     if qc.maximum <= qc.minimum {
         anyhow::bail!("control {id:#x} reports empty range");
     }
-    Ok(Axis { min: qc.minimum, max: qc.maximum })
+    Ok(Axis {
+        min: qc.minimum,
+        max: qc.maximum,
+    })
 }
