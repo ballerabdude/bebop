@@ -15,4 +15,4 @@ pub mod handlers;
 pub mod telemetry;
 pub mod ws;
 
-pub use ws::run_server;
+pub use ws::{AppState, run_server};

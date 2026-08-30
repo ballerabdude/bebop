@@ -868,6 +868,23 @@ else
     echo "==> skipping prereq install"
 fi
 
+# Firmware prereqs. v4l-utils ships `v4l2-ctl`, the operator + bring-up
+# surface for the camera (the OBSBOT Tiny 2's PTZ rides standard UVC
+# pan/tilt controls on /dev/video0; the firmware talks raw ioctls, but
+# humans use v4l2-ctl to inspect ranges and jog the gimbal by hand):
+#   v4l2-ctl -d /dev/video0 --list-ctrls     # pan/tilt/zoom + ranges
+#   v4l2-ctl -d /dev/video0 --get-ctrl pan_absolute
+# Gated on INSTALL_LINUX like the agent prereqs above are gated on the
+# agent, so --skip-prereqs and --agent-only keep their meaning.
+if [[ "${SKIP_PREREQS}" -eq 0 && "${INSTALL_LINUX}" -eq 1 ]]; then
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "==> ensuring system prereqs (v4l-utils)"
+        apt_install_if_missing v4l-utils
+    else
+        echo "==> non-Debian system; skipping v4l-utils"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Lay down files
 # ---------------------------------------------------------------------------

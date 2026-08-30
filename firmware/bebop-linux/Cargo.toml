@@ -48,6 +48,15 @@ axum = { version = "0.7", features = ["ws", "macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 
+# V4L2 camera capture (MJPEG passthrough for the /video endpoint).
+# Sync ioctl bindings, no libv4l2 dependency.
+rscam = "0.5"
+
+# JPEG decode for the nav runner (`src/nav.rs`): the camera hub
+# broadcasts MJPEG-compressed bytes, and the nav model needs decoded
+# RGB. Pure Rust, no C dependency.
+zune-jpeg = "0.4"
+
 # ONNX Runtime for neural network inference.
 #
 # We use the `load-dynamic` feature so the build does NOT statically link

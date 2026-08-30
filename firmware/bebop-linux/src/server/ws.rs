@@ -17,25 +17,30 @@
 //! All three feed a shared mpsc to the WS sink writer.
 
 use crate::imu::ImuShared;
+use crate::nav::NavHub;
 use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
 use crate::safety::{Supervisor, SupervisorEvent};
 use crate::server::handlers::{encode, handle_client_message};
 use crate::server::telemetry::{build_telemetry, telemetry_envelope};
+use crate::video::VideoHub;
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{header, StatusCode};
-use axum::response::IntoResponse;
+use axum::body::{Body, Bytes};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use bebop_proto::runtime::v1 as proto;
 use serde::Serialize;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -59,25 +64,17 @@ pub struct AppState {
     /// HTTP layer so `GET /captures` can list finished segments and
     /// `GET /captures/dl/<name>` (via `ServeDir`) can stream them out.
     pub capture_dir: PathBuf,
+    /// MJPEG camera hub (see [`crate::video`]). `None` on robots without
+    /// a `video:` config; `GET /video` answers 503 then.
+    pub video: Option<Arc<VideoHub>>,
+    /// Navigable-path runner handle (see [`crate::nav`]). `None` on
+    /// robots without a `nav:` block or when the model failed to load;
+    /// telemetry then reports `NavState.present = false` and the
+    /// `subscribe_nav` push sends nothing.
+    pub nav: Option<Arc<NavHub>>,
 }
 
-pub async fn run_server(
-    sup: Arc<Supervisor>,
-    imu: ImuShared,
-    imu_present: bool,
-    policy_io: PolicyIoShared,
-    policy_control: PolicyControlShared,
-    capture_dir: PathBuf,
-    bind_addr: &str,
-) -> Result<()> {
-    let state = AppState {
-        sup,
-        imu,
-        imu_present,
-        policy_io,
-        policy_control,
-        capture_dir: capture_dir.clone(),
-    };
+pub async fn run_server(state: AppState, bind_addr: &str) -> Result<()> {
     // Permissive CORS: the operator app is served from a different origin
     // (e.g. tauri://localhost or a dev http://localhost:1420), and we're
     // on the LAN. WebSockets aren't subject to CORS but the /healthz
@@ -95,8 +92,9 @@ pub async fn run_server(
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
+        .route("/video", get(video_stream))
         .route("/captures", get(list_captures))
-        .nest_service("/captures/dl", ServeDir::new(capture_dir))
+        .nest_service("/captures/dl", ServeDir::new(state.capture_dir.clone()))
         .with_state(state)
         .layer(cors);
 
@@ -105,6 +103,72 @@ pub async fn run_server(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// `GET /video` — live MJPEG from the robot camera.
+///
+/// Serves `multipart/x-mixed-replace` with JPEG parts: render directly in
+/// an `<img>` tag from the operator app, or open the URL as a capture
+/// source in OpenCV / FFmpeg (bebop-vision does exactly this). Each part
+/// carries the host capture timestamp in `X-Timestamp-Us` so consumers can
+/// align frames with telemetry. A slow client lags independently — the
+/// broadcast channel drops stale frames per subscriber. 503 when the
+/// robot has no `video:` config.
+async fn video_stream(State(state): State<AppState>) -> Response {
+    let hub = match state.video {
+        Some(ref hub) => hub.clone(),
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "no camera configured (missing `video:` in robot yaml)",
+            )
+                .into_response()
+        }
+    };
+
+    const BOUNDARY: &str = "bebopframe";
+    // If the capture thread stops producing frames (camera unplugged,
+    // hub wedged), end the response after this long so clients get a
+    // stream end (→ <img> onerror / reader EOF) instead of an idle
+    // socket that never closes.
+    const FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let stream = futures::stream::unfold(hub.subscribe(), |mut rx| async move {
+        loop {
+            match tokio::time::timeout(FRAME_TIMEOUT, rx.recv()).await {
+                Ok(Ok(frame)) => {
+                    let mut part = format!(
+                        "\r\n--{BOUNDARY}\r\nContent-Type: image/jpeg\r\n\
+                         Content-Length: {}\r\nX-Timestamp-Us: {}\r\n\
+                         X-Pan-Deg: {:.2}\r\nX-Tilt-Deg: {:.2}\r\n\r\n",
+                        frame.jpeg.len(),
+                        frame.ts_us,
+                        frame.pan_deg,
+                        frame.tilt_deg
+                    )
+                    .into_bytes();
+                    part.extend_from_slice(&frame.jpeg);
+                    let chunk: Result<Bytes, Infallible> = Ok(Bytes::from(part));
+                    return Some((chunk, rx));
+                }
+                // Slow consumer: skip whatever queued up and continue
+                // from the newest frame instead of backlogging.
+                Ok(Err(broadcast::error::RecvError::Lagged(dropped))) => {
+                    debug!(dropped, "video subscriber lagged; resyncing to newest frame");
+                    continue;
+                }
+                Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => return None,
+            }
+        }
+    });
+
+    Response::builder()
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/x-mixed-replace; boundary={BOUNDARY}"),
+        )
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from_stream(stream))
+        .unwrap()
 }
 
 /// One row of the `GET /captures` response. The TS consumer expects
@@ -208,6 +272,8 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         policy_io,
         policy_control,
         capture_dir: _,
+        video,
+        nav,
     } = state;
     info!("ws client connected");
     let (mut sink, mut stream) = socket.split();
@@ -218,14 +284,25 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         subscribed: false,
         rate_hz: 30,
     }));
+    // Nav-mask push control: same shape as the telemetry subscription.
+    let nav_state = Arc::new(tokio::sync::RwLock::new(NavPushState {
+        subscribed: false,
+        rate_hz: 10,
+    }));
     let max_rate_hz = sup.cfg().server.telemetry_max_hz.max(1);
     let default_rate_hz = sup.cfg().server.telemetry_default_hz.max(1);
+    // Cap nav-mask pushes well under the telemetry ceiling: each frame
+    // is a ~14 KB grid, and the overlay doesn't need more than the
+    // model produces anyway.
+    const NAV_PUSH_MAX_HZ: u32 = 15;
 
     // Task: telemetry pump.
     let tx_tele = tx.clone();
     let sup_tele = sup.clone();
     let imu_tele = imu.clone();
     let policy_io_tele = policy_io.clone();
+    let video_tele = video.clone();
+    let nav_tele = nav.clone();
     let tele_state_tele = telemetry_state.clone();
     let mut client_telemetry_subscribed = false;
     let telemetry_task = tokio::spawn(async move {
@@ -239,9 +316,69 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
             if !subscribed {
                 continue;
             }
-            let frame = build_telemetry(&sup_tele, &imu_tele, imu_present, &policy_io_tele);
+            let frame = build_telemetry(
+                &sup_tele,
+                &imu_tele,
+                imu_present,
+                &policy_io_tele,
+                &video_tele,
+                &nav_tele,
+            );
             let env = telemetry_envelope(frame);
             if tx_tele.send(env).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Task: nav-mask pump. Only pushes on *new* masks (seq change) so a
+    // slow model never re-sends the same grid; the subscription rate is
+    // an upper bound on overlay update frequency.
+    let tx_nav = tx.clone();
+    let nav_push_state = nav_state.clone();
+    let nav_push_hub = nav.clone();
+    let nav_task = tokio::spawn(async move {
+        let mut rx_hub = nav_push_hub.as_ref().map(|hub| hub.subscribe());
+        let mut last_seq: Option<u64> = None;
+        loop {
+            let (subscribed, rate_hz) = {
+                let g = nav_push_state.read().await;
+                (g.subscribed, g.rate_hz)
+            };
+            let period = Duration::from_secs_f32(1.0 / rate_hz.max(1) as f32);
+            tokio::time::sleep(period).await;
+            if !subscribed {
+                continue;
+            }
+            let Some(rx) = rx_hub.as_mut() else { continue };
+            let frame = rx.borrow_and_update().clone();
+            let Some(frame) = frame else { continue };
+            if last_seq == Some(frame.seq) {
+                continue;
+            }
+            let provider = nav_push_hub
+                .as_ref()
+                .map(|h| h.provider())
+                .unwrap_or_default();
+            let msg = proto::ServerRuntimeMessage {
+                request_id: 0,
+                payload: Some(proto::server_runtime_message::Payload::NavMask(
+                    proto::NavMaskFrame {
+                        seq: frame.seq,
+                        ts_us: frame.ts_us,
+                        width: crate::nav::MASK_W as u32,
+                        height: crate::nav::MASK_H as u32,
+                        grid: frame.grid.clone(),
+                        frac_blocked: frame.frac_blocked,
+                        frac_navigable: frame.frac_navigable,
+                        frac_caution: frame.frac_caution,
+                        mask_hz: frame.infer_hz,
+                        provider,
+                    },
+                )),
+            };
+            last_seq = Some(frame.seq);
+            if tx_nav.send(msg).await.is_err() {
                 break;
             }
         }
@@ -304,6 +441,8 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     imu_present,
                     &policy_io,
                     &policy_control,
+                    &video,
+                    &nav,
                     &bytes,
                 );
 
@@ -335,6 +474,19 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                     client_telemetry_subscribed = false;
                                 }
                             }
+                            proto::client_runtime_message::Payload::SubscribeNav(s) => {
+                                let mut g = nav_state.write().await;
+                                g.subscribed = true;
+                                g.rate_hz = if s.rate_hz == 0 {
+                                    10
+                                } else {
+                                    s.rate_hz.min(NAV_PUSH_MAX_HZ)
+                                };
+                            }
+                            proto::client_runtime_message::Payload::UnsubscribeNav(_) => {
+                                let mut g = nav_state.write().await;
+                                g.subscribed = false;
+                            }
                             _ => {}
                         }
                     }
@@ -365,6 +517,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     drop(tx);
     let _ = writer_task.await;
     telemetry_task.abort();
+    nav_task.abort();
     event_task.abort();
     if client_telemetry_subscribed {
         sup.dec_telemetry_subscribers();
@@ -373,6 +526,12 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
 }
 
 struct TelemetryState {
+    subscribed: bool,
+    rate_hz: u32,
+}
+
+/// Nav-mask push subscription state (see `SubscribeNav`).
+struct NavPushState {
     subscribed: bool,
     rate_hz: u32,
 }

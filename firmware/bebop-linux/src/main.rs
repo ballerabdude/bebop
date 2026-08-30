@@ -14,6 +14,7 @@ use bebop_linux::config::{ImuSource, RobotConfig};
 use bebop_linux::imu;
 use bebop_linux::imu_serial;
 use bebop_linux::mode::Mode;
+use bebop_linux::nav;
 use bebop_linux::policy_capture;
 use bebop_linux::policy_control;
 use bebop_linux::policy_io;
@@ -37,6 +38,11 @@ struct Args {
     /// Path to the trained policy ONNX. If `None`, defaults to
     /// `<config_dir>/policy.onnx` (sibling of the joint YAML).
     policy: Option<PathBuf>,
+    /// Path to the navigable-path model (navseg.onnx + sibling
+    /// .onnx.data). If `None`, defaults to
+    /// `<config_dir>/navseg.onnx`. Only loaded when the YAML has a
+    /// `nav:` block.
+    nav_model: Option<PathBuf>,
     /// Directory to write operator-toggled observation/action MCAP
     /// captures into. `~/` is expanded; defaults to `~/bebop-captures`.
     /// See `crate::policy_capture` for the file naming scheme.
@@ -48,6 +54,7 @@ impl Default for Args {
         Self {
             config: PathBuf::from("config/bebop_v2.yaml"),
             policy: None,
+            nav_model: None,
             capture_dir: None,
         }
     }
@@ -71,6 +78,12 @@ fn parse_args() -> Args {
                     i += 1;
                 }
             }
+            "--nav" | "-n" => {
+                if i + 1 < cli.len() {
+                    args.nav_model = Some(PathBuf::from(&cli[i + 1]));
+                    i += 1;
+                }
+            }
             "--capture-dir" => {
                 if i + 1 < cli.len() {
                     args.capture_dir = Some(PathBuf::from(&cli[i + 1]));
@@ -86,8 +99,10 @@ fn parse_args() -> Args {
                      OPTIONS:\n  \
                        -c, --config <PATH>      Joint config YAML \
                                                  [default: config/bebop_v2.yaml]\n  \
-                       -p, --policy <PATH>      Trained policy ONNX \
-                                                 [default: <config_dir>/policy.onnx]\n  \
+                        -p, --policy <PATH>      Trained policy ONNX \
+                                                  [default: <config_dir>/policy.onnx]\n  \
+                          -n, --nav <PATH>        Navigable-path model ONNX \
+                                                  [default: <config_dir>/navseg.onnx]\n  \
                            --capture-dir <DIR>  Where to write operator-toggled MCAP captures \
                                                  [default: ~/bebop-captures]\n  \
                        -h, --help               Print help\n"
@@ -108,7 +123,18 @@ fn parse_args() -> Args {
 /// `<config_dir>/policy.onnx` so the operator can ship the policy as a
 /// drop-in next to `bebop_v2.yaml`.
 fn resolve_policy_path(args: &Args) -> PathBuf {
-    if let Some(p) = args.policy.as_ref() {
+    resolve_sibling(args, args.policy.as_ref(), "policy.onnx")
+}
+
+/// Resolve the nav model ONNX path. Same drop-in convention: the CLI
+/// override wins; otherwise `<config_dir>/navseg.onnx` (with its sibling
+/// `navseg.onnx.data` for the external weights).
+fn resolve_nav_path(args: &Args) -> PathBuf {
+    resolve_sibling(args, args.nav_model.as_ref(), "navseg.onnx")
+}
+
+fn resolve_sibling(args: &Args, override_path: Option<&PathBuf>, file: &str) -> PathBuf {
+    if let Some(p) = override_path {
         return p.clone();
     }
     let cfg_dir = args
@@ -116,7 +142,7 @@ fn resolve_policy_path(args: &Args) -> PathBuf {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    cfg_dir.join("policy.onnx")
+    cfg_dir.join(file)
 }
 
 /// Resolve the operator capture directory. The CLI override wins (with
@@ -421,18 +447,47 @@ async fn main() -> Result<()> {
     let server_policy_control = policy_control_shared.clone();
     let server_capture_dir = capture_dir.clone();
     let bind_addr = cfg.server.bind_addr.clone();
+    // Camera hub (best-effort: a missing/unplugged camera never blocks
+    // robot startup — the capture thread retries on its own).
+    let server_video = cfg
+        .video
+        .clone()
+        .map(bebop_linux::video::VideoHub::spawn)
+        .map(Arc::new);
+
+    // Navigable-path runner: subscribes to the camera hub above and
+    // publishes nav masks (telemetry `NavState` + subscribe-gated
+    // `NavMaskFrame` push). Soft-fail like the policy loader — a
+    // missing model leaves the robot fully operational with
+    // `NavState.present = false`. Never spawned without `nav:` + `video:`
+    // in the YAML (config validation enforces the pairing).
+    let nav_model_path = resolve_nav_path(&args);
+    let server_nav = match (server_video.as_ref(), cfg.nav.as_ref()) {
+        (Some(video), Some(nav_cfg)) => Some(nav::spawn_nav_runner(
+            video.clone(),
+            nav_cfg.clone(),
+            nav_model_path,
+            shutdown_flag.clone(),
+        )),
+        (None, Some(_)) => {
+            warn!("nav: `nav:` block without `video:`; nav runner not started");
+            None
+        }
+        _ => None,
+    };
+
     let server_handle = tokio::spawn(async move {
-        if let Err(e) = server::run_server(
-            server_sup,
-            server_imu,
+        let state = bebop_linux::server::AppState {
+            sup: server_sup,
+            imu: server_imu,
             imu_present,
-            server_policy_io,
-            server_policy_control,
-            server_capture_dir,
-            &bind_addr,
-        )
-        .await
-        {
+            policy_io: server_policy_io,
+            policy_control: server_policy_control,
+            capture_dir: server_capture_dir,
+            video: server_video,
+            nav: server_nav,
+        };
+        if let Err(e) = server::run_server(state, &bind_addr).await {
             error!(error = %e, "server task exited with error");
         }
     });
