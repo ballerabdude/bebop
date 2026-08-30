@@ -374,6 +374,22 @@ pub struct ServerConfig {
     pub bind_addr: String,
     pub telemetry_default_hz: u32,
     pub telemetry_max_hz: u32,
+    /// Operator-link freshness budget for the drive twist (ms). A
+    /// non-zero twist that isn't refreshed within this window is
+    /// zeroed by the supervisor watchdog (controlled stop — the
+    /// operator went silent mid-drive and their stop never arrived).
+    /// `0` disables the check. The operator app re-sends the current
+    /// twist at ~10 Hz while driving, so 500 ms tolerates several
+    /// dropped frames without halting a healthy session.
+    pub operator_timeout_ms: u64,
+    /// Operator-arbitration grace (ms): how long after the active
+    /// operator's last drive command their assignment still blocks
+    /// other clients' non-zero drive input. Once this window passes
+    /// without input from the holder, anyone's next drive command
+    /// takes over. `0` disables arbitration entirely (any drive input
+    /// takes over immediately — last writer wins). Stops (zero twist)
+    /// are always accepted from any client regardless.
+    pub operator_grace_ms: u64,
 }
 
 impl Default for ServerConfig {
@@ -382,6 +398,8 @@ impl Default for ServerConfig {
             bind_addr: "0.0.0.0:9090".into(),
             telemetry_default_hz: 30,
             telemetry_max_hz: 100,
+            operator_timeout_ms: 500,
+            operator_grace_ms: 2000,
         }
     }
 }
@@ -841,6 +859,8 @@ impl RobotConfig {
                 bind_addr: s.bind_addr.unwrap_or_else(|| "0.0.0.0:9090".into()),
                 telemetry_default_hz: s.telemetry_default_hz.unwrap_or(30),
                 telemetry_max_hz: s.telemetry_max_hz.unwrap_or(100),
+                operator_timeout_ms: s.operator_timeout_ms.unwrap_or(500),
+                operator_grace_ms: s.operator_grace_ms.unwrap_or(2000),
             })
             .unwrap_or_default();
 
@@ -1236,6 +1256,8 @@ struct RawServer {
     bind_addr: Option<String>,
     telemetry_default_hz: Option<u32>,
     telemetry_max_hz: Option<u32>,
+    operator_timeout_ms: Option<u64>,
+    operator_grace_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1824,6 +1846,45 @@ drive:
             format!("{err:#}").contains("neither joints nor wheels"),
             "unexpected error: {err:#}"
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn operator_timeout_defaults_to_500ms() {
+        let path = write_temp_config(DIFF_DRIVE);
+        let cfg = RobotConfig::from_yaml(&path).expect("load wheeled config");
+        assert_eq!(cfg.server.operator_timeout_ms, 500);
+        assert_eq!(cfg.server.operator_grace_ms, 2000);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn operator_timeout_is_configurable_and_zero_disables() {
+        let body = format!("{DIFF_DRIVE}server:\n  operator_timeout_ms: 250\n");
+        let path = write_temp_config(&body);
+        let cfg = RobotConfig::from_yaml(&path).expect("load wheeled config");
+        assert_eq!(cfg.server.operator_timeout_ms, 250);
+        std::fs::remove_file(&path).ok();
+
+        let body = format!("{DIFF_DRIVE}server:\n  operator_timeout_ms: 0\n");
+        let path = write_temp_config(&body);
+        let cfg = RobotConfig::from_yaml(&path).expect("load wheeled config");
+        assert_eq!(cfg.server.operator_timeout_ms, 0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn operator_grace_is_configurable_and_zero_disables_arbitration() {
+        let body = format!("{DIFF_DRIVE}server:\n  operator_grace_ms: 5000\n");
+        let path = write_temp_config(&body);
+        let cfg = RobotConfig::from_yaml(&path).expect("load wheeled config");
+        assert_eq!(cfg.server.operator_grace_ms, 5000);
+        std::fs::remove_file(&path).ok();
+
+        let body = format!("{DIFF_DRIVE}server:\n  operator_grace_ms: 0\n");
+        let path = write_temp_config(&body);
+        let cfg = RobotConfig::from_yaml(&path).expect("load wheeled config");
+        assert_eq!(cfg.server.operator_grace_ms, 0);
         std::fs::remove_file(&path).ok();
     }
 

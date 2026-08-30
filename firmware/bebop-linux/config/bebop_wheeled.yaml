@@ -75,6 +75,21 @@ server:
   bind_addr: 0.0.0.0:9090
   telemetry_default_hz: 30
   telemetry_max_hz: 100
+  # Operator-link watchdog: a non-zero drive twist that isn't refreshed
+  # within this window is zeroed (controlled stop — wheels ramp to 0,
+  # motors stay armed). Covers a dropped WS link, a crashed operator
+  # app, or a Wi-Fi blip mid-drive. The app re-sends the current twist
+  # at ~10 Hz while driving, so 500 ms tolerates several lost frames on
+  # a healthy link. 0 disables the check.
+  operator_timeout_ms: 500
+  # Operator arbitration: with multiple apps connected, the first client
+  # to send a non-zero drive command becomes the "active operator" and
+  # other clients' drive commands are rejected until this much time
+  # passes without input from the holder — then anyone's next drive
+  # command takes over. Stops (zero twist) and E-STOP are always
+  # accepted from any client. 0 disables arbitration (any drive input
+  # takes over immediately — last writer wins).
+  operator_grace_ms: 2000
 
 # MJPEG camera relay. The firmware owns the camera exclusively and serves
 # GET /video (multipart/x-mixed-replace) so the operator app (<img src>)

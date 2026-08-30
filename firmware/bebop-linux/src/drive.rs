@@ -10,7 +10,7 @@ use crate::config::DiffDriveConfig;
 
 /// A body-frame motion command: `vx` (forward m/s), `wz` (yaw rate rad/s,
 /// + = left turn / CCW).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Twist {
     pub vx: f32,
     pub wz: f32,

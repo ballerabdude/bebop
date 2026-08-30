@@ -79,6 +79,14 @@ const MODE_LABEL: Record<RuntimeMode, string> = {
   RUN_POLICY: "Policy",
 };
 
+/// How often the drive keepalive re-sends the current twist while a
+/// drive cycle is open. Must stay comfortably below the firmware's
+/// `operator_timeout_ms` (default 500 ms — see
+/// `firmware/bebop-linux/src/config.rs`) so a healthy session never
+/// trips the robot-side link-loss watchdog; 10 Hz leaves ~4 missed
+/// packets of slack.
+const TWIST_KEEPALIVE_MS = 100;
+
 const fmt = (v: number): string =>
   v >= 0 ? `+${v.toFixed(2)}` : v.toFixed(2);
 
@@ -228,12 +236,21 @@ export function TeleopScreen({
   const twistPendingRef = useRef<{ vx: number; wz: number } | null>(null);
   const sentAnythingRef = useRef(false);
 
+  // Drive-cycle bookkeeping for the keepalive below: `drivingRef` is
+  // true while a gesture holds a non-zero twist, `lastTwistRef` holds
+  // the latest one. Closed by every stop path (release, deadman drop,
+  // visibility change, gesture teardown).
+  const drivingRef = useRef(false);
+  const lastTwistRef = useRef<{ vx: number; wz: number } | null>(null);
+
   const sendTwist = useCallback(
     async (vx: number, wz: number, silent = false) => {
       const t = transportRef.current;
       if (!t) return;
       sentAnythingRef.current = true;
       const payload = { vx, wz };
+      lastTwistRef.current = payload;
+      if (vx !== 0 || wz !== 0) drivingRef.current = true;
       if (twistInFlightRef.current) {
         twistPendingRef.current = payload;
         return;
@@ -260,9 +277,31 @@ export function TeleopScreen({
   // One-shot "stop": enqueue a (0,0) twist that supersedes anything
   // mid-flight, so every gesture end halts the robot.
   const stopDrive = useCallback(() => {
+    drivingRef.current = false;
+    lastTwistRef.current = null;
     twistPendingRef.current = { vx: 0, wz: 0 };
     void sendTwist(0, 0, true);
   }, [sendTwist]);
+
+  // Operator-link keepalive: the firmware zeroes any twist that isn't
+  // refreshed within its `operator_timeout_ms` (500 ms default) — the
+  // robot-side backstop for a dropped link. Every drive input here
+  // emits only on *change*, so a steady stick would look exactly like a
+  // dead operator to that watchdog. While a drive cycle is open,
+  // re-send the current twist at ~10 Hz; the coalescer above keeps this
+  // to one in-flight request + one pending. Repeats are silent (a
+  // flaky link already shows in the connection pill, and the robot
+  // halting is precisely the designed behavior we don't need to nag
+  // about).
+  useEffect(() => {
+    if (connState !== "connected") return;
+    const iv = window.setInterval(() => {
+      if (!drivingRef.current) return;
+      const last = lastTwistRef.current;
+      if (last) void sendTwist(last.vx, last.wz, true);
+    }, TWIST_KEEPALIVE_MS);
+    return () => window.clearInterval(iv);
+  }, [connState, sendTwist]);
 
   // Leaving the screen (or the whole tab) mid-drive must halt the
   // chassis — the firmware would otherwise hold the last twist. The
@@ -346,7 +385,9 @@ export function TeleopScreen({
         ? "Switch to Dial-in mode to drive."
         : armedWheelCount === 0
           ? "Enable the wheels to drive."
-          : null;
+          : drive?.hasActiveOperator && !drive?.youAreActiveOperator
+            ? "Another operator is driving — drive commands from this device are rejected until theirs go quiet for a couple of seconds."
+            : null;
 
   const startDriving = useCallback(() => {
     if (estopLatched) return;
@@ -414,6 +455,22 @@ export function TeleopScreen({
       {wheeled ? (
         <Pill tone={armedWheelCount === 0 ? "warn" : "ok"} title="Wheels armed">
           {armedWheelCount}/{wheels.length} wheels
+        </Pill>
+      ) : null}
+      {wheeled && drive?.operatorStale ? (
+        <Pill
+          tone="warn"
+          title="No fresh drive commands reached the robot within its operator timeout; it zeroed the twist and is holding still. Motion resumes when a fresh command arrives (this pill clears)."
+        >
+          link stale — motion halted
+        </Pill>
+      ) : null}
+      {wheeled && drive?.hasActiveOperator && !drive?.youAreActiveOperator ? (
+        <Pill
+          tone="warn"
+          title="Another device holds the drive assignment (input-based arbitration). Drive commands from this device are rejected until the other operator stops for a couple of seconds; stops and E-STOP always work."
+        >
+          another operator driving
         </Pill>
       ) : null}
       {batteryLabel ? (

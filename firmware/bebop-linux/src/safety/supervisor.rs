@@ -62,6 +62,102 @@ pub struct ZeroAllOutcome {
     pub position_after_rad: Option<f32>,
 }
 
+/// Stored operator twist plus the [`Instant`] it was last written.
+/// `last_set` is what makes the operator link lossy-detectable: the WS
+/// drive path is send-on-change, so the *absence* of writes is the only
+/// signal that the operator went silent (see [`twist_is_stale`]).
+#[derive(Debug, Clone, Copy)]
+struct CmdVelState {
+    twist: Twist,
+    last_set: Instant,
+}
+
+impl Default for CmdVelState {
+    fn default() -> Self {
+        Self {
+            twist: Twist::default(),
+            last_set: Instant::now(),
+        }
+    }
+}
+
+/// Pure operator-link staleness decision, extracted so it can be
+/// unit-tested without a live supervisor (which needs real CAN
+/// sockets): should the watchdog zero the operator twist?
+///
+/// Fires only when the twist is non-zero — a parked robot going stale
+/// is harmless, and zeroing an already-zero twist would just let the
+/// check re-arm every tick and spam the log. `timeout_ms == 0` disables
+/// the check entirely.
+fn twist_is_stale(twist: Twist, age_ms: u64, timeout_ms: u64) -> bool {
+    if timeout_ms == 0 {
+        return false;
+    }
+    let moving = twist.vx != 0.0 || twist.wz != 0.0;
+    moving && age_ms > timeout_ms
+}
+
+/// Operator arbitration: which WS connection currently owns the drive
+/// twist. The assignment follows *input* — the first client to send a
+/// non-zero drive command claims it, keeps it while its commands keep
+/// arriving (the operator app re-sends at ~10 Hz while driving), and
+/// loses it on disconnect, operator staleness, E-STOP, or once
+/// `server.operator_grace_ms` passes without input (then anyone's
+/// next drive command takes over). Zero-twist stops bypass
+/// arbitration entirely — stopping is always allowed from any client.
+#[derive(Debug, Clone, Copy)]
+struct ActiveOperator {
+    conn_id: u64,
+    /// Instant of the holder's last accepted non-zero drive command.
+    /// Other clients are rejected while this is fresher than the grace
+    /// window. Stops don't refresh it.
+    last_input: Instant,
+}
+
+/// Outcome of [`resolve_operator`] for one incoming non-zero drive
+/// command. Kept as a plain enum so the decision logic stays
+/// unit-testable without a constructed supervisor (which would need
+/// live CAN sockets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperatorResolution {
+    /// The sender already holds the assignment: accept and stamp.
+    Continue,
+    /// No fresh assignment (idle, expired, or released): the sender
+    /// takes over — accept.
+    Takeover,
+    /// Another client's assignment is fresh: reject. Carries the
+    /// holder's conn id for the error message.
+    Rejected(u64),
+}
+
+/// Pure arbitration decision for a non-zero drive command from
+/// `conn_id` given the current assignment.
+///
+/// The current holder always continues (no grace check for the same
+/// connection — a paused operator resumes seamlessly). A *different*
+/// client is rejected while the holder's last input is within
+/// `grace_ms`; once it is older, the new client takes over.
+/// `grace_ms == 0` disables arbitration: anyone takes over immediately.
+fn resolve_operator(
+    active: Option<ActiveOperator>,
+    conn_id: u64,
+    now: Instant,
+    grace_ms: u64,
+) -> OperatorResolution {
+    match active {
+        None => OperatorResolution::Takeover,
+        Some(op) if op.conn_id == conn_id => OperatorResolution::Continue,
+        Some(op) => {
+            let age_ms = now.duration_since(op.last_input).as_millis() as u64;
+            if grace_ms > 0 && age_ms <= grace_ms {
+                OperatorResolution::Rejected(op.conn_id)
+            } else {
+                OperatorResolution::Takeover
+            }
+        }
+    }
+}
+
 pub struct Supervisor {
     cfg: Arc<RobotConfig>,
     bus_pool: Arc<BusPool>,
@@ -83,9 +179,19 @@ pub struct Supervisor {
     by_wheel_name: HashMap<String, usize>,
     /// Differential-drive geometry; `Some` on a wheeled chassis.
     drive: Option<DiffDriveConfig>,
-    /// Latest operator twist command (body frame). Written by the WS
-    /// handler; read by `tick_drive`.
-    cmd_vel: Arc<Mutex<Twist>>,
+    /// Latest operator twist command (body frame) + freshness stamp.
+    /// Written by the WS handler; read by `tick_drive`. The stamp drives
+    /// the operator-link staleness check in [`Self::run_watchdog`]: a
+    /// non-zero twist that goes stale is zeroed (controlled stop).
+    cmd_vel: Arc<Mutex<CmdVelState>>,
+    /// True once the operator-link watchdog has zeroed a stale twist;
+    /// cleared by the next fresh [`Self::set_cmd_vel`]. Surfaced in
+    /// telemetry so the operator app can show a "link lost" pill.
+    operator_stale: Arc<AtomicBool>,
+    /// Which WS connection currently owns the drive twist
+    /// (input-following arbitration — see [`ActiveOperator`]). `None`
+    /// when nobody is driving.
+    active_operator: Arc<Mutex<Option<ActiveOperator>>>,
     /// Dead-reckoning pose integrator (wheel-encoder-only odometry).
     odometry: Arc<Mutex<Odometry>>,
     /// Power-board monitor: `Some` iff `cfg.power` is set. Owns the
@@ -136,7 +242,9 @@ impl Supervisor {
             by_odrive_id,
             by_wheel_name,
             drive,
-            cmd_vel: Arc::new(Mutex::new(Twist::default())),
+            cmd_vel: Arc::new(Mutex::new(CmdVelState::default())),
+            operator_stale: Arc::new(AtomicBool::new(false)),
+            active_operator: Arc::new(Mutex::new(None)),
             odometry: Arc::new(Mutex::new(Odometry::default())),
             power,
             mode: Arc::new(AtomicU8::new(Mode::Idle as u8)),
@@ -249,16 +357,166 @@ impl Supervisor {
     }
 
     /// Set the operator twist command (body frame) consumed by
-    /// [`Self::tick_drive`]. Callable from the WS handler thread.
-    pub fn set_cmd_vel(&self, twist: Twist) {
+    /// [`Self::tick_drive`]. Every write refreshes the operator-link
+    /// freshness stamp; a non-zero twist that is never refreshed is
+    /// zeroed by [`Self::run_watchdog`]. Internal — external drive
+    /// input must go through [`Self::drive_command`], which arbitrates
+    /// between multiple operator connections.
+    fn set_cmd_vel(&self, twist: Twist) {
         if let Ok(mut g) = self.cmd_vel.lock() {
-            *g = twist;
+            *g = CmdVelState {
+                twist,
+                last_set: Instant::now(),
+            };
         }
+        // A fresh command proves the operator link is alive again.
+        self.operator_stale.store(false, Ordering::SeqCst);
     }
 
     /// Read the latest twist command.
     pub fn cmd_vel(&self) -> Twist {
-        self.cmd_vel.lock().map(|g| *g).unwrap_or_default()
+        self.cmd_vel.lock().map(|g| g.twist).unwrap_or_default()
+    }
+
+    /// True when the operator-link watchdog zeroed a stale twist and no
+    /// fresh command has arrived since. Drives the `DriveState` flag the
+    /// operator app renders as a "link lost — motion halted" pill.
+    pub fn operator_stale(&self) -> bool {
+        self.operator_stale.load(Ordering::SeqCst)
+    }
+
+    /// A drive command from WS connection `conn_id`.
+    ///
+    /// **Arbitration** (see [`ActiveOperator`]): a zero twist (stop) is
+    /// always accepted from any client and never touches the assignment
+    /// — stopping is always allowed. A non-zero twist requires holding
+    /// the active-operator assignment: the first client to send one
+    /// claims it, the holder keeps it (their input refreshes it), and
+    /// other clients are rejected until `server.operator_grace_ms`
+    /// passes without input from the holder — at which point the new
+    /// client takes over.
+    pub fn drive_command(&self, conn_id: u64, twist: Twist) -> Result<()> {
+        if twist == Twist::default() {
+            // Stops bypass arbitration: any client may halt the robot,
+            // and a stop neither acquires nor refreshes a claim.
+            self.set_cmd_vel(twist);
+            return Ok(());
+        }
+        let now = Instant::now();
+        let grace_ms = self.cfg.server.operator_grace_ms;
+        let resolution = {
+            let mut g = match self.active_operator.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let res = resolve_operator(*g, conn_id, now, grace_ms);
+            if matches!(
+                res,
+                OperatorResolution::Continue | OperatorResolution::Takeover
+            ) {
+                *g = Some(ActiveOperator {
+                    conn_id,
+                    last_input: now,
+                });
+            }
+            res
+        };
+        match resolution {
+            OperatorResolution::Continue | OperatorResolution::Takeover => {
+                if resolution == OperatorResolution::Takeover {
+                    info!(
+                        conn_id,
+                        grace_ms, "operator takeover: drive assignment changed"
+                    );
+                }
+                self.set_cmd_vel(twist);
+                Ok(())
+            }
+            OperatorResolution::Rejected(holder) => Err(anyhow!(
+                "another operator (connection {holder}) is driving; drive commands \
+                 from this device are ignored until theirs stop for {grace_ms} ms"
+            )),
+        }
+    }
+
+    /// Per-connection arbitration state for telemetry:
+    /// `(has_active_operator, you_are_active_operator)`. An assignment
+    /// whose last input is older than the grace window reads as "no
+    /// active operator" — the holder can still resume seamlessly
+    /// (same-connection continues skip the grace check), but every
+    /// other client sees a free seat.
+    pub fn operator_state(&self, conn_id: u64) -> (bool, bool) {
+        let now = Instant::now();
+        let grace_ms = self.cfg.server.operator_grace_ms;
+        let g = match self.active_operator.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        match *g {
+            Some(op) => {
+                let age_ms = now.duration_since(op.last_input).as_millis() as u64;
+                let fresh = grace_ms > 0 && age_ms <= grace_ms;
+                (fresh, fresh && op.conn_id == conn_id)
+            }
+            None => (false, false),
+        }
+    }
+
+    /// The WS connection `conn_id` went away. If it held the drive
+    /// assignment, release it and halt the chassis — its twist is now
+    /// orphaned, since the stop gesture that would have ended the drive
+    /// died with the connection. No-op for viewers and rejected
+    /// would-be drivers: their disconnect never touched the motors.
+    pub fn operator_disconnected(&self, conn_id: u64) {
+        let was_holder = {
+            let mut g = match self.active_operator.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            match *g {
+                Some(op) if op.conn_id == conn_id => {
+                    *g = None;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if was_holder {
+            self.zero_cmd_vel_link_lost();
+        }
+    }
+
+    /// Drop the drive assignment (E-STOP latch, mode → Idle, operator
+    /// staleness). The holder doesn't lose the ability to *resume* —
+    /// a released assignment re-acquires on the next non-zero command
+    /// — but other clients stop being blocked immediately.
+    fn release_operator(&self) {
+        if let Ok(mut g) = self.active_operator.lock() {
+            *g = None;
+        }
+    }
+
+    /// Zero the twist because the operator holding the drive
+    /// assignment went away (WS disconnect). Marks the link stale so
+    /// the operator app shows the halt; the next fresh drive command
+    /// (e.g. the app reconnecting and re-sending its twist) clears it.
+    ///
+    /// No-op when the twist is already zero — a viewer-only client
+    /// dropping shouldn't raise a spurious "link lost" pill.
+    fn zero_cmd_vel_link_lost(&self) {
+        let twist = self.cmd_vel();
+        if twist == Twist::default() {
+            return;
+        }
+        warn!(
+            vx = twist.vx,
+            wz = twist.wz,
+            "driving operator disconnected; zeroing twist (controlled stop)"
+        );
+        if let Ok(mut g) = self.cmd_vel.lock() {
+            g.twist = Twist::default();
+        }
+        self.operator_stale.store(true, Ordering::SeqCst);
     }
 
     /// Read the odometry pose as `(x, y, theta)` (m, m, rad).
@@ -476,6 +734,9 @@ impl Supervisor {
             )));
             // Wheels mirror the joint arm-state transition.
             let _ = self.disarm_all_wheels();
+            // Nothing is drivable in Idle; free the operator assignment
+            // so a second app isn't blocked by a stale claim.
+            self.release_operator();
         }
         self.mode.store(requested as u8, Ordering::SeqCst);
         info!(?prev, ?requested, "mode changed");
@@ -499,6 +760,10 @@ impl Supervisor {
             *g = Some(reason);
         }
         warn!(reason = %human, "E-STOP latched");
+        // Motion is dead; "who was driving" no longer means anything.
+        // Frees every other client immediately (E-STOP itself is
+        // always accepted from any client — stopping needs no claim).
+        self.release_operator();
         // Best-effort: send disable to every motor on every bus, multiple
         // times in case the bus is dropping frames.
         for _ in 0..3 {
@@ -1344,6 +1609,40 @@ impl Supervisor {
                 return;
             }
         }
+
+        // Operator-link staleness: a non-zero twist that hasn't been
+        // refreshed within `server.operator_timeout_ms` means the
+        // operator went silent mid-drive (WS dropped, app crashed,
+        // Wi-Fi blip) and their client-side stop gestures never
+        // arrived. Zero the twist so the chassis halts. This is a
+        // *controlled stop*: motors stay armed (a balancing chassis
+        // keeps standing) and motion resumes automatically when fresh
+        // commands arrive; E-STOP latching stays reserved for explicit
+        // operator action and motor faults. The drive assignment is
+        // released too — the holder's link is effectively dead, so
+        // another operator should be free to take over immediately
+        // rather than wait out the arbitration grace.
+        let timeout_ms = self.cfg.server.operator_timeout_ms;
+        if timeout_ms > 0 {
+            let mut g = match self.cmd_vel.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let age_ms = now.duration_since(g.last_set).as_millis() as u64;
+            if twist_is_stale(g.twist, age_ms, timeout_ms) {
+                warn!(
+                    age_ms,
+                    timeout_ms,
+                    vx = g.twist.vx,
+                    wz = g.twist.wz,
+                    "operator command stale; zeroing twist (controlled stop)"
+                );
+                g.twist = Twist::default();
+                drop(g);
+                self.operator_stale.store(true, Ordering::SeqCst);
+                self.release_operator();
+            }
+        }
     }
 
     // ---------------------------------------------------------------- 100 Hz tick
@@ -1858,4 +2157,118 @@ pub fn spawn_rx_threads(
         handles.push(handle);
     }
     handles
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn twist(vx: f32, wz: f32) -> Twist {
+        Twist { vx, wz }
+    }
+
+    #[test]
+    fn stale_nonzero_twist_fires() {
+        // 600 ms of silence on a moving twist, 500 ms budget -> halt.
+        assert!(twist_is_stale(twist(0.4, 0.0), 600, 500));
+        assert!(twist_is_stale(twist(0.0, 0.5), 600, 500));
+    }
+
+    #[test]
+    fn fresh_nonzero_twist_does_not_fire() {
+        // Within the budget the operator is considered alive.
+        assert!(!twist_is_stale(twist(0.4, 0.0), 400, 500));
+        // Exactly at the boundary is still fresh (strictly-greater fires).
+        assert!(!twist_is_stale(twist(0.4, 0.0), 500, 500));
+    }
+
+    #[test]
+    fn zero_twist_never_fires() {
+        // A parked robot going stale is harmless; firing here would
+        // re-latch operator_stale on every tick after the first stop
+        // and spam the journal.
+        assert!(!twist_is_stale(twist(0.0, 0.0), 60_000, 500));
+    }
+
+    #[test]
+    fn zero_timeout_disables_check() {
+        assert!(!twist_is_stale(twist(0.4, 0.0), 60_000, 0));
+    }
+
+    #[test]
+    fn cmd_vel_state_defaults_fresh() {
+        // A freshly-constructed supervisor must not immediately zero a
+        // first twist that arrives "late" relative to construction time:
+        // set_cmd_vel re-stamps, so the invariant holds after any write.
+        let state = CmdVelState {
+            twist: twist(0.0, 0.0),
+            last_set: Instant::now(),
+        };
+        assert!(!twist_is_stale(state.twist, 0, 500));
+    }
+
+    // ------------------------------------------------------------ arbitration
+
+    fn holder(conn_id: u64, input_age: Duration) -> ActiveOperator {
+        ActiveOperator {
+            conn_id,
+            last_input: Instant::now() - input_age,
+        }
+    }
+
+    #[test]
+    fn arbitration_first_input_takes_over() {
+        let now = Instant::now();
+        assert_eq!(
+            resolve_operator(None, 7, now, 2000),
+            OperatorResolution::Takeover
+        );
+    }
+
+    #[test]
+    fn arbitration_holder_continues_even_after_long_pause() {
+        let now = Instant::now();
+        // Same connection resumes seamlessly — the grace check only
+        // guards against *other* clients stealing a paused assignment.
+        assert_eq!(
+            resolve_operator(Some(holder(7, Duration::from_secs(60))), 7, now, 2000),
+            OperatorResolution::Continue
+        );
+    }
+
+    #[test]
+    fn arbitration_other_client_rejected_within_grace() {
+        let now = Instant::now();
+        assert_eq!(
+            resolve_operator(Some(holder(7, Duration::from_millis(100))), 9, now, 2000),
+            OperatorResolution::Rejected(7)
+        );
+        // Exactly at the boundary still blocks (inclusive window).
+        assert_eq!(
+            resolve_operator(Some(holder(7, Duration::from_millis(2000))), 9, now, 2000),
+            OperatorResolution::Rejected(7)
+        );
+    }
+
+    #[test]
+    fn arbitration_takeover_after_grace_expires() {
+        let now = Instant::now();
+        // Well past the 2000 ms grace (the age is truncated to whole ms
+        // inside the decision, so keep the margin clear of the boundary).
+        assert_eq!(
+            resolve_operator(Some(holder(7, Duration::from_millis(2500))), 9, now, 2000),
+            OperatorResolution::Takeover
+        );
+    }
+
+    #[test]
+    fn arbitration_zero_grace_is_last_writer_wins() {
+        let now = Instant::now();
+        // grace_ms == 0 disables arbitration: any input takes over
+        // immediately, even mid-drive.
+        assert_eq!(
+            resolve_operator(Some(holder(7, Duration::from_millis(0))), 9, now, 0),
+            OperatorResolution::Takeover
+        );
+    }
 }

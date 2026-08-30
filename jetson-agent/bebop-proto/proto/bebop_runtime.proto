@@ -231,6 +231,28 @@ message DriveState {
   float cmd_linear_x  = 2;
   float cmd_angular_z = 3;
 
+  // True when the operator-link watchdog zeroed a stale twist (no fresh
+  // SetVelocityCommand within the server's `operator_timeout_ms` while a
+  // non-zero twist was active). Cleared by the next fresh command; the
+  // operator app renders a "link lost — motion halted" pill while set.
+  bool  operator_stale = 4;
+
+  // Operator arbitration: at most one WS connection ("active operator")
+  // may send non-zero drive commands. The assignment follows input —
+  // the first client to send a drive command claims it, keeps it while
+  // its commands keep arriving, and loses it on disconnect, operator
+  // staleness, E-STOP, or after the server's `operator_grace_ms`
+  // passes without input from that client (then anyone's next drive
+  // command takes over). Zero-twist stops are always accepted from any
+  // client regardless of the assignment.
+  //
+  // `has_active_operator` reports that a *fresh* assignment exists;
+  // `you_are_active_operator` is computed per connection so each client
+  // knows whether it holds the assignment (broadcast telemetry frames
+  // are built per connection by the server).
+  bool  has_active_operator      = 5;
+  bool  you_are_active_operator  = 6;
+
   // Wheel-encoder odometry pose (m, m, rad). Reset via ResetOdometry.
   float odom_x     = 10;
   float odom_y     = 11;

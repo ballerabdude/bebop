@@ -38,6 +38,7 @@ use serde::Serialize;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::broadcast;
@@ -45,6 +46,12 @@ use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing::{debug, info, warn};
+
+/// Monotonic WS connection ids. Each accepted connection gets a fresh
+/// id used for operator arbitration (which client owns the drive twist)
+/// and the per-connection telemetry flags. Starts at 1; 0 is reserved
+/// as "no connection".
+static WS_CONN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -278,7 +285,12 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         video,
         nav,
     } = state;
-    info!("ws client connected");
+    // Per-connection identity for operator arbitration. Monotonic so a
+    // reconnecting client never inherits a stale assignment; never 0
+    // (0 reads as "no connection" in the per-connection telemetry
+    // flags).
+    let conn_id = WS_CONN_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+    info!(conn_id, "ws client connected");
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<proto::ServerRuntimeMessage>(256);
 
@@ -319,6 +331,8 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
             if !subscribed {
                 continue;
             }
+            // conn_id rides along so the arbitration flags inside the
+            // drive state are computed for *this* client ("you").
             let frame = build_telemetry(
                 &sup_tele,
                 &imu_tele,
@@ -326,6 +340,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 &policy_io_tele,
                 &video_tele,
                 &nav_tele,
+                conn_id,
             );
             let env = telemetry_envelope(frame);
             if tx_tele.send(env).await.is_err() {
@@ -446,6 +461,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     &policy_control,
                     &video,
                     &nav,
+                    conn_id,
                     &bytes,
                 );
 
@@ -525,7 +541,15 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     if client_telemetry_subscribed {
         sup.dec_telemetry_subscribers();
     }
-    info!("ws client disconnected");
+    // Operator-link-loss stop: if this connection held the drive
+    // assignment, its twist is now orphaned — the stop gesture that
+    // would have ended the drive died with the socket. Release the
+    // assignment and zero the twist so the chassis halts (motors stay
+    // armed/balancing; recovery is automatic once any client sends
+    // fresh commands). Viewers and rejected would-be drivers touched
+    // nothing, so their disconnect is a no-op here.
+    sup.operator_disconnected(conn_id);
+    info!(conn_id, "ws client disconnected");
 }
 
 struct TelemetryState {

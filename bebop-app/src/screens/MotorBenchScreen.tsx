@@ -48,6 +48,14 @@ const MODE_LABEL: Record<RuntimeMode, string> = {
   RUN_POLICY: "Policy",
 };
 
+/// How often the drive keepalive re-sends the current twist while a
+/// drive cycle is open. Must stay comfortably below the firmware's
+/// `operator_timeout_ms` (default 500 ms — see
+/// `firmware/bebop-linux/src/config.rs`) so a healthy session never
+/// trips the robot-side link-loss watchdog; 10 Hz leaves ~4 missed
+/// packets of slack.
+const TWIST_KEEPALIVE_MS = 100;
+
 /** Live motor bench: enable/disable per joint, see live state, E-STOP. */
 export function MotorBenchScreen({
   robotIp,
@@ -283,10 +291,18 @@ export function MotorBenchScreen({
   const twistInFlightRef = useRef(false);
   const twistPendingRef = useRef<{ vx: number; wz: number } | null>(null);
 
-  const sendTwist = useCallback(async (vx: number, wz: number) => {
+  // Drive-cycle bookkeeping for the keepalive below: `drivingRef` is
+  // true while a gesture holds a non-zero twist, `lastTwistRef` holds
+  // the latest one. Closed by every stop path.
+  const drivingRef = useRef(false);
+  const lastTwistRef = useRef<{ vx: number; wz: number } | null>(null);
+
+  const sendTwist = useCallback(async (vx: number, wz: number, silent = false) => {
     const t = transportRef.current;
     if (!t) return;
     const payload = { vx, wz };
+    lastTwistRef.current = payload;
+    if (vx !== 0 || wz !== 0) drivingRef.current = true;
     if (twistInFlightRef.current) {
       twistPendingRef.current = payload;
       return;
@@ -295,13 +311,15 @@ export function MotorBenchScreen({
     try {
       await t.setVelocityCommand(vx, wz);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (!silent) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       twistInFlightRef.current = false;
       const next = twistPendingRef.current;
       twistPendingRef.current = null;
       if (next) {
-        void Promise.resolve().then(() => sendTwist(next.vx, next.wz));
+        void Promise.resolve().then(() => sendTwist(next.vx, next.wz, silent));
       }
     }
   }, []);
@@ -309,9 +327,28 @@ export function MotorBenchScreen({
   // One-shot "stop": enqueue a (0,0) twist that supersedes anything
   // mid-flight, so releasing the joystick always halts the robot.
   const stopDrive = useCallback(() => {
+    drivingRef.current = false;
+    lastTwistRef.current = null;
     twistPendingRef.current = { vx: 0, wz: 0 };
     void sendTwist(0, 0);
   }, [sendTwist]);
+
+  // Operator-link keepalive: the firmware zeroes any twist that isn't
+  // refreshed within its `operator_timeout_ms` (500 ms default). Every
+  // drive input here emits only on *change*, so a steady stick would
+  // look like a dead operator to that watchdog; re-send the current
+  // twist at ~10 Hz while a drive cycle is open. Repeats are silent —
+  // a flaky link already surfaces through the connection banner and
+  // the robot halting is the designed behavior.
+  useEffect(() => {
+    if (connState !== "connected") return;
+    const iv = window.setInterval(() => {
+      if (!drivingRef.current) return;
+      const last = lastTwistRef.current;
+      if (last) void sendTwist(last.vx, last.wz, true);
+    }, TWIST_KEEPALIVE_MS);
+    return () => window.clearInterval(iv);
+  }, [connState, sendTwist]);
 
   // "Run policy" composite action: switch to RUN_POLICY mode first, then
   // arm every joint. Order matters — the firmware's `arm()` only accepts
@@ -693,6 +730,39 @@ export function MotorBenchScreen({
             <Button variant="secondary" onClick={resetEStop} loading={busy === "reset"}>
               Reset
             </Button>
+          </div>
+        </Banner>
+      ) : null}
+
+      {/* Operator-link staleness banner: the robot zeroed the drive
+          twist because no fresh command arrived within its operator
+          timeout. Motion resumes automatically when a fresh command
+          lands (the keepalive below usually makes this transient), so
+          no action button — the banner exists so the operator knows
+          why the chassis isn't moving. */}
+      {wheeled && drive?.operatorStale ? (
+        <Banner tone="info">
+          <div className="font-semibold mb-0.5">Operator link stale — motion halted</div>
+          <div className="text-xs leading-relaxed">
+            No fresh drive commands reached the robot within its operator
+            timeout, so it zeroed the twist. Motors stay armed; driving
+            resumes once commands flow again.
+          </div>
+        </Banner>
+      ) : null}
+
+      {/* Operator arbitration: another device holds the drive
+          assignment. Drive commands from this bench are rejected until
+          the other operator's input goes quiet for the server's grace
+          window; stops and E-STOP are unaffected. */}
+      {wheeled && drive?.hasActiveOperator && !drive?.youAreActiveOperator ? (
+        <Banner tone="info">
+          <div className="font-semibold mb-0.5">Another operator is driving</div>
+          <div className="text-xs leading-relaxed">
+            Drive commands from this device are rejected while the other
+            operator's input keeps arriving. Take over by driving after
+            their input goes quiet for a couple of seconds. Stops and
+            E-STOP always work from this device.
           </div>
         </Banner>
       ) : null}

@@ -61,6 +61,23 @@ export interface DriveView {
   present: boolean;
   cmdLinearX: number; // m/s
   cmdAngularZ: number; // rad/s
+  /// True when the robot's operator-link watchdog zeroed a stale twist
+  /// (no fresh SetVelocityCommand within the server's
+  /// `operator_timeout_ms` while a non-zero twist was active, e.g. this
+  /// app dropped off Wi-Fi mid-drive). Cleared by the next fresh
+  /// command; show a "link lost — motion halted" pill while set.
+  operatorStale: boolean;
+  /// Operator arbitration: at most one connected client ("active
+  /// operator") may send non-zero drive commands — the assignment
+  /// follows input (first non-zero command claims it; it's lost on
+  /// disconnect, staleness, E-STOP, or after the server's
+  /// `operator_grace_ms` without input). Stops are always accepted
+  /// from any client.
+  /// `hasActiveOperator`: some client currently holds a fresh
+  /// assignment. `youAreActiveOperator`: it's *this* connection (frames
+  /// are per-connection, so "you" is well-defined).
+  hasActiveOperator: boolean;
+  youAreActiveOperator: boolean;
   odomX: number; // m
   odomY: number; // m
   odomTheta: number; // rad

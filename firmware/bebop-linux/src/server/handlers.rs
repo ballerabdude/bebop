@@ -31,6 +31,10 @@ fn fmt_err(e: &anyhow::Error) -> String {
 /// (Ack / Error / Snapshot / etc.) — or `None` for messages that don't
 /// produce a response (e.g. SubscribeTelemetry, where the response is the
 /// telemetry stream itself).
+///
+/// `conn_id` identifies the sending WS connection; it drives operator
+/// arbitration for drive commands and the per-connection
+/// `you_are_active_operator` snapshot flag.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_client_message(
     sup: &Arc<Supervisor>,
@@ -40,6 +44,7 @@ pub fn handle_client_message(
     policy_control: &PolicyControlShared,
     video: &Option<Arc<VideoHub>>,
     nav: &Option<Arc<NavHub>>,
+    conn_id: u64,
     bytes: &[u8],
 ) -> proto::ServerRuntimeMessage {
     let req = match proto::ClientRuntimeMessage::decode(bytes) {
@@ -80,7 +85,7 @@ pub fn handle_client_message(
         }
         P::UnsubscribeNav(_) => ack(request_id, "nav masks unsubscribed".into()),
         P::GetSnapshot(_) => {
-            snapshot_response(request_id, sup, imu, imu_present, policy_io, video, nav)
+            snapshot_response(request_id, sup, imu, imu_present, policy_io, video, nav, conn_id)
         }
         P::SetMotorEnabled(req) => {
             let result = if req.enabled {
@@ -222,17 +227,27 @@ pub fn handle_client_message(
             }
         }
         P::SetVelocityCommand(req) => {
-            sup.set_cmd_vel(Twist {
-                vx: req.linear_x,
-                wz: req.angular_z,
-            });
-            ack(
-                request_id,
-                format!(
-                    "drive twist -> vx {:.3} m/s, wz {:.3} rad/s",
-                    req.linear_x, req.angular_z
+            // Arbitrated drive command: the first client to send a
+            // non-zero twist claims the "active operator" assignment and
+            // other clients are rejected while that assignment is fresh
+            // (see `Supervisor::drive_command`). Zero-twist stops are
+            // always accepted from any client.
+            match sup.drive_command(
+                conn_id,
+                Twist {
+                    vx: req.linear_x,
+                    wz: req.angular_z,
+                },
+            ) {
+                Ok(()) => ack(
+                    request_id,
+                    format!(
+                        "drive twist -> vx {:.3} m/s, wz {:.3} rad/s",
+                        req.linear_x, req.angular_z
+                    ),
                 ),
-            )
+                Err(e) => error_response(request_id, fmt_err(&e)),
+            }
         }
         // Deliberately not mode-gated: moving the camera is not
         // safety-relevant, and PTZ look-around during dataset recording
@@ -329,6 +344,7 @@ pub fn error_response(request_id: u32, message: String) -> proto::ServerRuntimeM
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn snapshot_response(
     request_id: u32,
     sup: &Arc<Supervisor>,
@@ -337,11 +353,20 @@ pub fn snapshot_response(
     policy_io: &PolicyIoShared,
     video: &Option<Arc<VideoHub>>,
     nav: &Option<Arc<crate::nav::NavHub>>,
+    conn_id: u64,
 ) -> proto::ServerRuntimeMessage {
     proto::ServerRuntimeMessage {
         request_id,
         payload: Some(proto::server_runtime_message::Payload::Snapshot(
-            crate::server::telemetry::build_snapshot(sup, imu, imu_present, policy_io, video, nav),
+            crate::server::telemetry::build_snapshot(
+                sup,
+                imu,
+                imu_present,
+                policy_io,
+                video,
+                nav,
+                conn_id,
+            ),
         )),
     }
 }

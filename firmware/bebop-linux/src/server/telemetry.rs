@@ -104,7 +104,7 @@ fn wheel_state_to_proto(w: &crate::safety::limits::WheelSnapshot) -> proto::Whee
     }
 }
 
-fn build_drive_state(sup: &Arc<Supervisor>) -> proto::DriveState {
+fn build_drive_state(sup: &Arc<Supervisor>, conn_id: u64) -> proto::DriveState {
     if !sup.has_drive() {
         return proto::DriveState {
             present: false,
@@ -113,10 +113,17 @@ fn build_drive_state(sup: &Arc<Supervisor>) -> proto::DriveState {
     }
     let twist = sup.cmd_vel();
     let (x, y, theta) = sup.odometry_pose();
+    // Arbitration flags are per-connection: telemetry frames are built
+    // once per subscribed client, so "you" here means the client this
+    // frame is being sent to.
+    let (has_active_operator, you_are_active_operator) = sup.operator_state(conn_id);
     proto::DriveState {
         present: true,
         cmd_linear_x: twist.vx,
         cmd_angular_z: twist.wz,
+        operator_stale: sup.operator_stale(),
+        has_active_operator,
+        you_are_active_operator,
         odom_x: x,
         odom_y: y,
         odom_theta: theta,
@@ -319,6 +326,7 @@ pub fn build_snapshot(
     policy_io: &PolicyIoShared,
     video: &Option<Arc<VideoHub>>,
     nav: &Option<Arc<NavHub>>,
+    conn_id: u64,
 ) -> proto::Snapshot {
     let motors = sup.snapshot_motors();
     let wheels = sup.snapshot_wheels();
@@ -336,7 +344,7 @@ pub fn build_snapshot(
         imu: Some(build_imu_stats(imu, imu_present)),
         policy_io: Some(build_policy_io_stats(policy_io)),
         wheels: wheels.iter().map(wheel_state_to_proto).collect(),
-        drive: Some(build_drive_state(sup)),
+        drive: Some(build_drive_state(sup, conn_id)),
         camera: Some(build_camera_state(video)),
         nav: Some(build_nav_state(nav)),
     }
@@ -349,6 +357,7 @@ pub fn build_telemetry(
     policy_io: &PolicyIoShared,
     video: &Option<Arc<VideoHub>>,
     nav: &Option<Arc<NavHub>>,
+    conn_id: u64,
 ) -> proto::TelemetryFrame {
     let motors = sup.snapshot_motors();
     let wheels = sup.snapshot_wheels();
@@ -366,7 +375,7 @@ pub fn build_telemetry(
         imu: Some(build_imu_stats(imu, imu_present)),
         policy_io: Some(build_policy_io_stats(policy_io)),
         wheels: wheels.iter().map(wheel_state_to_proto).collect(),
-        drive: Some(build_drive_state(sup)),
+        drive: Some(build_drive_state(sup, conn_id)),
         camera: Some(build_camera_state(video)),
         nav: Some(build_nav_state(nav)),
     }
