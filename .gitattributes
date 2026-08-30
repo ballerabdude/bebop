@@ -21,4 +21,8 @@ docker-compose*.yml text eol=lf
 *.hex binary
 *.elf binary
 *.bin binary
+# ONNX models (graph + external-data weights) ship in git alongside the
+# firmware config — see firmware/bebop-linux/config/.
+*.onnx binary
+*.onnx.data binary
 

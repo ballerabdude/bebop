@@ -175,9 +175,25 @@ jobs:
           rm -rf bundle
           install -d bundle/bin bundle/config bundle/systemd
           install -m 0755 target/release/bebop-linux       bundle/bin/bebop-linux
-          install -m 0644 config/bebop_v2.yaml             bundle/config/bebop_v2.yaml
+          # Ship every robot config variant (bebop_v2.yaml humanoid,
+          # bebop_wheeled.yaml differential-drive chassis, ...). The
+          # Jetson installer picks the one to activate via
+          # `--config-yaml` (default bebop_v2.yaml).
+          for f in config/*.yaml; do
+            install -m 0644 "${f}" "bundle/config/$(basename "${f}")"
+          done
           install -m 0644 config/policy.onnx               bundle/config/policy.onnx
           install -m 0644 config/policy.onnx.data          bundle/config/policy.onnx.data
+          # Optional navigable-path model for the nav runner
+          # (firmware/bebop-linux/src/nav.rs). Staged only when present
+          # in the checkout — the firmware soft-fails without it
+          # (NavState.present = false), so a bundle missing these files
+          # just means no nav telemetry / overlay.
+          for f in navseg.onnx navseg.onnx.data; do
+            if [[ -f "config/${f}" ]]; then
+              install -m 0644 "config/${f}" "bundle/config/${f}"
+            fi
+          done
           install -m 0644 deploy/systemd/bebop-linux.service \
                                                            bundle/systemd/bebop-linux.service
           # Capture build provenance so the installer can log what it laid down.

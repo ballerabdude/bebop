@@ -4,10 +4,12 @@
 # you're currently shelled into.
 #
 # bebop-linux is shipped as a single tarball (binary + bebop_v2.yaml +
-# policy.onnx + policy.onnx.data + systemd unit) so the runtime, the
-# joint config, and the policy weights all move together. The default
-# source is the latest GitHub Release tagged `firmware/v*`. For
-# pre-release main builds use `--run-id` to pull from a CI workflow run.
+# policy.onnx + policy.onnx.data + systemd unit, plus the optional
+# navseg.onnx{,.data} navigable-path model when present in the checkout)
+# so the runtime, the joint config, and the policy weights all move
+# together. The default source is the latest GitHub Release tagged
+# `firmware/v*`. For pre-release main builds use `--run-id` to pull from
+# a CI workflow run.
 #
 # bebop-agent still ships as a bare binary; its config / unit are fetched
 # from `main` via the GitHub contents API as before.
@@ -57,6 +59,16 @@
 #   sudo ./install-jetson.sh --setup-imu-only # just configure IMU access;
 #                                             # don't download or install
 #                                             # binaries
+#   sudo ./install-jetson.sh --config-yaml bebop_wheeled.yaml
+#                                             # activate a different robot
+#                                             # config from the bundle
+#                                             # (default: bebop_v2.yaml).
+#                                             # The choice is remembered in
+#                                             # /etc/bebop/config-yaml-name
+#                                             # so plain upgrade runs keep
+#                                             # it; the systemd unit gets a
+#                                             # drop-in pointing ExecStart
+#                                             # at the chosen file.
 #
 # Requires:
 #   * `gh` CLI authenticated (`gh auth login`) — needed to list/download
@@ -72,6 +84,19 @@
 #     source of truth and they're versioned together as a unit. The
 #     previous bebop_v2.yaml is saved as bebop_v2.yaml.bak so a bad
 #     config push can be rolled back without re-downloading.
+#   * /etc/bebop/navseg.onnx{,.data} are replaced when the bundle
+#     carries them (same versioning rule); when a `nav:` block is
+#     enabled in the YAML but the model files are missing, the install
+#     WARNs — the firmware would soft-fail nav at boot.
+#
+# GPU note (one-time, NOT handled by this script): the nav runner needs
+# the onnxruntime CUDA execution provider, which is a *separate* set of
+# libraries under /usr/local/lib (libonnxruntime.so.1.23.0 built with
+# --use_cuda, plus libonnxruntime_providers_shared.so and
+# libonnxruntime_providers_cuda.so). Without them nav silently falls
+# back to the CPU EP. See bebop-vision/README.md "GPU note" for the
+# on-device source build. The installer prints a health check when it
+# installs a nav model.
 
 set -euo pipefail
 
@@ -114,6 +139,12 @@ CAN_BITRATE="${CAN_BITRATE:-1000000}"
 # `bebop` login user); override if you run the runtime under a
 # different account.
 IMU_GROUP="${IMU_GROUP:-bebop}"
+# Robot config to activate. Resolved in this order:
+#   1. --config-yaml <name>          (explicit, and persisted for next time)
+#   2. /etc/bebop/config-yaml-name   (a previous explicit choice)
+#   3. bebop_v2.yaml                 (bundle default / current behavior)
+# Must name a *.yaml shipped in the firmware bundle's config/ dir.
+CONFIG_YAML=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -147,6 +178,7 @@ while [[ $# -gt 0 ]]; do
         --build-gs-usb)   SETUP_CAN=1; BUILD_GS_USB=1; shift ;;
         --setup-imu)      SETUP_IMU=1; shift ;;
         --setup-imu-only) SETUP_IMU=1; SETUP_IMU_ONLY=1; shift ;;
+        --config-yaml)    CONFIG_YAML="$2"; shift 2 ;;
         *)                echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -180,6 +212,22 @@ if [[ "${LOCAL}" -eq 1 && -z "${LOCAL_REPO_ROOT}" ]]; then
 fi
 if [[ "${LOCAL}" -eq 1 && ! -d "${LOCAL_REPO_ROOT}" ]]; then
     echo "--repo-root '${LOCAL_REPO_ROOT}' is not a directory" >&2
+    exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve the robot config to activate (see CONFIG_YAML above).
+# ---------------------------------------------------------------------------
+
+if [[ -z "${CONFIG_YAML}" && -f /etc/bebop/config-yaml-name ]]; then
+    CONFIG_YAML="$(cat /etc/bebop/config-yaml-name)"
+    echo "==> using remembered config choice: ${CONFIG_YAML}"
+fi
+CONFIG_YAML="${CONFIG_YAML:-bebop_v2.yaml}"
+# Refuse obviously-wrong values early (a path traversal or an empty
+# string); existence inside the bundle is checked after extraction.
+if [[ ! "${CONFIG_YAML}" =~ ^[A-Za-z0-9._-]+\.yaml$ ]]; then
+    echo "--config-yaml must be a plain filename like 'bebop_wheeled.yaml' (got '${CONFIG_YAML}')" >&2
     exit 2
 fi
 
@@ -706,7 +754,6 @@ if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
         echo "==> staging bebop-linux bundle from local checkout"
         LX_ROOT="${LOCAL_REPO_ROOT}/firmware/bebop-linux"
         LX_BIN_SRC="${LX_ROOT}/target/release/bebop-linux"
-        LX_YAML_SRC="${LX_ROOT}/config/bebop_v2.yaml"
         LX_ONNX_SRC="${LX_ROOT}/config/policy.onnx"
         LX_ONNX_DATA_SRC="${LX_ROOT}/config/policy.onnx.data"
         LX_UNIT_SRC="${LX_ROOT}/deploy/systemd/bebop-linux.service"
@@ -720,7 +767,7 @@ Build it first (or re-run with --build):
 EOF
             exit 1
         fi
-        for f in "${LX_YAML_SRC}" "${LX_ONNX_SRC}" "${LX_ONNX_DATA_SRC}" "${LX_UNIT_SRC}"; do
+        for f in "${LX_ONNX_SRC}" "${LX_ONNX_DATA_SRC}" "${LX_UNIT_SRC}"; do
             if [[ ! -f "${f}" ]]; then
                 echo "missing local firmware asset: ${f}" >&2
                 exit 1
@@ -730,9 +777,22 @@ EOF
                     "${WORK_DIR}/linux-bundle/config" \
                     "${WORK_DIR}/linux-bundle/systemd"
         install -m 0755 "${LX_BIN_SRC}"        "${WORK_DIR}/linux-bundle/bin/bebop-linux"
-        install -m 0644 "${LX_YAML_SRC}"       "${WORK_DIR}/linux-bundle/config/bebop_v2.yaml"
+        # Every config variant, mirroring CI's bundle layout; the
+        # active one is picked by CONFIG_YAML below.
+        for f in "${LX_ROOT}"/config/*.yaml; do
+            [[ -e "${f}" ]] || continue
+            install -m 0644 "${f}" "${WORK_DIR}/linux-bundle/config/$(basename "${f}")"
+        done
         install -m 0644 "${LX_ONNX_SRC}"       "${WORK_DIR}/linux-bundle/config/policy.onnx"
         install -m 0644 "${LX_ONNX_DATA_SRC}"  "${WORK_DIR}/linux-bundle/config/policy.onnx.data"
+        # Optional nav model: stage when present so the local bundle
+        # matches CI's (the runtime resolves <config_dir>/navseg.onnx
+        # only when the YAML enables `nav:` — absent files are fine).
+        for f in "${LX_ROOT}/config/navseg.onnx" "${LX_ROOT}/config/navseg.onnx.data"; do
+            if [[ -f "${f}" ]]; then
+                install -m 0644 "${f}" "${WORK_DIR}/linux-bundle/config/$(basename "${f}")"
+            fi
+        done
         install -m 0644 "${LX_UNIT_SRC}"       "${WORK_DIR}/linux-bundle/systemd/bebop-linux.service"
         # Synthesize a VERSION file mirroring CI's, so the post-install
         # echo gives operators something useful to grep in journals.
@@ -789,13 +849,23 @@ EOF
     fi
 
     LINUX_BIN="${WORK_DIR}/linux-bundle/bin/bebop-linux"
-    LINUX_YAML="${WORK_DIR}/linux-bundle/config/bebop_v2.yaml"
+    # The active robot config, per CONFIG_YAML (flag / remembered /
+    # default). The bundle carries every variant; we activate one.
+    LINUX_YAML="${WORK_DIR}/linux-bundle/config/${CONFIG_YAML}"
     LINUX_ONNX="${WORK_DIR}/linux-bundle/config/policy.onnx"
     LINUX_ONNX_DATA="${WORK_DIR}/linux-bundle/config/policy.onnx.data"
     LINUX_UNIT="${WORK_DIR}/linux-bundle/systemd/bebop-linux.service"
+    # Optional nav model — presence-checked below, never required (the
+    # firmware soft-fails nav when the files are absent).
+    LINUX_NAV_ONNX="${WORK_DIR}/linux-bundle/config/navseg.onnx"
+    LINUX_NAV_ONNX_DATA="${WORK_DIR}/linux-bundle/config/navseg.onnx.data"
     for f in "${LINUX_BIN}" "${LINUX_YAML}" "${LINUX_ONNX}" "${LINUX_ONNX_DATA}" "${LINUX_UNIT}"; do
         if [[ ! -f "${f}" ]]; then
             echo "bundle is missing $(basename "${f}") (looked at ${f})" >&2
+            if [[ "${f}" == "${LINUX_YAML}" ]]; then
+                echo "the active config is '${CONFIG_YAML}'; available in this bundle:" >&2
+                ls "${WORK_DIR}/linux-bundle/config/"*.yaml 2>/dev/null | xargs -n1 basename | sed 's/^/    /' >&2
+            fi
             exit 1
         fi
     done
@@ -885,6 +955,37 @@ if [[ "${SKIP_PREREQS}" -eq 0 && "${INSTALL_LINUX}" -eq 1 ]]; then
     fi
 fi
 
+# Health check for the onnxruntime CUDA provider libraries the nav
+# runner dlopens at runtime. The CUDA EP ships as THREE files (main lib
+# built with --use_cuda + the provider bridge + the CUDA EP itself); a
+# main-lib-only install accepts CUDA sessions but silently runs
+# everything on the CPU EP. Warn loudly rather than fail — nav is
+# best-effort and the CPU fallback still works.
+nav_gpu_check() {
+    local ort_dir
+    for ort_dir in /usr/local/lib /usr/lib/aarch64-linux-gnu; do
+        if [[ -f "${ort_dir}/libonnxruntime_providers_cuda.so" \
+           && -f "${ort_dir}/libonnxruntime_providers_shared.so" ]]; then
+            echo "    nav GPU: CUDA EP present (${ort_dir}/libonnxruntime_providers_cuda.so)"
+            return 0
+        fi
+    done
+    cat >&2 <<EOF
+    WARN: onnxruntime CUDA provider libraries not found — the nav
+          runner will fall back to the CPU EP (a few Hz instead of
+          ~20 Hz on the Orin GPU). The CUDA build must match the
+          firmware's ort crate (onnxruntime 1.23.0) and installs as
+          three files under /usr/local/lib:
+
+              libonnxruntime.so.1.23.0              (CUDA-enabled build)
+              libonnxruntime_providers_shared.so    (provider bridge)
+              libonnxruntime_providers_cuda.so      (the CUDA EP)
+
+          Keep the CPU original as libonnxruntime.so.1.23.0.cpu-backup.
+          Build recipe: bebop-vision/README.md, "GPU note".
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # Lay down files
 # ---------------------------------------------------------------------------
@@ -910,18 +1011,47 @@ if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
     echo "==> installing bebop-linux → /usr/local/bin/bebop-linux"
     install -m 0755 "${LINUX_BIN}" /usr/local/bin/bebop-linux
 
-    # Replace bebop_v2.yaml on every install; back up the previous copy
-    # so a bad rollout can be reverted without re-downloading. The
-    # firmware bundle is the source of truth: joint limits, IMU pinout,
-    # CAN bus assignments must all match the policy that ships with it.
-    if [[ -f /etc/bebop/bebop_v2.yaml ]] \
-       && ! cmp -s /etc/bebop/bebop_v2.yaml "${LINUX_YAML}"; then
-        echo "==> updating /etc/bebop/bebop_v2.yaml (previous saved as .bak)"
-        install -m 0644 /etc/bebop/bebop_v2.yaml /etc/bebop/bebop_v2.yaml.bak
+    # Robot config. Installed under its REAL filename (e.g.
+    # /etc/bebop/bebop_wheeled.yaml); the systemd unit's ExecStart is
+    # repointed via a drop-in when it isn't the historical default
+    # (/etc/bebop/bebop_v2.yaml, which the shipped unit references).
+    # Backup logic applies to whichever file is active so a bad rollout
+    # can be reverted without re-downloading.
+    yaml_dst="/etc/bebop/${CONFIG_YAML}"
+    if [[ -f "${yaml_dst}" ]] && ! cmp -s "${yaml_dst}" "${LINUX_YAML}"; then
+        echo "==> updating ${yaml_dst} (previous saved as .bak)"
+        install -m 0644 "${yaml_dst}" "${yaml_dst}.bak"
     else
-        echo "==> writing /etc/bebop/bebop_v2.yaml"
+        echo "==> writing ${yaml_dst}"
     fi
-    install -m 0644 "${LINUX_YAML}" /etc/bebop/bebop_v2.yaml
+    install -m 0644 "${LINUX_YAML}" "${yaml_dst}"
+
+    # Remember the choice so plain upgrade runs don't flip the robot
+    # back to the default config. Written unconditionally (also pins
+    # the default when the operator never passes the flag — harmless,
+    # and makes an explicit later switch observable).
+    echo "${CONFIG_YAML}" > /etc/bebop/config-yaml-name
+
+    # Non-default config: drop-in overrides the unit's --config path.
+    # A drop-in (not editing the unit) survives this installer
+    # rewriting the base unit on every upgrade. Switching back to the
+    # default removes the drop-in.
+    unit_dropin_dir=/etc/systemd/system/bebop-linux.service.d
+    if [[ "${CONFIG_YAML}" != "bebop_v2.yaml" ]]; then
+        install -d -m 0755 "${unit_dropin_dir}"
+        cat > "${unit_dropin_dir}/10-config.conf" <<EOF
+# Managed by install-jetson.sh --config-yaml ${CONFIG_YAML}.
+# Overrides ExecStart to activate this robot's config variant.
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/bebop-linux \\
+    --config ${yaml_dst} \\
+    --capture-dir /var/lib/bebop-captures
+EOF
+        echo "==> systemd drop-in: ${unit_dropin_dir}/10-config.conf (--config ${yaml_dst})"
+    else
+        rm -f "${unit_dropin_dir}/10-config.conf"
+    fi
 
     # Policy weights. `bebop-linux` resolves `--policy` to
     # `<config_dir>/policy.onnx` by default, so dropping both files
@@ -931,6 +1061,19 @@ if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
     echo "==> installing policy → /etc/bebop/policy.onnx{,.data}"
     install -m 0644 "${LINUX_ONNX}"      /etc/bebop/policy.onnx
     install -m 0644 "${LINUX_ONNX_DATA}" /etc/bebop/policy.onnx.data
+
+    # Navigable-path model (optional, same drop-in convention as the
+    # policy). The runtime loads <config_dir>/navseg.onnx when the YAML
+    # has a `nav:` block; both files must come from the same export.
+    if [[ -f "${LINUX_NAV_ONNX}" && -f "${LINUX_NAV_ONNX_DATA}" ]]; then
+        echo "==> installing nav model → /etc/bebop/navseg.onnx{,.data}"
+        install -m 0644 "${LINUX_NAV_ONNX}"      /etc/bebop/navseg.onnx
+        install -m 0644 "${LINUX_NAV_ONNX_DATA}" /etc/bebop/navseg.onnx.data
+        nav_gpu_check
+    elif grep -qE '^nav:' "${LINUX_YAML}" 2>/dev/null; then
+        echo "    WARN: config enables \`nav:\` but navseg.onnx{,.data} are missing" >&2
+        echo "          from the bundle — nav will soft-fail at boot." >&2
+    fi
 
     install -m 0644 "${LINUX_UNIT}" /etc/systemd/system/bebop-linux.service
 fi
