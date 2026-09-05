@@ -11,6 +11,7 @@ dependencies = [
     "numpy",
     "opencv-python>=4.10.0",
     "protobuf>=4.25",
+    "pyorbbecsdk2==2.1.2",
     "torch>=2.5",
     "transformers>=4.55",
     "websockets>=12",
