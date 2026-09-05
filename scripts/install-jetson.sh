@@ -69,6 +69,17 @@
 #                                             # it; the systemd unit gets a
 #                                             # drop-in pointing ExecStart
 #                                             # at the chosen file.
+#   sudo ./install-jetson.sh --setup-orbbec   # also install Orbbec Gemini
+#                                             # 335Lg depth-camera support:
+#                                             # udev rules + the pinned
+#                                             # pyorbbecsdk2 Python bindings
+#   sudo ./install-jetson.sh --setup-orbbec-only
+#                                             # just the Orbbec setup; don't
+#                                             # download or install binaries
+#   sudo ./install-jetson.sh --setup-orbbec --orbbec-venv /path/to/venv
+#                                             # install the Python bindings
+#                                             # into this venv instead of
+#                                             # the auto-detected one
 #
 # Requires:
 #   * `gh` CLI authenticated (`gh auth login`) — needed to list/download
@@ -97,6 +108,22 @@
 # back to the CPU EP. See bebop-vision/README.md "GPU note" for the
 # on-device source build. The installer prints a health check when it
 # installs a nav model.
+#
+# Orbbec note (--setup-orbbec): the Gemini 335Lg (USB 2bc5:080b) must be
+# on a USB 3.0 port — behind USB 2.0 it enumerates at 480 Mbps and
+# cannot sustain full-resolution depth+color (the setup prints a warning
+# when it detects that). The udev rules make Orbbec devices 0666, so no
+# group membership or sudo is needed at runtime, and a udevadm trigger
+# applies them to the already-plugged camera without a replug or reboot.
+# The Python bindings are the pinned `pyorbbecsdk2` wheel (override with
+# ORBBEC_SDK_VERSION=x.y.z); it bundles the OrbbecSDK v2 shared libs, so
+# nothing is compiled on the Jetson, and the manylinux aarch64 wheels
+# cover both JetPack 6.x (python3.10) and 7.x (python3.12). The target
+# venv is resolved as: --orbbec-venv flag → <checkout>/bebop-vision/.venv
+# when present (bebop-vision's documented venv convention) → a fresh
+# /opt/bebop/orbbec-venv. Like every other process on the robot: only
+# one process can hold the camera at a time — stop bebop-vision or
+# OrbbecViewer before opening it from the other.
 
 set -euo pipefail
 
@@ -122,6 +149,12 @@ SETUP_CAN_ONLY=0
 BUILD_GS_USB=0
 SETUP_IMU=0
 SETUP_IMU_ONLY=0
+# --setup-orbbec: Orbbec Gemini 335Lg support. pyorbbecsdk2 is pinned so
+# re-runs are reproducible; override via ORBBEC_SDK_VERSION=x.y.z env.
+ORBBEC_SDK_VERSION="${ORBBEC_SDK_VERSION:-2.1.2}"
+# --orbbec-venv: explicit venv for the Python bindings. Empty = auto:
+# <checkout>/bebop-vision/.venv when present, else /opt/bebop/orbbec-venv.
+ORBBEC_VENV=""
 # --local: install from a local checkout instead of GitHub. Pre-built
 # release binaries are picked up from each crate's target/release/ and
 # configs/units come from the working tree. No `gh` required.
@@ -178,6 +211,9 @@ while [[ $# -gt 0 ]]; do
         --build-gs-usb)   SETUP_CAN=1; BUILD_GS_USB=1; shift ;;
         --setup-imu)      SETUP_IMU=1; shift ;;
         --setup-imu-only) SETUP_IMU=1; SETUP_IMU_ONLY=1; shift ;;
+        --setup-orbbec)      SETUP_ORBBEC=1; shift ;;
+        --setup-orbbec-only) SETUP_ORBBEC=1; SETUP_ORBBEC_ONLY=1; shift ;;
+        --orbbec-venv)    ORBBEC_VENV="$2"; shift 2 ;;
         --config-yaml)    CONFIG_YAML="$2"; shift 2 ;;
         *)                echo "unknown arg: $1" >&2; exit 2 ;;
     esac
@@ -505,6 +541,173 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Orbbec depth camera setup helper
+# ---------------------------------------------------------------------------
+#
+# bebop-vision is gaining an Orbbec Gemini 335Lg (USB 2bc5:080b) as a
+# directly-opened depth sensor. It is a second, physically separate
+# camera — the firmware's OBSBOT PTZ keeps its exclusive /dev/video*
+# claim, so there is no ownership conflict with bebop-linux.
+#
+# A non-root Python process needs three things:
+#
+#   1. udev rules. JetPack ships USB device nodes root-only. The vendored
+#      scripts/orbbec-99-obsensor-libusb.rules (Orbbec's official rules,
+#      covering the whole 2bc5 product range) makes the camera 0666.
+#   2. Python bindings. The `pyorbbecsdk2` wheel from PyPI bundles the
+#      OrbbecSDK v2 shared libraries — nothing to build on the Jetson,
+#      and the manylinux_2_27 aarch64 wheels span cp38–cp313, i.e. both
+#      JetPack 6.x (Ubuntu 22.04, python3.10) and 7.x (24.04, python3.12)
+#      system Pythons.
+#   3. A venv that owns the install. bebop-vision's convention is a venv
+#      in the checkout (bebop-vision/.venv, per its README bootstrap).
+#      This function installs into that venv when it exists on the
+#      robot; otherwise it creates a dedicated /opt/bebop/orbbec-venv so
+#      the bindings are ready before the bebop-vision checkout lands.
+#      --orbbec-venv overrides either choice.
+#
+# No reboot is required: `udevadm trigger` applies the rules to the
+# already-enumerated device. A camera currently held open by another
+# process keeps its old permissions until that process exits — unplug/
+# replug is the sledgehammer if a trigger ever seems to not take.
+setup_orbbec() {
+    echo "==> configuring Orbbec Gemini 335Lg access"
+
+    # 1) Resolve the target venv (see the precedence comment above).
+    local venv=""
+    if [[ -n "${ORBBEC_VENV}" ]]; then
+        venv="${ORBBEC_VENV}"
+    else
+        local checkout_root="${LOCAL_REPO_ROOT}"
+        if [[ -z "${checkout_root}" ]]; then
+            checkout_root="$(cd "${SCRIPT_DIR}/.." && pwd)"
+        fi
+        if [[ -x "${checkout_root}/bebop-vision/.venv/bin/pip" ]]; then
+            venv="${checkout_root}/bebop-vision/.venv"
+            echo "    using existing bebop-vision venv: ${venv}"
+        else
+            venv="/opt/bebop/orbbec-venv"
+            echo "    no bebop-vision venv found; creating ${venv}"
+            install -d -m 0755 "$(dirname "${venv}")"
+            # Stock JetPack images ship without python3-venv (the venv
+            # module needs its ensurepip pieces). Install on demand and
+            # retry once before giving up.
+            if ! python3 -m venv "${venv}" 2>/dev/null; then
+                if command -v apt-get >/dev/null 2>&1; then
+                    echo "    venv creation failed; installing python3-venv"
+                    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+                    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                        --no-install-recommends python3-venv
+                fi
+                if ! python3 -m venv "${venv}"; then
+                    cat >&2 <<EOF
+    ERROR: could not create venv at ${venv}.
+
+          python3 with the venv module (python3-venv on Debian/Ubuntu)
+          is required, or point at an existing venv:
+
+              sudo $0 --setup-orbbec-only --orbbec-venv /path/to/venv
+EOF
+                    exit 1
+                fi
+            fi
+        fi
+    fi
+    if [[ ! -x "${venv}/bin/pip" ]]; then
+        cat >&2 <<EOF
+    ERROR: '${venv}' does not look like a usable venv (no bin/pip).
+
+          Create it first:
+
+              python3 -m venv ${venv} && ${venv}/bin/pip install --upgrade pip
+
+          ...or pass a different one:
+
+              sudo $0 --setup-orbbec-only --orbbec-venv /path/to/venv
+EOF
+        exit 1
+    fi
+
+    # 2) Python bindings. Pinned version (ORBBEC_SDK_VERSION) so upgrade
+    #    runs are reproducible; bump deliberately when integrating.
+    echo "==> installing pyorbbecsdk2==${ORBBEC_SDK_VERSION} into ${venv}"
+    "${venv}/bin/pip" install --upgrade "pyorbbecsdk2==${ORBBEC_SDK_VERSION}"
+
+    # 3) udev rules from the vendored copy. Installing over an existing
+    #    file is the upgrade path (new PIDs ship with SDK releases).
+    local rules_src="${SCRIPT_DIR}/orbbec-99-obsensor-libusb.rules"
+    if [[ ! -f "${rules_src}" ]]; then
+        echo "    ERROR: vendored udev rules missing: ${rules_src}" >&2
+        exit 1
+    fi
+    install -d -m 0755 /etc/udev/rules.d
+    install -m 0644 "${rules_src}" /etc/udev/rules.d/99-obsensor-libusb.rules
+    echo "    wrote /etc/udev/rules.d/99-obsensor-libusb.rules"
+    udevadm control --reload-rules
+    udevadm trigger --subsystem-match=usb 2>/dev/null || udevadm trigger
+    udevadm settle 2>/dev/null || true
+
+    # 4) Verify. Absence of a camera is a WARN, not a failure — this
+    #    often runs on a robot before the camera is mounted.
+    echo
+    echo "    Orbbec device check:"
+    if ! "${venv}/bin/python" - <<'PYEOF'
+import sys
+
+import pyorbbecsdk as ob
+
+# Keep the Context in a named variable: the DeviceList returned by
+# query_devices() borrows the context's internal device manager, and a
+# temporary `ob.Context().query_devices()` would destroy it on the same
+# line ("NULL pointer passed for argument deviceMgr").
+ctx = ob.Context()
+devices = ctx.query_devices()
+count = devices.get_count()
+if count == 0:
+    print("      (no Orbbec device found — plug it into a USB 3.0 port;")
+    print("       the udev rules are in place, no re-run needed)")
+    sys.exit(0)
+for i in range(count):
+    info = devices.get_device_by_index(i).get_device_info()
+    print(f"      {info.get_name()}  serial={info.get_serial_number()}"
+          f"  fw={info.get_firmware_version()}")
+PYEOF
+    then
+        cat >&2 <<EOF
+    WARN: pyorbbecsdk2 import/enumeration failed in ${venv}.
+          The pip install above may have picked a wheel incompatible
+          with this Python — check \`${venv}/bin/python --version\`.
+EOF
+    fi
+
+    # 5) USB link-speed sanity from sysfs. The SDK can't report this;
+    #    a 335Lg behind USB 2.0 will frustrate whoever debugs streaming
+    #    later, so flag it now.
+    local dev_dir usb_speed found=0
+    for dev_dir in /sys/bus/usb/devices/*; do
+        if [[ -f "${dev_dir}/idVendor" ]] && grep -qx 2bc5 "${dev_dir}/idVendor"; then
+            found=1
+            usb_speed="$(cat "${dev_dir}/speed" 2>/dev/null || echo unknown)"
+            if [[ "${usb_speed}" =~ ^(1.5|12|480)$ ]]; then
+                echo
+                echo "    WARN: Orbbec device on ${dev_dir##*/} is linked at ${usb_speed} Mbps (USB 2.0)." >&2
+                echo "          The Gemini 335Lg needs a USB 3.0 port for full resolution/fps;" >&2
+                echo "          move it to a direct (non-hub) USB 3.0 port." >&2
+            else
+                echo "    USB link speed: ${usb_speed} Mbps (USB 3.0, OK)"
+            fi
+        fi
+    done
+    if [[ "${found}" -eq 0 ]]; then
+        echo "    (no Orbbec device on the bus right now)"
+    fi
+
+    echo
+    echo "    Orbbec setup complete. Try it:"
+    echo "        ${venv}/bin/python -c 'import pyorbbecsdk as ob; ctx = ob.Context(); print(ctx.query_devices().get_count(), \"device(s)\")'"
+}
+
+# ---------------------------------------------------------------------------
 # Sanity checks
 # ---------------------------------------------------------------------------
 
@@ -513,12 +716,14 @@ if [[ "${EUID}" -ne 0 ]]; then
     exit 1
 fi
 
-# --setup-can-only / --setup-imu-only short-circuit before we touch
-# gh / artifacts so an operator can run them from a freshly-cloned
-# checkout without needing a CI build artifact to be available.
-if [[ "${SETUP_CAN_ONLY}" -eq 1 || "${SETUP_IMU_ONLY}" -eq 1 ]]; then
+# --setup-can-only / --setup-imu-only / --setup-orbbec-only short-circuit
+# before we touch gh / artifacts so an operator can run them from a
+# freshly-cloned checkout without needing a CI build artifact to be
+# available.
+if [[ "${SETUP_CAN_ONLY}" -eq 1 || "${SETUP_IMU_ONLY}" -eq 1 || "${SETUP_ORBBEC_ONLY}" -eq 1 ]]; then
     [[ "${SETUP_CAN_ONLY}" -eq 1 ]] && setup_can
     [[ "${SETUP_IMU_ONLY}" -eq 1 ]] && setup_imu
+    [[ "${SETUP_ORBBEC_ONLY}" -eq 1 ]] && setup_orbbec
     exit 0
 fi
 
@@ -1090,6 +1295,10 @@ fi
 
 if [[ "${SETUP_IMU}" -eq 1 ]]; then
     setup_imu
+fi
+
+if [[ "${SETUP_ORBBEC}" -eq 1 ]]; then
+    setup_orbbec
 fi
 
 # ---------------------------------------------------------------------------
