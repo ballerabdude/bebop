@@ -224,7 +224,12 @@ async fn list_captures(State(state): State<AppState>) -> impl IntoResponse {
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            if !(name.starts_with("policy_capture_") && name.ends_with(".mcap")) {
+            // navd recorder sessions (bebop-vision) share this dir and are
+            // listed/downloadable alongside policy captures.
+            let is_mcap = name.ends_with(".mcap");
+            if !(is_mcap
+                && (name.starts_with("policy_capture_") || name.starts_with("navd_session_")))
+            {
                 continue;
             }
             let meta = match entry.metadata() {
