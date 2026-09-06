@@ -25,12 +25,15 @@ robots:
         # recorder stores it verbatim (saves ~65 ms/tick of CPU encode vs
         # RGB + re-encode; the capture threads also shed their decode work).
         color_format: mjpg
-        # Self-view rects (x0, y0, x1, y1 px): the chassis frame + foam
-        # boards on the left rail, measured from the mounted view
-        # 2026-09-06. The rigid mount keeps these pixels fixed.
+        # Self-view rects (x0, y0, x1, y1 px) in DEPTH coordinates (848x480):
+        # the chassis frame, measured 2026-09-06 from live close-range
+        # (<1.05 m) silhouette intersected over frames + 12 px margin.
+        # NOTE: the previous rects were color-space (1280x800) values and
+        # clipped against the depth frame, masking floor right of the
+        # chassis while leaving the chassis itself unmasked.
+        # The rigid mount keeps these pixels fixed.
         self_mask_pixels:
-          - [340, 380, 880, 800]
-          - [240, 230, 530, 430]
+          - [340, 215, 570, 480]
       CPBLC53000ED:
         role: far
         height_m: 1.32

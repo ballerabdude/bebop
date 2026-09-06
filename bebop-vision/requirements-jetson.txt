@@ -1,0 +1,21 @@
+# Jetson-specific dependency pin (Orin Nano, JetPack 6 / L4T 36.4, CUDA
+# driver 12.6, sm_87). pyproject.toml cannot express this: PyPI's torch
+# aarch64 wheels are built for server ARM and either refuse the driver
+# (cu13 builds) or lack Orin kernels entirely (no sm_87) — install torch
+# from the Jetson AI Lab index, then everything else normally.
+#
+# Install order (from bebop-vision/):
+#   1. .venv/bin/pip install torch==2.8.0 \
+#        --index-url https://pypi.jetson-ai-lab.io/jp6/cu126/
+#   2. .venv/bin/pip install -e .
+#   3. .venv/bin/pip install -r requirements-jetson.txt
+#
+# (The old pypi.jetson-ai-lab.dev host is dead — use .io.)
+
+torch==2.8.0
+transformers==4.55.4
+
+# numpy MUST stay 1.26.x — numpy 2.x breaks pyorbbecsdk (proven 2026-09-05).
+# Neither step above upgrades it; if pip ever proposes numpy>=2, abort and
+# re-pin: pip install "numpy==1.26.4"
+numpy==1.26.4
