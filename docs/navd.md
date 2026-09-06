@@ -1,9 +1,14 @@
 # navd — Depth-based goal-conditioned obstacle avoidance
 
-Status: **Phase A implemented** (2026-09-05) — code on robot, synthetic unit
-tests green (35), live bring-up verified (cameras + BEV + WS gating); bench
-acceptance demo (Section 6.7) and ED cable swap still pending.
-Scope: bebop-vision (Python, Jetson), firmware-adjacent but firmware untouched in v1.
+Status: **Phase A + recorder v2 shipped** (2026-09-06, main @ ad631c6, CI
+green). Phase A (§6) is implemented and bench-verified except the formal
+§6.7 acceptance demo; the recorder v2 (§7.1) is shipped and verified
+end-to-end (auto-segmented MCAP sessions + web-app download + extractor).
+**Phase B (§7.2–7.4) is not started** — the handoff brief for it is
+[`navd-b-handoff.md`](navd-b-handoff.md) (implementation deltas, environment
+facts, work plan). ED cable swap still pending (§11.1).
+Scope: bebop-vision (Python, Jetson), firmware-adjacent but firmware mostly
+untouched (one listing-filter change in `server/ws.rs`, deployed).
 
 ---
 
@@ -414,6 +419,11 @@ Inherited from `DriveNode`, unchanged:
 
 ### 7.1 Recorder v2 → MCAP sessions → `datasets/navd-v0/`
 
+> **SHIPPED 2026-09-06** — `bebop_vision/recorder_mcap.py`,
+> `main.py --record-navd [--auto]`, `tools/mcap_extract.py`, Foxglove
+> layout; verified end-to-end on-device (8 Hz, web-app download).
+> Implementation deltas and operational facts: `docs/navd-b-handoff.md`.
+
 Recording format: **one MCAP file per session**, written on-robot by
 `bebop_vision/recorder_mcap.py` and copied to the workstation (scp) as the
 single data artifact. MCAP is already the firmware's capture format (policy
@@ -645,8 +655,9 @@ app screens, jetson-agent, `bebop_v2.yaml` (never had `video:`).
    far-field horizon (it is the planning-horizon camera). Profiles restore
    automatically (verified: negotiation picks 848x480@10 today, 30 fps after).
 2. Jetson `bebop-vision/.venv`: Phase A deps installed (pyorbbecsdk2, numpy
-   1.26 pinned, opencv 4.11, pyyaml, websockets, protobuf — 2026-09-05).
-   `pip install -e .` for torch etc. still pending before Phase B.
+   1.26 pinned, opencv 4.11, pyyaml, websockets, protobuf, mcap, pytest —
+   2026-09-05/06). `pip install -e .` for torch etc. still pending before
+   Phase B training (long install — start overnight).
 3. Extrinsics **measured from live floor fits** (2026-09-05, auto-estimator):
    near `CPBLC53000PE` = 1.27 m / pitch −66°; far `CPBLC53000ED` = 1.32 m /
    pitch −17.4°; written to `config/orbbec_rig.yaml` (the doc's earlier
