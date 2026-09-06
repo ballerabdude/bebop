@@ -112,6 +112,11 @@ interface VideoFeedProps {
   /// Runtime base URL (`http://<ip>:<port>`); the stream itself is
   /// `<baseUrl>/video`.
   baseUrl: string;
+  /// Override for the video stream URL. The operator stream is served by
+  /// the bebop-vision process on its own port (9092), separate from the
+  /// firmware runtime port — pass `http://<ip>:9092/video` here. When
+  /// omitted, falls back to `<baseUrl>/video` (legacy firmware stream).
+  videoUrl?: string;
   /// Runtime WS transport — used to subscribe/unsubscribe the nav-mask
   /// stream while `showNav` is on. Shares the endpoint cache with the
   /// rest of the screen.
@@ -146,6 +151,7 @@ interface VideoFeedProps {
 
 export function VideoFeed({
   baseUrl,
+  videoUrl,
   transport,
   showNav,
   nav,
@@ -171,7 +177,7 @@ export function VideoFeed({
     null,
   );
 
-  const url = `${baseUrl}/video`;
+  const url = videoUrl ?? `${baseUrl}/video`;
   // Cache-busted variant actually assigned to the <img>: bumping the
   // key remounts the element, tearing the multipart stream down and
   // reconnecting — the retry path.

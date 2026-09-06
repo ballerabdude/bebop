@@ -673,6 +673,7 @@ export function TeleopScreen({
       <div className={fullscreen ? "relative flex-1 min-h-0" : "contents"}>
         <VideoFeed
           baseUrl={`http://${robotIp}:${runtimePort}`}
+          videoUrl={`http://${robotIp}:9092/video`}
           transport={transport}
           showNav={showNav}
           nav={nav}

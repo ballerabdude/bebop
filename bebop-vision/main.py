@@ -69,6 +69,10 @@ def run_goal_drive(args):
     print(f"[goal-drive] robot: {robot.describe()}")
 
     rig = OrbbecRig(rig_path=args.rig, color=args.color)
+    vserver = None
+    if not args.no_video_server:
+        vserver = VideoServer(rig, port=args.video_port)
+        vserver.start()
     if not rig.wait_for_pair(timeout=10.0):
         rig.stop()
         raise SystemExit("cameras did not produce fresh frames within 10 s")
@@ -184,6 +188,8 @@ def run_goal_drive(args):
         stop_evt.set()
         node.stop()
         pool.shutdown(wait=False)
+        if vserver is not None:
+            vserver.stop()
         rig.stop()
         robot.stop()
         try:
@@ -269,6 +275,7 @@ def run_record_navd(args):
                                            GoalSlot, parse_goal)
     from bebop_vision.orbbec import OrbbecRig
     from bebop_vision.recorder_mcap import NavdRecorder
+    from bebop_vision.videoserver import VideoServer
     from bebop_vision.robot import RobotClient
     import time as _time
 
@@ -284,6 +291,10 @@ def run_record_navd(args):
     if not rig.wait_for_pair(timeout=10.0):
         rig.stop()
         raise SystemExit("cameras did not produce fresh frames within 10 s")
+    vserver = None
+    if not args.no_video_server:
+        vserver = VideoServer(rig, port=args.video_port)
+        vserver.start()
 
     builder = BevBuilder()
     goal_slot = GoalSlot()
@@ -350,6 +361,8 @@ def run_record_navd(args):
             pass
         finally:
             close_segment(rec, path)
+            if vserver is not None:
+                vserver.stop()
             rig.stop()
             robot.stop()
             _release_recorder_lock()
@@ -407,6 +420,8 @@ def run_record_navd(args):
                 close_segment(seg, seg_path)
             except OSError as exc:
                 print(f"\n[record-navd] error closing final segment: {exc}")
+        if vserver is not None:
+            vserver.stop()
         rig.stop()
         robot.stop()
         _release_recorder_lock()
@@ -458,6 +473,12 @@ def main():
                         help="record-navd --auto: roll segment above this many minutes")
     parser.add_argument("--disk-budget-gb", type=float, default=20.0,
                         help="record-navd --auto: prune oldest sessions below this total")
+    parser.add_argument("--no-video-server", action="store_true",
+                        help="do not serve the operator MJPEG stream on "
+                             "--video-port")
+    parser.add_argument("--video-port", type=int, default=9092,
+                        help="port for the operator video stream "
+                             "(default: 9092)")
     parser.add_argument("--roles", default="",
                         help="comma-separated camera roles to open "
                              "(default: all configured, e.g. 'near' while "

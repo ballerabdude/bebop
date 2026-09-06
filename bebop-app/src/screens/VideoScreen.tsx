@@ -116,6 +116,7 @@ export function VideoScreen({
 
       <VideoFeed
         baseUrl={`http://${robotIp}:${runtimePort}`}
+        videoUrl={`http://${robotIp}:9092/video`}
         transport={transport}
         showNav={showNav}
         nav={nav}

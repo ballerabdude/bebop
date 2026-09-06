@@ -5,7 +5,7 @@ owns the camera and bebop-vision never opens a capture device directly
 (see `firmware/bebop-linux/src/video.rs` for the ownership split).
 """
 
-DEFAULT_SOURCE = "http://bebop.local:9090/video"
+DEFAULT_SOURCE = "http://bebop.local:9092/video"
 DEFAULT_NAV_MODEL = "weights/navseg"
 DEFAULT_CONFIDENCE = 0.5
 DEVICE = "auto"
