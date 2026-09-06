@@ -6,6 +6,7 @@ On the workstation, after scp'ing the session file off the robot:
 
 Produces (per aligned tick — all channels of a tick share log_time):
     color/{stamp}.jpg          PE camera frame (as recorded, JPEG)
+    color_far/{stamp}.jpg      ED camera frame (as recorded, JPEG)
     depth/{stamp}.npz          near, far  (uint16 mm)
     labels/{stamp}.npz         teacher (uint8 60x60) — pre-fill for hand labeling
     manifest.jsonl             stamp_ns, cmd_vel, odom, goal, plane_ok, paths
@@ -30,9 +31,9 @@ except ImportError as exc:  # pragma: no cover
 
 def extract(mcap_path, out_dir, tol_us=15_000):
     out = Path(out_dir)
-    for sub in ("color", "depth", "labels"):
+    for sub in ("color", "color_far", "depth", "labels"):
         (out / sub).mkdir(parents=True, exist_ok=True)
-    IMAGE_TOPICS = ("/color_near", "/depth_near", "/depth_far")
+    IMAGE_TOPICS = ("/color_near", "/color_far", "/depth_near", "/depth_far")
     ticks = {}  # log_us -> {topic: decoded payload}
     with open(mcap_path, "rb") as f:
         for schema, channel, message in make_reader(f).iter_messages():
@@ -65,6 +66,8 @@ def extract(mcap_path, out_dir, tol_us=15_000):
         stamp_s = f"{stamp:020d}"
         (out / "color" / f"{stamp_s}.jpg").write_bytes(
             chans.get("/color_near", b""))
+        (out / "color_far" / f"{stamp_s}.jpg").write_bytes(
+            chans.get("/color_far", b""))
         depth = {}
         for role in ("near", "far"):
             data = chans.get(f"/depth_{role}")
@@ -82,6 +85,7 @@ def extract(mcap_path, out_dir, tol_us=15_000):
                "cmd_vel": cmd, "odom": odom, "goal": goal,
                "plane_ok": bev.get("plane_ok", {}),
                "has_color": "/color_near" in chans,
+               "has_color_far": "/color_far" in chans,
                "calib": calib}
         manifest.append(row)
     with open(out / "manifest.jsonl", "w") as f:

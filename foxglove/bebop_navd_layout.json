@@ -14,8 +14,22 @@
       "imageTopic": "/color_near",
       "mode": "image"
     },
+    "Image!color_far": {
+      "foxglovePanelTitle": "Color (far)",
+      "imageMode": {
+        "imageTopic": "/color_far"
+      },
+      "imageTopics": [
+        {
+          "topic": "/color_far"
+        }
+      ],
+      "topic": "/color_far",
+      "imageTopic": "/color_far",
+      "mode": "image"
+    },
     "Image!depth": {
-      "foxglovePanelTitle": "Depth preview (near)",
+      "foxglovePanelTitle": "Depth (near)",
       "imageMode": {
         "imageTopic": "/depth_near_preview",
         "minValue": 300,
@@ -29,6 +43,23 @@
       ],
       "topic": "/depth_near_preview",
       "imageTopic": "/depth_near_preview",
+      "mode": "image"
+    },
+    "Image!depth_far": {
+      "foxglovePanelTitle": "Depth (far)",
+      "imageMode": {
+        "imageTopic": "/depth_far_preview",
+        "minValue": 300,
+        "maxValue": 6000,
+        "colormap": "turbo"
+      },
+      "imageTopics": [
+        {
+          "topic": "/depth_far_preview"
+        }
+      ],
+      "topic": "/depth_far_preview",
+      "imageTopic": "/depth_far_preview",
       "mode": "image"
     },
     "Image!map": {
@@ -156,29 +187,39 @@
     "first": {
       "direction": "column",
       "first": "Image!color",
-      "second": "Image!depth",
-      "splitPercentage": 55
+      "second": "Image!color_far",
+      "splitPercentage": 50
     },
     "second": {
-      "direction": "column",
-      "first": "Image!map",
-      "second": {
-        "direction": "row",
-        "first": {
-          "direction": "column",
-          "first": "Plot!cmd",
-          "second": "Plot!odom",
-          "splitPercentage": 50
-        },
-        "second": {
-          "direction": "column",
-          "first": "Plot!goal",
-          "second": "Plot!plane",
-          "splitPercentage": 50
-        }
+      "direction": "row",
+      "first": {
+        "direction": "column",
+        "first": "Image!depth",
+        "second": "Image!depth_far",
+        "splitPercentage": 50
       },
-      "splitPercentage": 45
+      "second": {
+        "direction": "column",
+        "first": "Image!map",
+        "second": {
+          "direction": "row",
+          "first": {
+            "direction": "column",
+            "first": "Plot!cmd",
+            "second": "Plot!odom",
+            "splitPercentage": 50
+          },
+          "second": {
+            "direction": "column",
+            "first": "Plot!goal",
+            "second": "Plot!plane",
+            "splitPercentage": 50
+          }
+        },
+        "splitPercentage": 45
+      },
+      "splitPercentage": 38
     },
-    "splitPercentage": 45
+    "splitPercentage": 28
   }
 }

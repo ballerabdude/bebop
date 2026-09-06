@@ -40,8 +40,11 @@ def state_path(topic, field, label):
 def build():
     config_by_id = {
         "Image!color": image("/color_near", "Color (near)"),
-        "Image!depth": image("/depth_near_preview", "Depth preview (near)",
+        "Image!color_far": image("/color_far", "Color (far)"),
+        "Image!depth": image("/depth_near_preview", "Depth (near)",
                              minValue=300, maxValue=6000, colormap="turbo"),
+        "Image!depth_far": image("/depth_far_preview", "Depth (far)",
+                                 minValue=300, maxValue=6000, colormap="turbo"),
         "Image!map": image("/bev_map", "BEV teacher map (60x60, 3x3 m)"),
         "Plot!cmd": plot([
             state_path("/cmd_vel", "vx", "vx (m/s)"),
@@ -61,37 +64,48 @@ def build():
         ], title="Ground-plane fit health"),
     }
 
-    # Left column: the two camera-ish views; right column: BEV map on top,
-    # plots below (2x2 mosaic).
+    # Three columns: color (near/far) | depth previews (near/far) | BEV map
+    # on top, plots below (2x2 mosaic). Foxglove mosaic nodes are binary
+    # splits, so three columns = row(color, row(depth, map+plots)).
     layout = {
         "direction": "row",
         "first": {
             "direction": "column",
             "first": "Image!color",
-            "second": "Image!depth",
-            "splitPercentage": 55,
+            "second": "Image!color_far",
+            "splitPercentage": 50,
         },
         "second": {
-            "direction": "column",
-            "first": "Image!map",
-            "second": {
-                "direction": "row",
-                "first": {
-                    "direction": "column",
-                    "first": "Plot!cmd",
-                    "second": "Plot!odom",
-                    "splitPercentage": 50,
-                },
-                "second": {
-                    "direction": "column",
-                    "first": "Plot!goal",
-                    "second": "Plot!plane",
-                    "splitPercentage": 50,
-                },
+            "direction": "row",
+            "first": {
+                "direction": "column",
+                "first": "Image!depth",
+                "second": "Image!depth_far",
+                "splitPercentage": 50,
             },
-            "splitPercentage": 45,
+            "second": {
+                "direction": "column",
+                "first": "Image!map",
+                "second": {
+                    "direction": "row",
+                    "first": {
+                        "direction": "column",
+                        "first": "Plot!cmd",
+                        "second": "Plot!odom",
+                        "splitPercentage": 50,
+                    },
+                    "second": {
+                        "direction": "column",
+                        "first": "Plot!goal",
+                        "second": "Plot!plane",
+                        "splitPercentage": 50,
+                    },
+                },
+                "splitPercentage": 45,
+            },
+            "splitPercentage": 38,
         },
-        "splitPercentage": 45,
+        "splitPercentage": 28,
     }
 
     return foxglove_doc(config_by_id, layout)

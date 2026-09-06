@@ -61,6 +61,7 @@ class StampedFrame:
     height: int
     fps: float
     color: np.ndarray = None   # uint8 (H, W, 3) RGB, or None
+    color_jpeg: bytes = None   # camera-encoded MJPEG bytes, or None
     serial: str = ""
     role: str = ""
 
@@ -100,12 +101,14 @@ def _negotiate_depth_profile(sensor, ob, preferred):
         f"no depth profile at or below {preferred}; advertised: {sorted(set(profiles))}")
 
 
-def _negotiate_color_profile(sensor, ob, preferred):
+def _negotiate_color_profile(sensor, ob, preferred, want_format="rgb"):
     """Pick the best advertised color profile at or below (w, h, fps).
 
-    Prefers raw RGB (USB 3.x); falls back to MJPG, which is the only color
-    the USB 2.0-cabled camera offers at high resolution (plan Section 3.2).
-    Returns (w, h, fps, format) or None when the sensor has no usable color.
+    Format preference order: `want_format` first, the other as fallback —
+    raw RGB is the lossless default; MJPG is the camera's hardware JPEG
+    encoder (zero CPU on the Jetson: the recorder can store the bytes
+    verbatim instead of re-encoding RGB per tick). Returns
+    (w, h, fps, format) or None when the sensor has no usable color.
     """
     pw, ph, pfps = preferred
     profiles = []
@@ -114,7 +117,10 @@ def _negotiate_color_profile(sensor, ob, preferred):
         vp = plist.get_stream_profile_by_index(i).as_video_stream_profile()
         profiles.append((vp.get_width(), vp.get_height(), vp.get_fps(),
                          vp.get_format()))
-    for fmt in (ob.OBFormat.RGB, ob.OBFormat.MJPG):
+    first, second = ((ob.OBFormat.MJPG, ob.OBFormat.RGB)
+                     if want_format == "mjpg" else
+                     (ob.OBFormat.RGB, ob.OBFormat.MJPG))
+    for fmt in (first, second):
         exact = [p for p in profiles
                  if p[3] == fmt and p[0] == pw and p[1] == ph and p[2] <= pfps]
         if exact:
@@ -168,12 +174,14 @@ class OrbbecCamera:
     """One Gemini 335Lg: capture thread -> latest-wins StampedFrame slot."""
 
     def __init__(self, serial, role, depth_profile=(848, 480, 30),
-                 color_profile=None, config_dir=None, mask_rects=None):
+                 color_profile=None, config_dir=None, mask_rects=None,
+                 color_format="rgb"):
         self.serial = serial
         self.role = role
         self.depth_profile = tuple(depth_profile)
         self.color_profile = tuple(color_profile) if color_profile else None
         self.color_format = None
+        self.color_format_want = color_format
         self.config_dir = config_dir
         # Self-view pixel rects (x0, y0, x1, y1): the rigid mount means the
         # robot's own chassis always lands on the same pixels — zeroed before
@@ -229,7 +237,8 @@ class OrbbecCamera:
                     color_sensor = s
             if color_sensor is not None:
                 color_profile = _negotiate_color_profile(
-                    color_sensor, ob, self.color_profile)
+                    color_sensor, ob, self.color_profile,
+                    want_format=self.color_format_want)
             if color_profile is None:
                 print(f"[orbbec] {self.role}({self.serial}): no usable color "
                       f"profile, depth only")
@@ -255,7 +264,8 @@ class OrbbecCamera:
                 print(f"[orbbec] {self.role}: could not auto-provision intrinsics "
                       f"({exc}); BEV will fail until they exist")
         print(f"[orbbec] {self.role}({self.serial}): depth {w}x{h}@{fps} "
-              f"color={'on' if self.color_profile else 'off'}")
+              f"color={'on' if self.color_profile else 'off'}"
+              f"{' (' + str(self.color_format).split('.')[-1] + ')' if self.color_profile else ''}")
 
     def _read_loop(self):
         frames = 0
@@ -280,16 +290,16 @@ class OrbbecCamera:
                 for x0, y0, x1, y1 in self.mask_rects:
                     arr[y0:y1, x0:x1] = 0
                 color = None
+                color_jpeg = None
                 if self.color_profile:
                     cf = fs.get_color_frame()
                     if cf is not None:
                         cdata = cf.get_data()
                         if self.color_format == ob.OBFormat.MJPG:
-                            import cv2
-                            jpg = np.frombuffer(cdata, dtype=np.uint8)
-                            color = cv2.imdecode(jpg, cv2.IMREAD_COLOR)
-                            if color is not None:
-                                color = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
+                            # Hardware-encoded JPEG: pass the bytes through
+                            # untouched (the recorder stores them verbatim;
+                            # decoding here would burn capture-thread CPU).
+                            color_jpeg = bytes(cdata)
                         else:
                             color = np.frombuffer(cdata, dtype=np.uint8).reshape(
                                 cf.get_height(), cf.get_width(), 3).copy()
@@ -304,7 +314,8 @@ class OrbbecCamera:
                 self._frame = StampedFrame(
                     depth=arr, stamp_us=stamp_us, recv_ts=time.monotonic(),
                     width=self.width, height=self.height, fps=self.fps,
-                    color=color, serial=self.serial, role=self.role)
+                    color=color, color_jpeg=color_jpeg, serial=self.serial,
+                    role=self.role)
             frames += 1
             now = time.monotonic()
             if now - t >= 1.0:
@@ -352,7 +363,8 @@ class OrbbecRig:
                 depth_profile=c.get("depth_profile", (848, 480, 30)),
                 color_profile=(1280, 800, 30) if color else None,
                 config_dir=config_dir,
-                mask_rects=c.get("self_mask_pixels"))
+                mask_rects=c.get("self_mask_pixels"),
+                color_format=c.get("color_format", "rgb"))
 
     def get(self, role):
         return self.cameras[role]

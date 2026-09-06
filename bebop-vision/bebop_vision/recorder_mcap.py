@@ -9,9 +9,12 @@ Foxglove for review, and `tools/mcap_extract.py` unpacks it into the
 
 Channels:
   /color_near   foxglove.CompressedImage (JSON: {format: "jpeg", data: b64})
+  /color_far    foxglove.CompressedImage (same encoding; both cameras stream
+                RGB since the far camera's USB 3 cable swap)
   /depth_near   raw PNG bytes (schemaless; uint16 mm, lossless — training data)
   /depth_far    raw PNG bytes (schemaless)
   /depth_near_preview  foxglove.RawImage (JSON; 106x60 16uc1 — dashboard only)
+  /depth_far_preview   foxglove.RawImage (same encoding, far camera)
   /bev_map      foxglove.RawImage (JSON; 60x60 rgb8 top-down teacher map)
   /cmd_vel      JSON  {"vx", "wz", "stamp_ns"}   — operator twist (teleop label)
   /odom         JSON  {"x", "y", "theta", "stamp_ns"}
@@ -166,7 +169,7 @@ class NavdRecorder:
     """Capture the navd teleop session to MCAP at a fixed rate."""
 
     def __init__(self, rig, robot, goal_slot, out_path, builder=None,
-                 rate_hz=10.0, jpeg_quality=85):
+                 rate_hz=10.0, jpeg_quality=85, workers=6):
         self.rig = rig
         self.robot = robot
         self.goal_slot = goal_slot
@@ -178,6 +181,16 @@ class NavdRecorder:
         self._lock = threading.Lock()
         self._running = False
         self._thread = None
+        # Per-camera BEV + encode jobs run here. Only numpy/cv2 work is
+        # submitted (both release the GIL); every pyorbbecsdk call stays in
+        # the recorder thread and MCAP writes stay serial (Writer is not
+        # thread-safe). Same split as the --goal-drive BEV worker; the
+        # corruption in §2.8 was from pooling capture, not processing.
+        from concurrent.futures import ThreadPoolExecutor
+        self._pool = ThreadPoolExecutor(max_workers=workers,
+                                        thread_name_prefix="navd-rec")
+        # role -> (stamp_us, {"png", "jpg", "bev"}) for the last encoded frame
+        self._cache = {}
         self._file = open(out_path, "wb")
         # No chunk compression: payloads are already-compressed JPEG/PNG,
         # and the zstd chunk path has proven lossy with this mcap build.
@@ -217,8 +230,12 @@ class NavdRecorder:
                 "/calib", "json", self._sch_calib),
             "color_near": self._writer.register_channel(
                 "/color_near", "json", self._sch_compressed_image),
+            "color_far": self._writer.register_channel(
+                "/color_far", "json", self._sch_compressed_image),
             "depth_near_preview": self._writer.register_channel(
                 "/depth_near_preview", "json", self._sch_raw_image),
+            "depth_far_preview": self._writer.register_channel(
+                "/depth_far_preview", "json", self._sch_raw_image),
             "bev_map": self._writer.register_channel(
                 "/bev_map", "json", self._sch_raw_image),
             # Training-depth channels: CompressedImage-wrapped lossless PNG
@@ -321,32 +338,73 @@ class NavdRecorder:
             g = {"type": "none"}
         self._add(self._ch["goal"], json.dumps(g).encode(), log_ns)
 
-        # Reads are cheap; the expensive per-camera work (BEV, PNG/JPEG
-        # encode) runs serially in this thread. A thread pool was measurably
-        # WORSE here (GIL contention with the camera capture threads, and
-        # pyorbbecsdk showed heap corruption under added thread pressure):
-        # serial tick is ~100 ms with one camera, comfortably >8 Hz.
-        frames, per_cam, ages = {}, {}, {}
+        # Camera reads stay serial in this thread (pyorbbecsdk must not be
+        # pooled — §2.8). BEV + PNG/JPEG encodes are numpy/cv2 (GIL-releasing)
+        # and run as per-camera jobs in the pool; results are written
+        # serially. With both cameras (PNG16 + JPEG + BEV each) the tick
+        # measures ~165 ms at 6 workers on the Orin Nano (vs ~330 ms fully
+        # serial, 2026-09-06); 6 cores — more workers oversubscribes.
+        #
+        # A camera whose frame stamp is unchanged since the last tick (far
+        # ticks at 10 fps, below the recorder rate) reuses the cached
+        # encoded payloads + BEV result — the channel is still written every
+        # tick so the extractor's per-tick alignment contract holds.
+        frames = {}
         for role, cam in self.rig.cameras.items():
             f = cam.read()
             if f is None or f.age_s() > self.builder.max_frame_age_s:
                 continue
             frames[role] = f
-            png = self._encode_png16(f.depth)
+        jobs = {}
+        for role, f in frames.items():
+            cached = self._cache.get(role)
+            if cached is not None and cached[0] == f.stamp_us:
+                jobs[role] = cached[1]
+                continue
+            jobs[role] = {"fut": {
+                "bev": self._pool.submit(self.builder.process, f),
+                "png": self._pool.submit(self._encode_png16, f.depth),
+                # Camera-MJPEG frames arrive pre-encoded (rig color_format:
+                # mjpg) — the bytes go into the MCAP verbatim, no CPU encode.
+                "jpg": (f.color_jpeg if f.color_jpeg is not None else
+                        (self._pool.submit(self._encode_jpeg, f.color,
+                                           self.jpeg_quality)
+                         if f.color is not None else None)),
+            }}
+        per_cam, ages = {}, {}
+        for role, f in frames.items():
+            job = jobs[role]
+            if "fut" in job:
+                fut = job["fut"]
+                try:
+                    bev = fut["bev"].result()
+                except Exception as exc:
+                    print(f"[recorder] BEV error ({role}): "
+                          f"{type(exc).__name__}: {exc}")
+                    bev = None
+                png = fut["png"].result()
+                jpg = fut["jpg"]
+                if jpg is not None and hasattr(jpg, "result"):
+                    jpg = jpg.result()
+                job = {"png": png, "jpg": jpg, "bev": bev}
+                jobs[role] = job
+                self._cache[role] = (f.stamp_us, job)
+            png, jpg = job["png"], job["jpg"]
+            per_cam[role] = job["bev"]
             self._add(self._ch[self._depth_topic(role)],
                       self._compressed_image_msg(f"depth_{role}", "png", png,
                                                  log_ns),
                       log_ns)
-            if role == "near":
-                if f.color is not None:
-                    jpg = self._encode_jpeg(f.color, self.jpeg_quality)
-                    self._add(self._ch["color_near"],
-                              self._compressed_image_msg("near_color", "jpeg",
-                                                         jpg, log_ns),
-                              log_ns)
-                self._add(self._ch["depth_near_preview"],
-                          self._depth_preview(f.depth, log_ns), log_ns)
-            per_cam[role] = self._safe_process(f)
+            if jpg is not None:
+                self._add(self._ch[f"color_{role}"],
+                          self._compressed_image_msg(f"{role}_color", "jpeg",
+                                                     jpg, log_ns),
+                          log_ns)
+            if role in ("near", "far"):
+                self._add(self._ch[f"depth_{role}_preview"],
+                          self._depth_preview(f.depth, log_ns,
+                                              frame_id=f"{role}_depth_preview"),
+                          log_ns)
             ages[role] = f.age_s()
         grid = self.builder.fuse(per_cam, ages)
         bev = {"raw": self._b64(grid.raw) if grid is not None else None,
@@ -356,14 +414,6 @@ class NavdRecorder:
         if grid is not None:
             self._add(self._ch["bev_map"],
                       self._bev_map_image(grid, goal, log_ns), log_ns)
-
-    def _safe_process(self, frame):
-        try:
-            return self.builder.process(frame)
-        except Exception as exc:
-            print(f"[recorder] BEV error ({frame.role}): "
-                  f"{type(exc).__name__}: {exc}")
-            return None
 
     @staticmethod
     def _encode_jpeg(color, quality):
@@ -381,13 +431,13 @@ class NavdRecorder:
         return png.tobytes() if ok else b""
 
     @staticmethod
-    def _depth_preview(depth, log_ns, stride=8):
+    def _depth_preview(depth, log_ns, stride=8, frame_id="near_depth_preview"):
         """Quarter-frame 16uc1 RawImage payload — dashboard only."""
         small = np.ascontiguousarray(depth[::stride, ::stride])
         h, w = small.shape
         return json.dumps({
             "timestamp": NavdRecorder._stamp(log_ns),
-            "frame_id": "near_depth_preview",
+            "frame_id": frame_id,
             "width": int(w), "height": int(h),
             "encoding": "16UC1", "step": int(w * 2),
             "data": base64.b64encode(small.tobytes()).decode(),
@@ -432,6 +482,7 @@ class NavdRecorder:
         self._running = False
         if self._thread is not None:
             self._thread.join(timeout=5.0)
+        self._pool.shutdown(wait=True)
         with self._lock:
             self._writer.finish()
             self._file.close()

@@ -16,6 +16,8 @@ from bebop_vision.recorder_mcap import NavdRecorder
 
 
 class FakeCamera:
+    """near exercises the RGB re-encode path, far the MJPEG passthrough."""
+
     def __init__(self, serial, role):
         self.serial, self.role = serial, role
         self.mask_rects = []
@@ -24,10 +26,22 @@ class FakeCamera:
     def read(self):
         self._n += 1
         depth = np.full((480, 848), 1500, np.uint16)
+        stamp_us = self._n
+        if self.role == "far":
+            import cv2
+            ok, jpg = cv2.imencode(
+                ".jpg", np.full((800, 1280, 3), 128, np.uint8),
+                [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            return StampedFrame(depth=depth, stamp_us=stamp_us,
+                                recv_ts=time.monotonic(),
+                                width=848, height=480, fps=30.0,
+                                color=None, color_jpeg=jpg.tobytes(),
+                                serial=self.serial, role=self.role)
         color = np.full((800, 1280, 3), 128, np.uint8)
-        return StampedFrame(depth=depth, stamp_us=self._n, recv_ts=time.monotonic(),
-                            width=848, height=480, fps=30.0, color=color,
-                            serial=self.serial, role=self.role)
+        return StampedFrame(depth=depth, stamp_us=stamp_us,
+                            recv_ts=time.monotonic(),
+                            width=848, height=480, fps=30.0,
+                            color=color, serial=self.serial, role=self.role)
 
 
 class FakeRig:
@@ -86,8 +100,9 @@ def test_mcap_roundtrip(tmp_path, builder):
 
     # every topic present with a sane number of ticks
     for topic in ("/cmd_vel", "/odom", "/goal", "/bev_teacher",
-                  "/color_near", "/depth_near", "/depth_far",
-                  "/depth_near_preview", "/bev_map"):
+                  "/color_near", "/color_far",
+                  "/depth_near", "/depth_far",
+                  "/depth_near_preview", "/depth_far_preview", "/bev_map"):
         assert topic in msgs, f"missing {topic}"
         assert len(msgs[topic]) >= 3, f"{topic}: too few messages"
     assert len(msgs["/calib"]) == 1  # written once at session start
@@ -99,6 +114,15 @@ def test_mcap_roundtrip(tmp_path, builder):
     jpg = np.frombuffer(base64.b64decode(color_msg["data"]), np.uint8)
     color = cv2.imdecode(jpg, cv2.IMREAD_COLOR)
     assert color is not None and color.shape == (800, 1280, 3)
+    color_far_msg = msgs["/color_far"][0]
+    assert color_far_msg["format"] == "jpeg"
+    assert color_far_msg["frame_id"] == "far_color"
+    # far rides the passthrough path: MCAP payload == camera JPEG bytes
+    assert base64.b64decode(color_far_msg["data"]) == \
+        rig.cameras["far"].read().color_jpeg
+    jpg_far = np.frombuffer(base64.b64decode(color_far_msg["data"]), np.uint8)
+    color_far = cv2.imdecode(jpg_far, cv2.IMREAD_COLOR)
+    assert color_far is not None and color_far.shape == (800, 1280, 3)
     png_msg = msgs["/depth_near"][0]
     assert png_msg["format"] == "png"
     png = np.frombuffer(base64.b64decode(png_msg["data"]), np.uint8)
@@ -160,6 +184,11 @@ def test_extractor_layout(tmp_path, builder):
     lab = np.load(out / "labels" / f"{row['stamp_ns']:020d}.npz")
     assert lab["teacher"].shape == (60, 60)
     assert row["cmd_vel"]["vx"] == pytest.approx(0.2)
+    assert row["has_color"] is True and row["has_color_far"] is True
+    import cv2
+    for sub in ("color", "color_far"):
+        img = cv2.imread(str(out / sub / f"{row['stamp_ns']:020d}.jpg"))
+        assert img is not None and img.shape == (800, 1280, 3), sub
 
 
 def test_prune_sessions(tmp_path):
@@ -185,6 +214,12 @@ def test_drive_active():
     robot.state.wheel_armed = {"left": True, "right": True}
     robot.state.mode = pb.MODE_RUN_POLICY
     assert _drive_active(robot)
+    # a single armed wheel is a failed enable, not a drivable state
+    robot.state.wheel_armed = {"left": True, "right": False}
+    assert not _drive_active(robot)
+    robot.state.wheel_armed = {"left": False, "right": True}
+    assert not _drive_active(robot)
+    robot.state.wheel_armed = {"left": True, "right": True}
     robot.state.estop_latched = True
     assert not _drive_active(robot)
     robot.state.estop_latched = False

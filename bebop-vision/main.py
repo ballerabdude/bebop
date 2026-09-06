@@ -249,7 +249,9 @@ def _drive_active(robot):
     return (st.connected
             and st.mode in (pb.MODE_DIAL_IN, pb.MODE_RUN_POLICY)
             and not st.estop_latched
-            and any(st.wheel_armed.values()))
+            # differential drive: a single armed wheel is a fault (failed
+            # enable), not a drivable state — don't record half-armed runs
+            and all(st.wheel_armed.values()))
 
 
 def run_record_navd(args):
@@ -292,6 +294,16 @@ def run_record_navd(args):
 
     out_dir = Path(args.record_navd).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Fail fast with a readable message: the root-run firmware recreates the
+    # capture dir as root if it ever goes missing, which lands here as a
+    # PermissionError mid-run (seen 2026-09-06) unless checked up front.
+    if not os.access(out_dir, os.W_OK):
+        _release_recorder_lock()
+        robot.stop()
+        raise SystemExit(
+            f"cannot write to {out_dir} "
+            f"(owned by {out_dir.owner()}:{out_dir.group()}); fix with "
+            f"'sudo chown bebop:bebop {out_dir}' or re-run install-jetson.sh")
     budget = args.disk_budget_gb * 1e9
     rate = args.record_rate if args.record_rate is not None else 10.0
 
@@ -358,12 +370,28 @@ def run_record_navd(args):
                 rolled = (seg.bytes_written >= max_bytes
                           or _time.monotonic() - seg_t0 >= max_s)
             if active and seg is None:
-                seg, seg_path, seg_t0 = new_segment()
+                try:
+                    seg, seg_path, seg_t0 = new_segment()
+                except OSError as exc:
+                    print(f"\n[record-navd] cannot open segment: {exc}; "
+                          f"waiting (fix the cause, drive state keeps "
+                          f"retriggering)")
+                    _time.sleep(2.0)
+                    active = False
             elif seg is not None and (not active or rolled):
-                close_segment(seg, seg_path)
+                try:
+                    close_segment(seg, seg_path)
+                except OSError as exc:
+                    print(f"\n[record-navd] error closing segment: {exc}")
                 seg = None
                 if active and rolled:
-                    seg, seg_path, seg_t0 = new_segment()
+                    try:
+                        seg, seg_path, seg_t0 = new_segment()
+                    except OSError as exc:
+                        print(f"\n[record-navd] cannot roll to next segment: "
+                              f"{exc}; waiting")
+                        _time.sleep(2.0)
+                        active = False
             if seg is not None:
                 print(f"\r[record-navd] {seg.frames} frames, "
                       f"{seg.bytes_written/1e6:.1f} MB", end="", flush=True)
@@ -375,7 +403,10 @@ def run_record_navd(args):
         pass
     finally:
         if seg is not None:
-            close_segment(seg, seg_path)
+            try:
+                close_segment(seg, seg_path)
+            except OSError as exc:
+                print(f"\n[record-navd] error closing final segment: {exc}")
         rig.stop()
         robot.stop()
         _release_recorder_lock()

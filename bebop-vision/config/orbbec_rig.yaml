@@ -4,8 +4,14 @@
 # optical frame: x right, y down, z forward.
 #
 # depth_profile is the *preferred* profile; the camera service negotiates
-# down to what the device advertises (the far camera on the unfixed USB 2.0
-# cable drops to 848x480@10 and restores to 30 fps when the cable is swapped).
+# down to what the device advertises.
+#
+# Far camera runs at 10 fps (full 848x480) even though the swapped USB 3
+# cable now advertises 30 fps: with both cameras filtering 848x480@30 the
+# SDK filter chains starve the GIL and the BEV worker collapses to ~1 Hz
+# (measured 2026-09-06); far@10 restores ~9 Hz fused grids (near@30). The
+# far camera feeds the 1.5-3 m horizon at a 10 Hz BEV tick, so 10 fps is
+# sufficient (4 cm of travel between frames at v_max 0.4 m/s).
 robots:
   default:
     cameras:
@@ -15,6 +21,10 @@ robots:
         pitch_deg: -66.0
         yaw_deg: 0.0
         depth_profile: [848, 480, 30]
+        # Camera's hardware JPEG encoder: color arrives pre-encoded and the
+        # recorder stores it verbatim (saves ~65 ms/tick of CPU encode vs
+        # RGB + re-encode; the capture threads also shed their decode work).
+        color_format: mjpg
         # Self-view rects (x0, y0, x1, y1 px): the chassis frame + foam
         # boards on the left rail, measured from the mounted view
         # 2026-09-06. The rigid mount keeps these pixels fixed.
@@ -26,7 +36,8 @@ robots:
         height_m: 1.32
         pitch_deg: -17.4
         yaw_deg: 0.0
-        depth_profile: [848, 480, 30]
+        depth_profile: [848, 480, 10]
+        color_format: mjpg
     bev:
       range_m: 3.0        # forward horizon
       width_m: 3.0        # lateral span (-1.5..+1.5)
