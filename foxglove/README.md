@@ -59,6 +59,26 @@ index layout.
 
 2x2 mosaic for static-capture noise review.
 
+### navd sessions (`bebop_navd_layout.json`)
+
+Review layout for navd recorder-v2 MCAP sessions
+(`bebop-vision/bebop_vision/recorder_mcap.py`, JSON-encoded channels):
+
+- **Image panels**: `/color_near` (`foxglove.CompressedImage`),
+  `/depth_near_preview` (16uc1 turbo depth preview),
+  `/bev_map` (top-down 60x60 teacher occupancy map with goal arrow)
+- **Plots**: teleop twist `/cmd_vel.vx|.wz` (the imitation label),
+  odometry, goal vs heading, ground-plane-fit health
+
+Record a session on the robot, copy it off, open it here:
+
+```bash
+# robot
+python main.py --record-navd /tmp/navd_sessions --seconds 600
+# workstation
+scp bebop@bebop.local:/tmp/navd_sessions/*.mcap datasets/sessions/
+```
+
 ## MCAP noise analysis
 
 ```bash

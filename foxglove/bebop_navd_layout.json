@@ -1,0 +1,184 @@
+{
+  "configById": {
+    "Image!color": {
+      "foxglovePanelTitle": "Color (near)",
+      "imageMode": {
+        "imageTopic": "/color_near"
+      },
+      "imageTopics": [
+        {
+          "topic": "/color_near"
+        }
+      ],
+      "topic": "/color_near",
+      "imageTopic": "/color_near",
+      "mode": "image"
+    },
+    "Image!depth": {
+      "foxglovePanelTitle": "Depth preview (near)",
+      "imageMode": {
+        "imageTopic": "/depth_near_preview",
+        "minValue": 300,
+        "maxValue": 6000,
+        "colormap": "turbo"
+      },
+      "imageTopics": [
+        {
+          "topic": "/depth_near_preview"
+        }
+      ],
+      "topic": "/depth_near_preview",
+      "imageTopic": "/depth_near_preview",
+      "mode": "image"
+    },
+    "Image!map": {
+      "foxglovePanelTitle": "BEV teacher map (60x60, 3x3 m)",
+      "imageMode": {
+        "imageTopic": "/bev_map"
+      },
+      "imageTopics": [
+        {
+          "topic": "/bev_map"
+        }
+      ],
+      "topic": "/bev_map",
+      "imageTopic": "/bev_map",
+      "mode": "image"
+    },
+    "Plot!cmd": {
+      "foxglovePanelTitle": "Teleop twist (imitation label)",
+      "paths": [
+        {
+          "value": "/cmd_vel.vx",
+          "enabled": true,
+          "label": "vx (m/s)",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/cmd_vel.wz",
+          "enabled": true,
+          "label": "wz (rad/s)",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240
+    },
+    "Plot!odom": {
+      "foxglovePanelTitle": "Odometry (m)",
+      "paths": [
+        {
+          "value": "/odom.x",
+          "enabled": true,
+          "label": "x (m)",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/odom.y",
+          "enabled": true,
+          "label": "y (m)",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240
+    },
+    "Plot!goal": {
+      "foxglovePanelTitle": "Goal vs heading",
+      "paths": [
+        {
+          "value": "/goal.heading_rad",
+          "enabled": true,
+          "label": "heading goal (rad)",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/odom.theta",
+          "enabled": true,
+          "label": "odom theta (rad)",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240
+    },
+    "Plot!plane": {
+      "foxglovePanelTitle": "Ground-plane fit health",
+      "paths": [
+        {
+          "value": "/bev_teacher.plane_ok.near",
+          "enabled": true,
+          "label": "plane_ok near",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/bev_teacher.plane_ok.far",
+          "enabled": true,
+          "label": "plane_ok far",
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "direction": "row",
+    "first": {
+      "direction": "column",
+      "first": "Image!color",
+      "second": "Image!depth",
+      "splitPercentage": 55
+    },
+    "second": {
+      "direction": "column",
+      "first": "Image!map",
+      "second": {
+        "direction": "row",
+        "first": {
+          "direction": "column",
+          "first": "Plot!cmd",
+          "second": "Plot!odom",
+          "splitPercentage": 50
+        },
+        "second": {
+          "direction": "column",
+          "first": "Plot!goal",
+          "second": "Plot!plane",
+          "splitPercentage": 50
+        }
+      },
+      "splitPercentage": 45
+    },
+    "splitPercentage": 45
+  }
+}
