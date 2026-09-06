@@ -1163,7 +1163,12 @@ if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
 fi
 
 if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
-    echo "==> installing bebop-linux → /usr/local/bin/bebop-linux"
+    echo "    # Capture dir: pre-create as the invoking user so the recorder
+    # (bebop-vision, run as the regular user) can write navd sessions
+    # next to the firmware's own policy captures. The firmware only
+    # creates the dir if missing, so ownership sticks.
+    install -d -o "${SUDO_USER:-bebop}" -g "${SUDO_GROUP:-$(id -gn "${SUDO_USER:-bebop}")}" /var/lib/bebop-captures
+==> installing bebop-linux → /usr/local/bin/bebop-linux"
     install -m 0755 "${LINUX_BIN}" /usr/local/bin/bebop-linux
 
     # Robot config. Installed under its REAL filename (e.g.
