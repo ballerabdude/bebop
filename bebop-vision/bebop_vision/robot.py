@@ -32,10 +32,8 @@ class RobotState:
         self.wheel_vel = {}
         self.wheel_feedback_stale = {}
         self.battery_v = None
-        self.camera_present = False
-        self.camera_pan_deg = 0.0
-        self.camera_tilt_deg = 0.0
-        self.camera_moving = False
+        # camera_* state retired with the OBSBOT pipeline (plan §9): the
+        # deprecated proto fields are no longer sent by the firmware.
         self.telemetry_hz = 0.0
         self.last_telemetry_ts = 0.0
 
@@ -142,10 +140,6 @@ class RobotClient:
         if t.drive.present:
             st.cmd = (t.drive.cmd_linear_x, t.drive.cmd_angular_z)
             st.odom = (t.drive.odom_x, t.drive.odom_y, t.drive.odom_theta)
-        st.camera_present = t.camera.present
-        st.camera_pan_deg = t.camera.pan_deg
-        st.camera_tilt_deg = t.camera.tilt_deg
-        st.camera_moving = t.camera.moving
         st.wheel_armed = {w.name: w.armed for w in t.wheels}
         st.wheel_vel = {w.name: w.velocity_rad_s for w in t.wheels}
         st.wheel_feedback_stale = {w.name: w.feedback_stale for w in t.wheels}
@@ -193,18 +187,8 @@ class RobotClient:
         """Command a body-frame twist (m/s forward, rad/s yaw, + left)."""
         return self._submit(self._twist_msg(vx, wz))
 
-    def set_camera_pose(self, pan_deg, tilt_deg):
-        """Command the camera gimbal to an absolute pose (degrees).
-
-        Pan + = right, tilt + = up, 0/0 = power-on center. The firmware
-        clamps to the camera's limits; not mode-gated, and the settled
-        pose arrives back via telemetry (`camera_pan_deg` / `camera_*`
-        state fields).
-        """
-        m = pb.ClientRuntimeMessage()
-        m.set_camera_pose.pan_deg = float(pan_deg)
-        m.set_camera_pose.tilt_deg = float(tilt_deg)
-        return self._submit(m)
+    # set_camera_pose() removed with the OBSBOT camera (plan §9 Stage 3).
+    # The firmware acks the deprecated SetCameraPose message as a no-op.
 
     def estop(self, reason="bebop-vision"):
         m = pb.ClientRuntimeMessage()

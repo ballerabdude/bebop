@@ -4,8 +4,7 @@
 # you're currently shelled into.
 #
 # bebop-linux is shipped as a single tarball (binary + bebop_v2.yaml +
-# policy.onnx + policy.onnx.data + systemd unit, plus the optional
-# navseg.onnx{,.data} navigable-path model when present in the checkout)
+# policy.onnx + policy.onnx.data + systemd unit)
 # so the runtime, the joint config, and the policy weights all move
 # together. The default source is the latest GitHub Release tagged
 # `firmware/v*`. For pre-release main builds use `--run-id` to pull from
@@ -91,20 +90,11 @@
 #     source of truth and they're versioned together as a unit. The
 #     previous bebop_v2.yaml is saved as bebop_v2.yaml.bak so a bad
 #     config push can be rolled back without re-downloading.
-#   * /etc/bebop/navseg.onnx{,.data} are replaced when the bundle
-#     carries them (same versioning rule); when a `nav:` block is
-#     enabled in the YAML but the model files are missing, the install
-#     WARNs — the firmware would soft-fail nav at boot.
-#
-# GPU note (one-time, NOT handled by this script): the nav runner needs
-# the onnxruntime CUDA execution provider, which is a *separate* set of
-# libraries under /usr/local/lib (libonnxruntime.so.1.23.0 built with
-# --use_cuda, plus libonnxruntime_providers_shared.so and
-# libonnxruntime_providers_cuda.so). Without them nav silently falls
-# back to the CPU EP. See bebop-vision/README.md "GPU note" for the
-# on-device source build. The installer prints a health check when it
-# installs a nav model.
-#
+#   (The legacy navseg.onnx nav-model install — and its onnxruntime
+#   CUDA-EP health check — were removed with the OBSBOT pipeline, plan
+#   §9 Stage 3. The navd student model runs in bebop-vision's venv, not
+#   in the firmware.)
+
 # Orbbec note (--setup-orbbec): the Gemini 335Lg (USB 2bc5:080b) must be
 # on a USB 3.0 port — behind USB 2.0 it enumerates at 480 Mbps and
 # cannot sustain full-resolution depth+color (the setup prints a warning
@@ -537,10 +527,9 @@ EOF
 # Orbbec depth camera setup helper
 # ---------------------------------------------------------------------------
 #
-# bebop-vision is gaining an Orbbec Gemini 335Lg (USB 2bc5:080b) as a
-# directly-opened depth sensor. It is a second, physically separate
-# camera — the firmware's OBSBOT PTZ keeps its exclusive /dev/video*
-# claim, so there is no ownership conflict with bebop-linux.
+# bebop-vision owns the Orbbec Gemini 335Lg pair (USB 2bc5:080b) as
+# directly-opened depth sensors. They are physically separate from
+# anything bebop-linux touches, so there is no ownership conflict.
 #
 # A non-root Python process needs two things:
 #
@@ -940,14 +929,6 @@ EOF
         done
         install -m 0644 "${LX_ONNX_SRC}"       "${WORK_DIR}/linux-bundle/config/policy.onnx"
         install -m 0644 "${LX_ONNX_DATA_SRC}"  "${WORK_DIR}/linux-bundle/config/policy.onnx.data"
-        # Optional nav model: stage when present so the local bundle
-        # matches CI's (the runtime resolves <config_dir>/navseg.onnx
-        # only when the YAML enables `nav:` — absent files are fine).
-        for f in "${LX_ROOT}/config/navseg.onnx" "${LX_ROOT}/config/navseg.onnx.data"; do
-            if [[ -f "${f}" ]]; then
-                install -m 0644 "${f}" "${WORK_DIR}/linux-bundle/config/$(basename "${f}")"
-            fi
-        done
         install -m 0644 "${LX_UNIT_SRC}"       "${WORK_DIR}/linux-bundle/systemd/bebop-linux.service"
         # Synthesize a VERSION file mirroring CI's, so the post-install
         # echo gives operators something useful to grep in journals.
@@ -1010,10 +991,6 @@ EOF
     LINUX_ONNX="${WORK_DIR}/linux-bundle/config/policy.onnx"
     LINUX_ONNX_DATA="${WORK_DIR}/linux-bundle/config/policy.onnx.data"
     LINUX_UNIT="${WORK_DIR}/linux-bundle/systemd/bebop-linux.service"
-    # Optional nav model — presence-checked below, never required (the
-    # firmware soft-fails nav when the files are absent).
-    LINUX_NAV_ONNX="${WORK_DIR}/linux-bundle/config/navseg.onnx"
-    LINUX_NAV_ONNX_DATA="${WORK_DIR}/linux-bundle/config/navseg.onnx.data"
     for f in "${LINUX_BIN}" "${LINUX_YAML}" "${LINUX_ONNX}" "${LINUX_ONNX_DATA}" "${LINUX_UNIT}"; do
         if [[ ! -f "${f}" ]]; then
             echo "bundle is missing $(basename "${f}") (looked at ${f})" >&2
@@ -1093,53 +1070,10 @@ else
     echo "==> skipping prereq install"
 fi
 
-# Firmware prereqs. v4l-utils ships `v4l2-ctl`, the operator + bring-up
-# surface for the camera (the OBSBOT Tiny 2's PTZ rides standard UVC
-# pan/tilt controls on /dev/video0; the firmware talks raw ioctls, but
-# humans use v4l2-ctl to inspect ranges and jog the gimbal by hand):
-#   v4l2-ctl -d /dev/video0 --list-ctrls     # pan/tilt/zoom + ranges
-#   v4l2-ctl -d /dev/video0 --get-ctrl pan_absolute
-# Gated on INSTALL_LINUX like the agent prereqs above are gated on the
-# agent, so --skip-prereqs and --agent-only keep their meaning.
-if [[ "${SKIP_PREREQS}" -eq 0 && "${INSTALL_LINUX}" -eq 1 ]]; then
-    if command -v apt-get >/dev/null 2>&1; then
-        echo "==> ensuring system prereqs (v4l-utils)"
-        apt_install_if_missing v4l-utils
-    else
-        echo "==> non-Debian system; skipping v4l-utils"
-    fi
-fi
-
-# Health check for the onnxruntime CUDA provider libraries the nav
-# runner dlopens at runtime. The CUDA EP ships as THREE files (main lib
-# built with --use_cuda + the provider bridge + the CUDA EP itself); a
-# main-lib-only install accepts CUDA sessions but silently runs
-# everything on the CPU EP. Warn loudly rather than fail — nav is
-# best-effort and the CPU fallback still works.
-nav_gpu_check() {
-    local ort_dir
-    for ort_dir in /usr/local/lib /usr/lib/aarch64-linux-gnu; do
-        if [[ -f "${ort_dir}/libonnxruntime_providers_cuda.so" \
-           && -f "${ort_dir}/libonnxruntime_providers_shared.so" ]]; then
-            echo "    nav GPU: CUDA EP present (${ort_dir}/libonnxruntime_providers_cuda.so)"
-            return 0
-        fi
-    done
-    cat >&2 <<EOF
-    WARN: onnxruntime CUDA provider libraries not found — the nav
-          runner will fall back to the CPU EP (a few Hz instead of
-          ~20 Hz on the Orin GPU). The CUDA build must match the
-          firmware's ort crate (onnxruntime 1.23.0) and installs as
-          three files under /usr/local/lib:
-
-              libonnxruntime.so.1.23.0              (CUDA-enabled build)
-              libonnxruntime_providers_shared.so    (provider bridge)
-              libonnxruntime_providers_cuda.so      (the CUDA EP)
-
-          Keep the CPU original as libonnxruntime.so.1.23.0.cpu-backup.
-          Build recipe: bebop-vision/README.md, "GPU note".
-EOF
-}
+# (The firmware's v4l-utils prereq and the navseg/onnxruntime CUDA-EP
+# health check were removed with the OBSBOT camera + legacy nav runner,
+# plan §9 Stage 3 — the firmware no longer touches any /dev/video* and
+# runs no ONNX nav model.)
 
 # ---------------------------------------------------------------------------
 # Lay down files
@@ -1223,18 +1157,6 @@ EOF
     install -m 0644 "${LINUX_ONNX_DATA}" /etc/bebop/policy.onnx.data
 
     # Navigable-path model (optional, same drop-in convention as the
-    # policy). The runtime loads <config_dir>/navseg.onnx when the YAML
-    # has a `nav:` block; both files must come from the same export.
-    if [[ -f "${LINUX_NAV_ONNX}" && -f "${LINUX_NAV_ONNX_DATA}" ]]; then
-        echo "==> installing nav model → /etc/bebop/navseg.onnx{,.data}"
-        install -m 0644 "${LINUX_NAV_ONNX}"      /etc/bebop/navseg.onnx
-        install -m 0644 "${LINUX_NAV_ONNX_DATA}" /etc/bebop/navseg.onnx.data
-        nav_gpu_check
-    elif grep -qE '^nav:' "${LINUX_YAML}" 2>/dev/null; then
-        echo "    WARN: config enables \`nav:\` but navseg.onnx{,.data} are missing" >&2
-        echo "          from the bundle — nav will soft-fail at boot." >&2
-    fi
-
     install -m 0644 "${LINUX_UNIT}" /etc/systemd/system/bebop-linux.service
 fi
 

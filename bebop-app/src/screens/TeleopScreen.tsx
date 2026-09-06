@@ -42,8 +42,6 @@ import type { ReactNode } from "react";
 import { ControlProfilePicker } from "../components/ControlProfilePicker";
 import { DriveJoystick } from "../components/DriveJoystick";
 import { GamepadDrive } from "../components/GamepadDrive";
-import { PtzJoystick, PTZ_KEYS_IJKL } from "../components/PtzJoystick";
-import { useCameraPtz } from "../components/useCameraPtz";
 import { VideoFeed } from "../components/VideoFeed";
 
 const VIDEO_STREAMS: { id: string; label: string }[] = [
@@ -57,8 +55,6 @@ import { useGamepad } from "../input";
 import { getOrCreateRuntimeTransport } from "../runtime";
 import type { RuntimeTransport } from "../runtime";
 import type {
-  CameraView,
-  NavView,
   RuntimeConnectionState,
   RuntimeMode,
   RuntimeSnapshot,
@@ -132,7 +128,6 @@ export function TeleopScreen({
   const [error, setError] = useState<string | null>(null);
   // Nav overlay: off by default so the raw video is what you get on
   // entry; one tap adds the navigable-path wash.
-  const [showNav, setShowNav] = useState(false);
   // Phones open in the immersive layout by default — a small screen
   // is all video real estate, with the pads floating over it and the
   // HUD condensed into the top bar. Desktops / tablets keep the page
@@ -149,7 +144,6 @@ export function TeleopScreen({
   // right-stick camera aim below) — one way to drive at a time.
   const { connected: padConnected } = useGamepad();
 
-  const transport = getOrCreateRuntimeTransport(robotIp, runtimePort);
   const transportRef = useRef<RuntimeTransport | null>(null);
 
   // -------------------------------------------------------------- lifecycle
@@ -379,8 +373,6 @@ export function TeleopScreen({
   const wheels = snapshot?.wheels ?? [];
   const drive = snapshot?.drive;
   const power = snapshot?.power;
-  const camera: CameraView | null = snapshot?.camera ?? null;
-  const nav: NavView | null = snapshot?.nav ?? null;
   const mode = snapshot?.mode ?? "UNSPECIFIED";
   const estopLatched = snapshot?.estopLatched ?? false;
   const estopReason = snapshot?.estopReason ?? "";
@@ -420,10 +412,6 @@ export function TeleopScreen({
       }
     });
   }, [refreshAfter, mode, armedWheelCount, estopLatched]);
-
-  const ptzReady =
-    connState === "connected" && camera !== null && camera.present;
-  const ptz = useCameraPtz(transport, camera, ptzReady);
 
   // Esc exits fullscreen.
   useEffect(() => {
@@ -497,29 +485,12 @@ export function TeleopScreen({
           {batteryLabel}
         </Pill>
       ) : null}
-      {camera?.present ? (
-        <Pill tone="dim" title="Camera pan / tilt pose">
-          {camera.panDeg.toFixed(0)}° / {camera.tiltDeg.toFixed(0)}°
-          {camera.moving ? " ⤳" : ""}
-        </Pill>
-      ) : null}
       {estopLatched ? (
         <Pill tone="err" title={estopReason || "E-STOP latched"}>
           E-STOP
         </Pill>
       ) : null}
     </>
-  );
-
-  const labelsToggle = (small = false) => (
-    <Button
-      variant={showNav ? "secondary" : "ghost"}
-      disabled={nav !== null && !nav.present}
-      className={`text-xs ${small ? "px-2.5 py-1.5 h-8" : "px-3 py-1.5 h-8"}`}
-      onClick={() => setShowNav((on) => !on)}
-    >
-      Labels{nav?.present && showNav ? ` · ${nav.maskHz.toFixed(0)} Hz` : ""}
-    </Button>
   );
 
   const estopButton = (
@@ -542,16 +513,6 @@ export function TeleopScreen({
       disabled={!canDrive}
     />
   );
-  const ptzPad = (
-    <PtzJoystick
-      onRate={ptz.onRate}
-      onStop={ptz.onStop}
-      disabled={!ptzReady}
-      keys={PTZ_KEYS_IJKL}
-      hint="I / J / K / L to aim"
-    />
-  );
-
   // -------------------------------------------------------------- render
   return (
     <div
@@ -598,7 +559,6 @@ export function TeleopScreen({
               Reset E-STOP
             </Button>
           ) : null}
-          {labelsToggle(true)}
           {estopButton}
         </div>
       ) : null}
@@ -623,7 +583,6 @@ export function TeleopScreen({
             <div className="hidden lg:block flex-1" aria-hidden />
 
             <div className="flex items-center gap-2 flex-wrap">
-              {labelsToggle()}
               <ControlProfilePicker />
               <Button
                 variant="secondary"
@@ -705,9 +664,6 @@ export function TeleopScreen({
                 baseUrl={`http://${robotIp}:${runtimePort}`}
                 videoUrl={`http://${robotIp}:9092/video`}
                 stream={id}
-                transport={transport}
-                showNav={showNav && id === videoStreams[0]}
-                nav={nav}
                 reconnectKey={reconnectKey}
                 onStreamState={setStreamState}
                 className={
@@ -752,11 +708,6 @@ export function TeleopScreen({
             {drivePad}
           </div>
         ) : null}
-        {fullscreen && camera !== null && camera.present ? (
-          <div className="absolute bottom-4 right-4 z-10 rounded-[var(--radius-card)] border border-white/10 bg-bg-elev/75 backdrop-blur-md p-2 max-sm:scale-90 max-sm:origin-bottom-right">
-            {ptzPad}
-          </div>
-        ) : null}
         {fullscreen && streamState === "error" ? (
           <div className="absolute inset-x-0 bottom-4 z-10 flex justify-center">
             <Button
@@ -773,14 +724,6 @@ export function TeleopScreen({
       {/* Page content below the feed — hidden, never unmounted, in
           fullscreen (the gamepad bridge must keep its poll loop). */}
       <div className={fullscreen ? "hidden" : "contents"}>
-        {showNav && nav !== null && !nav.present ? (
-          <Banner tone="error">
-            The robot has no navigable-path runner: add a <code>nav:</code>{" "}
-            block to the firmware YAML and ship <code>navseg.onnx</code> next
-            to it.
-          </Banner>
-        ) : null}
-
         {streamState === "error" ? (
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <span className="text-xs text-text-dim">
@@ -873,10 +816,8 @@ export function TeleopScreen({
                       Controller driving
                     </span>
                     <span className="text-[11px] text-text-dim leading-snug">
-                      Left stick drives;{" "}
-                      {camera?.present
-                        ? "right stick aims the camera. "
-                        : "right stick turns in split layout. "}
+                      Left stick drives; right stick turns in split
+                      layout. 
                       On-screen drive pad hidden while the controller is
                       connected.
                     </span>
@@ -949,60 +890,11 @@ export function TeleopScreen({
             </div>
           )}
 
-          {/* Camera card */}
-          <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev px-3.5 py-3 space-y-3">
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div className="min-w-0">
-                <div className="text-[11px] uppercase tracking-wider text-text-dim">
-                  Camera
-                </div>
-                <div className="text-[13px] text-text font-semibold mt-0.5 flex items-center gap-2">
-                  <span>
-                    pan {camera ? `${camera.panDeg.toFixed(1)}°` : "—"} · tilt{" "}
-                    {camera ? `${camera.tiltDeg.toFixed(1)}°` : "—"}
-                  </span>
-                  {camera?.moving ? (
-                    <span
-                      className="inline-block w-2 h-2 rounded-full bg-accent animate-pulse"
-                      title="Gimbal slewing"
-                    />
-                  ) : null}
-                </div>
-              </div>
-              <Button
-                variant="ghost"
-                disabled={!ptzReady}
-                onClick={ptz.center}
-                className="py-1.5! px-2! text-[12px]!"
-              >
-                Center
-              </Button>
-            </div>
-
-            <div className="flex justify-center">
-              {!fullscreen ? ptzPad : null}
-            </div>
-
-            {camera !== null && !camera.present ? (
-              <span className="text-xs text-text-dim">
-                PTZ unavailable — this robot has no <code>video:</code>{" "}
-                config, so the firmware reports no camera.
-              </span>
-            ) : null}
-            {camera !== null && camera.present && connState !== "connected" ? (
-              <span className="text-xs text-text-dim">
-                Reconnecting to the runtime… controls disabled.
-              </span>
-            ) : null}
-            {ptz.error ? <Banner tone="error">{ptz.error}</Banner> : null}
           </div>
-        </div>
 
         {/* Gamepad bridge — mounted for the screen's whole lifetime
-            (hidden in fullscreen) so a drive cycle survives the toggle.
-            The PTZ bridge is handed over only when the firmware
-            actually reports a camera; without one the right stick
-            keeps its split-layout turning role. */}
+            (hidden in fullscreen) so a drive cycle survives the
+            toggle. */}
         {wheeled ? (
           <GamepadDrive
             wheels={wheels}
@@ -1013,17 +905,14 @@ export function TeleopScreen({
             onEStop={eStop}
             onResetEStop={resetEStop}
             onSetAllWheels={setAllWheels}
-            ptz={camera !== null && camera.present ? ptz : null}
           />
         ) : null}
 
         <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 mt-2">
           <span className="text-[11px] text-text-dim">
             {padConnected
-              ? `Controller: left stick drives${
-                  camera?.present ? " · right stick aims the camera" : ""
-                }`
-              : "WASD / arrows drive · I / J / K / L aim the camera"}
+              ? "Controller: left stick drives · right stick turns"
+              : "WASD / arrows drive"}
           </span>
           {onOpenControllers ? (
             <Button variant="ghost" onClick={onOpenControllers}>

@@ -143,69 +143,6 @@ export interface ImuView {
   headingAccuracyRad: number;
 }
 
-/// Camera gimbal telemetry view. Mirrors the firmware's `CameraState`
-/// proto. Always present in the view layer; `present === false` when the
-/// firmware has no `video:` block configured — the UI should hide the
-/// PTZ controls. Pose is the *actual* read-back pose (the gimbal
-/// occasionally applies its own horizon compensation, so never assume
-/// the commanded target).
-export interface CameraView {
-  present: boolean;
-  /// Degrees, raw UVC pan/tilt units. The proto doc claims
-  /// "pan + = right", but on the OBSBOT Tiny 2 measured hardware it
-  /// is the opposite: increasing UVC pan turns the camera LEFT (and
-  /// the read-back follows). `useCameraPtz` negates pan commands at
-  /// the single place they're generated so every input path (pad,
-  /// I/J/K/L keys, the gamepad's right stick) drives the camera the
-  /// way the operator pushes; these read-back values therefore match
-  /// what was commanded, in the camera's own space. Tilt is
-  /// unquirky (+ = up). OBSBOT Tiny 2 range: pan ±130° / ±90°.
-  panDeg: number;
-  tiltDeg: number;
-  /// True while the actual pose differs from the last commanded target
-  /// by more than ~1 degree on either axis (gimbal still slewing).
-  moving: boolean;
-}
-
-/// Navigable-path runner summary (telemetry). Mirrors the firmware's
-/// `NavState` proto. `present === false` when the robot has no `nav:`
-/// block or the model failed to load — the video overlay should hide
-/// its toggle then. `received === false` until the first mask.
-export interface NavView {
-  present: boolean;
-  received: boolean;
-  /// Measured mask rate (Hz).
-  maskHz: number;
-  /// Execution provider serving the model ("cuda" / "cpu").
-  provider: string;
-  /// Camera frame sequence number the latest mask was computed from.
-  seq: number;
-  /// Camera capture timestamp (µs since epoch; matches the
-  /// `X-Timestamp-Us` part header on the video stream).
-  tsUs: number;
-  /// Per-class fractions of the label map, 0..1.
-  fracBlocked: number;
-  fracNavigable: number;
-  fracCaution: number;
-}
-
-/// One pushed navigable-path mask grid (~10 Hz, subscribe-gated).
-/// Mirrors the firmware's `NavMaskFrame` proto. `grid` is one label
-/// byte per cell, row-major: 0 = blocked, 1 = navigable, 2 = caution;
-/// `width` × `height` cells cover the full camera frame.
-export interface NavMaskView {
-  seq: number;
-  tsUs: number;
-  width: number;
-  height: number;
-  grid: Uint8Array;
-  fracBlocked: number;
-  fracNavigable: number;
-  fracCaution: number;
-  maskHz: number;
-  provider: string;
-}
-
 export interface RuntimeSnapshot {
   hostUnixMs: number;
   mode: RuntimeMode;
@@ -223,13 +160,6 @@ export interface RuntimeSnapshot {
   /// Always present in the view layer; `imu.present === false` when
   /// the firmware has no `imu:` block configured.
   imu: ImuView;
-  /// Camera gimbal state; `camera.present === false` when the firmware
-  /// has no `video:` block configured (no PTZ controls then).
-  camera: CameraView;
-  /// Navigable-path runner summary; `nav.present === false` when the
-  /// firmware has no `nav:` block or the model failed to load (the
-  /// video overlay toggle hides then).
-  nav: NavView;
   /// Policy observation/action I/O. `policyIo.present === false` when
   /// `policy.onnx` failed to load at boot.
   policyIo: PolicyIoView;

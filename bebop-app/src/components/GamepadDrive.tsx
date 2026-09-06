@@ -29,8 +29,6 @@ import type { GamepadSnapshot, LogicalSnapshot } from "../input";
 import type { RuntimeMode, WheelView } from "../runtime";
 import { ControllerIcon, Hint, prettifyGamepadId } from "./GamepadDriver";
 import { ControlProfilePicker } from "./ControlProfilePicker";
-import { PTZ_DEFAULT_RATES } from "./PtzJoystick";
-import type { CameraPtzApi } from "./useCameraPtz";
 
 // Drive soft limits come from the active control profile
 // (`../input/profile.ts`) — switched at runtime from the picker on
@@ -81,15 +79,6 @@ interface GamepadDriveProps {
   onResetEStop: () => void;
   /// Arm / disarm every wheel (L3 toggles between the two).
   onSetAllWheels: (enabled: boolean) => void;
-  /// Optional camera-PTZ bridge (teleop screen with a camera). When
-  /// provided, the right stick aims the camera — pan on X, tilt on Y,
-  /// at the on-screen pad's full-throw rates, a centred stick holding
-  /// the pose — and the drive layout is forced to *arcade* (the left
-  /// stick does both) because the right stick is reserved for the
-  /// camera. PTZ is deliberately NOT deadman- or mode-gated: moving the
-  /// camera can't hurt anyone and `SetCameraPose` isn't firmware
-  /// mode-gated, so aiming works even from Idle / E-STOP.
-  ptz?: CameraPtzApi | null;
 }
 
 /// Renders a compact status card and streams gamepad-driven twists to
@@ -104,7 +93,6 @@ export function GamepadDrive({
   onEStop,
   onResetEStop,
   onSetAllWheels,
-  ptz = null,
 }: GamepadDriveProps) {
   const { connected, id, standard } = useGamepad();
 
@@ -145,13 +133,6 @@ export function GamepadDrive({
   onResetEStopRef.current = onResetEStop;
   const onSetAllWheelsRef = useRef(onSetAllWheels);
   onSetAllWheelsRef.current = onSetAllWheels;
-  // PTZ bridge in a ref for the same reason — the api object is rebuilt
-  // by `useCameraPtz` on every parent render, and re-subscribing the
-  // per-frame loop on each of those would reset the hook's edge
-  // detection.
-  const ptzRef = useRef(ptz);
-  ptzRef.current = ptz;
-
   // Drive-session state, all subscriber-owned:
   //
   //   * `drivingRef` — a drive cycle is open (deadman held + gated on);
@@ -178,23 +159,14 @@ export function GamepadDrive({
     onStopRef.current();
   }, []);
 
-  // End an in-flight camera gesture (the gimbal holds its pose).
-  // Idempotent — the PTZ controller's onStop just zeroes the stored
-  // rate and clears the gesture target.
-  const stopPtz = useCallback(() => {
-    ptzRef.current?.onStop();
-  }, []);
-
   // Per-frame subscription. On teardown — pad disconnect or unmount —
-  // halt the chassis if a drive cycle was open and hold the camera if
-  // a PTZ gesture was active.
+  // halt the chassis if a drive cycle was open.
   useEffect(() => {
     if (!connected) return;
     const unsub = subscribeGamepad((snap) => onTick(snap));
     return () => {
       unsub();
       stopDriving();
-      stopPtz();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected]);
@@ -203,20 +175,16 @@ export function GamepadDrive({
   // firmware holds the last commanded twist until changed, so this is
   // the backstop that guarantees the chassis halts even when the poll
   // loop dies without a disconnect event (backgrounded WebView, pad
-  // battery pulling mid-drive). The PTZ controller integrates the last
-  // stored rate on its own timer, so a stalled loop would also keep
-  // slewing the camera — stop that here too. Both self-guard, so
-  // calling them while idle is a no-op.
+  // battery pulling mid-drive).
   useEffect(() => {
     if (!connected) return;
     const iv = window.setInterval(() => {
       if (performance.now() - lastTickAtRef.current > WATCHDOG_MS) {
         stopDriving();
-        stopPtz();
       }
     }, 100);
     return () => window.clearInterval(iv);
-  }, [connected, stopDriving, stopPtz]);
+  }, [connected, stopDriving]);
 
   // Backgrounding the tab freezes the RAF loop (and browsers throttle
   // timers, which would delay the watchdog); halt immediately instead.
@@ -224,13 +192,12 @@ export function GamepadDrive({
     const onVisibility = () => {
       if (document.hidden) {
         stopDriving();
-        stopPtz();
       }
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () =>
       document.removeEventListener("visibilitychange", onVisibility);
-  }, [stopDriving, stopPtz]);
+  }, [stopDriving]);
 
   function onTick(snap: GamepadSnapshot) {
     const now = performance.now();
@@ -283,8 +250,7 @@ export function GamepadDrive({
     // change applies to the very next frame. When the PTZ bridge is
     // active the right stick belongs to the camera, so the layout is
     // forced to arcade — the left stick does both.
-    const ptzApi = ptzRef.current;
-    const effectiveLayout: DriveLayout = ptzApi ? "arcade" : layoutRef.current;
+    const effectiveLayout: DriveLayout = layoutRef.current;
     const profile = getActiveControlProfile();
     const gain = 0.4 + 0.6 * Math.min(1, Math.max(0, trigger));
     const turnStick = effectiveLayout === "arcade" ? snap.lx : snap.rx;
@@ -304,25 +270,6 @@ export function GamepadDrive({
       }
     } else {
       stopDriving();
-    }
-
-    // ----- camera PTZ (right stick) ------------------------------------
-    // Rates proportional to deflection at the on-screen pad's
-    // full-throw limits; a centred stick (exactly 0 — the snapshot
-    // applies the profile's radial deadzone) holds the pose. Snapshot
-    // axes are already deadzone + expo shaped, with up = +ry, so no
-    // extra sign handling here — the pan quirk is negated inside
-    // `useCameraPtz` at the single place pan commands are produced.
-    // Deliberately independent of the deadman / drive gates: aiming
-    // the camera works from any mode, like the on-screen pad.
-    if (ptzApi) {
-      const panRate = snap.rx * PTZ_DEFAULT_RATES.pan;
-      const tiltRate = snap.ry * PTZ_DEFAULT_RATES.tilt;
-      if (panRate === 0 && tiltRate === 0) {
-        ptzApi.onStop();
-      } else {
-        ptzApi.onRate(panRate, tiltRate);
-      }
     }
 
     // ----- throttled UI updates ----------------------------------------
@@ -368,10 +315,7 @@ export function GamepadDrive({
       : armedWheelCount === 0
         ? "enable the wheels"
         : null;
-  // The camera-PTZ bridge reserves the right stick, so the drive
-  // layout is forced to arcade while it's active.
-  const ptzActive = ptz !== null;
-  const effectiveLayout: DriveLayout = ptzActive ? "arcade" : layout;
+  const effectiveLayout: DriveLayout = layout;
 
   return (
     <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev px-3.5 py-2.5 flex flex-col gap-2">
@@ -428,19 +372,9 @@ export function GamepadDrive({
       {/* Layout toggle + control profile + live twist readout. The
           readout shows what the pad is *requesting* (local), so it
           stays responsive even when telemetry lags; the DriveCard
-          shows what the firmware acked. While the camera bridge is
-          active the toggle is replaced by a note — the right stick
-          belongs to the camera, so the drive layout is locked to
-          arcade. */}
+          shows what the firmware acked. */}
       <div className="flex items-center gap-3 flex-wrap text-[12px]">
-        {ptzActive ? (
-          <span
-            className="text-[11px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-lg border border-accent/40 bg-accent/10 text-accent"
-            title="Right stick aims the camera (pan ↔, tilt ↕, centred = hold). Drive layout is locked to arcade: the left stick drives."
-          >
-            R-stick aims camera
-          </span>
-        ) : (
+        {(
           <div
             className="flex items-center gap-1 p-0.5 rounded-lg border border-border bg-bg-elev-2"
             title="Split: left stick ↕ = forward/back, right stick ↔ = turn. Arcade: the left stick does both."
@@ -485,7 +419,6 @@ export function GamepadDrive({
           chord={effectiveLayout === "arcade" ? "L-stick" : "L-stick ↕ + R-stick ↔"}
           label="drive"
         />
-        {ptzActive ? <Hint chord="R-stick" label="aim camera" /> : null}
         <Hint
           chord={`${logicalView?.chords.deadman ?? "RT"} (hold)`}
           label="deadman · speed"

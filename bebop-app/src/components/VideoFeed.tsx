@@ -1,111 +1,21 @@
-// Live MJPEG camera view shared by the video screen and the teleop
-// screen. Renders the firmware's `GET /video` multipart stream in an
+// Live MJPEG stream tile shared by the video screen and the teleop
+// screen. Renders a bebop-vision `:9092/video` multipart stream in an
 // `<img>` (the browser paints each JPEG part as it arrives — no
 // JavaScript decode loop) with:
 //
-//   * loading / error placeholder states (503 = no `video:` config),
-//   * the optional navigable-path mask overlay (subscribe-gated,
-//     painted by a rAF loop at the mask rate, fitted to the video's
-//     *displayed* rectangle so PTZ moves / letterboxing can't skew it),
+//   * loading / error placeholder states,
 //   * a parent-driven reconnect: bump `reconnectKey` to tear the
 //     multipart stream down and re-request it.
 //
-// The firmware owns the camera exclusively (see
-// `firmware/bebop-linux/src/video.rs`); this component is just another
-// subscriber alongside bebop-vision.
+// The stream is served by the bebop-vision process, which owns the
+// Orbbec cameras exclusively; this component is just another HTTP
+// subscriber. (The legacy nav-mask overlay was removed with the
+// OBSBOT pipeline, plan §9 Stage 3 — the BEV lives in Foxglove.)
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { Spinner } from "./ui";
-import type { RuntimeTransport } from "../runtime";
-import type { NavMaskView, NavView } from "../runtime";
-
-/// Nav-overlay paint colors, [r, g, b, a] per label. Navigable is a
-/// translucent green wash, caution a warmer amber; blocked cells stay
-/// transparent so the underlying video remains fully visible — the point
-/// of the overlay is "where can the robot go", not a full segmentation.
-const NAV_COLOR_NAVIGABLE: [number, number, number, number] = [46, 204, 113, 90];
-const NAV_COLOR_CAUTION: [number, number, number, number] = [241, 196, 15, 115];
-
-/// Scratch canvas the mask grid is painted into at native resolution
-/// (label → RGBA, one pixel per cell) before being scaled up onto the
-/// overlay canvas with smoothing disabled — crisp cell boundaries and
-/// a per-frame cost of one 160×90 putImageData + one drawImage.
-let navMaskScratch: HTMLCanvasElement | null = null;
-function paintNavMask(mask: NavMaskView): HTMLCanvasElement {
-  if (!navMaskScratch) {
-    navMaskScratch = document.createElement("canvas");
-  }
-  if (navMaskScratch.width !== mask.width) navMaskScratch.width = mask.width;
-  if (navMaskScratch.height !== mask.height) navMaskScratch.height = mask.height;
-  const ctx = navMaskScratch.getContext("2d");
-  if (!ctx) return navMaskScratch;
-  const image = ctx.createImageData(mask.width, mask.height);
-  const { grid } = mask;
-  for (let i = 0; i < grid.length && i < image.data.length / 4; i++) {
-    const label = grid[i];
-    const [r, g, b, a] =
-      label === 1 ? NAV_COLOR_NAVIGABLE : label === 2 ? NAV_COLOR_CAUTION : [0, 0, 0, 0];
-    const o = i * 4;
-    image.data[o] = r;
-    image.data[o + 1] = g;
-    image.data[o + 2] = b;
-    image.data[o + 3] = a;
-  }
-  ctx.putImageData(image, 0, 0);
-  return navMaskScratch;
-}
-
-/// Composite the latest mask onto the overlay canvas, fitting the video's
-/// *displayed* rectangle (`<img>` is `object-contain`, so the video may
-/// be letterboxed inside the card — the mask must land on the video
-/// pixels, not the pillarbox bars). The canvas is sized in device pixels
-/// for crisp rendering; a resize is picked up on the next frame.
-///
-/// The video rect is computed from the img's natural size — the only
-/// source of truth for what the camera is actually serving. If the img
-/// hasn't decoded a frame yet, fall back to the mask's own grid (it
-/// covers the full camera frame, so its aspect is the frame's aspect);
-/// if neither is known, skip painting entirely rather than guessing a
-/// 16:9 box and smearing the overlay across the letterbox bars.
-function drawNavOverlay(
-  canvas: HTMLCanvasElement | null,
-  img: HTMLImageElement | null,
-  mask: NavMaskView,
-): void {
-  if (!canvas) return;
-  const cssW = canvas.clientWidth;
-  const cssH = canvas.clientHeight;
-  if (cssW === 0 || cssH === 0) return;
-  const natW = img?.naturalWidth || mask.width;
-  const natH = img?.naturalHeight || mask.height;
-  if (!natW || !natH) return;
-  const scale = Math.min(cssW / natW, cssH / natH);
-  const vidW = natW * scale;
-  const vidH = natH * scale;
-  const offX = (cssW - vidW) / 2;
-  const offY = (cssH - vidH) / 2;
-  const dpr = window.devicePixelRatio || 1;
-  const pxW = Math.max(1, Math.round(vidW * dpr));
-  const pxH = Math.max(1, Math.round(vidH * dpr));
-  if (canvas.width !== pxW || canvas.height !== pxH) {
-    canvas.width = pxW;
-    canvas.height = pxH;
-  }
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  ctx.clearRect(0, 0, pxW, pxH);
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(
-    paintNavMask(mask),
-    Math.round(offX * dpr),
-    Math.round(offY * dpr),
-    pxW,
-    pxH,
-  );
-}
-
 export type VideoStreamState = "loading" | "live" | "error";
 
 interface VideoFeedProps {
@@ -120,16 +30,6 @@ interface VideoFeedProps {
   /// Stream selector understood by the bebop-vision server: color_near |
   /// color_far | depth_near | depth_far. Appended as ?stream= to the URL.
   stream?: string;
-  /// Runtime WS transport — used to subscribe/unsubscribe the nav-mask
-  /// stream while `showNav` is on. Shares the endpoint cache with the
-  /// rest of the screen.
-  transport: RuntimeTransport;
-  /// Paint the navigable-path overlay (subscribes to ~10 Hz masks).
-  showNav: boolean;
-  /// Nav runner summary from the screen's telemetry subscription —
-  /// drives the "nav unavailable / waiting for masks" hints. `null`
-  /// until the first telemetry frame.
-  nav: NavView | null;
   /// Bump to tear the multipart stream down and reconnect.
   reconnectKey: number;
   /// Stream lifecycle reports for the parent (retry buttons, etc.).
@@ -156,9 +56,6 @@ export function VideoFeed({
   baseUrl,
   videoUrl,
   stream,
-  transport,
-  showNav,
-  nav,
   reconnectKey,
   onStreamState,
   className = "",
@@ -168,7 +65,6 @@ export function VideoFeed({
   // "loading" until the first frame paints, "live" while streaming,
   // "error" when the endpoint is unreachable or answers 503.
   const [state, setState] = useState<VideoStreamState>("loading");
-  const [navMaskFresh, setNavMaskFresh] = useState(false);
   // Natural size of the decoded stream, measured off the first frame.
   // The container adopts this aspect so the video is never letterboxed
   // inside a hard-coded box: the YAML *requests* 1280x720 but the UVC
@@ -227,57 +123,6 @@ export function VideoFeed({
       img?.removeAttribute("src");
     };
   }, [streamSrc]);
-
-  // --- Nav overlay -----------------------------------------------------
-  // Masks are stored in a ref and painted by a rAF loop; the overlay
-  // runs at the mask rate (not the video rate) and re-fits the video's
-  // displayed rect every frame so PTZ moves / window resizes can't
-  // skew it. "Freshness" (mask arrived within the last ~1.5 s) is the
-  // only React state the loop feeds back, so 10 Hz masks don't
-  // re-render the whole screen.
-  const navCanvasRef = useRef<HTMLCanvasElement>(null);
-  const latestMaskRef = useRef<{ mask: NavMaskView; arrivedAt: number } | null>(
-    null,
-  );
-  useEffect(() => {
-    if (!showNav) return;
-    let disposed = false;
-    void transport.subscribeNav(10).catch(() => {
-      /* nav absent / connection loss — surfaced by the hint below */
-    });
-    const offMask = transport.onNavMask((mask) => {
-      latestMaskRef.current = { mask, arrivedAt: Date.now() };
-    });
-    let rafId = 0;
-    let lastFreshState = false;
-    const draw = () => {
-      if (disposed) return;
-      const latest = latestMaskRef.current;
-      if (latest) {
-        drawNavOverlay(navCanvasRef.current, imgRef.current, latest.mask);
-      }
-      const fresh = !!latest && Date.now() - latest.arrivedAt < 1_500;
-      if (fresh !== lastFreshState) {
-        lastFreshState = fresh;
-        setNavMaskFresh(fresh);
-      }
-      rafId = requestAnimationFrame(draw);
-    };
-    rafId = requestAnimationFrame(draw);
-    return () => {
-      disposed = true;
-      cancelAnimationFrame(rafId);
-      offMask();
-      void transport.unsubscribeNav().catch(() => {
-        /* best effort — reconnect resume logic re-arms anyway */
-      });
-      latestMaskRef.current = null;
-      const canvas = navCanvasRef.current;
-      const ctx = canvas?.getContext("2d");
-      if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
-      setNavMaskFresh(false);
-    };
-  }, [showNav, transport]);
 
   return (
     <div
@@ -343,23 +188,6 @@ export function VideoFeed({
         }}
         onError={() => report("error")}
       />
-      {/* Nav overlay canvas: stacked above the video, pointer-events
-          none so it never eats PTZ/keyboard input. Sits inside the
-          letterbox-fitted video rect (see drawNavOverlay), covering
-          the full container but only painting video pixels. */}
-      {showNav ? (
-        <canvas
-          ref={navCanvasRef}
-          className="absolute inset-0 w-full h-full pointer-events-none"
-        />
-      ) : null}
-      {showNav && !navMaskFresh ? (
-        <div className="absolute top-2 left-2 pointer-events-none rounded-[var(--radius-card)] bg-bg-elev/80 px-2 py-1 text-xs text-text-dim">
-          {nav?.present === false
-            ? "nav unavailable"
-            : "waiting for masks…"}
-        </div>
-      ) : null}
       {children}
     </div>
   );
