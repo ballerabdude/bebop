@@ -147,6 +147,7 @@ SETUP_CAN_ONLY=0
 BUILD_GS_USB=0
 SETUP_IMU=0
 SETUP_IMU_ONLY=0
+SETUP_ORBBEC_ONLY=0
 # --local: install from a local checkout instead of GitHub. Pre-built
 # release binaries are picked up from each crate's target/release/ and
 # configs/units come from the working tree. No `gh` required.
