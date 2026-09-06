@@ -225,12 +225,12 @@ class NavdUNet(nn.Module):
                       dim=1)
         y = self.dec1(y)
         logits = self.head(y)                                   # [B,3,240,424]
-        # image frame -> grid frame: the head predicts at full res, then the
-        # 60x60 grid is a learned pooling; anchor with the goal channel and
-        # sample the center-crop region of the FOV that maps to the grid.
-        logits = F.adaptive_avg_pool2d(logits, (GRID * 2, GRID * 2))
-        logits = F.interpolate(logits, (GRID, GRID), mode="bilinear",
+        # image frame -> grid frame: average-pool the FOV down to the 60x60
+        # grid (interpolate to a divisible size first — adaptive pooling to
+        # a non-factor output is not ONNX-exportable)
+        logits = F.interpolate(logits, (GRID * 2, GRID * 2), mode="bilinear",
                                align_corners=False)
+        logits = F.avg_pool2d(logits, 2)
         return logits
 
 
