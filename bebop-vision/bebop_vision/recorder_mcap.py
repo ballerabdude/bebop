@@ -470,6 +470,10 @@ class NavdRecorder:
                 hy = int(round(cy - 20 * math.cos(bearing)))
                 hx = int(round(cx + 20 * math.sin(bearing)))
                 cv2.line(img, (cx, cy), (hx, hy), (255, 255, 255), 1)
+        # Camera-aligned: body +y (left) renders LEFT, matching the color
+        # view (col 0 = robot right). Foxglove reviewers see the map in the
+        # same orientation as the cameras.
+        img = np.ascontiguousarray(img[:, ::-1])
         return json.dumps({
             "timestamp": NavdRecorder._stamp(log_ns),
             "frame_id": "navd_bev",

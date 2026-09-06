@@ -20,7 +20,10 @@ robots:
         height_m: 1.27
         pitch_deg: -66.0
         yaw_deg: 0.0
-        depth_profile: [848, 480, 30]
+        # 15 fps: hardware-sync requires matching depth/color rates across
+        # the primary+secondary pair (see far camera note); 15 fps keeps the
+        # SDK filter load under the GIL cliff while phase-locking the pair.
+        depth_profile: [848, 480, 15]
         # Camera's hardware JPEG encoder: color arrives pre-encoded and the
         # recorder stores it verbatim (saves ~65 ms/tick of CPU encode vs
         # RGB + re-encode; the capture threads also shed their decode work).
@@ -39,7 +42,12 @@ robots:
         height_m: 1.32
         pitch_deg: -17.4
         yaw_deg: 0.0
-        depth_profile: [848, 480, 10]
+        # 15 fps (was 10): must match the primary's rate for hardware sync
+        # (Orbbec multi-camera sync, Primary + Secondary-synced, delays 0).
+        # Both at 30 starves the GIL -> BEV ~1 Hz (measured 2026-09-06);
+        # 15+15 keeps the filter load at 30 frames/s total, below that cliff,
+        # and far gains 50% data rate vs the old 10 fps.
+        depth_profile: [848, 480, 15]
         color_format: mjpg
     bev:
       range_m: 3.0        # forward horizon

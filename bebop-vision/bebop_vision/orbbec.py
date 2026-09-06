@@ -205,13 +205,31 @@ class OrbbecCamera:
         ob = _sdk()
         self._ob = ob
         ob.Context.set_logger_level(ob.OBLogLevel.ERROR)
-        self._ctx = ob.Context()
+        self._ctx = ctx = ob.Context()
         try:
-            dev = self._ctx.query_devices().get_device_by_serial_number(self.serial)
+            dev = ctx.query_devices().get_device_by_serial_number(self.serial)
         except Exception as exc:
             raise RuntimeError(f"Orbbec device {self.serial} not found: {exc}") from exc
         if dev is None:
             raise RuntimeError(f"Orbbec device {self.serial} not found")
+        # Hardware sync (Orbbec multi-camera sync hub): the pair runs
+        # Primary (near) + Secondary-synced (far), all delays 0 — far frames
+        # phase-lock to the near camera's vsync, so both views capture the
+        # same instant (cross-device frame delta ~0-1 ms vs free-run drift).
+        # Requires matched depth+color rates across the pair (rig YAML).
+        _SYNC_MODE = {"near": ob.OBMultiDeviceSyncMode.PRIMARY,
+                      "far": ob.OBMultiDeviceSyncMode.SECONDARY_SYNCED}
+        if self.role in _SYNC_MODE and \
+                hasattr(dev, "set_multi_device_sync_config"):
+            cfg = dev.get_multi_device_sync_config()
+            cfg.mode = _SYNC_MODE[self.role]
+            cfg.depth_delay_us = 0
+            cfg.color_delay_us = 0
+            cfg.trigger_to_image_delay_us = 0
+            cfg.trigger_out_delay_us = 0
+            cfg.trigger_out_enable = self.role == "near"
+            cfg.frames_per_trigger = 1
+            dev.set_multi_device_sync_config(cfg)
 
         depth_sensor = None
         sensors = dev.get_sensor_list()
@@ -357,11 +375,13 @@ class OrbbecRig:
             cams = {s: c for s, c in cams.items() if c["role"] in roles}
         self.cameras = {}
         for serial, c in cams.items():
+            dp = tuple(c.get("depth_profile", (848, 480, 30)))
             self.cameras[c["role"]] = OrbbecCamera(
                 serial=serial,
                 role=c["role"],
-                depth_profile=c.get("depth_profile", (848, 480, 30)),
-                color_profile=(1280, 800, 30) if color else None,
+                depth_profile=dp,
+                # color rate must match depth rate (hardware sync pairing)
+                color_profile=(1280, 800, dp[2]) if color else None,
                 config_dir=config_dir,
                 mask_rects=c.get("self_mask_pixels"),
                 color_format=c.get("color_format", "rgb"))
