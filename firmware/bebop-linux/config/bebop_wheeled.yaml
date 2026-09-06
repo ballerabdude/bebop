@@ -91,21 +91,3 @@ server:
   # takes over immediately — last writer wins).
   operator_grace_ms: 2000
 
-# MJPEG camera relay. The firmware owns the camera exclusively and serves
-# GET /video (multipart/x-mixed-replace) so the operator app (<img src>)
-# and bebop-vision (OpenCV capture source) share one device. Omit this
-# block on robots without a camera — the endpoint then returns 503.
-video:
-  device: /dev/video0
-  width: 1280
-  height: 720
-  fps: 30
-
-# Navigable-path inference on the camera feed (see `src/nav.rs`).
-# Presence of the block enables the runner; the model is a drop-in
-# `navseg.onnx` + `navseg.onnx.data` next to this YAML (export from
-# bebop-vision with `tools/export_navseg_onnx.py`), overridable with
-# `--nav <PATH>`. Soft-fail: a missing model leaves the robot fully
-# operational, just without nav telemetry / masks.
-nav:
-  rate_hz: 10

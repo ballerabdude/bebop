@@ -2,67 +2,14 @@
 
 use crate::imu::ImuShared;
 use crate::mode::Mode;
-use crate::nav::NavHub;
 use crate::policy_io::{self, PolicyIoShared};
 use crate::powerboard::describe_faults;
 use crate::safety::limits::MotorSnapshot;
 use crate::safety::power_monitor::PowerBoardSnapshot;
 use crate::safety::{bus_pool::read_can_state, Supervisor};
-use crate::video::VideoHub;
 use bebop_proto::runtime::v1 as proto;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
-/// Camera gimbal state for the telemetry / snapshot frames. The default
-/// instance (`present=false`) covers robots without a `video:` config.
-fn build_camera_state(video: &Option<Arc<VideoHub>>) -> proto::CameraState {
-    match video {
-        Some(hub) => {
-            let (pan_deg, tilt_deg, moving) = hub.ptz.state();
-            proto::CameraState {
-                present: true,
-                pan_deg,
-                tilt_deg,
-                moving,
-            }
-        }
-        None => proto::CameraState::default(),
-    }
-}
-
-/// Nav-runner summary for the telemetry / snapshot frames. Default
-/// instance (`present=false`) covers robots without a `nav:` block or
-/// with a model that failed to load; `received=false` until the first
-/// mask is published.
-fn build_nav_state(nav: &Option<Arc<NavHub>>) -> proto::NavState {
-    let Some(hub) = nav else {
-        return proto::NavState::default();
-    };
-    if !hub.present() {
-        return proto::NavState::default();
-    }
-    let provider = hub.provider();
-    let latest = hub.subscribe();
-    let guard = latest.borrow();
-    match guard.as_ref() {
-        Some(frame) => proto::NavState {
-            present: true,
-            received: true,
-            mask_hz: frame.infer_hz,
-            provider,
-            seq: frame.seq,
-            ts_us: frame.ts_us,
-            frac_blocked: frame.frac_blocked,
-            frac_navigable: frame.frac_navigable,
-            frac_caution: frame.frac_caution,
-        },
-        None => proto::NavState {
-            present: true,
-            provider,
-            ..Default::default()
-        },
-    }
-}
 
 fn motor_state_to_proto(m: &MotorSnapshot) -> proto::MotorState {
     proto::MotorState {
@@ -324,8 +271,6 @@ pub fn build_snapshot(
     imu: &ImuShared,
     imu_present: bool,
     policy_io: &PolicyIoShared,
-    video: &Option<Arc<VideoHub>>,
-    nav: &Option<Arc<NavHub>>,
     conn_id: u64,
 ) -> proto::Snapshot {
     let motors = sup.snapshot_motors();
@@ -334,6 +279,8 @@ pub fn build_snapshot(
     let estop_latched = sup.estop_active();
     let estop_reason = sup.estop_reason_human().unwrap_or_default();
     proto::Snapshot {
+        // `camera`/`nav` retired with the OBSBOT removal (plan §9): the
+        // deprecated proto fields stay but carry no data.
         host_unix_ms: now_unix_ms(),
         mode: mode_proto,
         estop_latched,
@@ -345,8 +292,7 @@ pub fn build_snapshot(
         policy_io: Some(build_policy_io_stats(policy_io)),
         wheels: wheels.iter().map(wheel_state_to_proto).collect(),
         drive: Some(build_drive_state(sup, conn_id)),
-        camera: Some(build_camera_state(video)),
-        nav: Some(build_nav_state(nav)),
+        ..Default::default()
     }
 }
 
@@ -355,8 +301,6 @@ pub fn build_telemetry(
     imu: &ImuShared,
     imu_present: bool,
     policy_io: &PolicyIoShared,
-    video: &Option<Arc<VideoHub>>,
-    nav: &Option<Arc<NavHub>>,
     conn_id: u64,
 ) -> proto::TelemetryFrame {
     let motors = sup.snapshot_motors();
@@ -365,6 +309,7 @@ pub fn build_telemetry(
     let estop_latched = sup.estop_active();
     let estop_reason = sup.estop_reason_human().unwrap_or_default();
     proto::TelemetryFrame {
+        // see Snapshot note above
         host_unix_ms: now_unix_ms(),
         mode: mode_proto,
         estop_latched,
@@ -376,8 +321,7 @@ pub fn build_telemetry(
         policy_io: Some(build_policy_io_stats(policy_io)),
         wheels: wheels.iter().map(wheel_state_to_proto).collect(),
         drive: Some(build_drive_state(sup, conn_id)),
-        camera: Some(build_camera_state(video)),
-        nav: Some(build_nav_state(nav)),
+        ..Default::default()
     }
 }
 

@@ -473,57 +473,6 @@ pub struct RobotConfig {
     /// state consumed by the WS telemetry pump. Policy observations still
     /// use synthetic IMU until explicitly wired.
     pub imu: Option<ImuConfig>,
-    /// When set, [`crate::video`] owns the camera and serves
-    /// `GET /video` as an MJPEG stream. Optional — robots without a
-    /// camera omit the block and the endpoint returns 503.
-    pub video: Option<VideoConfig>,
-    /// When set, [`crate::nav`] runs the navigable-path model on the
-    /// camera feed and publishes masks via telemetry + the subscribe-
-    /// gated `NavMaskFrame` push. Requires `video:`. Optional —
-    /// omitted on robots that don't run perception.
-    pub nav: Option<NavConfig>,
-}
-
-/// MJPEG camera relay (see `video:` in the robot YAML). The camera
-/// compresses in hardware; the host only shuttles bytes and fans them
-/// out to any number of HTTP subscribers.
-#[derive(Debug, Clone)]
-pub struct VideoConfig {
-    /// V4L2 device path, e.g. `/dev/video0`.
-    pub device: String,
-    /// Requested capture width. The driver negotiates the nearest mode.
-    pub width: u32,
-    /// Requested capture height.
-    pub height: u32,
-    /// Target publish rate in frames per second. Faster camera modes are
-    /// throttled down to this.
-    pub fps: u32,
-}
-
-impl VideoConfig {
-    /// Broadcast queue depth: enough to absorb scheduler jitter without
-    /// buffering a meaningful backlog for slow clients.
-    pub fn queue_depth(&self) -> usize {
-        4
-    }
-}
-
-/// Navigable-path runner configuration (see `nav:` in the robot YAML).
-/// Presence of the block enables the runner; the model itself is a
-/// sibling `navseg.onnx` of the joint YAML (same drop-in convention as
-/// `policy.onnx`), overridable with `--nav` on the CLI.
-#[derive(Debug, Clone)]
-pub struct NavConfig {
-    /// Target mask rate in Hz. The runner processes at most this many
-    /// camera frames per second (it always picks the freshest frame, so
-    /// a low rate doesn't build a backlog). Clamp: [1, 30].
-    pub rate_hz: u32,
-}
-
-impl Default for NavConfig {
-    fn default() -> Self {
-        Self { rate_hz: 10 }
-    }
 }
 
 /// Optional BNO080/BNO085 SPI reader (see `imu:` in the robot YAML).
@@ -1011,48 +960,6 @@ impl RobotConfig {
             .transpose()
             .context("invalid `imu:` section")?;
 
-        let video = raw
-            .video
-            .map(|v| -> Result<VideoConfig> {
-                let device = v
-                    .device
-                    .ok_or_else(|| anyhow!("video.device is required"))?;
-                let width = v.width.unwrap_or(1280);
-                let height = v.height.unwrap_or(720);
-                let fps = v.fps.unwrap_or(30);
-                if width == 0 || height == 0 {
-                    return Err(anyhow!("video.width/height must be >= 1"));
-                }
-                if fps == 0 || fps > 60 {
-                    return Err(anyhow!("video.fps must be in [1, 60]; got {fps}"));
-                }
-                Ok(VideoConfig {
-                    device,
-                    width,
-                    height,
-                    fps,
-                })
-            })
-            .transpose()
-            .context("invalid `video:` section")?;
-
-        let nav = raw
-            .nav
-            .map(|n| -> Result<NavConfig> {
-                let rate_hz = n.rate_hz.unwrap_or(10);
-                if rate_hz == 0 || rate_hz > 30 {
-                    return Err(anyhow!("nav.rate_hz must be in [1, 30]; got {rate_hz}"));
-                }
-                if video.is_none() {
-                    return Err(anyhow!(
-                        "`nav:` requires a `video:` block (no camera to run on)"
-                    ));
-                }
-                Ok(NavConfig { rate_hz })
-            })
-            .transpose()
-            .context("invalid `nav:` section")?;
-
         Ok(Self {
             joints,
             wheels,
@@ -1062,8 +969,6 @@ impl RobotConfig {
             power,
             policy,
             imu,
-            video,
-            nav,
         })
     }
 
@@ -1130,8 +1035,6 @@ struct RawConfig {
     server: Option<RawServer>,
     power: Option<RawPower>,
     imu: Option<RawImu>,
-    video: Option<RawVideo>,
-    nav: Option<RawNav>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1156,23 +1059,6 @@ struct RawImu {
     /// SPI clock in Hz. Defaults to 1 MHz. See [`ImuConfig::spi_max_speed_hz`].
     spi_max_speed_hz: Option<u32>,
     mount: Option<RawMount>,
-}
-
-/// `video:` section — MJPEG camera relay. Only `device:` is required;
-/// size and rate default to 1280x720 @ 30.
-#[derive(Debug, Default, Deserialize)]
-struct RawVideo {
-    device: Option<String>,
-    width: Option<u32>,
-    height: Option<u32>,
-    fps: Option<u32>,
-}
-
-/// `nav:` section — navigable-path inference on the camera feed. All
-/// fields optional; enabling is the presence of the block itself.
-#[derive(Debug, Default, Deserialize)]
-struct RawNav {
-    rate_hz: Option<u32>,
 }
 
 /// Per-axis mount remap: for each sensor axis, "which body axis does this

@@ -7,12 +7,10 @@
 use crate::drive::Twist;
 use crate::imu::ImuShared;
 use crate::mode::Mode;
-use crate::nav::NavHub;
 use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
 use crate::safety::limits::BreachReason;
 use crate::safety::Supervisor;
-use crate::video::VideoHub;
 use bebop_proto::runtime::v1 as proto;
 use bebop_proto::Message;
 use bytes::Bytes;
@@ -42,8 +40,6 @@ pub fn handle_client_message(
     imu_present: bool,
     policy_io: &PolicyIoShared,
     policy_control: &PolicyControlShared,
-    video: &Option<Arc<VideoHub>>,
-    nav: &Option<Arc<NavHub>>,
     conn_id: u64,
     bytes: &[u8],
 ) -> proto::ServerRuntimeMessage {
@@ -63,6 +59,15 @@ pub fn handle_client_message(
 
     use proto::client_runtime_message::Payload as P;
     match payload {
+        // Deprecated OBSBOT-era messages (plan §9): accepted for wire
+        // compatibility, ignored. Proto fields get `reserved` in Stage 4.
+        P::SetCameraPose(_) | P::SubscribeNav(_) | P::UnsubscribeNav(_) => {
+            ack(
+                request_id,
+                "deprecated: the camera/legacy nav pipeline was removed".into(),
+            )
+        }
+
         P::SubscribeTelemetry(s) => {
             let rate = s.rate_hz;
             ack(
@@ -71,21 +76,8 @@ pub fn handle_client_message(
             )
         }
         P::UnsubscribeTelemetry(_) => ack(request_id, "telemetry unsubscribed".into()),
-        P::SubscribeNav(s) => {
-            let rate = s.rate_hz;
-            let available = nav.as_ref().map(|h| h.present()).unwrap_or(false);
-            ack(
-                request_id,
-                if available {
-                    format!("nav masks subscribed (rate hint = {rate} Hz)")
-                } else {
-                    "nav masks unavailable: no `nav:` config or model not loaded".into()
-                },
-            )
-        }
-        P::UnsubscribeNav(_) => ack(request_id, "nav masks unsubscribed".into()),
         P::GetSnapshot(_) => {
-            snapshot_response(request_id, sup, imu, imu_present, policy_io, video, nav, conn_id)
+            snapshot_response(request_id, sup, imu, imu_present, policy_io, conn_id)
         }
         P::SetMotorEnabled(req) => {
             let result = if req.enabled {
@@ -249,24 +241,6 @@ pub fn handle_client_message(
                 Err(e) => error_response(request_id, fmt_err(&e)),
             }
         }
-        // Deliberately not mode-gated: moving the camera is not
-        // safety-relevant, and PTZ look-around during dataset recording
-        // (any mode) is a core workflow.
-        P::SetCameraPose(req) => {
-            match video {
-                Some(hub) => match hub.ptz.set_pose(req.pan_deg, req.tilt_deg) {
-                    Ok((pan, tilt)) => ack(
-                        request_id,
-                        format!("camera pose -> pan {pan:.1}°, tilt {tilt:.1}°"),
-                    ),
-                    Err(e) => error_response(request_id, fmt_err(&e)),
-                },
-                None => error_response(
-                    request_id,
-                    "no camera configured (missing `video:` in robot yaml)".into(),
-                ),
-            }
-        }
         P::SetWheelEnabled(req) => {
             let result = if req.enabled {
                 sup.arm_wheel(&req.wheel_name)
@@ -351,22 +325,12 @@ pub fn snapshot_response(
     imu: &ImuShared,
     imu_present: bool,
     policy_io: &PolicyIoShared,
-    video: &Option<Arc<VideoHub>>,
-    nav: &Option<Arc<crate::nav::NavHub>>,
     conn_id: u64,
 ) -> proto::ServerRuntimeMessage {
     proto::ServerRuntimeMessage {
         request_id,
         payload: Some(proto::server_runtime_message::Payload::Snapshot(
-            crate::server::telemetry::build_snapshot(
-                sup,
-                imu,
-                imu_present,
-                policy_io,
-                video,
-                nav,
-                conn_id,
-            ),
+            crate::server::telemetry::build_snapshot(sup, imu, imu_present, policy_io, conn_id),
         )),
     }
 }
