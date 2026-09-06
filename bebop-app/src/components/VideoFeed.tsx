@@ -117,6 +117,9 @@ interface VideoFeedProps {
   /// firmware runtime port — pass `http://<ip>:9092/video` here. When
   /// omitted, falls back to `<baseUrl>/video` (legacy firmware stream).
   videoUrl?: string;
+  /// Stream selector understood by the bebop-vision server: color_near |
+  /// color_far | depth_near | depth_far. Appended as ?stream= to the URL.
+  stream?: string;
   /// Runtime WS transport — used to subscribe/unsubscribe the nav-mask
   /// stream while `showNav` is on. Shares the endpoint cache with the
   /// rest of the screen.
@@ -152,6 +155,7 @@ interface VideoFeedProps {
 export function VideoFeed({
   baseUrl,
   videoUrl,
+  stream,
   transport,
   showNav,
   nav,
@@ -177,11 +181,14 @@ export function VideoFeed({
     null,
   );
 
-  const url = videoUrl ?? `${baseUrl}/video`;
+  const base = videoUrl ?? `${baseUrl}/video`;
+  const url = stream ? `${base}?stream=${stream}` : base;
   // Cache-busted variant actually assigned to the <img>: bumping the
   // key remounts the element, tearing the multipart stream down and
   // reconnecting — the retry path.
-  const streamSrc = reconnectKey ? `${url}?r=${reconnectKey}` : url;
+  const streamSrc = reconnectKey
+    ? `${url}&r=${reconnectKey}`
+    : url;
 
   const report = (s: VideoStreamState) => {
     setState(s);

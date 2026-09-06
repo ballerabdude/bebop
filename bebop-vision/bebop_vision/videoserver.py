@@ -2,20 +2,36 @@
 
 Lives INSIDE the bebop-vision process that owns the cameras (camera
 exclusivity, docs §2.7) — main.py --goal-drive / --record-navd start it
-after the rig opens. Serves the camera hardware-encoded MJPEG frames as
-multipart MJPEG on :9092/video — the same wire format the app's <img>
-already consumed from the firmware /video route, with zero CPU encode.
+after the rig opens.
 
 Routes:
-  /video     multipart/x-mixed-replace MJPEG (X-Timestamp-Us per part)
-  /snapshot  single JPEG (latest frame)
-  /healthz   liveness
+  /video?stream=<name>   multipart/x-mixed-replace MJPEG
+       streams: color_near (default) | color_far | depth_near | depth_far
+       color streams pass the camera hardware-encoded JPEG through untouched
+       (zero CPU); depth streams render a turbo-colormapped 424x240 view
+       (0-4 m, invalid = black) per frame (~3 ms).
+  /snapshot?stream=...   single JPEG of the latest frame
+  /healthz               liveness
 """
 
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+import cv2
+import numpy as np
 
 PACING_S = 1.0 / 20.0      # serve at most 20 fps; frames arrive at 15
+STREAMS = ("color_near", "color_far", "depth_near", "depth_far")
+
+
+def render_depth(depth_mm):
+    """uint16 (480, 848) mm -> half-res BGR turbo view, 0-4 m, invalid=black."""
+    m = depth_mm > 0
+    v = np.clip(depth_mm.astype(np.float32) / 4000.0, 0, 1) * 255
+    vis = cv2.applyColorMap(v.astype(np.uint8), cv2.COLORMAP_TURBO)
+    vis[~m] = 0
+    return cv2.resize(vis, (424, 240), interpolation=cv2.INTER_AREA)
 
 
 class VideoServer:
@@ -37,14 +53,41 @@ class VideoServer:
             def log_message(self, fmt, *args):
                 pass
 
+            def _pick(self):
+                """(camera role, data kind) from ?stream=, defaulting to
+                color_near. Names are {kind}_{role}: color_near, depth_far."""
+                q = parse_qs(urlparse(self.path).query)
+                name = (q.get("stream") or ["color_near"])[0]
+                if name not in STREAMS:
+                    name = "color_near"
+                kind, role = name.rsplit("_", 1)
+                return name, role, kind
+
+            def _frame(self, role, kind):
+                cam = server.rig.cameras.get(role)
+                return cam.read() if cam else None
+
+            def _body(self, fr, kind):
+                if kind == "color":
+                    return fr.color_jpeg
+                if fr.depth is None:
+                    return None
+                ok, jpg = cv2.imencode(
+                    ".jpg", render_depth(fr.depth),
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                return jpg.tobytes() if ok else None
+
             def do_GET(self):
                 if self.path.startswith("/snapshot"):
-                    f = server.rig.cameras.get("near")
-                    fr = f.read() if f else None
-                    if fr is None or fr.color_jpeg is None:
+                    name, role, kind = self._pick()
+                    fr = self._frame(role, kind)
+                    if fr is None:
                         self.send_error(503, "no frame")
                         return
-                    body = fr.color_jpeg
+                    body = self._body(fr, kind)
+                    if not body:
+                        self.send_error(503, "no frame data")
+                        return
                     self.send_response(200)
                     self.send_header("Content-Type", "image/jpeg")
                     self.send_header("Content-Length", str(len(body)))
@@ -56,28 +99,28 @@ class VideoServer:
                     self.end_headers()
                     self.wfile.write(b"ok")
                 elif self.path.startswith("/video"):
+                    name, role, kind = self._pick()
                     self.send_response(200)
                     self.send_header("Content-Type",
                                      "multipart/x-mixed-replace; "
                                      "boundary=frame")
                     self.end_headers()
-                    cam = server.rig.cameras.get("near")
                     last = None
                     try:
                         while True:
-                            fr = cam.read() if cam else None
-                            if fr is not None and fr is not last \
-                                    and fr.color_jpeg:
+                            fr = self._frame(role, kind)
+                            if fr is not None and fr is not last:
                                 last = fr
-                                body = fr.color_jpeg
-                                self.wfile.write(
-                                    b"--frame\r\nContent-Type: image/jpeg"
-                                    b"\r\nX-Timestamp-Us: "
-                                    + str(fr.stamp_us).encode()
-                                    + b"\r\nContent-Length: "
-                                    + str(len(body)).encode()
-                                    + b"\r\n\r\n" + body + b"\r\n")
-                                self.wfile.flush()
+                                body = self._body(fr, kind)
+                                if body:
+                                    self.wfile.write(
+                                        b"--frame\r\nContent-Type: "
+                                        b"image/jpeg\r\nX-Timestamp-Us: "
+                                        + str(fr.stamp_us).encode()
+                                        + b"\r\nContent-Length: "
+                                        + str(len(body)).encode()
+                                        + b"\r\n\r\n" + body + b"\r\n")
+                                    self.wfile.flush()
                             time.sleep(PACING_S)
                     except (BrokenPipeError, ConnectionResetError,
                             ConnectionAbortedError, OSError):
@@ -96,7 +139,7 @@ class VideoServer:
             target=self._httpd.serve_forever, kwargs={"poll_interval": 0.25},
             daemon=True, name="videoserver")
         self._thread.start()
-        print(f"[videoserver] serving near-camera MJPEG on :{self.port}/video")
+        print(f"[videoserver] serving streams {STREAMS} on :{self.port}/video")
 
     def stop(self):
         if self._httpd is not None:

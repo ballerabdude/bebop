@@ -45,6 +45,13 @@ import { GamepadDrive } from "../components/GamepadDrive";
 import { PtzJoystick, PTZ_KEYS_IJKL } from "../components/PtzJoystick";
 import { useCameraPtz } from "../components/useCameraPtz";
 import { VideoFeed } from "../components/VideoFeed";
+
+const VIDEO_STREAMS: { id: string; label: string }[] = [
+  { id: "color_near", label: "Color" },
+  { id: "depth_near", label: "Depth" },
+  { id: "color_far", label: "Far" },
+  { id: "depth_far", label: "Far depth" },
+];
 import { Banner, Button } from "../components/ui";
 import { useGamepad } from "../input";
 import { getOrCreateRuntimeTransport } from "../runtime";
@@ -102,6 +109,7 @@ export function TeleopScreen({
   // loading / error placeholders while the WS connects in the
   // background.
   const [reconnectKey, setReconnectKey] = useState(0);
+  const [videoStream, setVideoStream] = useState("color_near");
   const [streamState, setStreamState] = useState<
     "loading" | "live" | "error"
   >("loading");
@@ -674,6 +682,7 @@ export function TeleopScreen({
         <VideoFeed
           baseUrl={`http://${robotIp}:${runtimePort}`}
           videoUrl={`http://${robotIp}:9092/video`}
+          stream={videoStream}
           transport={transport}
           showNav={showNav}
           nav={nav}
@@ -685,7 +694,24 @@ export function TeleopScreen({
               : "w-full -mx-4 sm:mx-0 sm:rounded-[var(--radius-card)] sm:border sm:border-border"
           }
           maxHeight={fullscreen ? undefined : "72dvh"}
-        />
+        >
+          <div className="absolute right-2 top-2 z-10 flex gap-1">
+            {VIDEO_STREAMS.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => setVideoStream(opt.id)}
+                className={`rounded px-2 py-0.5 text-[11px] font-medium backdrop-blur-sm transition-colors ${
+                  videoStream === opt.id
+                    ? "bg-white/85 text-black"
+                    : "bg-black/50 text-white/80 hover:bg-black/70"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </VideoFeed>
         {fullscreen && wheeled && !padConnected ? (
           <div className="absolute bottom-4 left-4 z-10 rounded-[var(--radius-card)] border border-white/10 bg-bg-elev/75 backdrop-blur-md p-2 max-sm:scale-90 max-sm:origin-bottom-left">
             {drivePad}
