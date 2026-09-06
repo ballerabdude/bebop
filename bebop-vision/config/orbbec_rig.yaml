@@ -1,0 +1,56 @@
+# orbbec_rig.yaml — measured once per robot; source of truth for extrinsics
+# (docs/navd.md Section 6.2). Convention: pitch_deg negative = camera center
+# points below the horizon. Body frame: x forward, y left, z up; camera
+# optical frame: x right, y down, z forward.
+#
+# depth_profile is the *preferred* profile; the camera service negotiates
+# down to what the device advertises (the far camera on the unfixed USB 2.0
+# cable drops to 848x480@10 and restores to 30 fps when the cable is swapped).
+robots:
+  default:
+    cameras:
+      CPBLC53000PE:
+        role: near
+        height_m: 1.27
+        pitch_deg: -66.0
+        yaw_deg: 0.0
+        depth_profile: [848, 480, 30]
+        # Self-view rects (x0, y0, x1, y1 px): the chassis frame + foam
+        # boards on the left rail, measured from the mounted view
+        # 2026-09-06. The rigid mount keeps these pixels fixed.
+        self_mask_pixels:
+          - [340, 380, 880, 800]
+          - [240, 230, 530, 430]
+      CPBLC53000ED:
+        role: far
+        height_m: 1.32
+        pitch_deg: -17.4
+        yaw_deg: 0.0
+        depth_profile: [848, 480, 30]
+    bev:
+      range_m: 3.0        # forward horizon
+      width_m: 3.0        # lateral span (-1.5..+1.5)
+      cell_m: 0.05        # 60x60 cells
+      near_authority_m: 1.5
+      # Body-frame dead disc: chassis-silhouette stereo artifacts sit just
+      # outside the self-view mask; nothing inside this radius is
+      # actionable (planner rays start at 0.35 m).
+      min_range_m: 0.55
+    robot:
+      radius_m: 0.20      # inflation radius for planning
+      # Self-view mask: the mast cameras see the robot's own chassis at
+      # fixed body-frame positions; those returns are dropped before
+      # classification. Measured 2026-09-05 from the mounted rig (mast
+      # strip at y~-0.1, frame rails to y +0.5 / x +0.9).
+      self_mask:
+        x_range_m: [-0.30, 1.00]
+        y_range_m: [-0.30, 0.60]
+        min_height_m: 0.05
+    safety:
+      max_frame_age_s: 0.3
+      plane_min_inliers: 50
+      # The far camera sees less floor (wall-heavy scenes) — a lower floor
+      # fraction still qualifies its plane fit.
+      plane_min_frac: 0.10
+      plane_residual_m: 0.015
+      hazard_drop_m: 0.05

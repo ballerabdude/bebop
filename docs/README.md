@@ -8,6 +8,7 @@ to the code they describe.
 |--------------------------------------|--------------------------------------------------------------------------|
 | [`onboarding.md`](onboarding.md)     | Dev-machine setup, first build, deploying to a Jetson, mobile app dev.   |
 | [`architecture.md`](architecture.md) | The components (`jetson-agent/`, `bebop-app/`, robot-app container), boot sequence, and trust boundaries. |
+| [`navd.md`](navd.md)                 | Depth-camera obstacle avoidance: dual Gemini 335Lg → BEV occupancy → goal-conditioned planner → learned student (design + phased spec). |
 | [`ble-protocol.md`](ble-protocol.md) | GATT service / characteristic UUIDs, length-prefixed framing, the protobuf envelope, and the (planned) auth handshake. |
 | [`ota-flow.md`](ota-flow.md)         | How the agent polls the manifest server, swaps the robot-app container, and how to roll back / channel-promote. |
 
