@@ -109,7 +109,18 @@ export function TeleopScreen({
   // loading / error placeholders while the WS connects in the
   // background.
   const [reconnectKey, setReconnectKey] = useState(0);
-  const [videoStream, setVideoStream] = useState("color_near");
+  // Concurrent operator streams: each toggle opens/closes its own MJPEG
+  // connection to the bebop-vision server (:9092). Color streams are
+  // camera-encoded passthrough; depth streams are rendered server-side.
+  const [videoStreams, setVideoStreams] = useState<string[]>(["color_near"]);
+  const toggleStream = (id: string) =>
+    setVideoStreams((cur) =>
+      cur.includes(id)
+        ? cur.length > 1
+          ? cur.filter((s) => s !== id) // never close the last tile
+          : cur
+        : [...cur, id],
+    );
   const [streamState, setStreamState] = useState<
     "loading" | "live" | "error"
   >("loading");
@@ -679,39 +690,63 @@ export function TeleopScreen({
           drops the card chrome so the video is edge-to-edge — the
           aspect follows the negotiated stream, not a hard-coded box. */}
       <div className={fullscreen ? "relative flex-1 min-h-0" : "contents"}>
-        <VideoFeed
-          baseUrl={`http://${robotIp}:${runtimePort}`}
-          videoUrl={`http://${robotIp}:9092/video`}
-          stream={videoStream}
-          transport={transport}
-          showNav={showNav}
-          nav={nav}
-          reconnectKey={reconnectKey}
-          onStreamState={setStreamState}
+        <div
           className={
             fullscreen
-              ? "w-full h-full"
-              : "w-full -mx-4 sm:mx-0 sm:rounded-[var(--radius-card)] sm:border sm:border-border"
+              ? "grid h-full min-h-0 grid-cols-1 gap-1 overflow-hidden"
+              : "grid grid-cols-1 gap-2 sm:grid-cols-2"
           }
-          maxHeight={fullscreen ? undefined : "72dvh"}
         >
-          <div className="absolute right-2 top-2 z-10 flex gap-1">
-            {VIDEO_STREAMS.map((opt) => (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => setVideoStream(opt.id)}
-                className={`rounded px-2 py-0.5 text-[11px] font-medium backdrop-blur-sm transition-colors ${
-                  videoStream === opt.id
-                    ? "bg-white/85 text-black"
-                    : "bg-black/50 text-white/80 hover:bg-black/70"
-                }`}
+          {videoStreams.map((id) => {
+            const opt = VIDEO_STREAMS.find((o) => o.id === id)!;
+            return (
+              <VideoFeed
+                key={id}
+                baseUrl={`http://${robotIp}:${runtimePort}`}
+                videoUrl={`http://${robotIp}:9092/video`}
+                stream={id}
+                transport={transport}
+                showNav={showNav && id === videoStreams[0]}
+                nav={nav}
+                reconnectKey={reconnectKey}
+                onStreamState={setStreamState}
+                className={
+                  fullscreen
+                    ? "w-full h-full min-h-0"
+                    : "w-full -mx-4 sm:mx-0 sm:rounded-[var(--radius-card)] sm:border sm:border-border"
+                }
+                maxHeight={fullscreen ? undefined : "72dvh"}
               >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </VideoFeed>
+                <div className="absolute right-2 top-2 z-10 flex gap-1">
+                  {VIDEO_STREAMS.map((o) => (
+                    <button
+                      key={o.id}
+                      type="button"
+                      onClick={() => toggleStream(o.id)}
+                      className={`rounded px-2 py-0.5 text-[11px] font-medium backdrop-blur-sm transition-colors ${
+                        videoStreams.includes(o.id)
+                          ? "bg-white/85 text-black"
+                          : "bg-black/50 text-white/80 hover:bg-black/70"
+                      }`}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                  {videoStreams.length > 1 ? (
+                    <button
+                      type="button"
+                      onClick={() => toggleStream(id)}
+                      className="rounded bg-black/50 px-2 py-0.5 text-[11px] font-medium text-white/80 backdrop-blur-sm hover:bg-black/70"
+                      aria-label={`close ${opt.label}`}
+                    >
+                      ✕
+                    </button>
+                  ) : null}
+                </div>
+              </VideoFeed>
+            );
+          })}
+        </div>
         {fullscreen && wheeled && !padConnected ? (
           <div className="absolute bottom-4 left-4 z-10 rounded-[var(--radius-card)] border border-white/10 bg-bg-elev/75 backdrop-blur-md p-2 max-sm:scale-90 max-sm:origin-bottom-left">
             {drivePad}
