@@ -524,7 +524,10 @@ reflective floor).
   Restart=on-failure) + `install-jetson.sh` step shipping the code + a pinned
   wheel set (or the venv). Autonomy as a managed service, not a dev shell.
 - **Telemetry**: BEV grid push over WS mirroring `NavMaskFrame`
-  (grid bytes + fracs + provider); app/Foxglove overlay.
+  (grid bytes + fracs + provider); app/Foxglove overlay. Interim
+  (shipped): the operator app watches the planner's grid live via the
+  videoserver's `bev` MJPEG stream (`:9092/video?stream=bev`,
+  `VideoServer.publish_bev`).
 - **App integration**: proto extension — client oneof field 22
   `SetNavigationGoal { oneof goal { float heading_rad; Vec2 point_odom; } }`
   consumed by the navd process via its existing WS client; app UI = tap on

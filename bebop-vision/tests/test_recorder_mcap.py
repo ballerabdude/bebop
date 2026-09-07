@@ -191,6 +191,25 @@ def test_extractor_layout(tmp_path, builder):
         assert img is not None and img.shape == (800, 1280, 3), sub
 
 
+def test_on_grid_callback(tmp_path, builder):
+    """The parent's live-BEV hook fires per tick with (grid, goal)."""
+    from bebop_vision.goal_planner import GoalSlot, GoalHeading
+    rig, robot, slot = FakeRig(), FakeRobot(), GoalSlot()
+    slot.set(GoalHeading(0.3))
+    calls = []
+    path = tmp_path / "session.mcap"
+    rec = NavdRecorder(rig, robot, slot, path, builder=builder,
+                       rate_hz=20.0,
+                       on_grid=lambda grid, goal: calls.append((grid, goal)))
+    rec.start()
+    time.sleep(0.6)
+    rec.stop()
+    assert len(calls) >= 3
+    grid, goal = calls[-1]
+    assert grid is not None and grid is rec.grid
+    assert goal is slot.get()
+
+
 def test_prune_sessions(tmp_path):
     from main import _prune_sessions
     for i, size in enumerate((300, 200, 100)):

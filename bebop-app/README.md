@@ -22,9 +22,10 @@ Today:
   agent control surface (`WsAgentTransport`).
 * **Motor bench** — live per-joint telemetry, dial-in slider with
   re-zero affordance, power-board card, sticky toolbar with E-STOP.
-* **Live video** — the firmware's MJPEG feed (`GET /video`) with
-  operator PTZ controls (on-screen pad + WASD) and the optional
-  navigable-path mask overlay.
+* **Live video** — the bebop-vision process's MJPEG streams
+  (`:9092/video?stream=...`): color + depth for both Orbbec cameras
+  and the BEV planner view (the fused occupancy grid the robot
+  navigates on), each a toggleable tile (`VideoScreen`).
 * **Teleop** — live video and driving in one screen (`TeleopScreen`),
   the primary way to operate a wheeled robot: the feed front and
   center, a sticky HUD (link / mode / wheels / battery / camera pose /
@@ -304,10 +305,8 @@ bebop-app/
 │   │   ├── bebop_pb.ts            # Agent envelope (BLE + WS-agent)
 │   │   └── bebop_runtime_pb.ts    # bebop-linux runtime envelope
 │   ├── components/       # Shared UI primitives + input bridges
-│   │   ├── VideoFeed.tsx          # MJPEG feed + nav overlay (video/teleop)
+│   │   ├── VideoFeed.tsx          # MJPEG feed tile (video/teleop)
 │   │   ├── DriveJoystick.tsx      # Differential-drive pad (bench/teleop)
-│   │   ├── PtzJoystick.tsx        # Camera pad, keyset-configurable
-│   │   ├── useCameraPtz.ts        # PTZ rate-integration + coalesced send
 │   │   └── GamepadDriver/Drive    # Bluetooth pad → dial-in / drive bridges
 │   └── screens/          # Welcome, Scan, Wifi, Config, Done, Dashboard,
 │                         # ConnectByIp, MotorBench, Teleop, Video,

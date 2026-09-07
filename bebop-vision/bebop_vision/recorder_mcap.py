@@ -169,13 +169,17 @@ class NavdRecorder:
     """Capture the navd teleop session to MCAP at a fixed rate."""
 
     def __init__(self, rig, robot, goal_slot, out_path, builder=None,
-                 rate_hz=10.0, jpeg_quality=85, workers=6):
+                 rate_hz=10.0, jpeg_quality=85, workers=6, on_grid=None):
         self.rig = rig
         self.robot = robot
         self.goal_slot = goal_slot
         self.rate_hz = rate_hz
         self.jpeg_quality = jpeg_quality
         self.builder = builder or BevBuilder()
+        # Optional parent hook, called with (grid, goal) after every fused
+        # tick — main.py wires VideoServer.publish_bev here so the operator
+        # app gets the live BEV feed while recording. grid may be None.
+        self._on_grid = on_grid
         self.bytes_written = 0
         self.frames = 0
         # Latest fused BEV grid from the recorder's own tick — lets the
@@ -412,6 +416,8 @@ class NavdRecorder:
             ages[role] = f.age_s()
         grid = self.builder.fuse(per_cam, ages)
         self.grid = grid
+        if self._on_grid is not None:
+            self._on_grid(grid, goal)
         bev = {"raw": self._b64(grid.raw) if grid is not None else None,
                "plane_ok": grid.plane_ok if grid is not None else {},
                "stamp_ns": log_ns}

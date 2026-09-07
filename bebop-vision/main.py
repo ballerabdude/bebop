@@ -19,8 +19,6 @@ import threading
 import time
 from pathlib import Path
 
-import numpy as np
-
 from bebop_vision import config
 from bebop_vision.robot import DEFAULT_URL
 from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as pb
@@ -29,30 +27,12 @@ from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as pb
 def _render_bev(grid, goal):
     """BEV debug overlay (bench, --display): cell classes + goal arrow.
 
-    Row 0 of the image = far edge (+range), matching the grid convention;
-    the white arrow points along the goal bearing from the robot origin.
+    Thin wrapper over the video feed's renderer (videoserver.render_bev)
+    so the local window and the :9092 bev stream look identical — same
+    palette, same camera-aligned mirror, same goal arrow.
     """
-    import cv2
-
-    colors = {0: (40, 40, 40), 1: (0, 0, 220), 2: (0, 140, 255), 3: (80, 80, 160)}
-    rows, cols = grid.occ.shape
-    scale = 8
-    img = np.zeros((rows * scale, cols * scale, 3), np.uint8)
-    for cls, color in colors.items():
-        img[grid.occ == cls] = color
-
-    cell = grid.cell_m
-
-    def to_px(x, y):
-        return (int((y + cols * cell / 2.0) / cell * scale),
-                int((rows * cell - x) / cell * scale))
-
-    if goal is not None:
-        bearing = goal.heading_rad if hasattr(goal, "heading_rad") else 0.0
-        ox, oy = to_px(0.0, 0.0)
-        px, py = to_px(1.2 * math.cos(bearing), 1.2 * math.sin(bearing))
-        cv2.arrowedLine(img, (oy, ox), (py, px), (255, 255, 255), 2, tipLength=0.15)
-    return img
+    from bebop_vision.videoserver import _goal_bearing, render_bev
+    return render_bev(grid, _goal_bearing(goal))
 
 
 def run_goal_drive(args):
@@ -62,6 +42,7 @@ def run_goal_drive(args):
                                            parse_goal)
     from bebop_vision.orbbec import OrbbecRig
     from bebop_vision.robot import RobotClient
+    from bebop_vision.videoserver import VideoServer
 
     robot = RobotClient(args.robot_url).start()
     if not robot.await_connection(5.0):
@@ -122,6 +103,9 @@ def run_goal_drive(args):
                 grid = None
             state["grid"] = grid
             state["grids"] += 1
+            # Live BEV feed for the operator app: :9092/video?stream=bev
+            if vserver is not None:
+                vserver.publish_bev(grid, goal_slot.get())
             now = time.monotonic()
             if now - state["stats_ts"] >= 5.0:
                 state["stats_ts"] = now
@@ -389,8 +373,11 @@ def run_record_navd(args):
 
     def new_segment():
         path = out_dir / f"navd_session_{_time.strftime('%Y%m%d_%H%M%S')}.mcap"
-        rec = NavdRecorder(rig, robot, goal_slot, path, builder=builder,
-                           rate_hz=rate)
+        rec = NavdRecorder(
+            rig, robot, goal_slot, path, builder=builder, rate_hz=rate,
+            # Live BEV feed for the operator app: :9092/video?stream=bev
+            on_grid=(lambda grid, goal: vserver.publish_bev(grid, goal))
+                    if vserver is not None else None)
         rec.start()
         rec_holder["rec"] = rec
         print(f"\n[record-navd] recording -> {path}")

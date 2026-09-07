@@ -51,6 +51,7 @@ const VIDEO_STREAMS: { id: string; label: string }[] = [
   { id: "depth_near", label: "Depth" },
   { id: "color_far", label: "Far" },
   { id: "depth_far", label: "Far depth" },
+  { id: "bev", label: "BEV" },
 ];
 import { Banner, Button } from "../components/ui";
 import { useGamepad } from "../input";
@@ -109,7 +110,8 @@ export function TeleopScreen({
   const [reconnectKey, setReconnectKey] = useState(0);
   // Concurrent operator streams: each toggle opens/closes its own MJPEG
   // connection to the bebop-vision server (:9092). Color streams are
-  // camera-encoded passthrough; depth streams are rendered server-side.
+  // camera-encoded passthrough; depth and BEV streams are rendered
+  // server-side.
   const [videoStreams, setVideoStreams] = useState<string[]>(["color_near"]);
   const toggleStream = (id: string) =>
     setVideoStreams((cur) =>

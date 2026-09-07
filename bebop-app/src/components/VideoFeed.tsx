@@ -10,7 +10,8 @@
 // The stream is served by the bebop-vision process, which owns the
 // Orbbec cameras exclusively; this component is just another HTTP
 // subscriber. (The legacy nav-mask overlay was removed with the
-// OBSBOT pipeline, plan §9 Stage 3 — the BEV lives in Foxglove.)
+// OBSBOT pipeline, plan §9 Stage 3 — the BEV is now its own `bev`
+// stream, the planner's fused occupancy grid rendered server-side.)
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -28,7 +29,8 @@ interface VideoFeedProps {
   /// omitted, falls back to `<baseUrl>/video` (legacy firmware stream).
   videoUrl?: string;
   /// Stream selector understood by the bebop-vision server: color_near |
-  /// color_far | depth_near | depth_far. Appended as ?stream= to the URL.
+  /// color_far | depth_near | depth_far | bev. Appended as ?stream= to
+  /// the URL.
   stream?: string;
   /// Bump to tear the multipart stream down and reconnect.
   reconnectKey: number;

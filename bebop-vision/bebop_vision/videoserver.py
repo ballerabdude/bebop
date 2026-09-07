@@ -7,14 +7,20 @@ after the rig opens.
 Routes:
   /video?stream=<name>   multipart/x-mixed-replace MJPEG
        streams: color_near (default) | color_far | depth_near | depth_far
+                | bev
        color streams pass the camera hardware-encoded JPEG through untouched
        (zero CPU); depth streams render a turbo-colormapped 424x240 view
-       (0-4 m, invalid = black) per frame (~3 ms).
+       (0-4 m, invalid = black) per frame (~3 ms); bev is the fused
+       occupancy grid colorized top-down — BEV workers call publish_bev()
+       once per grid (~10 Hz) and every client replays the same encoded
+       bytes, so the feed costs nothing extra per viewer.
   /snapshot?stream=...   single JPEG of the latest frame
   /healthz               liveness
 """
 
+import math
 import time
+from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -22,7 +28,24 @@ import cv2
 import numpy as np
 
 PACING_S = 1.0 / 20.0      # serve at most 20 fps; frames arrive at 15
-STREAMS = ("color_near", "color_far", "depth_near", "depth_far")
+STREAMS = ("color_near", "color_far", "depth_near", "depth_far", "bev")
+
+# BEV feed: 8x upscale of the 60x60 grid (480x480 px) at JPEG quality 80 —
+# ~0.1 ms render + ~1 ms encode per grid, well inside the 10 Hz BEV budget.
+BEV_SCALE = 8
+BEV_JPEG_QUALITY = 80
+
+# Cell-class palette (BGR) — same colors as the --display BEV overlay
+# (main.py _render_bev): free dark, occupied red, hazard orange, inflated
+# blue-gray.
+BEV_COLORS = {0: (40, 40, 40), 1: (0, 0, 220), 2: (0, 140, 255),
+              3: (80, 80, 160)}
+
+# Latest published BEV feed frame: pre-encoded JPEG + grid stamp. The
+# namedtuple exposes .stamp_us so the MJPEG part headers work for every
+# stream kind; each publish replaces the object, which is exactly the
+# frame-identity check the /video loop uses to skip duplicates.
+_BevSlot = namedtuple("_BevSlot", ("jpeg", "stamp_us"))
 
 
 def render_depth(depth_mm):
@@ -34,12 +57,80 @@ def render_depth(depth_mm):
     return cv2.resize(vis, (424, 240), interpolation=cv2.INTER_AREA)
 
 
+def _goal_bearing(goal):
+    """Body-frame goal bearing for the feed's arrow (None = no arrow).
+
+    GoalHeading carries heading_rad; GoalPoint (x, y) points at atan2.
+    """
+    if goal is None:
+        return None
+    if hasattr(goal, "heading_rad"):
+        return goal.heading_rad
+    if hasattr(goal, "x") and hasattr(goal, "y"):
+        return math.atan2(goal.y, goal.x)
+    return None
+
+
+def render_bev(grid, bearing_rad=None, scale=BEV_SCALE):
+    """Occupancy grid -> colorized top-down BGR view for the feed.
+
+    Drawn in grid convention (row 0 = far edge, col 0 = robot right) and
+    mirrored horizontally at the end so body +y (left) renders LEFT —
+    camera-aligned, matching the recorder's /bev_map Foxglove channel and
+    the color views. `bearing_rad` draws a white arrow along the goal
+    bearing from the robot origin at the bottom edge.
+    """
+    occ = grid.occ
+    rows, cols = occ.shape
+    cell = grid.cell_m
+    # Colorize at grid resolution (the class masks only match there),
+    # then nearest-neighbor upscale to the feed size.
+    small = np.zeros((rows, cols, 3), np.uint8)
+    for cls, color in BEV_COLORS.items():
+        small[occ == cls] = color
+    img = np.repeat(np.repeat(small, scale, axis=0), scale, axis=1)
+    if bearing_rad is not None:
+        def to_px(x, y):
+            return (int((rows * cell - x) / cell * scale),
+                    int((y + cols * cell / 2.0) / cell * scale))
+        orow, ocol = to_px(0.0, 0.0)
+        reach = 0.4 * rows * cell      # 1.2 m on the default 3 m grid
+        trow, tcol = to_px(reach * math.cos(bearing_rad),
+                           reach * math.sin(bearing_rad))
+        cv2.arrowedLine(img, (ocol, orow), (tcol, trow),
+                        (255, 255, 255), 2, tipLength=0.15)
+    return np.ascontiguousarray(img[:, ::-1])
+
+
 class VideoServer:
     def __init__(self, rig, port=9092):
         self.rig = rig
         self.port = port
         self._httpd = None
         self._thread = None
+        # Latest BEV feed frame (None until the first grid fuses).
+        self._bev = None
+
+    def publish_bev(self, grid, goal=None):
+        """Render + encode the fused BEV grid into the `bev` stream slot.
+
+        Called from the BEV workers (~10 Hz, once per grid — HTTP clients
+        replay the same encoded bytes, so extra viewers are free). `goal`
+        is the goal-slot entry (GoalHeading / GoalPoint) for the bearing
+        arrow. `grid=None` (no floor fit, cameras down) keeps the previous
+        frame, same as a frozen camera stream; encode failures do too.
+        """
+        if grid is None:
+            return
+        bearing = _goal_bearing(goal)
+        try:
+            ok, jpg = cv2.imencode(
+                ".jpg", render_bev(grid, bearing),
+                [int(cv2.IMWRITE_JPEG_QUALITY), BEV_JPEG_QUALITY])
+        except Exception:
+            return
+        if ok:
+            self._bev = _BevSlot(jpg.tobytes(), int(grid.stamp_us))
 
     def start(self):
         import threading
@@ -54,20 +145,28 @@ class VideoServer:
                 pass
 
             def _pick(self):
-                """(camera role, data kind) from ?stream=, defaulting to
-                color_near. Names are {kind}_{role}: color_near, depth_far."""
+                """(stream name, camera role, data kind) from ?stream=,
+                defaulting to color_near. Camera streams are named
+                {kind}_{role} (color_near, depth_far); bev is the fused
+                occupancy-grid feed published by the BEV workers."""
                 q = parse_qs(urlparse(self.path).query)
                 name = (q.get("stream") or ["color_near"])[0]
                 if name not in STREAMS:
                     name = "color_near"
+                if name == "bev":
+                    return name, None, "bev"
                 kind, role = name.rsplit("_", 1)
                 return name, role, kind
 
             def _frame(self, role, kind):
+                if kind == "bev":
+                    return server._bev
                 cam = server.rig.cameras.get(role)
                 return cam.read() if cam else None
 
             def _body(self, fr, kind):
+                if kind == "bev":
+                    return fr.jpeg
                 if kind == "color":
                     return fr.color_jpeg
                 if fr.depth is None:
