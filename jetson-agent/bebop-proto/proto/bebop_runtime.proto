@@ -90,16 +90,15 @@ message ClientRuntimeMessage {
     // the S1's NVM — it must be re-run after a power cycle, or persisted
     // once via `odrivetool` → `save_configuration()` over USB.
     CalibrateWheel       calibrate_wheel       = 18;
-    // Command the camera gimbal (see `video:` in the robot YAML) to an
-    // absolute pan/tilt pose in degrees. Ungated by mode on purpose:
-    // moving the camera is not safety-relevant, and PTZ look-around
-    // during dataset recording (any mode) is a core workflow.
-    SetCameraPose        set_camera_pose       = 19;
-    // Subscribe to the pushed navigable-path mask frames (see `NavState` /
-    // `NavMaskFrame`). Subscribe-gated like telemetry: nothing is pushed
-    // until asked for. Used by the operator app's video overlay.
-    SubscribeNav         subscribe_nav         = 20;
-    UnsubscribeNav       unsubscribe_nav       = 21;
+    // Deprecated (plan §9): the OBSBOT camera gimbal is removed. The
+    // firmware acks this as a no-op; the field is kept for wire
+    // compatibility and reserved against reuse in a future revision.
+    SetCameraPose        set_camera_pose       = 19 [deprecated = true];
+    // Deprecated (plan §9): the legacy navseg mask push is removed —
+    // no firmware handler, nothing is ever pushed. Kept for wire
+    // compatibility.
+    SubscribeNav         subscribe_nav         = 20 [deprecated = true];
+    UnsubscribeNav       unsubscribe_nav       = 21 [deprecated = true];
   }
   reserved 12;
   reserved "set_policy_capture";
@@ -119,9 +118,10 @@ message ServerRuntimeMessage {
     ModeChanged         mode_changed    = 5;
     EStopLatched        estop_latched   = 6;
     BusStatusUpdate     bus_status      = 7;
-    // Navigable-path mask grid (low-res label map for the live video
-    // overlay). Pushed only to clients that sent `subscribe_nav`.
-    NavMaskFrame        nav_mask        = 8;
+    // Deprecated (plan §9): the legacy navseg runner that produced these
+    // masks is removed — the firmware never pushes this. Kept for wire
+    // compatibility.
+    NavMaskFrame        nav_mask        = 8 [deprecated = true];
   }
 }
 
@@ -385,13 +385,13 @@ message TelemetryFrame {
   repeated WheelState wheels = 15;
   // Differential-drive summary; `present=false` without a `drive:` block.
   DriveState drive = 16;
-  // Camera gimbal state (OBSBOT Tiny 2 PTZ). Default instance
-  // (`present=false`) on robots without a `video:` config.
-  CameraState camera = 17;
-  // Navigable-path inference summary (the `nav:` model). Default
-  // instance (`present=false`) when the robot has no `nav:` config or
-  // the model failed to load. Optional so old clients still decode.
-  NavState nav = 18;
+  // Deprecated (plan §9): the OBSBOT camera is removed — the firmware
+  // no longer populates this. Kept for wire compatibility with older
+  // clients (they render `present=false`).
+  CameraState camera = 17 [deprecated = true];
+  // Deprecated (plan §9): the legacy navseg runner is removed — the
+  // firmware no longer populates this. Kept for wire compatibility.
+  NavState nav = 18 [deprecated = true];
 }
 
 // One-shot reply to GetSnapshot — same content as TelemetryFrame.
@@ -407,8 +407,10 @@ message Snapshot {
   PolicyIoStats policy_io = 14;
   repeated WheelState wheels = 15;
   DriveState drive = 16;
-  CameraState camera = 17;
-  NavState nav = 18;
+  // Deprecated (plan §9): see TelemetryFrame.camera.
+  CameraState camera = 17 [deprecated = true];
+  // Deprecated (plan §9): see TelemetryFrame.nav.
+  NavState nav = 18 [deprecated = true];
 }
 
 message BusStatusUpdate {
