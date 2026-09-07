@@ -335,7 +335,8 @@ def run_record_navd(args):
 
         drive_node = GoalDriveNode(
             robot, planner, _grid, goal_slot,
-            command_hz=args.command_hz, require_mode=pb.MODE_RUN_POLICY)
+            command_hz=args.command_hz,
+            require_mode=None if args.drive_any_mode else pb.MODE_RUN_POLICY)
 
         def _on_app_goal(goal):
             if goal is None:
