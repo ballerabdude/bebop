@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from bebop_vision.navd import NavdDataset, NavdUNet  # noqa: E402
+from bebop_vision.navd_pre import prep_color, prep_depth  # noqa: E402
 
 INPUT_NAMES = ["depth_near", "depth_far", "color", "goal"]
 
@@ -46,12 +47,12 @@ def parity(model, sess, samples, min_agreement):
     for it in samples:
         p, stamp, _row = it
         depth = np.load(p / "depth" / f"{stamp:020d}.npz")
-        dn, _ = _prep(depth["near"])
-        df, _ = _prep(depth["far"])
+        dn, _ = prep_depth(depth["near"])
+        df, _ = prep_depth(depth["far"])
         import cv2
         cimg = cv2.imread(str(p / "color" / f"{stamp:020d}.jpg"))
         cimg = cv2.cvtColor(cimg, cv2.COLOR_BGR2RGB)
-        c = _prep_color(cimg)
+        c = prep_color(cimg)
         lab = np.load(p / "labels" / f"{stamp:020d}.npz")
         goal = np.zeros((1, 1, 60, 60), np.float32)
         feed = {"depth_near": dn[None], "depth_far": df[None],
@@ -75,21 +76,6 @@ def parity(model, sess, samples, min_agreement):
     if mean < min_agreement:
         raise SystemExit(f"parity gate failed: {mean:.4%} < {min_agreement:.0%}")
     print(f"[parity] gate passed (>= {min_agreement:.0%})")
-
-
-def _prep(d_mm):
-    d = cv2.resize(d_mm, (424, 240), interpolation=cv2.INTER_NEAREST)
-    m = (d > 0).astype(np.float32)
-    out = np.clip(d.astype(np.float32) * 1e-3, 0.3, 6.0) * m
-    return out[None], m[None]
-
-
-def _prep_color(rgb):
-    c = cv2.resize(rgb, (424, 240), interpolation=cv2.INTER_AREA)
-    c = (c.astype(np.float32) / 255.0
-         - np.array([0.485, 0.456, 0.406], np.float32)) \
-        / np.array([0.229, 0.224, 0.225], np.float32)
-    return c.transpose(2, 0, 1)
 
 
 def main():

@@ -16,6 +16,8 @@ Channels:
   /depth_near_preview  foxglove.RawImage (JSON; 106x60 16uc1 — dashboard only)
   /depth_far_preview   foxglove.RawImage (same encoding, far camera)
   /bev_map      foxglove.RawImage (JSON; 60x60 rgb8 top-down teacher map)
+  /bev_model    JSON {"raw": b64 60x60 uint8, "plane_ok", "provider"} — the
+                student-model grid the planner drove on (--navd-model only)
   /cmd_vel      JSON  {"vx", "wz", "stamp_ns"}   — operator twist (teleop label)
   /odom         JSON  {"x", "y", "theta", "stamp_ns"}
   /goal         JSON  {"type": "heading"|"point"|"none", ...}
@@ -173,7 +175,8 @@ class NavdRecorder:
     """Capture the navd teleop session to MCAP at a fixed rate."""
 
     def __init__(self, rig, robot, goal_slot, out_path, builder=None,
-                 rate_hz=10.0, jpeg_quality=85, workers=6, on_grid=None):
+                 rate_hz=10.0, jpeg_quality=85, workers=6, on_grid=None,
+                 model_grid_fn=None):
         self.rig = rig
         self.robot = robot
         self.goal_slot = goal_slot
@@ -184,6 +187,11 @@ class NavdRecorder:
         # tick — main.py wires VideoServer.publish_bev here so the operator
         # app gets the live BEV feed while recording. grid may be None.
         self._on_grid = on_grid
+        # Optional model-drive grid source (plan §7.3 --navd-model): a
+        # zero-arg callable returning (BevGrid | None, provider str) — the
+        # grid the goal planner actually drove on, recorded as /bev_model
+        # for offline A/B against the geometric /bev_teacher.
+        self._model_grid_fn = model_grid_fn
         self.bytes_written = 0
         self.frames = 0
         # Latest fused BEV grid from the recorder's own tick — lets the
@@ -250,6 +258,8 @@ class NavdRecorder:
                 "/depth_far_preview", "json", self._sch_raw_image),
             "bev_map": self._writer.register_channel(
                 "/bev_map", "json", self._sch_raw_image),
+            "bev_model": self._writer.register_channel(
+                "/bev_model", "json", self._sch_bev),
             # Training-depth channels: CompressedImage-wrapped lossless PNG
             # (16-bit). Foxglove rejects schemaless "raw" channels, so the
             # bytes ride in base64 like the color channel; the extractor
@@ -479,6 +489,12 @@ class NavdRecorder:
         if grid is not None:
             self._add(self._ch["bev_map"],
                       self._bev_map_image(grid, goal, log_ns), log_ns)
+        if self._model_grid_fn is not None:
+            mgrid, provider = self._model_grid_fn()
+            bm = {"raw": self._b64(mgrid.raw) if mgrid is not None else None,
+                  "plane_ok": mgrid.plane_ok if mgrid is not None else {},
+                  "provider": provider, "stamp_ns": log_ns}
+            self._add(self._ch["bev_model"], json.dumps(bm).encode(), log_ns)
 
     @staticmethod
     def _encode_jpeg(color, quality):

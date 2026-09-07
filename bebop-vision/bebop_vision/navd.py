@@ -30,46 +30,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-IMG_H, IMG_W = 240, 424
-GRID = 60
-RANGE_M, WIDTH_M, CELL_M = 3.0, 3.0, 0.05
-IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
-IMAGENET_STD = np.array([0.229, 0.224, 0.225], np.float32)
+# Preprocessing + grid geometry live in navd_pre (torch-free, shared with
+# the runtime provider navd_runtime.py so the two paths cannot drift).
+# The _prep_* aliases keep the historical names working for tooling.
+from .navd_pre import (GRID, IMAGENET_MEAN, IMAGENET_STD, IMG_H, IMG_W,
+                       RANGE_M, WIDTH_M, CELL_M, build_goal_raster,
+                       prep_color as _prep_color,
+                       prep_depth as _prep_depth)
+
 RAY_ANGLES = np.deg2rad(np.arange(-60.0, 61.0, 10.0))   # 13 rays
-
-
-def build_goal_raster(goal, odom):
-    """goal dict from the manifest {type: heading|point|none, ...} ->
-    (60, 60) float32 fan: 1 along the goal bearing from the robot origin,
-    fading with angular distance."""
-    g = np.zeros((GRID, GRID), np.float32)
-    if goal.get("type", "none") == "heading":
-        bearing = float(goal["heading_rad"])
-    elif goal.get("type") == "point":
-        gx, gy = float(goal["x"]), float(goal["y"])
-        ox, oy, oth = float(odom["x"]), float(odom["y"]), float(odom["theta"])
-        bearing = math.atan2(gy - oy, gx - ox) - oth
-    else:
-        return g
-    rows, cols = np.mgrid[0:GRID, 0:GRID]
-    x = RANGE_M - (rows + 0.5) * CELL_M
-    y = (cols + 0.5) * CELL_M - WIDTH_M / 2.0
-    ang = np.arctan2(y, np.maximum(x, 1e-6))
-    d = np.abs(np.angle(np.exp(1j * (ang - bearing))))
-    return np.clip(1.0 - d / (math.pi / 2.0), 0.0, 1.0).astype(np.float32)
-
-
-def _prep_depth(d_mm):
-    d = cv2.resize(d_mm, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
-    m = (d > 0).astype(np.float32)
-    out = np.clip(d.astype(np.float32) * 1e-3, 0.3, 6.0) * m
-    return out[None], m[None]
-
-
-def _prep_color(rgb):
-    c = cv2.resize(rgb, (IMG_W, IMG_H), interpolation=cv2.INTER_AREA)
-    c = (c.astype(np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
-    return c.transpose(2, 0, 1)
 
 
 class NavdDataset:
@@ -77,6 +46,7 @@ class NavdDataset:
 
     def __init__(self, session_dirs, augment=False, sample_stride=1):
         self.items = []
+        self.n_hand = 0   # ticks whose labels carry a human `hand` correction
         for sd in session_dirs:
             manifest = [json.loads(l) for l in
                         open(Path(sd) / "manifest.jsonl")]
@@ -87,6 +57,14 @@ class NavdDataset:
                         and (p / "depth" / f"{stamp:020d}.npz").exists() \
                         and (p / "color" / f"{stamp:020d}.jpg").exists():
                     self.items.append((p, stamp, row))
+                    # Census of human corrections while we are already
+                    # scanning every usable tick: `hand` in NpzFile only
+                    # reads the zip directory (no array decode), so this
+                    # stays cheap. Observability surface only — nothing
+                    # here changes per-tick semantics.
+                    if "hand" in np.load(
+                            p / "labels" / f"{stamp:020d}.npz"):
+                        self.n_hand += 1
         self.augment = augment
         self.rng = np.random.default_rng(0)
 
@@ -102,7 +80,12 @@ class NavdDataset:
         color = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
         c = _prep_color(color)
         lab = np.load(p / "labels" / f"{stamp:020d}.npz")
-        fused = lab["fused"].astype(np.int64)
+        # Human corrections win where they exist: the dataset-review
+        # dashboard writes a `hand` key into the same label npz (same
+        # 60x60 uint8, 0=blocked/1=navigable/2=caution semantics) wherever
+        # a person fixed SAM's fused output. `fused` stays the fallback so
+        # uncorrected ticks train exactly as before.
+        fused = lab["hand" if "hand" in lab else "fused"].astype(np.int64)
         goal = build_goal_raster(row["goal"], row["odom"])
         cmd = row["cmd_vel"]
         vx, wz = float(cmd["vx"]), float(cmd["wz"])
@@ -166,7 +149,14 @@ def ray_navigable_probs(logits):
 
 
 def class_weights_from(session_dirs, sample=400):
-    """Inverse-frequency weights over the fused labels."""
+    """Inverse-frequency weights over the training labels.
+
+    Per file, prefers the human-corrected `hand` key when the npz carries
+    one (written by the dataset-review dashboard) and falls back to the
+    fused teacher output — so the weights track what __getitem__ will
+    actually feed the model. The `hand` in NpzFile membership test reads
+    only the zip directory, keeping the sampled pass as cheap as before.
+    """
     import random
     files = []
     for sd in session_dirs:
@@ -175,8 +165,9 @@ def class_weights_from(session_dirs, sample=400):
     random.shuffle(files)
     counts = np.zeros(3, np.int64)
     for f in files[:sample]:
-        lab = np.load(f)["fused"].ravel()
-        counts += np.bincount(lab, minlength=3)
+        lab = np.load(f)
+        counts += np.bincount(
+            lab["hand" if "hand" in lab else "fused"].ravel(), minlength=3)
     w = counts.sum() / np.maximum(counts, 1) * 3.0
     return torch.tensor(w / w.mean(), dtype=torch.float32)
 

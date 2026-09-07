@@ -15,6 +15,23 @@
 torch==2.8.0
 transformers==4.55.4
 
+# Student-model runtime (§7.3, --navd-model): the GPU build of ORT — CUDA EP
+# is mandatory on the Orin (CPU EP measured 260 ms/inference on the much
+# stronger desktop CPU; the plan's 10 Hz budget needs CUDA). PyPI's
+# onnxruntime aarch64 wheel is CPU-only and the plain `onnxruntime` dist
+# shares site-packages files with this one — NEVER install both in one venv
+# (pyproject declares onnxruntime only as the `runtime` extra for
+# workstation/CI). Same index as torch.
+#   .venv/bin/pip install onnxruntime-gpu==1.24.0 \
+#        --index-url https://pypi.jetson-ai-lab.io/jp6/cu126/
+onnxruntime-gpu==1.24.0
+
+# onnx: needed by torch.onnx.export (tools/export_navd_onnx.py). WARNING:
+# installing it from PyPI drags numpy to 2.x (breaks pyorbbecsdk) — always
+# re-pin numpy==1.26.4 afterwards, or install with:
+#   pip install onnx "numpy==1.26.4"
+onnx==1.22.0
+
 # numpy MUST stay 1.26.x — numpy 2.x breaks pyorbbecsdk (proven 2026-09-05).
 # Neither step above upgrades it; if pip ever proposes numpy>=2, abort and
 # re-pin: pip install "numpy==1.26.4"

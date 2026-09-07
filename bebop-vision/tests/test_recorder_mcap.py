@@ -243,6 +243,40 @@ def test_on_grid_callback(tmp_path, builder):
     assert goal is slot.get()
 
 
+def test_model_grid_recorded(tmp_path, builder):
+    """--navd-model: the grid the planner drove on lands in /bev_model with
+    its provider, alongside the geometric /bev_teacher (§7.3 A/B)."""
+    import base64
+    from bebop_vision.bev import BevGrid
+    from bebop_vision.goal_planner import GoalSlot, GoalHeading
+    rig, robot, slot = FakeRig(), FakeRobot(), GoalSlot()
+    slot.set(GoalHeading(0.3))
+    mgrid = BevGrid(occ=np.full((60, 60), 1, np.uint8),
+                    raw=np.zeros((60, 60), np.uint8), stamp_us=42,
+                    per_camera_age_s={}, plane_ok={}, roles=["navd"],
+                    cell_m=0.05, recv_ts=time.monotonic())
+    path = tmp_path / "session.mcap"
+    rec = NavdRecorder(rig, robot, slot, path, builder=builder,
+                       rate_hz=20.0,
+                       model_grid_fn=lambda: (mgrid, "navd"))
+    rec.start()
+    time.sleep(0.6)
+    rec.stop()
+
+    from mcap.reader import make_reader
+    topics = {}
+    with open(path, "rb") as f:
+        for schema, channel, message in make_reader(f).iter_messages():
+            if channel.message_encoding == "json":
+                topics.setdefault(channel.topic, []).append(
+                    json.loads(message.data))
+    assert "/bev_model" in topics and len(topics["/bev_model"]) >= 3
+    for m in topics["/bev_model"]:
+        assert m["provider"] == "navd"
+        raw = np.frombuffer(base64.b64decode(m["raw"]), np.uint8)
+        assert raw.shape == (60 * 60,)
+
+
 def test_prune_sessions(tmp_path):
     from main import _prune_sessions
     for i, size in enumerate((300, 200, 100)):

@@ -40,6 +40,7 @@ def run_goal_drive(args):
     from bebop_vision.goal_planner import (GoalDriveNode, GoalHeading,
                                            GoalPlanner, GoalPoint, GoalSlot,
                                            parse_goal)
+    from bebop_vision.navd_runtime import gather_frames
     from bebop_vision.orbbec import OrbbecRig
     from bebop_vision.robot import RobotClient
     from bebop_vision.videoserver import VideoServer
@@ -49,7 +50,12 @@ def run_goal_drive(args):
         raise SystemExit(f"cannot reach robot runtime at {robot.url}")
     print(f"[goal-drive] robot: {robot.describe()}")
 
-    rig = OrbbecRig(rig_path=args.rig, color=args.color)
+    # The student model consumes the near camera's color (§7.2); color is
+    # off by default to save USB/CPU, so --navd-model forces it on.
+    want_color = args.color or bool(args.navd_model)
+    rig = OrbbecRig(rig_path=args.rig, color=want_color)
+    if args.navd_model and not args.color:
+        print("[goal-drive] navd model: near color enabled (model input)")
     vserver = None
     if not args.no_video_server:
         vserver = VideoServer(rig, port=args.video_port)
@@ -59,6 +65,14 @@ def run_goal_drive(args):
         raise SystemExit("cameras did not produce fresh frames within 10 s")
 
     builder = BevBuilder()
+    model_src = None
+    if args.navd_model:
+        from bebop_vision.navd_runtime import NavdGridSource
+        model_src = NavdGridSource(args.navd_model,
+                                   max_frame_age_s=builder.max_frame_age_s)
+        print(f"[goal-drive] navd model ON: {args.navd_model} drives the "
+              f"BEV (providers: {model_src.model.sess.get_providers()}); "
+              "geometric grid stays as auto-fallback")
     planner = GoalPlanner(v_max=args.v_max, wz_max=args.wz_max,
                           wz_turn=args.wz_turn)
     goal_slot = GoalSlot()
@@ -67,8 +81,8 @@ def run_goal_drive(args):
     elif args.goal_xy is not None:
         goal_slot.set(GoalPoint(*args.goal_xy))
 
-    state = {"grid": None, "last_stamp": {}, "cached": {}, "stats_ts": time.monotonic(),
-             "grids": 0}
+    state = {"grid": None, "provider": "geometric", "last_stamp": {},
+             "cached": {}, "stats_ts": time.monotonic(), "grids": 0}
     stop_evt = threading.Event()
     from concurrent.futures import ThreadPoolExecutor
     pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bev-proc")
@@ -76,14 +90,13 @@ def run_goal_drive(args):
     def bev_worker():
         while not stop_evt.is_set():
             t0 = time.monotonic()
-            per_cam, ages = {}, {}
+            frames, ages = gather_frames(rig, builder.max_frame_age_s)
             jobs = {}
-            for role, cam in rig.cameras.items():
-                f = cam.read()
-                if f is None or f.age_s() > builder.max_frame_age_s:
-                    per_cam[role], ages[role] = None, None
+            per_cam = {}
+            for role, f in frames.items():
+                if f is None:
+                    per_cam[role] = None
                     continue
-                ages[role] = f.age_s()
                 if state["last_stamp"].get(role) != f.stamp_us:
                     jobs[role] = (pool.submit(builder.process, f), f.stamp_us)
                 per_cam[role] = state["cached"].get(role)
@@ -101,8 +114,19 @@ def run_goal_drive(args):
             except Exception as exc:
                 print(f"[goal-drive] fuse error: {type(exc).__name__}: {exc}")
                 grid = None
+            provider = "geometric"
+            if model_src is not None:
+                # §7.3 runtime swap: model first, geometric auto-fallback
+                # on stale streams / NaN / implausible output / errors.
+                try:
+                    grid, provider = model_src.update(
+                        frames, grid, goal_slot.get(), robot.state.odom)
+                except Exception as exc:
+                    print(f"[goal-drive] model update error: "
+                          f"{type(exc).__name__}: {exc}")
+                    provider = "geometric"
             state["grid"] = grid
-            state["grids"] += 1
+            state["provider"] = provider
             # Live BEV feed for the operator app: :9092/video?stream=bev
             if vserver is not None:
                 vserver.publish_bev(grid, goal_slot.get())
@@ -110,7 +134,8 @@ def run_goal_drive(args):
             if now - state["stats_ts"] >= 5.0:
                 state["stats_ts"] = now
                 info = " ".join(f"{r}:{cam.read_fps:.0f}fps" for r, cam in rig.cameras.items())
-                print(f"[goal-drive] {state['grids']} grids | cams {info}")
+                print(f"[goal-drive] {state['grids']} grids "
+                      f"({state['provider']}) | cams {info}")
                 state["grids"] = 0
             time.sleep(max(0.0, 0.1 - (time.monotonic() - t0)))
 
@@ -308,12 +333,19 @@ def run_record_navd(args):
     # Default off — without it the recorder only records and app goals
     # are ignored, which is the safe behavior for passive capture.
     drive_node = None
+    model_holder = {"grid": None, "provider": "geometric"}
     rec_holder = {"rec": None}   # active segment recorder (set by new_segment)
     if args.goal_drive:
         from bebop_vision.goal_planner import GoalDriveNode
         planner = GoalPlanner()
 
         def _grid():
+            # navd model mode: the model worker's grid (model output or its
+            # geometric fallback) drives; without it, the recorder's own
+            # geometric grid does.
+            g = model_holder["grid"]
+            if g is not None:
+                return g
             active = rec_holder["rec"]
             return active.grid if active is not None else None
 
@@ -375,9 +407,17 @@ def run_record_navd(args):
         path = out_dir / f"navd_session_{_time.strftime('%Y%m%d_%H%M%S')}.mcap"
         rec = NavdRecorder(
             rig, robot, goal_slot, path, builder=builder, rate_hz=rate,
-            # Live BEV feed for the operator app: :9092/video?stream=bev
+            # Live BEV feed for the operator app: :9092/video?stream=bev.
+            # In model mode the navd-model worker owns the feed (it shows
+            # the grid the planner drives on — model output or its
+            # fallback), so the recorder must not double-publish its own
+            # geometric teacher grid over it.
             on_grid=(lambda grid, goal: vserver.publish_bev(grid, goal))
-                    if vserver is not None else None)
+                    if vserver is not None
+                    and not (args.goal_drive and args.navd_model) else None,
+            model_grid_fn=(lambda: (model_holder["grid"],
+                                    model_holder["provider"]))
+                           if args.goal_drive and args.navd_model else None)
         rec.start()
         rec_holder["rec"] = rec
         print(f"\n[record-navd] recording -> {path}")
@@ -406,6 +446,8 @@ def run_record_navd(args):
             now = time.monotonic()
             if state != last_report[0] or now - last_report[1] > 5.0:
                 extra = {k: v for k, v in info.items() if k != "state"}
+                if args.navd_model:
+                    extra["prov"] = model_holder["provider"]
                 print(f"[record-navd] nav: {state} {extra}")
                 last_report = (state, now)
             time.sleep(0.1)
@@ -413,6 +455,89 @@ def run_record_navd(args):
     if drive_node is not None:
         threading.Thread(target=drive_loop, daemon=True,
                          name="rec-goal-drive").start()
+
+    # navd model drive worker (§7.3): the model consumes raw frames straight
+    # from the rig and produces the grid the drive node consumes; the
+    # recorder's own geometric grid stays the auto-fallback (and the
+    # recorded teacher — training data is not contaminated with the
+    # student's output). While a segment records, its tick-aligned grid is
+    # the fallback source; when idle, this worker builds its own. It also
+    # owns the operator BEV feed while no segment is recording.
+    stop_model = threading.Event()
+    if args.goal_drive and args.navd_model:
+        from bebop_vision.navd_runtime import NavdGridSource, gather_frames
+        from concurrent.futures import ThreadPoolExecutor
+        model_src = NavdGridSource(args.navd_model,
+                                   max_frame_age_s=builder.max_frame_age_s)
+        model_pool = ThreadPoolExecutor(max_workers=2,
+                                        thread_name_prefix="navd-model-geo")
+
+        def model_worker():
+            geo_builder = BevBuilder()
+            last_stamp, cached = {}, {}
+            grids, stats_ts = 0, time.monotonic()
+            while not stop_model.is_set():
+                t0 = time.monotonic()
+                rec = rec_holder["rec"]
+                frames, ages = gather_frames(rig, builder.max_frame_age_s)
+                if rec is not None:
+                    geo = rec.grid
+                else:
+                    per_cam, jobs = {}, {}
+                    for role, f in frames.items():
+                        if f is None:
+                            per_cam[role] = None
+                            continue
+                        if last_stamp.get(role) != f.stamp_us:
+                            jobs[role] = (model_pool.submit(geo_builder.process,
+                                                            f), f.stamp_us)
+                        per_cam[role] = cached.get(role)
+                    for role, (job, stamp) in jobs.items():
+                        try:
+                            cached[role] = job.result()
+                        except Exception as exc:
+                            print(f"[navd-model] geo error ({role}): "
+                                  f"{type(exc).__name__}: {exc}")
+                            cached[role] = None
+                        last_stamp[role] = stamp
+                        per_cam[role] = cached.get(role)
+                    try:
+                        geo = geo_builder.fuse(per_cam, ages)
+                    except Exception as exc:
+                        print(f"[navd-model] geo fuse error: "
+                              f"{type(exc).__name__}: {exc}")
+                        geo = None
+                try:
+                    grid, prov = model_src.update(frames, geo,
+                                                  goal_slot.get(),
+                                                  robot.state.odom)
+                except Exception as exc:
+                    print(f"[navd-model] update error: "
+                          f"{type(exc).__name__}: {exc}")
+                    grid, prov = geo, "geometric"
+                model_holder["grid"] = grid
+                model_holder["provider"] = prov
+                # The model worker owns the operator BEV feed for the whole
+                # run in model mode: idle AND while recording (what the app
+                # shows is what the planner drives on — never the teacher).
+                if vserver is not None:
+                    vserver.publish_bev(grid, goal_slot.get())
+                grids += 1
+                now = time.monotonic()
+                if now - stats_ts >= 5.0:
+                    stats_ts = now
+                    lat = model_src.model.last_latency_ms
+                    print(f"[navd-model] {grids} grids "
+                          f"({model_holder['provider']}, "
+                          f"{(lat or 0):.0f} ms/inference)")
+                    grids = 0
+                time.sleep(max(0.0, 0.1 - (time.monotonic() - t0)))
+
+        threading.Thread(target=model_worker, daemon=True,
+                         name="navd-model").start()
+        print(f"[record-navd] navd model ON: {args.navd_model} drives the "
+              "goal planner (geometric auto-fallback; recorded teacher "
+              "grid unchanged)")
 
     # Feed BEV worker: keeps the :9092 bev stream live whenever the rig
     # is open, even with no segment recording — auto mode only opens
@@ -424,7 +549,10 @@ def run_record_navd(args):
     # worker: serial camera reads, numpy/cv2-only pool work (§2.8).
     stop_feed = threading.Event()
     feed_pool = None
-    if vserver is not None:
+    # In model mode the navd-model worker owns the idle feed (it publishes
+    # model/fallback grids when no segment is recording) — running both
+    # would double-publish the slot and compute every grid twice.
+    if vserver is not None and not (args.goal_drive and args.navd_model):
         from concurrent.futures import ThreadPoolExecutor
         feed_pool = ThreadPoolExecutor(max_workers=2,
                                        thread_name_prefix="bev-feed")
@@ -492,6 +620,7 @@ def run_record_navd(args):
         finally:
             close_segment(rec, path)
             stop_drive_loop.set()
+            stop_model.set()
             stop_feed.set()
             if feed_pool is not None:
                 feed_pool.shutdown(wait=False)
@@ -555,6 +684,7 @@ def run_record_navd(args):
             except OSError as exc:
                 print(f"\n[record-navd] error closing final segment: {exc}")
         stop_drive_loop.set()
+        stop_model.set()
         stop_feed.set()
         if feed_pool is not None:
             feed_pool.shutdown(wait=False)
@@ -590,6 +720,11 @@ def main():
                         help="drive the robot: nav mask -> planner -> SetVelocityCommand")
     parser.add_argument("--goal-drive", action="store_true",
                         help="navd: Orbbec depth -> BEV grid -> goal planner -> twist")
+    parser.add_argument("--navd-model", metavar="ONNX",
+                        help="navd student (plan §7.3): the goal-drive BEV source "
+                             "becomes this exported model (onnxruntime CUDA EP); "
+                             "the geometric BEV stays as auto-fallback. Implies "
+                             "near-camera color in --goal-drive.")
     goal_group = parser.add_mutually_exclusive_group()
     goal_group.add_argument("--goal-heading-deg", type=float, metavar="DEG",
                             help="initial goal: body-frame heading offset (deg, + left)")

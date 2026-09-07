@@ -20,6 +20,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Student-model runtime (§7.3): ONNX inference for --navd-model. CPU build
+# on workstation/CI; on the Jetson use the GPU build instead
+# (requirements-jetson.txt) — the two distributions share the
+# site-packages/onnxruntime dir, so never install both into one venv.
+runtime = [
+    "onnxruntime>=1.20",
+]
 teacher = [
     "einops",
     "huggingface_hub>=0.26.0",
@@ -28,6 +35,11 @@ teacher = [
     "pycocotools",
     "tensorrt>=11.0",
     "sam3 @ git+https://github.com/facebookresearch/sam3.git",
+]
+# Workstation-side training only (--tb in train_navd.py): the Jetson never
+# trains, so tensorboard stays out of the main dependency set.
+train = [
+    "tensorboard>=2.12",
 ]
 
 [tool.setuptools.packages.find]
