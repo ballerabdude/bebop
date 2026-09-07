@@ -162,7 +162,23 @@ export function TeleopScreen({
     setNavBusy(true);
     try {
       await refreshAfter("nav", async () => {
-        await transportRef.current?.setNavigationGoal(goal);
+        const t = transportRef.current!;
+        // Go = the autonomy-equivalent of "start driving": the navd
+        // planner's mode gate requires Policy mode and armed wheels, so
+        // a single press puts the robot in the driveable state for
+        // goal-following. Clear = back to Dial-in so manual teleop works
+        // again without hunting for the mode switch.
+        if (goal) {
+          if (mode !== "RUN_POLICY") {
+            await t.setMode("RUN_POLICY");
+          }
+          if (armedWheelCount === 0) {
+            await t.setAllWheelsEnabled(true);
+          }
+        } else if (mode === "RUN_POLICY") {
+          await t.setMode("DIAL_IN");
+        }
+        await t.setNavigationGoal(goal);
       });
     } finally {
       setNavBusy(false);
