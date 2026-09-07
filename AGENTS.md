@@ -72,6 +72,13 @@
 
 ## Gotchas (learned the hard way)
 
+- Backgrounded sessions (`nohup ... &` inside a non-interactive ssh
+  shell) **inherit SIGINT=SIG_IGN** — CPython keeps an inherited
+  ignore, so Ctrl-C-style shutdown never arrives. Stop them with
+  `sudo pkill -TERM -f 'record-nav[d]'` (main.py translates SIGTERM
+  into the graceful KeyboardInterrupt path since 2026-09-06: segments
+  flush, the recorder lock is released). Use sudo — the recorder runs
+  as root — and the bracket trick in a separate ssh command.
 - `install-jetson.sh` prereqs: don't add flags without initializing the
   variable in the defaults block (`set -u` will kill the script).
 - Protobuf: three binding sets (Rust prost auto via build.rs, app TS via

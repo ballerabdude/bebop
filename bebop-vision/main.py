@@ -631,6 +631,20 @@ def main():
                         help="command velocity regardless of firmware mode (bench only)")
     args = parser.parse_args()
 
+    # Graceful SIGTERM: sessions started in the background (nohup ... &
+    # inside a non-interactive shell) inherit SIGINT=SIG_IGN — CPython
+    # keeps an inherited ignore — so a Ctrl-C-style shutdown never
+    # arrives and pkill's default SIGTERM would hard-kill the process,
+    # leaving the recorder lock behind and any open MCAP segment
+    # unflushed (seen 2026-09-06). Translate SIGTERM into the
+    # KeyboardInterrupt path every mode already handles.
+    import signal
+
+    def _sigterm_to_int(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _sigterm_to_int)
+
     # record-navd first: `--record-navd --goal-drive` means "record AND
     # consume app navigation goals" (run_record_navd reads args.goal_drive);
     # bare --goal-drive still runs the standalone goal-drive mode.
