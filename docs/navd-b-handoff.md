@@ -6,6 +6,38 @@ shipped, the decisions that deviated from the spec, environment facts, and
 the exact remaining work**. State as of 2026-09-06, `main` @ `ad631c6`,
 CI green.
 
+> **⚠ UPDATE 2026-09-07 (`main` @ `db6cd72`, deployed to the robot) — this
+> brief is partially superseded.** 27 commits landed the day after it was
+> written; §1–§4 below are the 2026-09-06 record. What changed:
+>
+> - **Phase B is no longer "work plan" — most of it shipped** (see §4
+>   statuses). Trained + exported student, ONNX export with parity gate
+>   (`1917652`), and the **runtime swap shipped 2026-09-07** (`--navd-model`,
+>   `bebop_vision/navd_runtime.py`, CUDA EP ~55 ms vs CPU ~750 ms on the
+>   Orin, per-tick geometric auto-fallback; on-robot dep
+>   `onnxruntime-gpu==1.24.0` from the Jetson AI Lab index).
+> - **Label pipeline v2 (2026-09-07, user decision): SAM 3.1 + depth
+>   only** — YOLO and the geometric teacher are OUT of the fusion;
+>   navigable = SAM floor depth-confirmed, blocked = non-floor surface
+>   (valid depth) or full-band sweep (no depth), caution = unconfirmed.
+>   Retrained student **navd_v3: val mIoU 0.559** (navigable IoU 0.538)
+>   vs 0.512 on v1 labels; deployed to the robot.
+> - **Remaining Phase B work**: §7.4 acceptance (student ≥ teacher on
+>   the failure-case suite + forced-fallback bench demo), the hand-label
+>   tool (§4 item 3), more/denser data + failure cases (§4 item 5).
+> - **§9 OBSBOT retirement (out of scope here) is DONE** — all four
+>   stages, same day.
+> - **Hardware changed**: Gemini 330 fw 1.6.00 → **1.8.10** (ISP
+>   recalibrated, intrinsics + ray LUTs refreshed, `db6cd72`);
+>   `depth_work_mode: High Density` set per camera (`b241358` — the
+>   device default melted floor-level objects into the ground plane);
+>   cameras now run **matched 15 fps** under hardware sync.
+> - Torch/transformers **are installed** on the Jetson venv (§3 below is
+>   stale on that line).
+>
+> The authoritative live status header is `docs/navd.md` (synced same
+> day).
+
 ---
 
 ## 1. What shipped (all on `main`, deployed to the robot)
@@ -100,54 +132,72 @@ live only here:
   `/captures/dl/<name>`).
 - Jetson venv `bebop-vision/.venv`: pyorbbecsdk2 2.1.2, numpy **1.26.4
   (pinned — 2.x breaks pyorbbecsdk)**, opencv 4.11, pyyaml, websockets,
-  protobuf 7.35.1, mcap, pytest. **No torch/transformers yet.**
-- Hardware: near cam `CPBLC53000PE` (USB3, 848x480@30 + color), far cam
-  `CPBLC53000ED` (**unfixed USB 2.0 cable — drops off the bus
-  occasionally; currently usually run with `--roles near`**). Left wheel
-  needed a manual calibration once (MISSING_ESTIMATE estop).
-- Data on the robot: 7 navd sessions (2026-09-06, ~240 MB, near-only) in
-  `/var/lib/bebop-captures`, all DialIn/static-to-slow-drive — usable for
-  pipeline bring-up, **not** the real training set.
+  protobuf 7.35.1, mcap, pytest, **torch 2.8.0 + transformers 4.55.4**
+  (installed 2026-09-06/07; pin file `bebop-vision/requirements-jetson.txt`
+  — torch must come from `pypi.jetson-ai-lab.io/jp6/cu126`, the old `.dev`
+  host is dead). Verified on-device 2026-09-07.
+- Hardware: near cam `CPBLC53000PE`, far cam `CPBLC53000ED`, both running
+  **matched 15 fps depth + color under hardware sync** (PRIMARY /
+  SECONDARY_SYNCED, phase-locked; 30 fps is gone — the sync pairing needs
+  matched rates and 30+30 starves the GIL). ED link still drops off the
+  bus occasionally — degraded runs use `--roles near`. Gemini 330
+  firmware **1.8.10** (2026-09-07: intrinsics + ray LUTs refreshed post-
+  ISP recalibration). `depth_work_mode: High Density` is set per camera
+  at open — the device default melts floor-level objects into the ground
+  plane. Left wheel needed a manual calibration once (MISSING_ESTIMATE
+  estop).
+- Data on the robot: 8 navd sessions in `/var/lib/bebop-captures`
+  (**3,092 ticks labeled** via the YOLO+SAM fusion, class balance
+  blocked 27–34% / navigable 15–34% / caution 39–55%). Still
+  DialIn/static-to-slow-drive motion — failure cases (glass, black bag,
+  reflective floor) not yet recorded, and the 5–10 k frame target is not
+  reached.
 - Workstation has the sessions mirrored in `bebop-vision/datasets/sessions/`
-  and one extracted example in `bebop-vision/datasets/navd-v0/`.
+  and extracted sets under `bebop-vision/datasets/navd-v0/`.
 - Foxglove layout import: `foxglove/bebop_navd_layout.json` (regenerate via
   `python3 foxglove/make_foxglove_layout.py --layout navd --force`).
-- 40 Python tests green (workstation + Jetson); firmware fmt/clippy/test
+- 51 Python tests green (workstation + Jetson); firmware fmt/clippy/test
   green; CI on `main` green (runs on every push).
 
 ## 4. Phase B work plan (docs/navd.md §7.2–7.4)
 
-In order; 1–4 are data plumbing, 5–7 are the model:
+In order; 1–4 are data plumbing, 5–7 are the model. **Statuses updated
+2026-09-07** (original plan text kept):
 
-1. **Jetson venv full install** (§11.2): `pip install -e .` for
-   torch/transformers — long install, do it early/overnight.
-2. **YOLO-seg auto-label pass** (workstation GPU; `yolo26l-seg.pt`):
-   instance masks over extracted color frames. Bulk labeling.
-3. **Hand-label tool**: grid-level (60×60) review/paint over fused labels;
+1. **DONE** — torch 2.8.0 + transformers 4.55.4 installed on the Jetson
+   venv (via `requirements-jetson.txt`).
+2. **DONE** (`9bc3e63`) — `tools/yolo_autolabel.py`, `yolo26l-seg`
+   over near+far color.
+3. **NOT BUILT** — grid-level (60×60) review/paint over fused labels;
    writes `labels/{stamp}.npz` `hand` array. Training prefers `hand`,
    falls back to `teacher`.
-4. **Fusion → navd-v0 labels**: YOLO masks + dilation margin ∪ geometric
-   `/bev_teacher`; disagreement → caution class. Emit via the extractor.
-5. **Data collection** (user drives; recorder is ready): 5–10k frames,
-   3–5 sessions, varied obstacles/lighting/goals + the failure cases
-   (glass, black bag, reflective floor). ED camera cable reseat first so
-   far-depth is in the data (it is a model input).
-6. **Student model** `bebop_vision/navd.py` (§7.2): inputs
-   `depth_near [1,1,240,424]`, `depth_far [1,1,240,424]`,
-   `color [1,3,240,424]`, `goal [1,1,60,60]` → `logits [1,3,60,60]`
-   (0 blocked / 1 navigable / 2 caution). SegFormer-B0-style multi-modal
-   vs 4-level UNet, ~3–5 M params — decide by val mIoU. Loss: weighted CE
-   + λ≈0.2 imitation term (twist-direction bin). Augmentations: h-flip
-   (goal channel too), depth dropout, depth noise σ=10 mm, color jitter,
-   goal resampling.
-7. **Export + runtime swap** (§7.3): `tools/export_navd_onnx.py` mirroring
-   `export_navseg_onnx.py` (two-artifact ONNX, fixed tensor names, parity
-   gate ≥ 0.99 vs torch); `--navd-model` flag swaps the BEV source
-   (onnxruntime CUDA EP, ~10 Hz); auto-fallback to geometric on stale
-   > 0.5 s / NaN / `frac_navigable` outside [0.05, 0.95]; log provider.
-8. **Phase B acceptance** (§7.4): student ≥ teacher on the failure-case
-   suite; no regression on normal scenes (val mIoU); bench demo with forced
-   fallback (kill the model mid-run → stop safely → revert → continue).
+4. **DONE, superseded** (`9bc3e63` v1 → **v2 2026-09-07**) — shipped as
+   `tools/fuse_navd_labels.py`; **v2 is SAM 3.1 + depth only** (no YOLO,
+   no geometric teacher in the fusion — user decision; known accepted
+   gap: no negative-obstacle signal). 3,092 ticks labeled across 8
+   sessions; v2 balance blocked 30–37% / nav 20–36% / caution 31–46%.
+5. **PARTIAL** — 8 sessions / 3,092 ticks recorded + labeled; target is
+   5–10 k frames with failure cases (glass, black bag, reflective
+   floor). ED far-depth is now in the data (sync-verified dual-cam).
+6. **DONE** (`375db0e`, retrained 2026-09-07) — shipped as
+   **`NavdUNet`** (3-level UNet, 1.93 M params; UNet won over
+   SegFormer-B0): 6-channel stem (depth_near, depth_far, color×3, goal
+   fan) → logits [1,3,60,60]. **v3 (v2 labels): val mIoU 0.559**
+   (navigable IoU 0.538; 40 epochs, 2,363 train / 729 val) vs 0.512 on
+   v1 labels. Loss: weighted CE + ray-navigable imitation loss (v1
+   twist-direction proxy, documented in `train_navd.py`).
+7. **DONE 2026-09-07** — export (`1917652`, `tools/export_navd_onnx.py`,
+   parity gate ≥ 0.99 vs torch) AND the runtime swap:
+   `main.py --navd-model weights/navd.onnx` (goal-drive + record-navd
+   goal-drive), `bebop_vision/navd_runtime.py` (onnxruntime CUDA EP,
+   ~55 ms steady on the Orin; per-tick geometric auto-fallback with
+   provider-switch logging; preprocessing shared with training via
+   `navd_pre.py`). On-robot: `onnxruntime-gpu==1.24.0` (Jetson AI Lab
+   index) + `onnx` (re-pin numpy 1.26.4 after installing it). Verified:
+   67 Python tests green on the Jetson; real `weights/navd.onnx` loads
+   and infers on CUDA EP.
+8. **NOT RUN** — §7.4 acceptance (depends on a bench drive with the
+   model live).
 
 ## 5. Guardrails
 

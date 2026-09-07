@@ -63,6 +63,10 @@
   consume app goals and drive):
   `sudo .venv/bin/python -u main.py --record-navd /var/lib/bebop-captures --auto --goal-drive`
   (add `--drive-any-mode` to skip the Policy-mode gate — Dial-in works).
+  Add `--navd-model weights/navd.onnx` to drive on the trained student's
+  BEV instead of the geometric one (geometric stays as auto-fallback;
+  provider + fallback reasons show in the `nav:`/`[navd-model]` log
+  lines; needs weights/navd.onnx scp'd to the robot — it is gitignored).
 - The `nav:` status lines print the drive-loop gate state
   (waiting/hold/estop/no_floor/search/rotate/hard_stop/drive) — if the
   robot isn't moving, that line says why.

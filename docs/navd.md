@@ -1,14 +1,21 @@
 # navd — Depth-based goal-conditioned obstacle avoidance
 
-Status: **Phase A + recorder v2 shipped** (2026-09-06, main @ ad631c6, CI
-green). Phase A (§6) is implemented and bench-verified except the formal
-§6.7 acceptance demo; the recorder v2 (§7.1) is shipped and verified
-end-to-end (auto-segmented MCAP sessions + web-app download + extractor).
-**Phase B (§7.2–7.4) is not started** — the handoff brief for it is
-[`navd-b-handoff.md`](navd-b-handoff.md) (implementation deltas, environment
-facts, work plan). ED cable swap still pending (§11.1).
-Scope: bebop-vision (Python, Jetson), firmware-adjacent but firmware mostly
-untouched (one listing-filter change in `server/ws.rs`, deployed).
+Status: **Phase A + recorder v2 + OBSBOT retirement (§9, all four stages)
++ Phase B through export AND runtime swap shipped** (2026-09-07, deployed
+to the robot). Phase A (§6) is implemented and bench-verified except the
+formal §6.7 acceptance demo; recorder v2 (§7.1) is verified end-to-end;
+the teacher-label pipeline + student model v1 (§7.2, `NavdUNet` 1.93 M
+params) are trained, exported, and **wired into the runtime** (`--navd-model`
+with geometric auto-fallback — §7.3 shipped 2026-09-07). **Remaining for
+Phase B: §7.4 acceptance + more data (failure cases)** — see the
+2026-09-07 addendum in
+[`navd-b-handoff.md`](navd-b-handoff.md). §8 shipped the goals + BEV feed
+pieces (client field 22 `SetNavigationGoal` → firmware `nav_goal.rs` →
+navd goal slot; BEV MJPEG on `:9092/video?stream=bev`); the systemd unit
+and app map-click goal UI are still open.
+Scope: bebop-vision (Python, Jetson); firmware is no longer "mostly
+untouched" — OBSBOT-era code was removed (§9 Stage 2) and
+`nav_goal.rs` + `SetNavigationGoal` were added (§8).
 
 ---
 
@@ -39,7 +46,7 @@ The system is built and delivered in three stages, each independently useful:
 - Dynamic-obstacle motion prediction (obstacles are treated as static per tick).
 - Speeds above the existing planner limit (0.4 m/s).
 - Keeping the legacy RGB pipeline alive on the robot: the OBSBOT USB webcam
-  and the firmware nav runner are being retired (Section 9). `navseg`
+  and the firmware nav runner **were retired** 2026-09-06 (Section 9). `navseg`
   survives as workstation-side training/recording tooling only; on-robot,
   navd supersedes it.
 
@@ -50,7 +57,11 @@ The system is built and delivered in three stages, each independently useful:
 Facts about the existing stack that navd depends on or reuses. File paths are
 authoritative — read them before changing any contract.
 
-### 2.1 Perception → control loop today (RGB — legacy, being retired: Section 9)
+### 2.1 Perception → control loop today (RGB — legacy, **retired 2026-09-06, §9**)
+
+> Removed on-robot by §9 Stages 2–4 (commit `1334218` + client cleanup);
+> `navseg` survives as workstation-side training tooling only (§9.3).
+> Kept here as the historical reference for the planner/gating defaults.
 
 ```
 firmware video.rs (owns OBSBOT /dev/video0, MJPG 1280x720@30)
@@ -112,11 +123,13 @@ firmware supervisor.rs::drive_command         (operator arbitration + watchdogs)
 - Devices (Jetson `bebop.local`):
   - `CPBLC53000PE` — **near** camera. On a USB 3.x lane (5000 Mbps) after a
     cable swap. Full profile set available.
-  - `CPBLC53000ED` — **far** camera. **Still linked at 480 Mbps (old cable) —
-    blocker**: at 480 Mbps the firmware only advertises crippled profiles
-    (max depth 640x360@10; color RGB only at 424x240@10). Usable for a
-    reduced far field at 10 fps, but swap the cable for the real horizon;
-    profiles restore automatically.
+  - `CPBLC53000ED` — **far** camera. The USB 2.0 profile restriction is
+    **resolved in practice**: ED runs 848x480@15 depth + 1280x800 MJPG
+    under hardware sync (verified with `tools/orbbec_sync_test.py`,
+    commit `9bc3e63`). Whether that came from a cable swap or fw 1.8.10
+    lifting the profile cap isn't recorded — worth a one-minute
+    `lsusb -t`/dmesg check. Known flakiness remains: the link has
+    dropped off the bus occasionally; degraded runs use `--roles near`.
 - One process holds a camera at a time — close OrbbecViewer before running.
 - Units stream on the *same* Realtek hub; each camera has its own SuperSpeed
   lane (verified: 5G through the hub works).
@@ -142,11 +155,16 @@ not this document — is the source of truth for extrinsics.
 
 | Stream | Format | Rate | Purpose |
 |---|---|---|---|
-| depth (both cams) | 848x480 @ 30 fps, Y16 (uint16, mm) | 30 Hz capture, ~10 Hz processed | BEV geometry |
-| color (PE) | 1280x800 @ 30 fps, RGB | capture only | dataset recording, debugging |
-| color (ED) | MJPG until re-cabled → RGB after | capture only | dataset recording |
+| depth (both cams) | 848x480 @ 15 fps, Y16 (uint16, mm) | hardware-synced pair, ~10 Hz processed | BEV geometry |
+| color (PE) | 1280x800 @ 15 fps, MJPG | capture only | dataset recording, debugging |
+| color (ED) | 1280x800 @ 15 fps, MJPG | capture only | dataset recording |
 
-Bandwidth: 2x depth Y16 @ 848x480x30 ≈ 48 MB/s total — fits on separate
+Rates are **matched 15 + 15 by requirement**: the multi-camera sync hub
+needs matched rates, and 30+30 starves the GIL (BEV collapsed to ~1 Hz
+when tried). 15+15 keeps filters under the cliff (BEV 9.8 Hz, recorder
+8 Hz, far data +50% vs the old 10 fps far field).
+
+Bandwidth: 2x depth Y16 @ 848x480x15 ≈ 24 MB/s total — fits on separate
 SuperSpeed lanes; do **not** put both cameras on a shared USB 2.0 path.
 
 Frame sync: **hardware sync via the Orbbec Multi-Camera Sync Hub** (8-pin,
@@ -280,7 +298,8 @@ Color streams are recorded but do not participate in Phase A control.
 
 ### 6.1 `bebop_vision/orbbec.py` — camera service
 
-- `OrbbecCamera(serial, role, depth_profile=(848,480,30), color_profile=None)`.
+- `OrbbecCamera(serial, role, depth_profile=(848,480,15), color_profile=None)`
+  (15 fps since the hardware-sync pairing; 30 was the pre-sync default).
   Opens via `ob.Context().query_devices()` matched by serial (never index —
   enumeration order is not stable with two identical devices).
 - Depth filters enabled per Section 3.3. Optional color stream (recording).
@@ -439,6 +458,10 @@ Inherited from `DriveNode`, unchanged:
 > `main.py --record-navd [--auto]`, `tools/mcap_extract.py`, Foxglove
 > layout; verified end-to-end on-device (8 Hz, web-app download).
 > Implementation deltas and operational facts: `docs/navd-b-handoff.md`.
+> Also shipped since: dual-camera recording (far color+depth, `39ee914`),
+> capture-instant frame pairing (`9fc3030`), `--goal-drive` on the
+> recorder (drive while recording, `f1fcef1`), and the continuous BEV
+> MJPEG feed (`6115a48`).
 
 Recording format: **one MCAP file per session**, written on-robot by
 `bebop_vision/recorder_mcap.py` and copied to the workstation (scp) as the
@@ -462,21 +485,40 @@ Channels (JSON-encoded, ~10 Hz):
 Review sessions in Foxglove with `foxglove/bebop_navd_layout.json`
 (generate via `python3 foxglove/make_foxglove_layout.py --layout navd`).
 
-Teacher labels = **models, not hand rules** (revised 2026-09-06, supersedes
-the geometry-only teacher):
+Teacher labels = **models, not hand rules**. **v2 label pipeline
+(2026-09-07, user decision): SAM 3.1 + depth only — no YOLO, no
+geometric BEV in the fusion.** The depth camera is the geometry; SAM
+floor/carpet/rug/ground masks over both cameras are the only
+segmentation (`tools/sam_floor_label.py`). Fusion
+(`tools/fuse_navd_labels.py`, depth-gated frustum projection per tick):
 
-- **YOLO-seg** auto-label pass over recorded color (workstation GPU,
-  `yolo26l-seg`) — semantic obstacles (person/chair/box/...), bulk.
-- **Hand labeling** on top of YOLO: human review/correction of the fused
-  grid + masks for hard frames (grid-level paint tool; SAM3 assist where
-  masks are needed).
-- **Geometric BEV** (`/bev_teacher`) stays in the file as a third opinion —
-  it sees walls/negative obstacles RGB misses, and doubles as the runtime
-  fallback.
+- **navigable** = SAM floor AND the ray's measured depth lands within
+  0.25 m of the flat-floor prediction (landing cell confirmed).
+- **blocked** = non-floor pixel whose measured surface is not the ground
+  plane → the obstacle-band cells within ±0.15 m of the measured range
+  (replaces both YOLO and the geometric height-band classifier);
+  non-floor with NO depth return (glass/dark/overexposed) → conservative
+  full-band sweep. Depth-consistent ground that SAM did not confirm
+  (shadow/missed mask) stays **unconfirmed**, not blocked.
+- **caution** = everything else (no depth return, conflicts, out-of-FOV).
+- The robot's footprint is never drivable. Chassis `self_mask` pixels
+  are dropped before projection.
+- **No negative-obstacle term (accepted gap)**: stair descents / holes
+  that SAM masks as ground read navigable. The recorded `/bev_teacher`
+  stays in each npz as bookkeeping, so a drop-detection term can be
+  re-added later by re-running the fusion (no re-recording).
+- YOLO (`tools/yolo_autolabel.py`) is retired from labeling; its output
+  stays on disk, unused.
 
-Fusion follows `labelnav.py`: semantic masks → obstacle class + dilation
-margin band, unioned with geometric occupancy; teacher/model disagreement
-lands in the *caution* class (free hard-negative mining).
+v2 class balance (3,092 ticks, 8 sessions): blocked 30–37%,
+navigable 20–36%, caution 31–46% (v1 fusion: nav 15–34%, caution
+39–55% — v2 gives the student more positive floor signal).
+- **Hand labeling** (grid-level review/paint over the fused labels;
+  training prefers `hand`, falls back to `teacher`) — **still to build**
+  (brief §4 item 3).
+- **Geometric BEV** (`/bev_teacher`) remains recorded for bookkeeping/
+  mining only — it is no longer a label source; at runtime it survives
+  solely as the model's auto-fallback and the `plane_ok` carrier.
 
 Target: 5–10 k frames over 3–5 teleop sessions (varied obstacles, lighting,
 goal directions; include the failure cases: glass door/table, black bag,
@@ -496,9 +538,16 @@ reflective floor).
     (unit-gradient fan from robot origin toward the goal heading)
 - **Output**: `logits` [1,3,60,60] — same class semantics as navseg:
   0 blocked, 1 navigable, 2 caution (caution = within the inflation margin).
-- **Backbone**: shallow SegFormer-style encoder (SegFormer-B0 variant with
-  multi-modal stem, or a 4-level UNet; pick whichever trains better at
-  ~3–5 M params — decide by val mIoU, same metric as `train_nav.py`).
+- **Backbone — decided 2026-09-06 (`375db0e`)**: `NavdUNet`
+  (`bebop_vision/navd.py`) — 3-level UNet, **1.93 M params**, 6-channel
+  stem (depth_near, depth_far, color×3, goal fan) at 240×424 → decoder →
+  interpolate/avg-pool to logits [1,3,60,60]. SegFormer-B0 was the
+  alternative; UNet won. **v3 (2026-09-07, trained on the v2 SAM+depth
+  labels): val mIoU 0.559** (blocked 0.539 / navigable 0.538 / caution
+  0.599; 2,363 train / 729 val frames, 40 epochs) — beats the v1-label
+  model (0.512, navigable 0.413). Training: `train_navd.py`
+  (session-split val, AMP, OneCycleLR, per-class IoU, class-weighted CE
+  + ray-navigable imitation loss).
 - **Loss**: `CE(logits, teacher_BEV)` (class-weighted, inverse frequency —
   reuse `class_weights_from`) `+ λ * imitation term` (cross-entropy between
   the planner-score argmax over the predicted grid and the operator twist
@@ -513,16 +562,31 @@ reflective floor).
 
 ### 7.3 Export + runtime swap
 
-- `tools/export_navd_onnx.py`: two-artifact ONNX (opset 17), fixed names
-  above, **parity gate ≥ 0.99 cell-wise argmax agreement vs torch** over
-  sampled dataset frames (same pattern as `export_navseg_onnx.py`).
-- Runtime: `--navd-model weights/navd` switches the BEV source from
-  geometric to student (runs via onnxruntime CUDA EP, ~10 Hz). The planner
-  and DriveNode are untouched — the grid is the seam.
-- **Auto-fallback to geometric** when: student output stale (> 0.5 s), any
-  NaN/Inf, or `frac_navigable` outside [0.05, 0.95] (implausible — floor or
-  wall everywhere). Log which provider produced each grid (mirror
-  `NavState.provider`).
+- **Export — SHIPPED** (`1917652`): `tools/export_navd_onnx.py`,
+  two-artifact ONNX (opset 17), fixed names above, **parity gate ≥ 0.99
+  cell-wise argmax agreement vs torch** over sampled dataset frames
+  (same pattern as `export_navseg_onnx.py`).
+- **Runtime swap — SHIPPED 2026-09-07** (`bebop_vision/navd_runtime.py`,
+  `main.py --navd-model weights/navd.onnx`): the model consumes raw
+  frames straight from the rig (near/far depth + near color — MJPEG is
+  decoded worker-side, cached per device stamp) and produces the grid the
+  planner consumes unchanged (the grid is the seam). onnxruntime **CUDA
+  EP is mandatory**: measured on the Orin — CUDA ~55 ms steady-state vs
+  ~750 ms CPU EP. Preprocessing is shared with training via
+  `navd_pre.py` so the two paths cannot drift. Class mapping:
+  navigable → free, blocked → occupied, caution → planning-blocked
+  (inflated) / raw-hazard; no runtime inflation (teacher margins are
+  learned). Works in both `--goal-drive` and `--record-navd --goal-drive`
+  (there the recorder's teacher grid stays geometric — training data is
+  never contaminated with the student's output).
+- **Auto-fallback to geometric — per tick, immediate** (stricter than
+  the spec's "> 0.5 s stale" window; the drive node's recv_ts deadman
+  enforces the 0.5 s side independently): missing/stale camera streams,
+  no decodable near color, NaN/Inf logits, `frac_navigable` outside
+  [0.05, 0.95] (implausible — floor or wall everywhere), or any
+  inference exception. Provider switches are logged once per transition;
+  a single bad tick falls back for that tick and the next good
+  prediction reclaims the provider (no sticky fallback).
 
 ### 7.4 Phase B acceptance
 
@@ -554,6 +618,14 @@ reflective floor).
 ---
 
 ## 9. Legacy OBSBOT webcam retirement plan
+
+> **DONE — all four stages shipped 2026-09-06**: Stage 1 `8209520`,
+> Stage 2 `1334218`, Stage 3 `54945f3`, Stage 4 `7407d27`. Shipped
+> deltas vs the plan: the videoserver runs on **:9092** (jetson-agent
+> owns :9091) as an MJPEG stream server (`/video?stream=` +
+> `/snapshot?stream=`), not the H.264/fMP4 route planned here — H.264
+> encode was benchmarked (§3.2) but MJPEG shipped as the simpler
+> operator path. Text below is kept as the plan of record.
 
 The OBSBOT Tiny 2 PTZ (the firmware's `/dev/video0` USB webcam) was prototype
 hardware for the RGB nav experiments. With navd, the Orbbec 335Lg pair owned
@@ -607,10 +679,14 @@ app screens, jetson-agent, `bebop_v2.yaml` (never had `video:`).
 ### 9.2 Staging (order matters)
 
 - **Stage 1 — replacement stream.** `bebop_vision/videoserver.py`:
-  threaded HTTP server on `:9091`, route `/video` serving **H.264
+  threaded HTTP server (shipped on **:9092** — jetson-agent owns :9091;
+  the plan text below says :9091), route `/video` serving **H.264
   fragmented-MP4** (`video/mp4`, chunked transfer) — played in the Tauri
   app via MSE in a `<video>` element (VideoFeed is rewritten from the
   legacy MJPEG `<img>` to an MSE player).
+  *(Shipped instead: MJPEG multipart on :9092 with per-stream selection
+  and camera-JPEG passthrough — simpler, no MSE player needed; see the
+  §9 shipped-deltas note.)*
   - **Encoding**: software **libx264 via PyAV** (verified available in the
     venv) at **1280x800@30**, preset superfast / tune zerolatency, ~2–3
     Mbps, hardware-style GOP (`keyint=30`, `ref=1`, `bframes=0`) — measured
@@ -657,7 +733,7 @@ app screens, jetson-agent, `bebop_v2.yaml` (never had `video:`).
 | Risk | Mitigation |
 |---|---|
 | Flat-floor assumption breaks (ramps, carpet transitions) | v1 documented limitation; RANSAC residual → caution band; dual `plane_ok` gate stops the robot if both cameras lose the floor |
-| ED camera (far) still on USB 2.0 cable | Blocker tracked; far field limited to 640x360@10 until swapped — Phase A can run near-cam-authoritative (PE, full speed) in the meantime; profiles restore automatically at 5 G |
+| ED camera (far) link flakiness (occasional bus drops) | Sync-verified dual-cam operation at matched 15 fps (`9bc3e63`); USB-lane origin (cable vs fw 1.8.10) unconfirmed — degraded runs use `--roles near` |
 | Depth noise at 3 m (335Lg ≈ 1% of range) | Temporal filter + inflation margin; caution class absorbs the band |
 | Software H.264 encoder CPU cost (no NVENC on Orin Nano) | Measured: x264 1280x800@30 ≈ 45 fps untuned; NVIDIA app-note GOP tuning (keyint=30, ref=1, bframes=0 — §3.2) brings 30 fps to ~18% of one core; encoder thread degrades to 15 fps before BEV/control ever drop |
 | GPU contention (navseg CUDA + navd student) | Stagger rates if needed (navd 10 Hz, navseg 10 Hz is the budget to verify with `nav_probe` + `tegrastats`); navd can run CPU EP for the planner-critical path if GPU saturates |
@@ -670,30 +746,49 @@ app screens, jetson-agent, `bebop_v2.yaml` (never had `video:`).
 
 ## 11. Open items / prerequisites
 
-1. **Swap `CPBLC53000ED` USB cable** (same fix as PE) — required for the full
-   far-field horizon (it is the planning-horizon camera). Profiles restore
-   automatically (verified: negotiation picks 848x480@10 today, 30 fps after).
-2. Jetson `bebop-vision/.venv`: Phase A deps installed (pyorbbecsdk2, numpy
-   1.26 pinned, opencv 4.11, pyyaml, websockets, protobuf, mcap, pytest —
-   2026-09-05/06). `pip install -e .` for torch etc. still pending before
-   Phase B training (long install — start overnight).
+1. ~~Swap `CPBLC53000ED` USB cable~~ — **done**: the far camera is on a
+   USB 3 lane (recorder docstring: "both cameras stream RGB since the
+   far camera's USB 3 cable swap"); runs 848x480@15 + 1280x800 MJPG
+   under hardware sync, phase-locked (`9bc3e63`,
+   `tools/orbbec_sync_test.py`). Occasional bus drops remain — degraded
+   runs use `--roles near`.
+2. ~~Jetson venv ML deps~~ — **done** 2026-09-06/07:
+   `requirements-jetson.txt` pins torch **2.8.0** (Jetson AI Lab index
+   `pypi.jetson-ai-lab.io/jp6/cu126` — the old `.dev` host is dead) +
+   transformers 4.55.4; numpy stays 1.26.4. Verified installed on the
+   Jetson 2026-09-07.
 3. Extrinsics **measured from live floor fits** (2026-09-05, auto-estimator):
    near `CPBLC53000PE` = 1.27 m / pitch −66°; far `CPBLC53000ED` = 1.32 m /
    pitch −17.4°; written to `config/orbbec_rig.yaml` (the doc's earlier
    0.55/−35 and 0.75/−12 numbers were stale placeholders). The bench
    verification procedure (flat floor + box at a known spot) still to run.
-4. One-time intrinsics dump per serial — **done** 2026-09-05
-   (`tools/orbbec_intrinsics.py` → `config/orbbec_intrinsics_<serial>.json`).
+4. Intrinsics dump per serial — **done** 2026-09-05, **refreshed**
+   2026-09-07 after the Gemini 330 fw **1.8.10** upgrade (ISP
+   recalibrated color; depth unchanged; ray LUTs regenerated,
+   `db6cd72`).
 5. ~~Decide final near/far serial-role mapping~~ — resolved: **PE = near,
    ED = far** (confirmed from the mounted cameras' views, 2026-09-05).
-6. **OBSBOT retirement** (Section 9): Stage 1 video server (`videoserver.py`
-   + app port default) lands before any firmware removal; then Stage 2–4.
+6. ~~OBSBOT retirement~~ (Section 9) — **done**, all four stages
+   (2026-09-06).
 7. ~~Videoserver H.265 track: NVENC~~ — **resolved 2026-09-05**: Orin Nano
    has no hardware encoder; verified libx264/libx265 via PyAV on-device and
-   benchmarked (Section 3.2 table). **Decision: H.264 stream** — x264
-   1280x800@30, superfast/zerolatency + tuned GOP, ~2–3 Mbps. H.265 dropped:
-   its only win (bitrate) was irrelevant at 2 Mbps, and it cost ~4x encoder
-   CPU plus a fleet HEVC-decode requirement.
+   benchmarked (Section 3.2 table). MJPEG shipped as the operator stream
+   instead (see §9 note); the x264 numbers remain the record for any
+   future encoded-stream work.
+8. ~~Phase B runtime swap~~ (§7.3 second half) — **done 2026-09-07**:
+   `--navd-model` + `navd_runtime.py` (CUDA EP ~55 ms, CPU EP ~750 ms,
+   per-tick auto-fallback + provider logging); on-robot deps
+   `onnxruntime-gpu==1.24.0` from the Jetson AI Lab index. Remaining
+   Phase B: **the §7.4 acceptance demo** (student vs teacher on the
+   failure-case suite, forced-fallback bench demo).
+9. **Hand-label tool + more data** (§7.1): grid-level review/paint tool
+   is unbuilt; dataset is 3,092 ticks / 8 sessions vs the 5–10 k frame
+   target — failure cases (glass, black bag, reflective floor) not yet
+   in the data.
+10. **Depth work mode** — `depth_work_mode: High Density` is now set per
+    camera at open (`b241358`): the device default melted floor-level
+    objects into the ground plane. Verify on the next bench run that
+    floor-level obstacles survive classification.
 
 ---
 
@@ -708,13 +803,20 @@ app screens, jetson-agent, `bebop_v2.yaml` (never had `video:`).
   `main.py --goal-drive` (wiring), `config/orbbec_rig.yaml` (extrinsics),
   `tools/orbbec_intrinsics.py`, `tests/` (35 synthetic unit tests).
 - `bebop-vision/train_nav.py`, `tools/export_navseg_onnx.py` (export contract).
-- `firmware/bebop-linux/src/`: `nav.rs` (ORT pattern, CUDA EP — retired per
-  Section 9, kept as reference), `video.rs` (V4L2 UVC capture — retired per
-  Section 9; the Rust-port path for depth), `supervisor.rs`
-  (arbitration + watchdog), `drive.rs` (twist kinematics), `config.rs`
-  (`nav:` block — retired per Section 9).
+- Phase B: `bebop_vision/navd.py` + `train_navd.py` (student),
+  `bebop_vision/navd_pre.py` (shared preprocessing),
+  `bebop_vision/navd_runtime.py` (runtime swap),
+  `tools/export_navd_onnx.py` (export), `tools/{yolo_autolabel,
+  sam_floor_label,fuse_navd_labels}.py` (teacher labels),
+  `requirements-jetson.txt` (Jetson ML pins).
+- `firmware/bebop-linux/src/`: `nav.rs` / `video.rs` / `ptz.rs` were
+  **deleted** by §9 Stage 2 (`1334218`) — consult git history for the ORT
+  / V4L2 patterns; `nav_goal.rs` + `server/{ws,handlers}.rs` (goal
+  routing, §8), `supervisor.rs` (arbitration + watchdog), `drive.rs`
+  (twist kinematics).
 - `jetson-agent/bebop-proto/proto/bebop_runtime.proto` (message schemas;
-  next free client field: 22).
+  client field 22 = `SetNavigationGoal` — **used**; next free client
+  field: 23).
 - `scripts/install-jetson.sh` + `scripts/orbbec-99-obsensor-libusb.rules`
   (camera bring-up).
 - Local bring-up artifacts (not in repo): viewer script

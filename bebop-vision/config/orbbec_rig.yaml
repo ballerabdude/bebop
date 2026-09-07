@@ -38,9 +38,14 @@ robots:
         # NOTE: the previous rects were color-space (1280x800) values and
         # clipped against the depth frame, masking floor right of the
         # chassis while leaving the chassis itself unmasked.
+        # Tightened 2026-09-07 against a live snapshot overlay: chassis
+        # top rail v~246, right rail u~548, bottom-left edge u~336 (the
+        # frame widens toward the bottom) — the old top/right edges
+        # masked ~18 px of actionable floor (0.6-0.7 m ahead) that the
+        # label fusion turned into permanent caution cells.
         # The rigid mount keeps these pixels fixed.
         self_mask_pixels:
-          - [340, 215, 570, 480]
+          - [336, 228, 560, 480]
       CPBLC53000ED:
         role: far
         height_m: 1.32
