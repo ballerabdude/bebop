@@ -414,6 +414,69 @@ def run_record_navd(args):
         threading.Thread(target=drive_loop, daemon=True,
                          name="rec-goal-drive").start()
 
+    # Feed BEV worker: keeps the :9092 bev stream live whenever the rig
+    # is open, even with no segment recording — auto mode only opens
+    # segments while the drive state is active (wheels armed, no estop),
+    # and without this worker the feed went dark exactly then. While a
+    # segment IS recording, the recorder's tick publishes its own
+    # tick-aligned grid via on_grid, so this worker pauses rather than
+    # computing every grid twice. Same shape as the --goal-drive BEV
+    # worker: serial camera reads, numpy/cv2-only pool work (§2.8).
+    stop_feed = threading.Event()
+    feed_pool = None
+    if vserver is not None:
+        from concurrent.futures import ThreadPoolExecutor
+        feed_pool = ThreadPoolExecutor(max_workers=2,
+                                       thread_name_prefix="bev-feed")
+
+        def feed_bev_worker():
+            feed_builder = BevBuilder()
+            last_stamp, cached = {}, {}
+            grids, stats_ts = 0, time.monotonic()
+            while not stop_feed.is_set():
+                t0 = time.monotonic()
+                if rec_holder["rec"] is not None:
+                    stop_feed.wait(0.25)   # recorder publishes its grid
+                    continue
+                per_cam, ages, jobs = {}, {}, {}
+                for role, cam in rig.cameras.items():
+                    f = cam.read()
+                    if f is None or f.age_s() > feed_builder.max_frame_age_s:
+                        per_cam[role], ages[role] = None, None
+                        continue
+                    ages[role] = f.age_s()
+                    if last_stamp.get(role) != f.stamp_us:
+                        jobs[role] = (
+                            feed_pool.submit(feed_builder.process, f),
+                            f.stamp_us)
+                    per_cam[role] = cached.get(role)
+                for role, (job, stamp) in jobs.items():
+                    try:
+                        cached[role] = job.result()
+                    except Exception as exc:
+                        print(f"[record-navd] feed BEV error ({role}): "
+                              f"{type(exc).__name__}: {exc}")
+                        cached[role] = None
+                    last_stamp[role] = stamp
+                    per_cam[role] = cached.get(role)
+                try:
+                    grid = feed_builder.fuse(per_cam, ages)
+                except Exception as exc:
+                    print(f"[record-navd] feed fuse error: "
+                          f"{type(exc).__name__}: {exc}")
+                    grid = None
+                vserver.publish_bev(grid, goal_slot.get())
+                grids += 1
+                now = time.monotonic()
+                if now - stats_ts >= 5.0:
+                    stats_ts = now
+                    print(f"[record-navd] feed: {grids} grids (idle)")
+                    grids = 0
+                time.sleep(max(0.0, 0.1 - (time.monotonic() - t0)))
+
+        threading.Thread(target=feed_bev_worker, daemon=True,
+                         name="bev-feed").start()
+
     if not args.auto:
         rec, path, _ = new_segment()
         t0 = _time.monotonic()
@@ -429,6 +492,9 @@ def run_record_navd(args):
         finally:
             close_segment(rec, path)
             stop_drive_loop.set()
+            stop_feed.set()
+            if feed_pool is not None:
+                feed_pool.shutdown(wait=False)
             if vserver is not None:
                 vserver.stop()
             rig.stop()
@@ -489,6 +555,9 @@ def run_record_navd(args):
             except OSError as exc:
                 print(f"\n[record-navd] error closing final segment: {exc}")
         stop_drive_loop.set()
+        stop_feed.set()
+        if feed_pool is not None:
+            feed_pool.shutdown(wait=False)
         if vserver is not None:
             vserver.stop()
         rig.stop()
