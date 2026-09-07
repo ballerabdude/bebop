@@ -24,6 +24,10 @@ robots:
         # the primary+secondary pair (see far camera note); 15 fps keeps the
         # SDK filter load under the GIL cliff while phase-locking the pair.
         depth_profile: [848, 480, 15]
+        # Depth work mode (set at open; resets to "Default" on power cycle).
+        # "Default" over-smooths floor-level objects into the ground plane;
+        # "High Density" keeps object relief (measured 2026-09-07).
+        depth_work_mode: High Density
         # Camera's hardware JPEG encoder: color arrives pre-encoded and the
         # recorder stores it verbatim (saves ~65 ms/tick of CPU encode vs
         # RGB + re-encode; the capture threads also shed their decode work).
@@ -48,6 +52,7 @@ robots:
         # 15+15 keeps the filter load at 30 frames/s total, below that cliff,
         # and far gains 50% data rate vs the old 10 fps.
         depth_profile: [848, 480, 15]
+        depth_work_mode: High Density
         color_format: mjpg
     bev:
       range_m: 3.0        # forward horizon

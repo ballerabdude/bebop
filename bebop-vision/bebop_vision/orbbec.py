@@ -13,6 +13,11 @@ OrbbecViewer before running.
   restore when the cable is swapped — no config change needed.
 - Depth filters (SpatialModerate + Temporal + HoleFilling) run in the
   capture thread, per Section 3.3 of the plan.
+- Depth work mode (per-camera `depth_work_mode` in the rig YAML) is set
+  at open time — the device default "Default" mode over-smooths and
+  melts low-contrast objects on the floor into the ground plane;
+  "High Density" preserves edge/detail (measured 2026-09-07: +3%
+  valid pixels, visible object relief vs Default).
 - Threading mirrors `camera.py`: one capture thread per camera feeding a
   latest-wins slot. Open failure at startup is a hard error (bench tool);
   a mid-run drop leaves the slot stale so the deadman stops the robot —
@@ -156,7 +161,37 @@ def _dump_intrinsics(pipeline, serial, config_dir=None):
                        "p1": float(dist.p1), "p2": float(dist.p2),
                        "k3": float(dist.k3), "k4": float(dist.k4),
                        "k5": float(dist.k5), "k6": float(dist.k6)},
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+    # Color intrinsics + color->depth extrinsic: the semantic-fusion ray
+    # LUTs (tools/fuse_navd_labels.py) project through these. The ISP
+    # recalibrates them on firmware updates, so they belong in the same
+    # cached snapshot (depth values are unaffected by ISP changes).
+    rgb = getattr(param, "rgb_intrinsic", None)
+    rgbd = getattr(param, "rgb_distortion", None)
+    if rgb is not None and int(getattr(rgb, "width", 0)) > 0:
+        data.update({
+            "color_width": int(rgb.width), "color_height": int(rgb.height),
+            "color_fx": float(rgb.fx), "color_fy": float(rgb.fy),
+            "color_cx": float(rgb.cx), "color_cy": float(rgb.cy),
+            "color_rgb_distortion": {
+                "model": int(rgbd.model),
+                "k1": float(rgbd.k1), "k2": float(rgbd.k2),
+                "p1": float(rgbd.p1), "p2": float(rgbd.p2),
+                "k3": float(rgbd.k3), "k4": float(rgbd.k4),
+                "k5": float(rgbd.k5), "k6": float(rgbd.k6)},
+        })
+        # OBExtrinsic: rot = 3x3 rotation (9), transform = translation (3).
+        ext = getattr(param, "transform", None)
+        rot = None if ext is None else getattr(ext, "rot", None)
+        tr = None if ext is None else getattr(ext, "transform", None)
+        rot = np.asarray(rot, dtype=np.float32).reshape(-1) if rot is not None else []
+        tr = np.asarray(tr, dtype=np.float32).reshape(-1) if tr is not None else []
+        if rot.size == 9 and np.any(rot):
+            data["color_to_depth_transform"] = {
+                "rotation": [float(v) for v in rot],
+                "translation": [float(v) for v in tr[:3]],
+            }
     path = intrinsics_path(serial, config_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
@@ -176,10 +211,11 @@ class OrbbecCamera:
 
     def __init__(self, serial, role, depth_profile=(848, 480, 30),
                  color_profile=None, config_dir=None, mask_rects=None,
-                 color_format="rgb"):
+                 color_format="rgb", depth_work_mode=None):
         self.serial = serial
         self.role = role
         self.depth_profile = tuple(depth_profile)
+        self.depth_work_mode = depth_work_mode
         self.color_profile = tuple(color_profile) if color_profile else None
         self.color_format = None
         self.color_format_want = color_format
@@ -235,6 +271,18 @@ class OrbbecCamera:
             cfg.trigger_out_enable = self.role == "near"
             cfg.frames_per_trigger = 1
             dev.set_multi_device_sync_config(cfg)
+
+        # Depth work mode: set before the pipeline starts. Devices power up
+        # in "Default", which over-smooths floor-level objects into the
+        # ground plane (see module docstring).
+        if self.depth_work_mode and hasattr(dev, "set_depth_work_mode"):
+            try:
+                current = dev.get_depth_work_mode()
+                if getattr(current, "name", None) != self.depth_work_mode:
+                    dev.set_depth_work_mode(self.depth_work_mode)
+            except Exception as exc:
+                print(f"[orbbec] {self.role}({self.serial}): depth work mode "
+                      f"'{self.depth_work_mode}' rejected: {exc}")
 
         depth_sensor = None
         sensors = dev.get_sensor_list()
@@ -396,7 +444,8 @@ class OrbbecRig:
                 color_profile=(1280, 800, dp[2]) if color else None,
                 config_dir=config_dir,
                 mask_rects=c.get("self_mask_pixels"),
-                color_format=c.get("color_format", "rgb"))
+                color_format=c.get("color_format", "rgb"),
+                depth_work_mode=c.get("depth_work_mode"))
 
     def get(self, role):
         return self.cameras[role]
