@@ -1,19 +1,17 @@
 """Runtime BEV provider for the navd student model (plan §7.3).
 
-Swaps the geometric BEV source for the exported NavdUNet ONNX at runtime:
+Replaces the geometric BEV source with the exported NavdUNet ONNX:
 raw sensor frames (near/far depth + near color) and the goal direction go
 through one forward pass to a 60x60 class map that is wrapped in a
 BevGrid the planner consumes unchanged ("the grid is the seam" —
 GoalPlanner/GoalDriveNode never see the difference).
 
-Auto-fallback to the geometric grid (plan §7.3): missing/stale camera
-streams, NaN/Inf logits, `frac_navigable` outside [0.05, 0.95], or any
-inference exception — the geometric grid computed in the same tick takes
-over and the provider switch is logged once per transition. A fresh
-model grid always wins; a single bad tick falls back for that tick only
-(the next good prediction reclaims the provider, so a flaky model
-degrades to "geometric with occasional model ticks" rather than
-sticking).
+Model-only, no fallback: when the model cannot produce a grid
+(missing/stale camera streams, NaN/Inf logits, `frac_navigable` outside
+[0.05, 0.95], or any inference exception) update() returns None — the
+drive node treats that exactly like a stale grid ("waiting", zero
+twist). The reason is kept in last_reason and logged once per
+transition; the next good prediction serves a grid again.
 
 Class mapping (model -> BEV vocabulary):
   navigable(1) -> FREE, blocked(0) -> OCCUPIED, caution(2) -> INFLATED in
@@ -105,7 +103,7 @@ class NavdModel:
     def predict(self, depth_near_mm, depth_far_mm, color_rgb, goal_raster):
         """uint16 mm depths, RGB uint8 color, (60, 60) goal fan ->
         (3, 60, 60) float32 logits. Raises on malformed inputs (the
-        source's fallback catches)."""
+        source's update turns any failure into a None grid)."""
         dn, _ = prep_depth(depth_near_mm)
         df, _ = prep_depth(depth_far_mm)
         c = prep_color(color_rgb)
@@ -121,12 +119,11 @@ class NavdModel:
 
 
 class NavdGridSource:
-    """Model-first grid source with automatic geometric fallback.
+    """Model-only grid source.
 
-    update(frames, geo_grid, goal, odom) -> (BevGrid, provider) where
-    provider is "navd" or "geometric". `frames` is the fresh-only dict
-    from gather_frames(); `geo_grid` is this tick's geometric BevGrid
-    (fallback value + plane_ok carrier for the no_floor gate).
+    update(frames, goal, odom) -> BevGrid | None: the student model's
+    grid, or None on any tick the model cannot serve (reason in
+    last_reason). `frames` is the fresh-only dict from gather_frames().
 
     The near camera's color arrives as camera-encoded MJPEG bytes
     (rig `color_format: mjpg`); decoding happens here, in the worker
@@ -139,8 +136,8 @@ class NavdGridSource:
         self.max_frame_age_s = max_frame_age_s
         self.frac_lo, self.frac_hi = frac_range
         self._log = log
-        self._provider = None
         self.last_reason = None   # why the model did not produce the last grid
+        self._last_logged = None  # reason already reported (log once per change)
         self._color_stamp = None
         self._color_rgb = None
         self._lock = threading.Lock()
@@ -161,9 +158,9 @@ class NavdGridSource:
             self._color_stamp = near.stamp_us
         return self._color_rgb
 
-    # --- provider -----------------------------------------------------------
+    # --- grid ----------------------------------------------------------------
 
-    def _try_model(self, frames, geo_grid, goal, odom, now):
+    def _predict_grid(self, frames, goal, odom, now):
         """(BevGrid, None) on success or (None, reason) on any failure."""
         try:
             near, far = frames.get("near"), frames.get("far")
@@ -193,39 +190,37 @@ class NavdGridSource:
             return BevGrid(
                 occ=occ, raw=raw, stamp_us=max(near.stamp_us, far.stamp_us),
                 per_camera_age_s=ages,
-                # The model knows nothing about ground planes; carry the
-                # geometric fit health so the no_floor gate stays live.
-                plane_ok=dict(geo_grid.plane_ok) if geo_grid is not None else {},
-                roles=["navd"], cell_m=CELL_M, recv_ts=now), None
-        except Exception as exc:   # noqa: BLE001 — any model failure falls back
+                # The model knows nothing about ground planes: plane_ok
+                # stays empty, which keeps the no_floor gate inert.
+                plane_ok={},
+                roles=["navd"], cell_m=CELL_M,
+                # Stamp AFTER inference: the drive node's deadman measures
+                # producer liveness (how long since a grid completed), so
+                # the ~70 ms the GPU spends inside Run must not count
+                # against it — at tick-start stamping, worst-case age was
+                # worker period + inference and rode the 0.5 s line
+                # (bench run 2026-09-07).
+                recv_ts=time.monotonic()), None
+        except Exception as exc:   # noqa: BLE001 — any model failure -> None
             return None, f"{type(exc).__name__}: {exc}"
 
-    def update(self, frames, geo_grid, goal, odom, now=None):
-        """One tick: try the model, fall back to geometric. Returns
-        (grid, provider); grid is None only when neither source has one.
+    def update(self, frames, goal, odom, now=None):
+        """One tick: model frames -> grid, or None when the model cannot
+        produce one (reason in last_reason).
 
-        Fallback is per-tick and immediate — stricter than the spec's
-        "> 0.5 s stale" window (which the drive node's recv_ts deadman
-        enforces independently). A single bad tick serves geometric for
-        that tick; the next good prediction reclaims the provider.
+        There is no fallback grid: the caller sees None and the drive
+        node's deadman treats it like any stale grid ("waiting", zero
+        twist). Failures are logged once per transition — the first bad
+        tick and the first good tick after — not every tick.
         """
         now = time.monotonic() if now is None else now
         with self._lock:
-            grid, reason = self._try_model(frames, geo_grid, goal, odom, now)
-            if grid is not None:
-                provider = "navd"
-                self.last_reason = None
-            else:
-                provider = "geometric"
-                grid = geo_grid
-                self.last_reason = reason
-            if self._provider != provider:
-                suffix = f" ({reason})" if reason else ""
-                self._log(f"[navd-model] provider "
-                          f"{self._provider or 'startup'} -> {provider}{suffix}")
-            self._provider = provider
-        return grid, provider
-
-    @property
-    def provider(self):
-        return self._provider or "geometric"
+            grid, reason = self._predict_grid(frames, goal, odom, now)
+            self.last_reason = reason
+            if reason != self._last_logged:
+                if reason is None:
+                    self._log("[navd-model] model grid ok (recovered)")
+                else:
+                    self._log(f"[navd-model] no model grid: {reason}")
+                self._last_logged = reason
+            return grid

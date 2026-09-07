@@ -244,8 +244,8 @@ def test_on_grid_callback(tmp_path, builder):
 
 
 def test_model_grid_recorded(tmp_path, builder):
-    """--navd-model: the grid the planner drove on lands in /bev_model with
-    its provider, alongside the geometric /bev_teacher (§7.3 A/B)."""
+    """--navd-model: the grid the planner drove on lands in /bev_model,
+    alongside the geometric /bev_teacher (§7.3 A/B)."""
     import base64
     from bebop_vision.bev import BevGrid
     from bebop_vision.goal_planner import GoalSlot, GoalHeading
@@ -258,7 +258,7 @@ def test_model_grid_recorded(tmp_path, builder):
     path = tmp_path / "session.mcap"
     rec = NavdRecorder(rig, robot, slot, path, builder=builder,
                        rate_hz=20.0,
-                       model_grid_fn=lambda: (mgrid, "navd"))
+                       model_grid_fn=lambda: mgrid)
     rec.start()
     time.sleep(0.6)
     rec.stop()
@@ -272,7 +272,6 @@ def test_model_grid_recorded(tmp_path, builder):
                     json.loads(message.data))
     assert "/bev_model" in topics and len(topics["/bev_model"]) >= 3
     for m in topics["/bev_model"]:
-        assert m["provider"] == "navd"
         raw = np.frombuffer(base64.b64decode(m["raw"]), np.uint8)
         assert raw.shape == (60 * 60,)
 

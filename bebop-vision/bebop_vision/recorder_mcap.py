@@ -16,7 +16,7 @@ Channels:
   /depth_near_preview  foxglove.RawImage (JSON; 106x60 16uc1 — dashboard only)
   /depth_far_preview   foxglove.RawImage (same encoding, far camera)
   /bev_map      foxglove.RawImage (JSON; 60x60 rgb8 top-down teacher map)
-  /bev_model    JSON {"raw": b64 60x60 uint8, "plane_ok", "provider"} — the
+  /bev_model    JSON {"raw": b64 60x60 uint8, "plane_ok", "stamp_ns"} — the
                 student-model grid the planner drove on (--navd-model only)
   /cmd_vel      JSON  {"vx", "wz", "stamp_ns"}   — operator twist (teleop label)
   /odom         JSON  {"x", "y", "theta", "stamp_ns"}
@@ -188,9 +188,9 @@ class NavdRecorder:
         # app gets the live BEV feed while recording. grid may be None.
         self._on_grid = on_grid
         # Optional model-drive grid source (plan §7.3 --navd-model): a
-        # zero-arg callable returning (BevGrid | None, provider str) — the
-        # grid the goal planner actually drove on, recorded as /bev_model
-        # for offline A/B against the geometric /bev_teacher.
+        # zero-arg callable returning BevGrid | None — the grid the goal
+        # planner actually drove on (model-only, no fallback), recorded
+        # as /bev_model for offline A/B against the geometric /bev_teacher.
         self._model_grid_fn = model_grid_fn
         self.bytes_written = 0
         self.frames = 0
@@ -490,10 +490,10 @@ class NavdRecorder:
             self._add(self._ch["bev_map"],
                       self._bev_map_image(grid, goal, log_ns), log_ns)
         if self._model_grid_fn is not None:
-            mgrid, provider = self._model_grid_fn()
+            mgrid = self._model_grid_fn()
             bm = {"raw": self._b64(mgrid.raw) if mgrid is not None else None,
                   "plane_ok": mgrid.plane_ok if mgrid is not None else {},
-                  "provider": provider, "stamp_ns": log_ns}
+                  "stamp_ns": log_ns}
             self._add(self._ch["bev_model"], json.dumps(bm).encode(), log_ns)
 
     @staticmethod

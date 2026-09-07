@@ -14,7 +14,8 @@ CI green.
 >   statuses). Trained + exported student, ONNX export with parity gate
 >   (`1917652`), and the **runtime swap shipped 2026-09-07** (`--navd-model`,
 >   `bebop_vision/navd_runtime.py`, CUDA EP ~55 ms vs CPU ~750 ms on the
->   Orin, per-tick geometric auto-fallback; on-robot dep
+>   Orin; the per-tick geometric auto-fallback was removed the same day —
+>   model-only; on-robot dep
 >   `onnxruntime-gpu==1.24.0` from the Jetson AI Lab index).
 > - **Label pipeline v2 (2026-09-07, user decision): SAM 3.1 + depth
 >   only** — YOLO and the geometric teacher are OUT of the fusion;
@@ -190,8 +191,9 @@ In order; 1–4 are data plumbing, 5–7 are the model. **Statuses updated
    parity gate ≥ 0.99 vs torch) AND the runtime swap:
    `main.py --navd-model weights/navd.onnx` (goal-drive + record-navd
    goal-drive), `bebop_vision/navd_runtime.py` (onnxruntime CUDA EP,
-   ~55 ms steady on the Orin; per-tick geometric auto-fallback with
-   provider-switch logging; preprocessing shared with training via
+   ~55 ms steady on the Orin; model-only — the original per-tick
+   geometric auto-fallback + provider logging was removed 2026-09-07;
+   preprocessing shared with training via
    `navd_pre.py`). On-robot: `onnxruntime-gpu==1.24.0` (Jetson AI Lab
    index) + `onnx` (re-pin numpy 1.26.4 after installing it). Verified:
    67 Python tests green on the Jetson; real `weights/navd.onnx` loads
@@ -204,7 +206,8 @@ In order; 1–4 are data plumbing, 5–7 are the model. **Statuses updated
 - **The grid is the seam.** `GoalPlanner` + `GoalDriveNode` do not change
   for the student; only the grid provider swaps. Do not rewrite them.
 - The **coded safety envelope stays coded**: deadman, e-stop latch, mode
-  gate, near-cone final check, geometric fallback (§7.2 revision).
+  gate, near-cone final check (§7.2 revision; geometric fallback removed —
+  model-only runtime).
 - Keep the test pattern: synthetic unit tests, hardware paths mocked/faked.
 - Don't spin thread pools around pyorbbecsdk capture (see §2.8).
 - If you add CLI flags to `scripts/install-jetson.sh`, initialize the

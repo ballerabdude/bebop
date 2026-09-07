@@ -1097,12 +1097,13 @@ if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
 fi
 
 if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
-    echo "    # Capture dir: pre-create as the invoking user so the recorder
+    # Capture dir: pre-create as the invoking user so the recorder
     # (bebop-vision, run as the regular user) can write navd sessions
     # next to the firmware's own policy captures. The firmware only
     # creates the dir if missing, so ownership sticks.
-    install -d -o "${SUDO_USER:-bebop}" -g "${SUDO_GROUP:-$(id -gn "${SUDO_USER:-bebop}")}" /var/lib/bebop-captures
-==> installing bebop-linux → /usr/local/bin/bebop-linux"
+    install -d -o "${SUDO_USER:-bebop}" -g "$(id -gn "${SUDO_USER:-bebop}")" \
+        /var/lib/bebop-captures
+    echo "==> installing bebop-linux → /usr/local/bin/bebop-linux"
     install -m 0755 "${LINUX_BIN}" /usr/local/bin/bebop-linux
 
     # Robot config. Installed under its REAL filename (e.g.
@@ -1179,11 +1180,26 @@ if [[ "${SETUP_ORBBEC}" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# GPU clocks. The Orin's nvhost_podgov idles the GPU at ~306 MHz; navd's
+# ~5 Hz CUDA inferences each paid the clock ramp (107-118 ms unpinned vs
+# 74 ms flat, bench 2026-09-07). A boot-time oneshot pins the devfreq
+# governor to performance for every GPU consumer. Installed
+# unconditionally: idempotent, tiny, and not tied to any --setup flag.
+# ---------------------------------------------------------------------------
+
+echo "==> installing bebop-gpu-clocks.service (GPU devfreq -> performance)"
+install -m 0644 "${SCRIPT_DIR}/bebop-gpu-clocks.service" \
+    /etc/systemd/system/bebop-gpu-clocks.service
+
+# ---------------------------------------------------------------------------
 # Reload + start
 # ---------------------------------------------------------------------------
 
 echo "==> reloading systemd"
 systemctl daemon-reload
+
+systemctl enable --now bebop-gpu-clocks.service \
+    || echo "    WARN: failed to enable bebop-gpu-clocks.service" >&2
 
 if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
     echo "==> enabling + (re)starting bebop-agent"

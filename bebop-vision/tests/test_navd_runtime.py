@@ -1,14 +1,15 @@
-"""NavdGridSource runtime-swap unit tests (plan §7.3).
+"""NavdGridSource runtime unit tests (plan §7.3).
 
-Synthetic only: a stub model stands in for the ONNX session, so provider
-selection, class mapping, fallback triggers and recovery are tested
+Synthetic only: a stub model stands in for the ONNX session, so grid
+production, class mapping and the no-grid failure paths are tested
 without torch/onnxruntime. The real-ONNX parity test is skipped unless
 torch + onnxruntime are importable (they are declared deps, but the
 Jetson's torch comes from a separate index).
 
 Note on the frac_navigable guard: implausible uniform outputs (everything
-navigable or everything blocked) fall back, so every "model wins" fixture
-paints a plausible scene — a blocked far wall plus a small obstacle band.
+navigable or everything blocked) yield no grid, so every "model wins"
+fixture paints a plausible scene — a blocked far wall plus a small
+obstacle band.
 """
 
 import importlib.util
@@ -22,7 +23,7 @@ import cv2
 import numpy as np
 import pytest
 
-from bebop_vision.bev import FREE, OCCUPIED, HAZARD, INFLATED, BevGrid
+from bebop_vision.bev import FREE, OCCUPIED, HAZARD, INFLATED
 from bebop_vision.goal_planner import GoalHeading, GoalPlanner, GoalPoint
 from bebop_vision.navd_pre import (IMG_H, IMG_W, build_goal_raster,
                                    prep_color, prep_depth)
@@ -49,16 +50,6 @@ def make_frame(depth_mm, stamp_us, age_s=0.01, color_jpeg=None, color=None):
                         width=depth_mm.shape[1], height=depth_mm.shape[0],
                         fps=15.0, color=color, color_jpeg=color_jpeg,
                         serial="S", role="x")
-
-
-def make_geo_grid():
-    occ = np.zeros((ROWS, COLS), np.uint8)
-    occ[10, 30] = OCCUPIED   # something the geometric path sees
-    return BevGrid(occ=occ, raw=occ.copy(), stamp_us=7,
-                   per_camera_age_s={"near": 0.01, "far": 0.02},
-                   plane_ok={"near": True, "far": True},
-                   roles=["near", "far"], cell_m=CELL,
-                   recv_ts=time.monotonic())
 
 
 def logits_for(cls_map):
@@ -88,7 +79,8 @@ def make_source(logits=None, error=None, **kw):
     src.max_frame_age_s = kw.get("max_frame_age_s", 0.3)
     src.frac_lo, src.frac_hi = kw.get("frac_range", (0.05, 0.95))
     src._log = kw.get("log", print)
-    src._provider = None
+    src.last_reason = None
+    src._last_logged = None
     src._color_stamp = None
     src._color_rgb = None
     src._lock = threading.Lock()
@@ -103,15 +95,13 @@ def sample_frames(color="array"):
             "far": make_frame(df, 1000)}
 
 
-# --- provider selection ------------------------------------------------------
+# --- grid production ---------------------------------------------------------
 
-def test_model_grid_wins_and_maps_classes():
+def test_model_grid_maps_classes():
     cls = plausible_scene()
     cls[40:44, 20:24] = CAUTION     # an unconfirmed band mid-floor
     src = make_source(logits_for(cls))
-    geo = make_geo_grid()
-    grid, provider = src.update(sample_frames(), geo, None, (0.0, 0.0, 0.0))
-    assert provider == "navd"
+    grid = src.update(sample_frames(), None, (0.0, 0.0, 0.0))
     assert grid.shape == (ROWS, COLS) and grid.cell_m == CELL
     assert (grid.occ[0:10, :] == OCCUPIED).all()
     assert (grid.occ[40:44, 20:24] == INFLATED).all()
@@ -122,10 +112,11 @@ def test_model_grid_wins_and_maps_classes():
     # raw telemetry: caution reads as HAZARD, blocked as OCCUPIED
     assert (grid.raw[40:44, 20:24] == HAZARD).all()
     assert (grid.raw[0:10, :] == OCCUPIED).all()
-    # geometric health rides along for the no_floor gate
-    assert grid.plane_ok == {"near": True, "far": True}
+    # model-only: no geometric plane fit rides along
+    assert grid.plane_ok == {}
     assert grid.stamp_us == 1000
     assert set(grid.per_camera_age_s) == {"near", "far"}
+    assert src.last_reason is None
 
 
 def test_planner_blocks_on_model_caution():
@@ -133,76 +124,77 @@ def test_planner_blocks_on_model_caution():
     cls = plausible_scene()
     cls[50:52, 28:32] = CAUTION     # ~0.5 m ahead, dead ahead
     src = make_source(logits_for(cls))
-    grid, _ = src.update(sample_frames(), make_geo_grid(), None,
-                         (0.0, 0.0, 0.0))
+    grid = src.update(sample_frames(), None, (0.0, 0.0, 0.0))
     vx, wz, info = GoalPlanner().compute(grid, GoalHeading(0.0))
     assert info["state"] == "hard_stop"
     assert vx == 0.0 and wz == 0.0
 
 
-def test_fallback_missing_far():
+# --- no-grid failures (no fallback — the drive node waits) --------------------
+
+def test_missing_far_yields_no_grid():
     src = make_source(logits_for(plausible_scene()))
     frames = sample_frames()
     frames.pop("far")
-    geo = make_geo_grid()
-    grid, provider = src.update(frames, geo, None, (0.0, 0.0, 0.0))
-    assert provider == "geometric"
-    assert grid is geo
+    assert src.update(frames, None, (0.0, 0.0, 0.0)) is None
+    assert "near+far" in src.last_reason
 
 
-def test_fallback_stale_frame():
+def test_stale_frame_yields_no_grid():
     src = make_source(logits_for(plausible_scene()))
     frames = sample_frames()
     frames["far"] = make_frame(np.full((480, 848), 2500, np.uint16), 1000,
                                age_s=1.0)
-    geo = make_geo_grid()
-    grid, provider = src.update(frames, geo, None, (0.0, 0.0, 0.0))
-    assert provider == "geometric" and grid is geo
+    assert src.update(frames, None, (0.0, 0.0, 0.0)) is None
+    assert src.last_reason == "camera frame stale"
 
 
-def test_fallback_nan_logits():
+def test_nan_logits_yield_no_grid():
     bad = logits_for(plausible_scene())
     bad[0, 0, 0] = np.nan
     src = make_source(bad)
-    geo = make_geo_grid()
-    grid, provider = src.update(sample_frames(), geo, None, (0.0, 0.0, 0.0))
-    assert provider == "geometric" and grid is geo
+    assert src.update(sample_frames(), None, (0.0, 0.0, 0.0)) is None
+    assert src.last_reason == "non-finite logits"
 
 
 @pytest.mark.parametrize("cls_fill", [BLOCKED, NAVIGABLE])
-def test_fallback_implausible_frac(cls_fill):
+def test_implausible_frac_yields_no_grid(cls_fill):
     """Fully uniform predictions are implausible either way (§7.3)."""
     cls = np.full((ROWS, COLS), cls_fill, np.uint8)
     src = make_source(logits_for(cls))
-    geo = make_geo_grid()
-    grid, provider = src.update(sample_frames(), geo, None, (0.0, 0.0, 0.0))
-    assert provider == "geometric" and grid is geo
+    assert src.update(sample_frames(), None, (0.0, 0.0, 0.0)) is None
+    assert "frac_navigable" in src.last_reason
 
 
-def test_fallback_on_exception_then_recovery():
+def test_no_color_yields_no_grid():
+    src = make_source(logits_for(plausible_scene()))
+    frames = sample_frames(color="none")   # no color array, no jpeg
+    assert src.update(frames, None, (0.0, 0.0, 0.0)) is None
+    assert src.last_reason == "no decodable near color"
+
+
+def test_exception_yields_no_grid_then_recovers():
     src = make_source(error=RuntimeError("CUDA exploded"))
-    geo = make_geo_grid()
-    grid, provider = src.update(sample_frames(), geo, None, (0.0, 0.0, 0.0))
-    assert provider == "geometric" and grid is geo
-    # next good tick reclaims the provider — no sticky fallback
+    assert src.update(sample_frames(), None, (0.0, 0.0, 0.0)) is None
+    assert src.last_reason == "RuntimeError: CUDA exploded"
+    # next good tick serves a grid again
     src.model.logits, src.model.error = logits_for(plausible_scene()), None
-    grid, provider = src.update(sample_frames(), geo, None, (0.0, 0.0, 0.0))
-    assert provider == "navd"
+    grid = src.update(sample_frames(), None, (0.0, 0.0, 0.0))
+    assert grid is not None
     assert (grid.occ[0:10, :] == OCCUPIED).all()
+    assert src.last_reason is None
 
 
-def test_provider_switch_logged_once():
+def test_failure_logged_once_per_transition():
     logs = []
     src = make_source(error=RuntimeError("x"), log=logs.append)
-    geo = make_geo_grid()
-    src.update(sample_frames(), geo, None, (0.0, 0.0, 0.0))
-    src.update(sample_frames(), geo, None, (0.0, 0.0, 0.0))   # same state
+    src.update(sample_frames(), None, (0.0, 0.0, 0.0))
+    src.update(sample_frames(), None, (0.0, 0.0, 0.0))   # same failure
     src.model.logits, src.model.error = logits_for(plausible_scene()), None
-    src.update(sample_frames(), geo, None, (0.0, 0.0, 0.0))
-    src.update(sample_frames(), geo, None, (0.0, 0.0, 0.0))   # same state
-    switched = [m for m in logs if "provider" in m]
-    assert len(switched) == 2          # navd->geometric and back
-    assert all("->" in m for m in switched)
+    src.update(sample_frames(), None, (0.0, 0.0, 0.0))
+    src.update(sample_frames(), None, (0.0, 0.0, 0.0))   # still good
+    assert len([m for m in logs if "no model grid" in m]) == 1
+    assert len([m for m in logs if "recovered" in m]) == 1
 
 
 # --- inputs ------------------------------------------------------------------
@@ -215,21 +207,12 @@ def test_color_from_camera_jpeg_is_decoded_and_cached():
     frames = sample_frames(color="none")
     frames["near"] = make_frame(np.full((480, 848), 2000, np.uint16), 1000,
                                 color_jpeg=buf.tobytes())
-    grid, provider = src.update(frames, make_geo_grid(), None,
-                                (0.0, 0.0, 0.0))
-    assert provider == "navd"
+    grid = src.update(frames, None, (0.0, 0.0, 0.0))
+    assert grid is not None
     # same device stamp -> cached decode, no second imdecode
     first = src._color_rgb
-    src.update(frames, make_geo_grid(), None, (0.0, 0.0, 0.0))
+    src.update(frames, None, (0.0, 0.0, 0.0))
     assert src._color_rgb is first
-
-
-def test_no_color_falls_back():
-    src = make_source(logits_for(plausible_scene()))
-    frames = sample_frames(color="none")   # no color array, no jpeg
-    geo = make_geo_grid()
-    grid, provider = src.update(frames, geo, None, (0.0, 0.0, 0.0))
-    assert provider == "geometric" and grid is geo
 
 
 def test_gather_frames_filters_stale():

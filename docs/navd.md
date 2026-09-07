@@ -5,8 +5,9 @@ Status: **Phase A + recorder v2 + OBSBOT retirement (§9, all four stages)
 to the robot). Phase A (§6) is implemented and bench-verified except the
 formal §6.7 acceptance demo; recorder v2 (§7.1) is verified end-to-end;
 the teacher-label pipeline + student model v1 (§7.2, `NavdUNet` 1.93 M
-params) are trained, exported, and **wired into the runtime** (`--navd-model`
-with geometric auto-fallback — §7.3 shipped 2026-09-07). **Remaining for
+params) are trained, exported, and **wired into the runtime** (`--navd-model`,
+§7.3 shipped 2026-09-07; the geometric auto-fallback was removed right
+after — the student model is the only drive-time BEV source). **Remaining for
 Phase B: §7.4 acceptance + more data (failure cases)** — see the
 2026-09-07 addendum in
 [`navd-b-handoff.md`](navd-b-handoff.md). §8 shipped the goals + BEV feed
@@ -410,10 +411,13 @@ Output: `BevGrid` dataclass — `occ` (uint8 60x60: 0 free, 1 occupied,
 ### 6.5 Waypoint interface + `main.py --goal-drive`
 
 ```
-python main.py --goal-drive \
+python main.py --goal-drive --navd-model weights/navd.onnx \
     [--goal-heading-deg 25 | --goal-xy 1.5 0.5] \
     [--v-max 0.4] [--wz-max 1.2] [--display]
 ```
+
+(`--navd-model` is mandatory since the model-only runtime change —
+the geometric drive path was removed.)
 
 - Runtime re-issue (bench): stdin lines `heading <deg>` / `xy <x> <y>` /
   `stop`. Parsed on the main thread; shared with the planner via a small
@@ -517,8 +521,8 @@ navigable 20–36%, caution 31–46% (v1 fusion: nav 15–34%, caution
   training prefers `hand`, falls back to `teacher`) — **still to build**
   (brief §4 item 3).
 - **Geometric BEV** (`/bev_teacher`) remains recorded for bookkeeping/
-  mining only — it is no longer a label source; at runtime it survives
-  solely as the model's auto-fallback and the `plane_ok` carrier.
+  mining only — it is no longer a label source and has no runtime role
+  in model mode (no fallback, no `plane_ok` carrier).
 
 Target: 5–10 k frames over 3–5 teleop sessions (varied obstacles, lighting,
 goal directions; include the failure cases: glass door/table, black bag,
@@ -557,8 +561,9 @@ reflective floor).
   color jitter (color input now present), goal-heading resampling (same
   scene reused with many goals — free diversity).
 - **Coded runtime safety envelope (not learned)**: deadman, e-stop latch,
-  mode gate, final near-cone check on whatever grid the model outputs, and
-  auto-fallback to the geometric BEV below.
+  mode gate, final near-cone check on whatever grid the model outputs.
+  Model-only: a tick the model cannot serve yields no grid and the drive
+  node waits (no geometric fallback).
 
 ### 7.3 Export + runtime swap
 
@@ -579,14 +584,16 @@ reflective floor).
   learned). Works in both `--goal-drive` and `--record-navd --goal-drive`
   (there the recorder's teacher grid stays geometric — training data is
   never contaminated with the student's output).
-- **Auto-fallback to geometric — per tick, immediate** (stricter than
-  the spec's "> 0.5 s stale" window; the drive node's recv_ts deadman
-  enforces the 0.5 s side independently): missing/stale camera streams,
-  no decodable near color, NaN/Inf logits, `frac_navigable` outside
-  [0.05, 0.95] (implausible — floor or wall everywhere), or any
-  inference exception. Provider switches are logged once per transition;
-  a single bad tick falls back for that tick and the next good
-  prediction reclaims the provider (no sticky fallback).
+- **Model-only, no fallback — revised 2026-09-07**: the original per-tick
+  geometric auto-fallback (missing/stale camera streams, no decodable
+  near color, NaN/Inf logits, `frac_navigable` outside [0.05, 0.95],
+  inference errors) was removed — the student model is the only drive-time
+  BEV source. A tick the model cannot serve yields `None` from
+  `NavdGridSource.update()`; the drive node's recv_ts deadman treats that
+  like any stale grid ("waiting", zero twist). The reason is kept in
+  `last_reason` and logged once per transition; the next good prediction
+  serves a grid again. The `frac_navigable` guard stays as a plausibility
+  gate on the model's own output.
 
 ### 7.4 Phase B acceptance
 
