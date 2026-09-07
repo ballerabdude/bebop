@@ -31,7 +31,9 @@ import {
   SetMotorEnabledSchema,
   SetMotorTargetSchema,
   SetPolicyDryRunSchema,
+  SetNavigationGoalSchema,
   SetVelocityCommandSchema,
+  Vec2Schema,
   SetWheelEnabledSchema,
   SetAllWheelsEnabledSchema,
   ResetOdometrySchema,
@@ -76,6 +78,11 @@ type PendingResolver = (msg: ServerRuntimeMessage) => void;
 type TelemetryListener = (snapshot: RuntimeSnapshot) => void;
 type EStopListener = (reason: string) => void;
 type ModeListener = (mode: RuntimeMode) => void;
+/// Active navd navigation goal. `null` = goal cleared / none.
+export type NavGoalUpdate =
+  | { kind: "heading"; headingRad: number }
+  | { kind: "point"; x: number; y: number };
+export type NavGoalListener = (goal: NavGoalUpdate | null) => void;
 /// Nav-mask pushes are high-rate (~10 Hz × 14 KB) and are consumed by
 /// the video overlay's draw loop directly — they deliberately do NOT
 /// flow through the `RuntimeSnapshot` state machine like telemetry.
@@ -100,6 +107,7 @@ export class RuntimeTransport {
   private telemetryListeners = new Set<TelemetryListener>();
   private estopListeners = new Set<EStopListener>();
   private modeListeners = new Set<ModeListener>();
+  private navGoalListeners = new Set<NavGoalListener>();
   private connectionStateListeners = new Set<ConnectionStateListener>();
 
   /// Last (host, port) the caller asked us to open. Stashed so the
@@ -352,6 +360,12 @@ export class RuntimeTransport {
     this.modeListeners.add(cb);
     return () => this.modeListeners.delete(cb);
   }
+  /// Active navigation goal (navd). Pushed on change and once after
+  /// connect; `null` = no active goal.
+  onNavGoal(cb: NavGoalListener): () => void {
+    this.navGoalListeners.add(cb);
+    return () => this.navGoalListeners.delete(cb);
+  }
 
   // -------------------------------------------------------------- requests
   async getSnapshot(): Promise<RuntimeSnapshot> {
@@ -520,6 +534,29 @@ export class RuntimeTransport {
     });
   }
 
+  /// Operator navigation goal for the navd goal-drive pipeline (plan §8).
+  /// `heading` = body-frame offset (rad, + left), `pointOdom` = odom-frame
+  /// destination (m); both optional, neither = clear the active goal.
+  async setNavigationGoal(goal?: {
+    headingRad?: number;
+    pointOdom?: { x: number; y: number };
+  }): Promise<void> {
+    await this.requestAck({
+      case: "setNavigationGoal",
+      value: create(SetNavigationGoalSchema, {
+        goal: goal?.headingRad !== undefined
+          ? { case: "headingRad", value: goal.headingRad }
+          : goal?.pointOdom !== undefined
+            ? {
+                case: "pointOdom",
+                value: create(Vec2Schema, goal.pointOdom),
+              }
+            : undefined,
+        clear: !goal,
+      }),
+    });
+  }
+
   /// Run the ODrive FULL_CALIBRATION_SEQUENCE on one wheel (~20-30 s spin).
   /// The axis must be disarmed first. Recovers a lost encoder calibration —
   /// the CAN result is NOT saved to the S1's NVM, so it must be re-run
@@ -626,6 +663,21 @@ export class RuntimeTransport {
       case "modeChanged":
         for (const cb of this.modeListeners) cb(modeFromProto(msg.payload.value.mode));
         break;
+      case "navGoal": {
+        const g = msg.payload.value;
+        const goal: NavGoalUpdate | null =
+          g.goal.case === "headingRad"
+            ? { kind: "heading", headingRad: g.goal.value }
+            : g.goal.case === "pointOdom"
+              ? {
+                  kind: "point",
+                  x: g.goal.value.x,
+                  y: g.goal.value.y,
+                }
+              : null;
+        for (const cb of this.navGoalListeners) cb(g.active ? goal : null);
+        break;
+      }
       case "snapshot":
       case "ack":
       case "error":

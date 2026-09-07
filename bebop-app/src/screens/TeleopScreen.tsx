@@ -42,6 +42,8 @@ import type { ReactNode } from "react";
 import { ControlProfilePicker } from "../components/ControlProfilePicker";
 import { DriveJoystick } from "../components/DriveJoystick";
 import { GamepadDrive } from "../components/GamepadDrive";
+import { NavGoalCard } from "../components/NavGoalCard";
+import type { NavGoalUpdate } from "../runtime";
 import { VideoFeed } from "../components/VideoFeed";
 
 const VIDEO_STREAMS: { id: string; label: string }[] = [
@@ -144,6 +146,29 @@ export function TeleopScreen({
   // right-stick camera aim below) — one way to drive at a time.
   const { connected: padConnected } = useGamepad();
 
+  // ---------------------------------------------------------- navigation goals
+  // Heading is a body-frame offset (±90°); distance the straight-line
+  // range of the odom waypoint sent on Go. Goal state mirrors the
+  // firmware's NavigationGoalState push so the card reflects app-,
+  // stdin-, or any-other-client-issued goals identically.
+  const [goalHeadingDeg, setGoalHeadingDeg] = useState(0);
+  const [goalDistanceM, setGoalDistanceM] = useState(1.5);
+  const [activeGoal, setActiveGoal] = useState<NavGoalUpdate | null>(null);
+  const [navBusy, setNavBusy] = useState(false);
+  const sendNavGoal = async (goal?: {
+    headingRad?: number;
+    pointOdom?: { x: number; y: number };
+  }) => {
+    setNavBusy(true);
+    try {
+      await refreshAfter("nav", async () => {
+        await transportRef.current?.setNavigationGoal(goal);
+      });
+    } finally {
+      setNavBusy(false);
+    }
+  };
+
   const transportRef = useRef<RuntimeTransport | null>(null);
 
   // -------------------------------------------------------------- lifecycle
@@ -175,6 +200,9 @@ export function TeleopScreen({
     };
 
     offCallbacks.push(
+      t.onNavGoal((g) => {
+        if (!cancelled) setActiveGoal(g);
+      }),
       t.onTelemetry(scheduleFlush),
       t.onEStopLatched(() => {
         if (!cancelled) {
@@ -891,6 +919,21 @@ export function TeleopScreen({
           )}
 
           </div>
+
+        {/* Navigation goals (plan §8) — page mode only; exit fullscreen
+            to reach it. The card mirrors the authoritative goal state. */}
+        {wheeled ? (
+          <NavGoalCard
+            activeGoal={activeGoal}
+            headingDeg={goalHeadingDeg}
+            onHeadingDeg={setGoalHeadingDeg}
+            distanceM={goalDistanceM}
+            onDistanceM={setGoalDistanceM}
+            onSend={sendNavGoal}
+            busy={navBusy || busy !== null}
+            estopLatched={estopLatched}
+          />
+        ) : null}
 
         {/* Gamepad bridge — mounted for the screen's whole lifetime
             (hidden in fullscreen) so a drive cycle survives the

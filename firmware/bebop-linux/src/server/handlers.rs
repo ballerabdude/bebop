@@ -7,6 +7,7 @@
 use crate::drive::Twist;
 use crate::imu::ImuShared;
 use crate::mode::Mode;
+use crate::nav_goal::{NavGoal, NavGoalShared};
 use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
 use crate::safety::limits::BreachReason;
@@ -40,6 +41,7 @@ pub fn handle_client_message(
     imu_present: bool,
     policy_io: &PolicyIoShared,
     policy_control: &PolicyControlShared,
+    nav_goal: &NavGoalShared,
     conn_id: u64,
     bytes: &[u8],
 ) -> proto::ServerRuntimeMessage {
@@ -65,6 +67,35 @@ pub fn handle_client_message(
             ack(
                 request_id,
                 "deprecated: the camera/legacy nav pipeline was removed".into(),
+            )
+        }
+
+        P::SetNavigationGoal(g) => {
+            let goal = if g.clear {
+                NavGoal::None
+            } else {
+                match &g.goal {
+                    Some(proto::set_navigation_goal::Goal::HeadingRad(rad)) => {
+                        NavGoal::Heading(*rad)
+                    }
+                    Some(proto::set_navigation_goal::Goal::PointOdom(p)) => {
+                        NavGoal::PointOdom(p.x, p.y)
+                    }
+                    None => NavGoal::None, // empty oneof + clear=false = clear
+                }
+            };
+            nav_goal.set(goal);
+            ack(
+                request_id,
+                match goal {
+                    NavGoal::None => "navigation goal cleared".into(),
+                    NavGoal::Heading(rad) => {
+                        format!("navigation goal: heading {rad:.2} rad")
+                    }
+                    NavGoal::PointOdom(x, y) => {
+                        format!("navigation goal: point ({x:.2}, {y:.2}) m")
+                    }
+                },
             )
         }
 

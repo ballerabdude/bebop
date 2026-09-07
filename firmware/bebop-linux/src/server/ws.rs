@@ -17,6 +17,7 @@
 //! All three feed a shared mpsc to the WS sink writer.
 
 use crate::imu::ImuShared;
+use crate::nav_goal::NavGoalShared;
 use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
 use crate::safety::{Supervisor, SupervisorEvent};
@@ -37,6 +38,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -66,6 +68,9 @@ pub struct AppState {
     /// HTTP layer so `GET /captures` can list finished segments and
     /// `GET /captures/dl/<name>` (via `ServeDir`) can stream them out.
     pub capture_dir: PathBuf,
+    /// Operator navigation goal (navd, plan §8). Written by the
+    /// SetNavigationGoal handler; changes broadcast to all clients.
+    pub nav_goal: Arc<NavGoalShared>,
 }
 
 pub async fn run_server(state: AppState, bind_addr: &str) -> Result<()> {
@@ -203,6 +208,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         imu_present,
         policy_io,
         policy_control,
+        nav_goal,
         capture_dir: _,
     } = state;
     // Per-connection identity for operator arbitration. Monotonic so a
@@ -213,6 +219,18 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     info!(conn_id, "ws client connected");
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<proto::ServerRuntimeMessage>(256);
+
+    // Post-connect flush: the current navigation goal, so late joiners
+    // (e.g. a restarting navd process) see the active goal without a
+    // snapshot round-trip.
+    let _ = tx
+        .send(proto::ServerRuntimeMessage {
+            request_id: 0,
+            payload: Some(proto::server_runtime_message::Payload::NavGoal(
+                nav_goal.get().to_proto(),
+            )),
+        })
+        .await;
 
     // Telemetry control: shared subscribed flag + clamped rate.
     let telemetry_state = Arc::new(tokio::sync::RwLock::new(TelemetryState {
@@ -246,6 +264,32 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
             let env = telemetry_envelope(frame);
             if tx_tele.send(env).await.is_err() {
                 break;
+            }
+        }
+    });
+
+    // Task: nav-goal change pump. Every client sees goal changes (the
+    // navd goal-drive process consumes them; the app mirrors state).
+    let tx_goal = tx.clone();
+    let mut goal_rx = nav_goal.subscribe();
+    let goal_task = tokio::spawn(async move {
+        loop {
+            match goal_rx.recv().await {
+                Ok(goal) => {
+                    let msg = proto::ServerRuntimeMessage {
+                        request_id: 0,
+                        payload: Some(proto::server_runtime_message::Payload::NavGoal(
+                            goal.to_proto(),
+                        )),
+                    };
+                    if tx_goal.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    debug!(skipped = n, "nav-goal broadcast lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -307,6 +351,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     imu_present,
                     &policy_io,
                     &policy_control,
+                    &nav_goal,
                     conn_id,
                     &bytes,
                 );
@@ -369,6 +414,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     drop(tx);
     let _ = writer_task.await;
     telemetry_task.abort();
+    goal_task.abort();
     event_task.abort();
     if client_telemetry_subscribed {
         sup.dec_telemetry_subscribers();

@@ -99,6 +99,10 @@ message ClientRuntimeMessage {
     // compatibility.
     SubscribeNav         subscribe_nav         = 20 [deprecated = true];
     UnsubscribeNav       unsubscribe_nav       = 21 [deprecated = true];
+    // Operator navigation goal for the navd goal-drive pipeline (plan §8).
+    // Handled by storing + broadcasting; the navd process consumes it
+    // from the broadcast via its own WS client.
+    SetNavigationGoal    set_navigation_goal   = 22;
   }
   reserved 12;
   reserved "set_policy_capture";
@@ -122,6 +126,9 @@ message ServerRuntimeMessage {
     // masks is removed — the firmware never pushes this. Kept for wire
     // compatibility.
     NavMaskFrame        nav_mask        = 8 [deprecated = true];
+    // Active navigation goal (navd). Pushed on change to every client
+    // and once to each client right after connect.
+    NavigationGoalState nav_goal        = 9;
   }
 }
 
@@ -777,4 +784,43 @@ message NavMaskFrame {
   float frac_caution   = 12;
   float mask_hz        = 13;
   string provider      = 14;
+}
+
+// ---------------------------------------------------------------------------
+// Navigation goal (navd)
+// ---------------------------------------------------------------------------
+
+// 2D point in the odometry frame (metres). Odom origin is the pose at
+// the last ResetOdometry; x forward, y left.
+message Vec2 {
+  float x = 1;
+  float y = 2;
+}
+
+// Operator-commanded navigation goal for the navd goal-drive pipeline.
+// Oneof picks the goal kind; `clear` supersedes both and empties the
+// goal slot (the robot stops navigating and holds).
+message SetNavigationGoal {
+  oneof goal {
+    // Body-frame heading offset from current pose, radians, + left.
+    // Held until re-issued or cleared (heading hold).
+    float heading_rad = 1;
+    // Destination point in the odometry frame. The robot stops when it
+    // comes within ~0.3 m.
+    Vec2  point_odom  = 2;
+  }
+  // True when neither goal variant is set: clear the active goal.
+  bool clear = 3;
+}
+
+// Server -> client push: the currently active navigation goal. Sent on
+// change to every connected client, and once to each client right after
+// the WS connection opens (so late joiners see the current state).
+message NavigationGoalState {
+  // False when the goal slot is empty.
+  bool  active = 1;
+  oneof goal {
+    float heading_rad = 2;  // body-frame offset, rad, + left
+    Vec2  point_odom  = 3;  // odom-frame destination, metres
+  }
 }

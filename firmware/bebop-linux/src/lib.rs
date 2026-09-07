@@ -24,6 +24,7 @@ pub mod imu;
 pub mod imu_serial;
 pub mod logging;
 pub mod mode;
+pub mod nav_goal;
 pub mod observation;
 pub mod odrive;
 pub mod policy;

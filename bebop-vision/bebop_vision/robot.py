@@ -36,6 +36,9 @@ class RobotState:
         # deprecated proto fields are no longer sent by the firmware.
         self.telemetry_hz = 0.0
         self.last_telemetry_ts = 0.0
+        # Active navigation goal (navd, plan §8). Mirrors the firmware's
+        # NavigationGoalState push: None | ("heading", rad) | ("point", x, y).
+        self.nav_goal = None
 
 
 class RobotClient:
@@ -49,6 +52,7 @@ class RobotClient:
         self.state = RobotState()
         self.on_mode_changed = []
         self.on_estop = []
+        self.on_goal = []
         self._loop = None
         self._thread = None
         self._stop_evt = threading.Event()
@@ -130,6 +134,17 @@ class RobotClient:
                 cb(st.estop_reason)
         elif which == "error":
             print(f"[robot] server error (req {msg.request_id}): {msg.error.message}")
+        elif which == "nav_goal":
+            g = msg.nav_goal
+            if not g.active:
+                goal = None
+            elif g.WhichOneof("goal") == "heading_rad":
+                goal = ("heading", float(g.heading_rad))
+            else:
+                goal = ("point", float(g.point_odom.x), float(g.point_odom.y))
+            st.nav_goal = goal
+            for cb in self.on_goal:
+                cb(goal)
 
     def _update_from_fields(self, t):
         st = self.state

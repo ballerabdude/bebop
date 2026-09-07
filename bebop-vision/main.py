@@ -157,6 +157,22 @@ def run_goal_drive(args):
                          command_hz=args.command_hz,
                          require_mode=None if args.drive_any_mode else pb.MODE_RUN_POLICY)
     robot.on_estop.append(lambda reason: node.stop())
+
+    # Operator goals from the app ride the runtime WS (plan §8): the
+    # firmware stores SetNavigationGoal and broadcasts it; here we mirror
+    # it into the planner's goal slot. Goals from stdin still work.
+    def _on_app_goal(goal):
+        if goal is None:
+            goal_slot.clear()
+            print("[goal] cleared (app)")
+        elif goal[0] == "heading":
+            goal_slot.set(GoalHeading(goal[1]))
+            print(f"[goal] app heading {math.degrees(goal[1]):.1f}°")
+        else:
+            goal_slot.set(GoalPoint(goal[1], goal[2]))
+            print(f"[goal] app point ({goal[1]:.2f}, {goal[2]:.2f}) m")
+
+    robot.on_goal.append(_on_app_goal)
     print(f"[goal-drive] running (v_max={args.v_max} wz_max={args.wz_max} "
           f"hz={args.command_hz}); Ctrl+C to stop")
     t_start = time.monotonic()

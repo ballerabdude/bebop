@@ -14,6 +14,7 @@ use bebop_linux::config::{ImuSource, RobotConfig};
 use bebop_linux::imu;
 use bebop_linux::imu_serial;
 use bebop_linux::mode::Mode;
+use bebop_linux::nav_goal::NavGoalShared;
 use bebop_linux::policy_capture;
 use bebop_linux::policy_control;
 use bebop_linux::policy_io;
@@ -424,6 +425,7 @@ async fn main() -> Result<()> {
     let server_policy_io = policy_io_shared.clone();
     let server_policy_control = policy_control_shared.clone();
     let server_capture_dir = capture_dir.clone();
+    let server_nav_goal = std::sync::Arc::new(NavGoalShared::new());
     let bind_addr = cfg.server.bind_addr.clone();
     let server_handle = tokio::spawn(async move {
         let state = bebop_linux::server::AppState {
@@ -433,6 +435,7 @@ async fn main() -> Result<()> {
             policy_io: server_policy_io,
             policy_control: server_policy_control,
             capture_dir: server_capture_dir,
+            nav_goal: server_nav_goal,
         };
         if let Err(e) = server::run_server(state, &bind_addr).await {
             error!(error = %e, "server task exited with error");
