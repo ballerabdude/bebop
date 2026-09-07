@@ -535,10 +535,6 @@ def main():
                         help="record-navd --auto: roll segment above this many minutes")
     parser.add_argument("--disk-budget-gb", type=float, default=20.0,
                         help="record-navd --auto: prune oldest sessions below this total")
-    parser.add_argument("--goal-drive", action="store_true",
-                        help="record-navd: consume app/WS navigation goals "
-                             "and drive on them (GoalPlanner twists at 10 "
-                             "Hz; needs wheels armed + Policy mode)")
     parser.add_argument("--no-video-server", action="store_true",
                         help="do not serve the operator MJPEG stream on "
                              "--video-port")
@@ -559,12 +555,15 @@ def main():
                         help="command velocity regardless of firmware mode (bench only)")
     args = parser.parse_args()
 
-    if args.goal_drive:
-        run_goal_drive(args)
-        return
-
+    # record-navd first: `--record-navd --goal-drive` means "record AND
+    # consume app navigation goals" (run_record_navd reads args.goal_drive);
+    # bare --goal-drive still runs the standalone goal-drive mode.
     if args.record_navd:
         run_record_navd(args)
+        return
+
+    if args.goal_drive:
+        run_goal_drive(args)
         return
 
     if args.record_dataset:
