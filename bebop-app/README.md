@@ -27,19 +27,19 @@ Today:
   and the BEV planner view (the fused occupancy grid the robot
   navigates on), each a toggleable tile (`VideoScreen`).
 * **Teleop** — live video and driving in one screen (`TeleopScreen`),
-  the primary way to operate a wheeled robot: the feed front and
-  center, a sticky HUD (link / mode / wheels / battery / camera pose /
-  E-STOP), a one-tap "Start driving" quick-start (switches to Dial-in
-  + arms every wheel), and every input path side by side — on-screen
-  joystick, WASD / arrows, paired gamepad, and I / J / K / L to aim
-  the camera while WASD drives. With a controller connected the
-  on-screen drive pads hide and the right stick takes over the
-  camera. The video container follows the stream's negotiated aspect
-  (the UVC driver may not serve exactly what the YAML asks for) so
-  the nav overlay always lands on video pixels. On phones the screen
-  opens in a fullscreen layout — video edge-to-edge with the drive
-  and camera pads floating over it; desktops use the page layout with
-  an explicit Fullscreen button.
+  the primary way to operate a wheeled robot: the primary stream front
+  and center with any other open stream docked as a clickable filmstrip
+  thumbnail (beneath the feed on the page, top row on phones /
+  right-hand column in fullscreen — click promotes it to primary), a
+  sticky HUD (link / mode / wheels / battery / E-STOP), a one-tap
+  "Start driving" quick-start (switches to Dial-in + arms every wheel),
+  and every input path side by side — on-screen joystick, WASD /
+  arrows, or a paired gamepad. The video container follows the
+  stream's negotiated aspect (the UVC driver may not serve exactly
+  what the YAML asks for). On phones the screen opens in a fullscreen
+  layout — primary video filling the screen with the drive pad
+  floating over it; desktops use the page layout with an explicit
+  Fullscreen button.
 * **Bluetooth gamepad dial-in & drive** — pair an 8BitDo / DualSense /
   Xbox / Switch Pro pad to your phone or laptop; drive the active
   joint's target with the left stick (legged), or drive the wheeled

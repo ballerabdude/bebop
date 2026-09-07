@@ -113,14 +113,23 @@ export function TeleopScreen({
   // camera-encoded passthrough; depth and BEV streams are rendered
   // server-side.
   const [videoStreams, setVideoStreams] = useState<string[]>(["color_near"]);
-  const toggleStream = (id: string) =>
-    setVideoStreams((cur) =>
-      cur.includes(id)
-        ? cur.length > 1
-          ? cur.filter((s) => s !== id) // never close the last tile
-          : cur
-        : [...cur, id],
-    );
+  // Primary (full-size) view; every other open stream docks as a
+  // filmstrip thumbnail. Clicking a thumbnail promotes it to primary.
+  const [primaryId, setPrimaryId] = useState("color_near");
+  const primaryStream = videoStreams.includes(primaryId)
+    ? primaryId
+    : videoStreams[0];
+  const secondaryStreams = videoStreams.filter((s) => s !== primaryStream);
+  const toggleStream = (id: string) => {
+    if (videoStreams.includes(id)) {
+      if (videoStreams.length <= 1) return; // never close the last tile
+      const next = videoStreams.filter((s) => s !== id);
+      setVideoStreams(next);
+      if (primaryStream === id) setPrimaryId(next[0]); // promote a survivor
+    } else {
+      setVideoStreams([...videoStreams, id]);
+    }
+  };
   const [streamState, setStreamState] = useState<
     "loading" | "live" | "error"
   >("loading");
@@ -559,6 +568,85 @@ export function TeleopScreen({
       disabled={!canDrive}
     />
   );
+
+  // Stream picker chips — one instance, overlaid on the primary tile
+  // (previously duplicated on every tile of the grid). Chips toggle
+  // streams open/closed; closing the primary promotes the first
+  // remaining stream (handled in toggleStream).
+  const streamPicker = (
+    <div className="absolute right-2 top-2 z-10 flex max-w-[75%] flex-wrap justify-end gap-1">
+      {VIDEO_STREAMS.map((o) => (
+        <button
+          key={o.id}
+          type="button"
+          onClick={() => toggleStream(o.id)}
+          className={`rounded px-2 py-0.5 text-[11px] font-medium backdrop-blur-sm transition-colors ${
+            videoStreams.includes(o.id)
+              ? "bg-white/85 text-black"
+              : "bg-black/50 text-white/80 hover:bg-black/70"
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+      {videoStreams.length > 1 ? (
+        <button
+          type="button"
+          onClick={() => toggleStream(primaryStream)}
+          className="rounded bg-black/50 px-2 py-0.5 text-[11px] font-medium text-white/80 backdrop-blur-sm hover:bg-black/70"
+          aria-label={`close ${
+            VIDEO_STREAMS.find((o) => o.id === primaryStream)!.label
+          }`}
+        >
+          ✕
+        </button>
+      ) : null}
+    </div>
+  );
+
+  // Filmstrip thumbnail for a secondary stream: fixed 16:9 box (mixed
+  // stream aspects letterbox/pillarbox inside instead of making ragged
+  // rows), click promotes to primary, ✕ closes the stream. Only the
+  // primary reports stream state — a degraded thumbnail shouldn't
+  // raise the screen-level "camera stream failed" banner.
+  const streamThumb = (id: string, sizeClasses: string) => {
+    const opt = VIDEO_STREAMS.find((o) => o.id === id)!;
+    return (
+      <div
+        key={id}
+        className={`relative aspect-video shrink-0 overflow-hidden rounded-[var(--radius-card)] border border-border bg-black transition-colors hover:border-white/40 ${sizeClasses}`}
+      >
+        <VideoFeed
+          baseUrl={`http://${robotIp}:${runtimePort}`}
+          videoUrl={`http://${robotIp}:9092/video`}
+          stream={id}
+          reconnectKey={reconnectKey}
+          className="h-full w-full"
+        >
+          <button
+            type="button"
+            onClick={() => setPrimaryId(id)}
+            className="absolute inset-0 z-10 cursor-pointer"
+            aria-label={`Show ${opt.label} in the main view`}
+            title="Show in main view"
+          />
+          {videoStreams.length > 1 ? (
+            <button
+              type="button"
+              onClick={() => toggleStream(id)}
+              className="absolute right-1 top-1 z-20 rounded bg-black/60 px-1.5 py-0.5 text-[11px] font-medium text-white/80 backdrop-blur-sm hover:bg-black/80"
+              aria-label={`close ${opt.label}`}
+            >
+              ✕
+            </button>
+          ) : null}
+          <span className="pointer-events-none absolute bottom-1 left-1 z-10 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white/80 backdrop-blur-sm">
+            {opt.label}
+          </span>
+        </VideoFeed>
+      </div>
+    );
+  };
   // -------------------------------------------------------------- render
   return (
     <div
@@ -689,82 +777,73 @@ export function TeleopScreen({
       </div>
 
       {/* Live feed. `contents` in page mode keeps the feed a direct
-          child of the screen's flex column; in fullscreen the wrapper
-          becomes the flex-1 video area with the floating pads. On
-          phones the feed breaks out of the page padding (-mx-4) and
-          drops the card chrome so the video is edge-to-edge — the
-          aspect follows the negotiated stream, not a hard-coded box. */}
+          child of the screen's flex column: the primary stream large,
+          the other open streams in an aligned thumbnail row beneath it.
+          In fullscreen the wrapper becomes the flex-1 video area — the
+          primary fills it (drive pads float over it) and the others
+          dock as a filmstrip: top row on phones, right-hand column on
+          desktop. Clicking a thumbnail promotes it to primary; the
+          picker chips ride on the primary tile only. On phones the
+          primary breaks out of the page padding (-mx-4) and drops the
+          card chrome so the video is edge-to-edge — the aspect follows
+          the negotiated stream, not a hard-coded box. */}
       <div className={fullscreen ? "relative flex-1 min-h-0" : "contents"}>
-        <div
-          className={
-            fullscreen
-              ? "grid h-full min-h-0 grid-cols-1 gap-1 overflow-hidden"
-              : "grid grid-cols-1 gap-2 sm:grid-cols-2"
-          }
-        >
-          {videoStreams.map((id) => {
-            const opt = VIDEO_STREAMS.find((o) => o.id === id)!;
-            return (
+        {fullscreen ? (
+          <div className="flex h-full min-h-0 flex-col-reverse gap-1 overflow-hidden sm:flex-row">
+            <div className="relative min-h-0 min-w-0 flex-1">
               <VideoFeed
-                key={id}
                 baseUrl={`http://${robotIp}:${runtimePort}`}
                 videoUrl={`http://${robotIp}:9092/video`}
-                stream={id}
+                stream={primaryStream}
                 reconnectKey={reconnectKey}
                 onStreamState={setStreamState}
-                className={
-                  fullscreen
-                    ? "w-full h-full min-h-0"
-                    : "w-full -mx-4 sm:mx-0 sm:rounded-[var(--radius-card)] sm:border sm:border-border"
-                }
-                maxHeight={fullscreen ? undefined : "72dvh"}
+                className="h-full w-full"
               >
-                <div className="absolute right-2 top-2 z-10 flex gap-1">
-                  {VIDEO_STREAMS.map((o) => (
-                    <button
-                      key={o.id}
-                      type="button"
-                      onClick={() => toggleStream(o.id)}
-                      className={`rounded px-2 py-0.5 text-[11px] font-medium backdrop-blur-sm transition-colors ${
-                        videoStreams.includes(o.id)
-                          ? "bg-white/85 text-black"
-                          : "bg-black/50 text-white/80 hover:bg-black/70"
-                      }`}
-                    >
-                      {o.label}
-                    </button>
-                  ))}
-                  {videoStreams.length > 1 ? (
-                    <button
-                      type="button"
-                      onClick={() => toggleStream(id)}
-                      className="rounded bg-black/50 px-2 py-0.5 text-[11px] font-medium text-white/80 backdrop-blur-sm hover:bg-black/70"
-                      aria-label={`close ${opt.label}`}
-                    >
-                      ✕
-                    </button>
-                  ) : null}
-                </div>
+                {streamPicker}
               </VideoFeed>
-            );
-          })}
-        </div>
-        {fullscreen && wheeled && !padConnected ? (
-          <div className="absolute bottom-4 left-4 z-10 rounded-[var(--radius-card)] border border-white/10 bg-bg-elev/75 backdrop-blur-md p-2 max-sm:scale-90 max-sm:origin-bottom-left">
-            {drivePad}
+              {wheeled && !padConnected ? (
+                <div className="absolute bottom-4 left-4 z-10 rounded-[var(--radius-card)] border border-white/10 bg-bg-elev/75 backdrop-blur-md p-2 max-sm:scale-90 max-sm:origin-bottom-left">
+                  {drivePad}
+                </div>
+              ) : null}
+              {streamState === "error" ? (
+                <div className="absolute inset-x-0 bottom-4 z-10 flex justify-center">
+                  <Button
+                    variant="secondary"
+                    onClick={() => setReconnectKey((n) => n + 1)}
+                    className="py-2! text-sm!"
+                  >
+                    Reconnect video
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+            {secondaryStreams.length > 0 ? (
+              <div className="flex shrink-0 gap-1 overflow-x-auto p-0.5 sm:w-36 sm:flex-col sm:overflow-x-hidden sm:overflow-y-auto lg:w-44">
+                {secondaryStreams.map((id) => streamThumb(id, "w-28 sm:w-auto"))}
+              </div>
+            ) : null}
           </div>
-        ) : null}
-        {fullscreen && streamState === "error" ? (
-          <div className="absolute inset-x-0 bottom-4 z-10 flex justify-center">
-            <Button
-              variant="secondary"
-              onClick={() => setReconnectKey((n) => n + 1)}
-              className="py-2! text-sm!"
+        ) : (
+          <>
+            <VideoFeed
+              baseUrl={`http://${robotIp}:${runtimePort}`}
+              videoUrl={`http://${robotIp}:9092/video`}
+              stream={primaryStream}
+              reconnectKey={reconnectKey}
+              onStreamState={setStreamState}
+              className="w-full -mx-4 sm:mx-0 sm:rounded-[var(--radius-card)] sm:border sm:border-border"
+              maxHeight="72dvh"
             >
-              Reconnect video
-            </Button>
-          </div>
-        ) : null}
+              {streamPicker}
+            </VideoFeed>
+            {secondaryStreams.length > 0 ? (
+              <div className="grid w-full -mx-4 grid-cols-2 gap-2 sm:mx-0 sm:grid-cols-3 lg:grid-cols-4">
+                {secondaryStreams.map((id) => streamThumb(id, ""))}
+              </div>
+            ) : null}
+          </>
+        )}
       </div>
 
       {/* Page content below the feed — hidden, never unmounted, in
