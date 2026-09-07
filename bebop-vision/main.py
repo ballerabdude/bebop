@@ -324,11 +324,17 @@ def run_record_navd(args):
     # Default off — without it the recorder only records and app goals
     # are ignored, which is the safe behavior for passive capture.
     drive_node = None
+    rec_holder = {"rec": None}   # active segment recorder (set by new_segment)
     if args.goal_drive:
         from bebop_vision.goal_planner import GoalDriveNode
         planner = GoalPlanner()
+
+        def _grid():
+            active = rec_holder["rec"]
+            return active.grid if active is not None else None
+
         drive_node = GoalDriveNode(
-            robot, planner, lambda: getattr(rec, "grid", None), goal_slot,
+            robot, planner, _grid, goal_slot,
             command_hz=args.command_hz, require_mode=pb.MODE_RUN_POLICY)
 
         def _on_app_goal(goal):
@@ -385,11 +391,14 @@ def run_record_navd(args):
         rec = NavdRecorder(rig, robot, goal_slot, path, builder=builder,
                            rate_hz=rate)
         rec.start()
+        rec_holder["rec"] = rec
         print(f"\n[record-navd] recording -> {path}")
         return rec, path, _time.monotonic()
 
     def close_segment(rec, path):
         rec.stop()
+        if rec_holder["rec"] is rec:
+            rec_holder["rec"] = None
         print(f"\n[record-navd] closed {path.name} "
               f"({rec.frames} frames, {rec.bytes_written/1e6:.1f} MB)")
         _prune_sessions(out_dir, budget)
@@ -399,8 +408,18 @@ def run_record_navd(args):
     stop_drive_loop = threading.Event()
 
     def drive_loop():
+        last_report = ("", 0.0)
         while not stop_drive_loop.is_set():
             drive_node.on_grid()
+            # Report gate states so "not moving" is always explainable:
+            # waiting / hold / estop / no_floor / search / rotate / drive.
+            info = drive_node.last_info or {}
+            state = info.get("state", "?")
+            now = time.monotonic()
+            if state != last_report[0] or now - last_report[1] > 5.0:
+                extra = {k: v for k, v in info.items() if k != "state"}
+                print(f"[record-navd] nav: {state} {extra}")
+                last_report = (state, now)
             time.sleep(0.1)
 
     if drive_node is not None:
