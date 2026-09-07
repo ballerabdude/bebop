@@ -436,7 +436,10 @@ Inherited from `DriveNode`, unchanged:
   twist is never rejected).
 - New for navd: camera process crash → no twists at all (watchdog stops the
   robot within 500 ms); BEV `plane_ok == False` on **both** cameras for >
-  1 s → zero twist (floor estimate untrustworthy).
+  1 s → zero twist (floor estimate untrustworthy). Model-only runtime
+  (§7.3): the model's grids carry `plane_ok={}` — it knows nothing about
+  ground planes — so this gate is inert there; the deadman covers
+  producer liveness instead.
 
 ### 6.7 Phase A tests + acceptance
 
@@ -576,8 +579,13 @@ reflective floor).
   frames straight from the rig (near/far depth + near color — MJPEG is
   decoded worker-side, cached per device stamp) and produces the grid the
   planner consumes unchanged (the grid is the seam). onnxruntime **CUDA
-  EP is mandatory**: measured on the Orin — CUDA ~55 ms steady-state vs
-  ~750 ms CPU EP. Preprocessing is shared with training via
+  EP is mandatory** (~750 ms on the CPU EP vs ~60-74 ms on CUDA). The
+  GPU **clock governor matters**: `nvhost_podgov` idles the GPU at
+  306 MHz and the worker's ~5 Hz pace pays the clock ramp on every run
+  (107-118 ms vs 74 ms flat pinned) — `bebop-gpu-clocks.service`
+  (installed + enabled by `install-jetson.sh`, 2026-09-07) pins the
+  devfreq governor to `performance` at boot. Preprocessing is shared
+  with training via
   `navd_pre.py` so the two paths cannot drift. Class mapping:
   navigable → free, blocked → occupied, caution → planning-blocked
   (inflated) / raw-hazard; no runtime inflation (teacher margins are
@@ -593,15 +601,23 @@ reflective floor).
   like any stale grid ("waiting", zero twist). The reason is kept in
   `last_reason` and logged once per transition; the next good prediction
   serves a grid again. The `frac_navigable` guard stays as a plausibility
-  gate on the model's own output.
+  gate on the model's own output. Grids are stamped `recv_ts` **after**
+  inference (bench fix 2026-09-07): with the tick-start stamp, worst-case
+  grid age at the drive node was worker period + inference and rode the
+  0.5 s deadman line whenever GPU clocks sagged — observed as
+  `search`↔`waiting` flapping with zero `[navd-model] no model grid`
+  lines, i.e. the model never failed a tick; its grids were merely stale
+  by the time the 10 Hz drive loop read them.
 
 ### 7.4 Phase B acceptance
 
 - Student ≥ geometric teacher on the failure-case suite (glass/black/reflective
   scenes: teacher marks them navigable+collision-prone, student must not).
 - No regression vs teacher on normal scenes (val mIoU + bench runs).
-- Bench demo: full goal-drive run with the student grid; force a fallback
-  mid-run (kill the model) → robot stops safely, reverts, continues.
+- Bench demo: full goal-drive run with the student grid; stop
+  bebop-vision mid-run → twists stop (no publisher + deadman, "waiting");
+  relaunch with the model → driving resumes. Nothing to "revert" to —
+  model-only means no fallback grid exists.
 
 ---
 
@@ -743,7 +759,7 @@ app screens, jetson-agent, `bebop_v2.yaml` (never had `video:`).
 | ED camera (far) link flakiness (occasional bus drops) | Sync-verified dual-cam operation at matched 15 fps (`9bc3e63`); USB-lane origin (cable vs fw 1.8.10) unconfirmed — degraded runs use `--roles near` |
 | Depth noise at 3 m (335Lg ≈ 1% of range) | Temporal filter + inflation margin; caution class absorbs the band |
 | Software H.264 encoder CPU cost (no NVENC on Orin Nano) | Measured: x264 1280x800@30 ≈ 45 fps untuned; NVIDIA app-note GOP tuning (keyint=30, ref=1, bframes=0 — §3.2) brings 30 fps to ~18% of one core; encoder thread degrades to 15 fps before BEV/control ever drop |
-| GPU contention (navseg CUDA + navd student) | Stagger rates if needed (navd 10 Hz, navseg 10 Hz is the budget to verify with `nav_probe` + `tegrastats`); navd can run CPU EP for the planner-critical path if GPU saturates |
+| GPU contention / clock sag (any CUDA consumer + navd student) | navseg is retired (§9); GPU devfreq pinned to `performance` at boot (`bebop-gpu-clocks.service`, 2026-09-07) so the ~5 Hz navd inferences don't pay clock ramps — 107-118 ms → 74 ms; `recv_ts` stamped post-inference means a slow tick trips the deadman (zero twist) instead of feeding a stale grid |
 | Arbitration conflict (teleop operator vs navd) | Documented: first non-zero client holds the seat; navd acquires it when started, operator gamepad takes over by simply moving the stick; navd zero-twist never blocks a stop |
 | Glass / reflective / black obstacles invisible to IR | Explicit Phase B motivation; geometric teacher knowingly fails these; student trained on teleop human avoidance of them |
 | Two cameras drift (mount knocks) | Extrinsics verification procedure (Section 6.2) is a 5-minute bench check; rig YAML is the only thing to re-measure |
