@@ -19,11 +19,13 @@ class FakeCamera:
     """near exercises the RGB re-encode path, far the MJPEG passthrough."""
 
     def __init__(self, serial, role):
+        import collections
         self.serial, self.role = serial, role
         self.mask_rects = []
         self._n = 0
+        self._hist = collections.deque(maxlen=6)
 
-    def read(self):
+    def _make(self):
         self._n += 1
         depth = np.full((480, 848), 1500, np.uint16)
         stamp_us = self._n
@@ -42,6 +44,37 @@ class FakeCamera:
                             recv_ts=time.monotonic(),
                             width=848, height=480, fps=30.0,
                             color=color, serial=self.serial, role=self.role)
+
+    def read(self):
+        f = self._make()
+        self._hist.append(f)
+        return f
+
+    def recent(self):
+        return list(self._hist)
+
+
+class ScriptedCamera:
+    """Camera with preset history: recv_ts/stamp list, freshest last."""
+
+    def __init__(self, serial, role, frames):
+        self.serial, self.role = serial, role
+        self.mask_rects = []
+        self._frames = list(frames)
+
+    def read(self):
+        return self._frames[-1]
+
+    def recent(self):
+        return list(self._frames)
+
+
+def _frame(role, serial, stamp_us, recv_ts, color_jpeg=None):
+    depth = np.full((480, 848), 1500, np.uint16)
+    return StampedFrame(depth=depth, stamp_us=stamp_us, recv_ts=recv_ts,
+                        width=848, height=480, fps=15.0,
+                        color=None, color_jpeg=color_jpeg,
+                        serial=serial, role=role)
 
 
 class FakeRig:
@@ -224,6 +257,47 @@ def test_prune_sessions(tmp_path):
     remaining = sorted(p.name for p in tmp_path.glob("*.mcap"))
     assert remaining == ["navd_session_s1.mcap", "navd_session_s2.mcap",
                          "policy_capture_x.mcap"]  # oldest navd pruned first
+
+
+def test_pair_frames_matches_capture_instants(tmp_path, builder):
+    """Freshest same-instant pair wins over two independent latest reads.
+
+    Scenario (the measured 76 ms case): near slot is fresh, far slot is
+    ~66 ms stale. Pairing must fall back to near's previous frame to match
+    far's freshest instant instead of storing a one-period-skewed pair.
+    """
+    from bebop_vision.goal_planner import GoalSlot
+    now = time.monotonic()
+    rig = SimpleNamespace(cameras={
+        "near": ScriptedCamera("S-NEAR", "near", [
+            _frame("near", "S-NEAR", 100, now - 0.069),
+            _frame("near", "S-NEAR", 101, now - 0.002)]),
+        "far": ScriptedCamera("S-FAR", "far", [
+            _frame("far", "S-FAR", 201, now - 0.133),
+            _frame("far", "S-FAR", 202, now - 0.066)]),
+    })
+    rec = NavdRecorder(rig, FakeRobot(), GoalSlot(), tmp_path / "s.mcap",
+                       builder=builder, rate_hz=20.0)
+    frames, pair_ms = rec._pair_frames(max_age_s=0.3)
+    assert frames["near"].stamp_us == 100  # not the freshest near frame
+    assert frames["far"].stamp_us == 202
+    assert pair_ms["far"] < 5.0  # was 64 ms apart via naive latest-reads
+    rec.stop()
+
+
+def test_pair_frames_single_camera(tmp_path, builder):
+    """Near-only rig (roles=("near",)) records without pairing metadata."""
+    from bebop_vision.goal_planner import GoalSlot
+    now = time.monotonic()
+    rig = SimpleNamespace(cameras={
+        "near": ScriptedCamera("S-NEAR", "near", [
+            _frame("near", "S-NEAR", 101, now - 0.002)]),
+    })
+    rec = NavdRecorder(rig, FakeRobot(), GoalSlot(), tmp_path / "s.mcap",
+                       builder=builder, rate_hz=20.0)
+    frames, pair_ms = rec._pair_frames(max_age_s=0.3)
+    assert frames["near"].stamp_us == 101 and pair_ms == {}
+    rec.stop()
 
 
 def test_drive_active():

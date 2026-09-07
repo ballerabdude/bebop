@@ -19,6 +19,7 @@ OrbbecViewer before running.
   the control loop never crashes on a camera exception.
 """
 
+import collections
 import dataclasses
 import json
 import threading
@@ -191,6 +192,10 @@ class OrbbecCamera:
         self.read_fps = 0.0
         self._lock = threading.Lock()
         self._frame = None
+        # Short arrival-ordered history (≈0.4 s at 15 fps) — lets consumers
+        # pair frames across cameras by arrival time instead of trusting two
+        # independent latest-wins slots (recorder_mcap NavdRecorder._tick).
+        self._history = collections.deque(maxlen=6)
         self._running = False
         self._reader = None
         self._ctx = None
@@ -328,12 +333,14 @@ class OrbbecCamera:
                 print(f"[orbbec] {self.role} capture error: {type(exc).__name__}: {exc}")
                 time.sleep(0.5)
                 continue
+            frame = StampedFrame(
+                depth=arr, stamp_us=stamp_us, recv_ts=time.monotonic(),
+                width=self.width, height=self.height, fps=self.fps,
+                color=color, color_jpeg=color_jpeg, serial=self.serial,
+                role=self.role)
             with self._lock:
-                self._frame = StampedFrame(
-                    depth=arr, stamp_us=stamp_us, recv_ts=time.monotonic(),
-                    width=self.width, height=self.height, fps=self.fps,
-                    color=color, color_jpeg=color_jpeg, serial=self.serial,
-                    role=self.role)
+                self._frame = frame
+                self._history.append(frame)
             frames += 1
             now = time.monotonic()
             if now - t >= 1.0:
@@ -347,6 +354,11 @@ class OrbbecCamera:
             if self._frame is None:
                 return None
             return self._frame
+
+    def recent(self):
+        """Arrival-ordered history (oldest→newest) of recent StampedFrames."""
+        with self._lock:
+            return list(self._history)
 
     def stop(self):
         self._running = False

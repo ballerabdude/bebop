@@ -149,9 +149,20 @@ not this document — is the source of truth for extrinsics.
 Bandwidth: 2x depth Y16 @ 848x480x30 ≈ 48 MB/s total — fits on separate
 SuperSpeed lanes; do **not** put both cameras on a shared USB 2.0 path.
 
-Frame sync: no hardware sync. Fusion tolerates the skew: at 0.4 m/s a 50 ms
-timestamp difference is 2 cm. Each camera's BEV contribution carries its own
-timestamp; the grid is re-fused every tick.
+Frame sync: **hardware sync via the Orbbec Multi-Camera Sync Hub** (8-pin,
+1.8 V logic, both cameras on the hub): near = PRIMARY (trigger-out), far =
+SECONDARY_SYNCED, all delays 0 (bebop_vision/orbbec.py). Measured
+2026-09-07 with `tools/orbbec_sync_test.py`: host-clock phase spread
+0.00 ms over 40 s and far streams 15.00 fps in strict SECONDARY (captures
+only on trigger) — the pair is phase-locked. Device stamps are per-camera
+clock domains (no host clock-sync in this pyorbbecsdk build) and must not
+be compared across cameras. Consumers must still pair frames explicitly:
+each camera feeds an independent latest-wins slot, so two blind slot reads
+land a frame period apart (med 0.3 ms, max 76.6 ms —
+`tools/orbbec_slot_probe.py`); the recorder picks the freshest same-instant
+pair from the camera histories (recorder_mcap `NavdRecorder._pair_frames`)
+and stamps each image message with `stamp_us` + `pair_ms`. Each camera's
+BEV contribution carries its own timestamp; the grid is re-fused every tick.
 
 Camera hardware encode: **none** — the 335Lg exposes no H.264/H.265 UVC
 profiles (verified on-device 2026-09-05; color sensor offers raw/MJPG only),
@@ -186,7 +197,12 @@ See the videoserver spec (Section 9.2, Stage 1).
 Use `pyorbbecsdk` frame-sync on each camera pipeline (color/depth alignment
 within a device) and enable the depth filters: SpatialModerateFilter +
 TemporalFilter + HoleFillingFilter (settings proven in OrbbecViewer bring-up).
-Do not use cross-device sync.
+Cross-device sync: hardware sync via the sync hub as above (PRIMARY +
+SECONDARY_SYNCED; reference: OrbbecSDK_v2 examples
+3.advanced.multi_devices_sync). Do not switch the far camera to strict
+SECONDARY in production — it then captures only on trigger and silently
+produces nothing if the sync signal is lost; SECONDARY_SYNCED free-runs in
+that case (the failure mode the bench tool exists to detect).
 
 ---
 

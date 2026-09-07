@@ -27,7 +27,11 @@ the Foxglove-schema channels exist so sessions open as a live dashboard in
 Foxglove Studio (foxglove/bebop_navd_layout.json).
 
 All messages of one tick share the same log_time (µs since epoch), so the
-extractor can group them by exact match.
+extractor can group them by exact match. Image messages additionally carry
+`stamp_us` (SDK device stamp — per-camera clock domain, NOT comparable
+across cameras) and `pair_ms` (arrival-time residual of this camera's frame
+vs the paired near frame; hardware sync keeps it ~0-2 ms) so cross-camera
+alignment is verifiable offline.
 """
 
 import base64
@@ -319,14 +323,63 @@ class NavdRecorder:
         return {"sec": int(log_ns // 1_000_000_000),
                 "nsec": int(log_ns % 1_000_000_000)}
 
+    def _pair_frames(self, max_age_s):
+        """Freshest same-instant frame pair across the camera histories.
+
+        Returns ({role: StampedFrame}, {role: delta_ms vs the anchor}).
+        Cameras without history support (test fakes) fall back to read().
+        A single-camera rig just uses its latest frame.
+        """
+        hists = {}
+        for role, cam in self.rig.cameras.items():
+            h = []
+            try:
+                h = [f for f in cam.recent() if f.age_s() <= max_age_s]
+            except AttributeError:
+                pass
+            if not h:  # no history support or capture hasn't started yet
+                f = cam.read()
+                h = [f] if f is not None and f.age_s() <= max_age_s else []
+            if not h:
+                continue
+            hists[role] = h
+        if not hists:
+            return {}, {}
+        if len(hists) == 1:
+            role, h = next(iter(hists.items()))
+            return {role: h[-1]}, {}
+        anchor_role, anchor_hist = next(iter(hists.items()))
+        best, best_pair, best_deltas = None, None, {}
+        for nf in reversed(anchor_hist):  # freshest anchor first
+            pair, deltas = {anchor_role: nf}, {}
+            for role, h in hists.items():
+                if role == anchor_role:
+                    continue
+                ff = min(h, key=lambda f: abs(f.recv_ts - nf.recv_ts))
+                pair[role] = ff
+                deltas[role] = abs(ff.recv_ts - nf.recv_ts)
+            worst = max(deltas.values(), default=0.0)
+            if best is None or worst < best:
+                best, best_pair, best_deltas = worst, pair, deltas
+            if best < 0.002:  # sub-2 ms: freshest such pair wins
+                break
+        pair_ms = {role: d * 1e3 for role, d in best_deltas.items()}
+        return best_pair, pair_ms
+
     @staticmethod
-    def _compressed_image_msg(frame_id, fmt, blob, log_ns):
-        return json.dumps({
+    def _compressed_image_msg(frame_id, fmt, blob, log_ns,
+                              stamp_us=None, pair_ms=None):
+        msg = {
             "timestamp": NavdRecorder._stamp(log_ns),
             "frame_id": frame_id,
             "format": fmt,
             "data": base64.b64encode(blob).decode(),
-        }).encode()
+        }
+        if stamp_us is not None:
+            msg["stamp_us"] = int(stamp_us)
+        if pair_ms is not None:
+            msg["pair_ms"] = round(float(pair_ms), 3)
+        return json.dumps(msg).encode()
 
     def _tick(self, log_ns, seq):
         st = self.robot.state
@@ -353,16 +406,16 @@ class NavdRecorder:
         # measures ~165 ms at 6 workers on the Orin Nano (vs ~330 ms fully
         # serial, 2026-09-06); 6 cores — more workers oversubscribes.
         #
-        # A camera whose frame stamp is unchanged since the last tick (far
-        # ticks at 10 fps, below the recorder rate) reuses the cached
-        # encoded payloads + BEV result — the channel is still written every
-        # tick so the extractor's per-tick alignment contract holds.
-        frames = {}
-        for role, cam in self.rig.cameras.items():
-            f = cam.read()
-            if f is None or f.age_s() > self.builder.max_frame_age_s:
-                continue
-            frames[role] = f
+        # Cross-camera pairing: hardware sync phase-locks the capture
+        # instants (tools/orbbec_sync_test.py: host-clock phase spread
+        # 0.00 ms), but each camera feeds its own latest-wins slot, so two
+        # independent slot reads can land a frame period apart (measured
+        # med 0.3 ms / max 76.6 ms, tools/orbbec_slot_probe.py). Pairing
+        # takes the freshest same-instant pair from the per-camera
+        # histories; the residual |Δrecv| rides in the image messages
+        # (pair_ms) with the device stamp (stamp_us) so offline consumers
+        # can verify alignment.
+        frames, pair_ms = self._pair_frames(self.builder.max_frame_age_s)
         jobs = {}
         for role, f in frames.items():
             cached = self._cache.get(role)
@@ -399,14 +452,15 @@ class NavdRecorder:
                 self._cache[role] = (f.stamp_us, job)
             png, jpg = job["png"], job["jpg"]
             per_cam[role] = job["bev"]
+            meta = {"stamp_us": f.stamp_us, "pair_ms": pair_ms.get(role)}
             self._add(self._ch[self._depth_topic(role)],
                       self._compressed_image_msg(f"depth_{role}", "png", png,
-                                                 log_ns),
+                                                 log_ns, **meta),
                       log_ns)
             if jpg is not None:
                 self._add(self._ch[f"color_{role}"],
                           self._compressed_image_msg(f"{role}_color", "jpeg",
-                                                     jpg, log_ns),
+                                                     jpg, log_ns, **meta),
                           log_ns)
             if role in ("near", "far"):
                 self._add(self._ch[f"depth_{role}_preview"],
