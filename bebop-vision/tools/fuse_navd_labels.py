@@ -1,23 +1,41 @@
-"""Fuse YOLO image-space masks with the geometric teacher into BEV labels.
+"""Fuse SAM 3.1 floor masks with depth into BEV labels (v2 — SAM+depth only).
 
-Projection is a semantic FRUSTUM with depth-gated marking. A masked color
-pixel defines a ray; the ray marks obstacle cells where it passes through
-the height band [0.03, 0.30] m above the floor:
+v2 (2026-09-07, user decision): nothing geometric enters the fusion — no
+RANSAC plane, no height-band occupancy classifier, no object detector.
+The depth camera itself is the geometry; SAM 3.1 (floor/carpet/rug/ground
+concepts only) is the only segmentation. Per color pixel (stride 4), per
+camera, per tick:
 
-- depth valid at the pixel  -> mark only the +-0.15 m range window around
-  the measured surface (tight, calibrated marking; floor bleed from mask
-  edges cancels because the floor reading sits below the band)
-- depth invalid (glass, dark, overexposed) -> mark the FULL band sweep up
-  to the ground hit (conservative — this is the case the teacher cannot
-  see at all)
+  navigable  SAM floor mask AND the ray's measured depth lands within
+             FLOOR_TOL of the flat-floor prediction -> the landing cell
+             is drivable ground.
+  blocked    non-floor pixel:
+             - valid depth AND the measured surface is NOT within
+               FLOOR_TOL of the ground plane: the ray hit something that
+               is not ground -> mark the obstacle-band cells within
+               +-DEPTH_TOL of the measured range
+             - invalid depth (glass / dark / overexposed): full band
+               sweep up to the ground hit (conservative — we know
+               something is there, not where)
+             - valid depth but surface == ground plane (SAM missed /
+               shadow): no blocked mark — left unconfirmed, caution
+  caution    everything else (unconfirmed floor, conflicts, out-of-FOV)
 
-Cells inside the body-frame self_mask footprint are dropped. Per session,
-updates labels/{stamp}.npz in place:
-    teacher   uint8 60x60  raw geometric grid (unchanged input)
-    yolo_near uint8 60x60  near-camera frustum-blocked cells
-    yolo_far  uint8 60x60  far-camera frustum-blocked cells
-    fused     uint8 60x60  0 blocked / 1 navigable / 2 caution  <- training
-    disagree  uint8 60x60  teacher-free but yolo-blocked (mining/hand-label)
+Cells inside the body-frame self_mask footprint are never drivable.
+Known gap (accepted 2026-09-07): stair descents / holes that SAM masks as
+ground read navigable — negative obstacles have no label signal; the
+recorded /bev_teacher stays in each npz as bookkeeping so a drop-detection
+term can be re-added later by re-running this tool (no re-recording).
+
+Per session, updates labels/{stamp}.npz in place:
+    teacher      uint8 60x60  raw geometric grid (recorded input, bookkeeping)
+    sem_near     uint8 60x60  near-camera SAM+depth blocked cells
+    sem_far      uint8 60x60  far-camera SAM+depth blocked cells
+    floor_near   uint8 60x60  near-camera floor confirmations
+    floor_far    uint8 60x60  far-camera floor confirmations
+    fused        uint8 60x60  0 blocked / 1 navigable / 2 caution  <- training
+    disagree     uint8 60x60  SAM/depth blocked where geometric saw nothing
+    unconfirmed  uint8 60x60  caution where geometric saw nothing (mining)
 """
 
 import json
@@ -32,17 +50,12 @@ sys.path.insert(0, str(ROOT))
 
 from bebop_vision.bev import mount_rotation  # noqa: E402
 
-# COCO ids that are floor-clutter / too small to block a wheeled robot;
-# everything else marks blocked cells.
-FLAT_IGNORE = {40, 41, 42, 43, 44, 45, 63, 64, 65, 66, 67, 73, 74, 79}
-MIN_INSTANCE_PX = 1200
 PIXEL_STRIDE = 4
 BAND_LO_M, BAND_HI_M = 0.03, 0.30
 SAMPLE_STEP_M = 0.025
 MAX_SAMPLES = 60
 DEPTH_TOL_M = 0.15
 FLOOR_TOL_M = 0.25          # |floor landing range - measured depth| gate
-MARGIN_CELLS = 4            # 0.20 m robot radius
 
 
 def load_cfg():
@@ -59,6 +72,7 @@ def build_lut(serial, cam_cfg, bev, intr):
       t1, t2  band-entry/exit range along the ray (t = optical z, m)
       u_d, v_d pixel projected into the depth image
       cells/offsets  ragged list of swept ground cells (t-ordered)
+      land_cells, t_g  flat-floor landing cell / landing range
     """
     fx, fy = intr["color_fx"], intr["color_fy"]
     cx, cy = intr["color_cx"], intr["color_cy"]
@@ -131,6 +145,40 @@ def load_lut(role):
     return {k: v for k, v in np.load(p).items()}
 
 
+def _sweep_blocked(lut, sel, d_m, valid):
+    """Vectorized ragged band sweep for the given ray indices.
+
+    Rays with valid depth mark only the band cells within +-DEPTH_TOL of
+    the measured range; rays without valid depth mark their whole band
+    (something is there, we don't know where). Returns a bool cell map.
+    """
+    lens = lut["offsets"][sel + 1] - lut["offsets"][sel]
+    nz = lens > 0
+    pix = sel[nz]
+    lens = lens[nz]
+    if len(pix) == 0:
+        return np.zeros(60 * 60, bool)
+    starts = lut["offsets"][pix]
+    tot = int(lens.sum())
+    within = np.arange(tot, dtype=np.int64) - np.repeat(
+        np.concatenate([[0], np.cumsum(lens)[:-1]]).astype(np.int64), lens)
+    flat = np.repeat(starts, lens) + within
+    hits_all = lut["cells"][flat]
+    t1, t2 = lut["t1"][pix], lut["t2"][pix]
+    dv, ok = d_m[nz], valid[nz]
+    t_lo = np.where(ok, np.maximum(t1, dv - DEPTH_TOL_M), t1)
+    t_hi = np.where(ok, np.minimum(t2, dv + DEPTH_TOL_M), t2)
+    frac = (within / np.repeat(np.maximum(lens - 1, 1), lens)).astype(np.float32)
+    t_sample = np.repeat(t1, lens) \
+        + (np.repeat(t2, lens) - np.repeat(t1, lens)) * frac
+    keep = (t_sample >= np.repeat(t_lo, lens)) \
+        & (t_sample <= np.repeat(t_hi, lens))
+    hits = hits_all[keep]
+    if len(hits) == 0:
+        return np.zeros(60 * 60, bool)
+    return np.bincount(hits, minlength=60 * 60) > 0
+
+
 def session_fuse(sess_dir, cams, bev, sm, intr_by_serial, roles=("near", "far")):
     serials = {r: next(s for s, c in cams.items() if c["role"] == r)
                for r in roles}
@@ -144,79 +192,29 @@ def session_fuse(sess_dir, cams, bev, sm, intr_by_serial, roles=("near", "far"))
             print(f"[lut] {r}: {lut['n_px']} rays, {len(lut['cells'])} hits")
         luts[r] = load_lut(r)
 
-    stats = {"n": 0, "blocked": [], "disagree": [], "caution": [],
-             "near": [], "far": [], "floor": [], "nav": []}
+    stats = {"n": 0, "blocked": [], "sem": [], "caution": [],
+             "floor": [], "nav": [], "disagree": []}
     for npz_path in sorted((sess_dir / "labels").glob("*.npz")):
         stamp = int(npz_path.stem)
         dep = np.load(sess_dir / "depth" / f"{stamp:020d}.npz")
         d = dict(np.load(npz_path))
-        teacher = d["teacher"].reshape(-1)
-        union = np.zeros(60 * 60, bool)          # yolo obstacle marks
-        floor_union = np.zeros(60 * 60, bool)    # sam floor confirmations
+        teacher = d["teacher"].reshape(-1)   # bookkeeping only (not fused)
+        sem_union = np.zeros(60 * 60, bool)      # SAM+depth blocked marks
+        floor_union = np.zeros(60 * 60, bool)    # SAM floor confirmations
         for role in roles:
             lut = luts[role]
             blocked = np.zeros(60 * 60, bool)
             floor = np.zeros(60 * 60, bool)
-            yp = sess_dir / ("yolo" if role == "near" else "yolo_far") \
-                / f"{stamp:020d}.npz"
-            if yp.exists():
-                y = np.load(yp)
-                H, W = int(y["shape"][0]), int(y["shape"][1])
-                solid = (~np.isin(y["classes"], list(FLAT_IGNORE))) \
-                    & (y["confs"] > 0.3)
-                if len(y["classes"]):
-                    areas = y["bits"].reshape(len(y["classes"]), -1) \
-                        .astype(bool).sum(1)
-                    solid &= areas >= MIN_INSTANCE_PX
-                if solid.any():
-                    um = np.zeros((H, W), bool)
-                    for j in np.where(solid)[0]:
-                        um |= np.unpackbits(y["bits"][j], count=H * W) \
-                            .reshape(H, W).astype(bool)
-                    act = um[::PIXEL_STRIDE, ::PIXEL_STRIDE].ravel()
-                    sel = np.where(act)[0]
-                    if len(sel):
-                        depth_img = dep[role]
-                        d_m = depth_img[lut["v_d"][sel],
-                                        lut["u_d"][sel]].astype(np.float32) \
-                            * 1e-3
-                        valid = (d_m > 0.05) & (d_m < 6.0)
-                        t1 = lut["t1"][sel]
-                        t2 = lut["t2"][sel]
-                        t_lo = np.where(valid, np.maximum(t1, d_m
-                                                          - DEPTH_TOL_M), t1)
-                        t_hi = np.where(valid, np.minimum(t2, d_m
-                                                          + DEPTH_TOL_M), t2)
-                        pix = sel
-                        lens = (lut["offsets"][pix + 1] - lut["offsets"][pix])
-                        ar0 = np.repeat(np.arange(sel.size), lens)
-                        ac = np.concatenate(
-                            [lut["cells"][lut["offsets"][i]:
-                                          lut["offsets"][i + 1]]
-                             for i in sel])
-                        # t of each sample by linear interpolation across
-                        # the pixel's [t1, t2] span
-                        starts = np.concatenate(
-                            [[0], np.cumsum(lens)[:-1]]).astype(np.int64)
-                        k = (np.arange(int(lens.sum()), dtype=np.float32)
-                             - np.repeat(starts, lens))
-                        frac = k / np.maximum(
-                            lens[ar0].astype(np.float32) - 1, 1)
-                        t_sample = t1[ar0] + (t2[ar0] - t1[ar0]) * frac
-                        keep = (t_sample >= t_lo[ar0]) \
-                            & (t_sample <= t_hi[ar0])
-                        hits = ac[keep]
-                        if len(hits):
-                            cnt = np.bincount(hits, minlength=60 * 60)
-                            blocked = cnt > 0
             fp = sess_dir / ("sam_floor" if role == "near"
                              else "sam_floor_far") / f"{stamp:020d}.npz"
             if fp.exists():
                 fm = np.load(fp)["mask"]
-                fact = fm[::PIXEL_STRIDE, ::PIXEL_STRIDE].ravel()
-                fsel = np.where(fact)[0]
+                act = fm[::PIXEL_STRIDE, ::PIXEL_STRIDE].ravel()
+                depth_img = dep[role]
+                # floor confirmations: SAM floor AND depth lands on the
+                # flat-ground prediction
+                fsel = np.where(act)[0]
                 if len(fsel):
-                    depth_img = dep[role]
                     d_m = depth_img[lut["v_d"][fsel],
                                     lut["u_d"][fsel]].astype(np.float32) * 1e-3
                     ok = (d_m > 0.05) & (d_m < 6.0) \
@@ -225,40 +223,53 @@ def session_fuse(sess_dir, cams, bev, sm, intr_by_serial, roles=("near", "far"))
                     lc = lc[lc >= 0]
                     if len(lc):
                         floor[np.bincount(lc, minlength=60 * 60) > 0] = True
+                # blocked evidence: non-floor pixels whose measured surface
+                # is not the ground plane (or that returned no depth at all)
+                nsel = np.where(~act)[0]
+                if len(nsel):
+                    d_m = depth_img[lut["v_d"][nsel],
+                                    lut["u_d"][nsel]].astype(np.float32) * 1e-3
+                    valid = (d_m > 0.05) & (d_m < 6.0)
+                    # depth-consistent ground that SAM did not confirm
+                    # (shadow / missed mask) stays unconfirmed, not blocked
+                    on_ground = valid \
+                        & (np.abs(lut["t_g"][nsel] - d_m) <= FLOOR_TOL_M)
+                    sel = nsel[~on_ground]   # the rest: sweep (windowed/full)
+                    blocked = _sweep_blocked(lut, sel, d_m[~on_ground],
+                                             valid[~on_ground])
             x, y_ = cells_to_xy(np.where(blocked)[0], bev)
             infoot = (x > sm["x_range_m"][0]) & (x < sm["x_range_m"][1]) \
                 & (y_ > sm["y_range_m"][0]) & (y_ < sm["y_range_m"][1])
             blocked[np.where(blocked)[0][infoot]] = False
-            d[f"yolo_{role}"] = blocked.astype(np.uint8).reshape(60, 60)
+            d[f"sem_{role}"] = blocked.astype(np.uint8).reshape(60, 60)
             d[f"floor_{role}"] = floor.astype(np.uint8).reshape(60, 60)
-            union |= blocked
+            sem_union |= blocked
             floor_union |= floor
-            stats[role].append(blocked.mean())
-        blocked_all = (teacher >= 1) | union
         # the robot's own footprint is never drivable
         rows_g, cols_g = np.mgrid[0:60, 0:60]
         xg = bev["range_m"] - (rows_g + 0.5) * bev["cell_m"]
         yg = (cols_g + 0.5) * bev["cell_m"] - bev["width_m"] / 2.0
         footprint = ((xg > sm["x_range_m"][0]) & (xg < sm["x_range_m"][1])
                      & (yg > sm["y_range_m"][0]) & (yg < sm["y_range_m"][1]))
-        blocked_all |= footprint.reshape(-1)
+        blocked_all = sem_union | footprint.reshape(-1)
         navigable = floor_union & ~blocked_all
         caution = ~blocked_all & ~navigable
         fused = np.ones(60 * 60, np.uint8)
         fused[blocked_all] = 0
         fused[caution] = 2
         d["fused"] = fused.reshape(60, 60)
-        d["disagree"] = (union & (teacher == 0)).astype(np.uint8) \
+        d["disagree"] = (sem_union & (teacher == 0)).astype(np.uint8) \
             .reshape(60, 60)
         d["unconfirmed"] = (caution & (teacher == 0)).astype(np.uint8) \
             .reshape(60, 60)
         np.savez_compressed(npz_path, **d)
         stats["n"] += 1
         stats["blocked"].append(blocked_all.mean())
-        stats["disagree"].append(d["disagree"].mean())
+        stats["sem"].append(sem_union.mean())
         stats["caution"].append(caution.mean())
         stats["floor"].append(floor_union.mean())
         stats["nav"].append(navigable.mean())
+        stats["disagree"].append(d["disagree"].mean())
     return stats
 
 
