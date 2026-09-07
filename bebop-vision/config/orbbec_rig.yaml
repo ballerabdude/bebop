@@ -24,28 +24,38 @@ robots:
         # the primary+secondary pair (see far camera note); 15 fps keeps the
         # SDK filter load under the GIL cliff while phase-locking the pair.
         depth_profile: [848, 480, 15]
-        # Depth work mode (set at open; resets to "Default" on power cycle).
-        # "Default" over-smooths floor-level objects into the ground plane;
-        # "High Density" keeps object relief (measured 2026-09-07).
-        depth_work_mode: High Density
+        # Depth preset (set at open; resets to "Default" on power cycle).
+        # Supersedes the old depth_work_mode (presets bundle their own work
+        # mode). Built-in "High Accuracy" replaces "High Density" (user
+        # choice 2026-09-07); the G33X custom preset bin is Gemini 330-only
+        # (firmware rejects with ERR_MISMATCH on the 335Lg).
+        depth_preset: High Accuracy
         # Camera's hardware JPEG encoder: color arrives pre-encoded and the
         # recorder stores it verbatim (saves ~65 ms/tick of CPU encode vs
         # RGB + re-encode; the capture threads also shed their decode work).
         color_format: mjpg
-        # Self-view rects (x0, y0, x1, y1 px) in DEPTH coordinates (848x480):
-        # the chassis frame, measured 2026-09-06 from live close-range
-        # (<1.05 m) silhouette intersected over frames + 12 px margin.
-        # NOTE: the previous rects were color-space (1280x800) values and
+        # Self-view mask shapes in DEPTH coordinates (848x480) — orbbec.py
+        # zeroes these pixels before the frame is published. Two forms per
+        # entry, mix freely:
+        #   - [x0, y0, x1, y1]        rect
+        #   - [[x, y], [x, y], ...]   polygon (>= 3 vertices)
+        # The chassis silhouette is a trapezoid (wider at the bottom), so a
+        # polygon hugs it without masking the floor a rect would cover.
+        # Draw shapes with tools/set_self_mask.py on the workstation
+        # (fetches the live color view, converts to depth coords via the
+        # color->depth extrinsic, prints this snippet).
+        # History: the first rects were color-space (1280x800) values and
         # clipped against the depth frame, masking floor right of the
-        # chassis while leaving the chassis itself unmasked.
-        # Tightened 2026-09-07 against a live snapshot overlay: chassis
-        # top rail v~246, right rail u~548, bottom-left edge u~336 (the
-        # frame widens toward the bottom) — the old top/right edges
-        # masked ~18 px of actionable floor (0.6-0.7 m ahead) that the
-        # label fusion turned into permanent caution cells.
+        # chassis while leaving the chassis itself unmasked. Tightened
+        # 2026-09-07 against a live snapshot overlay — the old top/right
+        # edges masked ~18 px of actionable floor (0.6-0.7 m ahead) that
+        # the label fusion turned into permanent caution cells. Later on
+        # 2026-09-07 the rect became a polygon (tools/set_self_mask.py):
+        # the chassis is a trapezoid, the rect was masking floor at the
+        # top corners and both sides.
         # The rigid mount keeps these pixels fixed.
         self_mask_pixels:
-          - [336, 228, 560, 480]
+          - [[632, 479], [530, 479], [500, 250], [350, 252], [334, 479], [280, 479]]
       CPBLC53000ED:
         role: far
         height_m: 1.32
@@ -57,7 +67,7 @@ robots:
         # 15+15 keeps the filter load at 30 frames/s total, below that cliff,
         # and far gains 50% data rate vs the old 10 fps.
         depth_profile: [848, 480, 15]
-        depth_work_mode: High Density
+        depth_preset: High Accuracy
         color_format: mjpg
     bev:
       range_m: 3.0        # forward horizon

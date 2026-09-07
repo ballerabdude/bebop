@@ -13,11 +13,11 @@ OrbbecViewer before running.
   restore when the cable is swapped — no config change needed.
 - Depth filters (SpatialModerate + Temporal + HoleFilling) run in the
   capture thread, per Section 3.3 of the plan.
-- Depth work mode (per-camera `depth_work_mode` in the rig YAML) is set
-  at open time — the device default "Default" mode over-smooths and
-  melts low-contrast objects on the floor into the ground plane;
-  "High Density" preserves edge/detail (measured 2026-09-07: +3%
-  valid pixels, visible object relief vs Default).
+- Depth preset (per-camera `depth_preset` in the rig YAML) is loaded at
+  open time via `load_preset` — this replaces the earlier work-mode
+  setting (a preset bundles its own work mode). Replaces "High Density"
+  with the built-in "High Accuracy" preset (2026-09-07); the G33X custom
+  preset bin is Gemini 330-only (firmware ERR_MISMATCH on pid 2059).
 - Threading mirrors `camera.py`: one capture thread per camera feeding a
   latest-wins slot. Open failure at startup is a hard error (bench tool);
   a mid-run drop leaves the slot stale so the deadman stops the robot —
@@ -31,6 +31,7 @@ import threading
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 try:
@@ -50,6 +51,63 @@ def intrinsics_path(serial, config_dir=None):
 def load_rig_config(path=None):
     with open(path or DEFAULT_RIG_YAML) as f:
         return yaml.safe_load(f)
+
+
+def parse_self_mask_entries(entries):
+    """Split rig-YAML self_mask_pixels entries into (rects, polygons).
+
+    Two shape forms are accepted, in any order: a rect is four scalars
+    [x0, y0, x1, y1]; a polygon is a list of [x, y] vertex pairs (the
+    chassis silhouette is a trapezoid — a rect wastes floor around it).
+    """
+    rects, polys = [], []
+    for e in (entries or []):
+        scalars = [v for v in e if isinstance(v, (int, float))]
+        if len(e) == 4 and len(scalars) == 4:
+            rects.append(tuple(int(v) for v in e))
+        else:
+            try:
+                polys.append([[int(p[0]), int(p[1])] for p in e])
+            except (TypeError, ValueError, IndexError) as exc:
+                raise ValueError(
+                    f"self_mask_pixels entry must be [x0, y0, x1, y1] or "
+                    f"[[x, y], ...]: {e!r}") from exc
+    return rects, polys
+
+
+def normalize_mask_shapes(rects, polys):
+    """Coerce mask entries to int tuples / int vertex lists.
+
+    Constructor hygiene for direct OrbbecCamera callers: YAML may hand us
+    floats, and rect slices / fillPoly need ints. Expects the split output
+    of parse_self_mask_entries.
+    """
+    return ([tuple(int(v) for v in r) for r in (rects or [])],
+            [[[int(pt[0]), int(pt[1])] for pt in poly]
+             for poly in (polys or [])])
+
+
+def build_self_view_mask(rects, polys, width, height):
+    """Static bool (H, W) mask covering the given rects + polygons.
+
+    All coordinates are DEPTH-frame pixels; the mask is built once at
+    camera open (the rigid mount keeps the self-view at fixed pixels) and
+    applied per frame with a single boolean index. Shapes clamp to the
+    frame; no shapes -> None (no masking). Rect slicing [y0:y1, x0:x1]
+    matches the historical per-rect zeroing semantics.
+    """
+    if not rects and not polys:
+        return None
+    m = np.zeros((height, width), np.uint8)
+    for x0, y0, x1, y1 in rects:
+        m[max(0, y0):min(height, y1), max(0, x0):min(width, x1)] = 1
+    for poly in polys:
+        pts = np.array([[min(width - 1, max(0, int(x))),
+                         min(height - 1, max(0, int(y)))] for x, y in poly],
+                       np.int32)
+        if len(pts) >= 3:
+            cv2.fillPoly(m, [pts], 1)
+    return m.astype(bool)
 
 
 @dataclasses.dataclass
@@ -211,20 +269,26 @@ class OrbbecCamera:
 
     def __init__(self, serial, role, depth_profile=(848, 480, 30),
                  color_profile=None, config_dir=None, mask_rects=None,
-                 color_format="rgb", depth_work_mode=None):
+                 color_format="rgb", depth_work_mode=None, depth_preset=None,
+                 mask_polys=None):
         self.serial = serial
         self.role = role
         self.depth_profile = tuple(depth_profile)
         self.depth_work_mode = depth_work_mode
+        self.depth_preset = depth_preset
         self.color_profile = tuple(color_profile) if color_profile else None
         self.color_format = None
         self.color_format_want = color_format
         self.config_dir = config_dir
-        # Self-view pixel rects (x0, y0, x1, y1): the rigid mount means the
-        # robot's own chassis always lands on the same pixels — zeroed before
-        # the frame is published (body-frame boxes can't catch cables and
-        # overhanging mounts that stick out past the measured footprint).
-        self.mask_rects = [tuple(r) for r in (mask_rects or [])]
+        # Self-view shapes (rects [x0, y0, x1, y1] and/or polygons
+        # [[x, y], ...]) in DEPTH-frame pixels: the rigid mount means the
+        # robot's own chassis always lands on the same pixels — zeroed
+        # before the frame is published (body-frame boxes can't catch
+        # cables and overhanging mounts that stick out past the measured
+        # footprint). Polygons hug the trapezoid silhouette without
+        # masking the floor a rect would cover.
+        self.mask_rects, self.mask_polys = normalize_mask_shapes(
+            mask_rects, mask_polys)
         self.read_fps = 0.0
         self._lock = threading.Lock()
         self._frame = None
@@ -237,6 +301,10 @@ class OrbbecCamera:
         self._ctx = None
         self._pipeline = None
         self._open()
+        # Built at the NEGOTIATED depth size; shape coordinates assume the
+        # preferred profile and clamp if negotiation lands elsewhere.
+        self._pix_mask = build_self_view_mask(
+            self.mask_rects, self.mask_polys, self.width, self.height)
         self._reader = threading.Thread(
             target=self._read_loop, daemon=True, name=f"orbbec-{role}")
         self._running = True
@@ -272,10 +340,23 @@ class OrbbecCamera:
             cfg.frames_per_trigger = 1
             dev.set_multi_device_sync_config(cfg)
 
-        # Depth work mode: set before the pipeline starts. Devices power up
-        # in "Default", which over-smooths floor-level objects into the
-        # ground plane (see module docstring).
-        if self.depth_work_mode and hasattr(dev, "set_depth_work_mode"):
+        # Depth preset / work mode: set before the pipeline starts. Devices
+        # power up in "Default", which over-smooths floor-level objects into
+        # the ground plane (see module docstring). A preset (`depth_preset`)
+        # bundles its own work mode and supersedes `depth_work_mode`.
+        preset_loaded = False
+        if self.depth_preset and hasattr(dev, "load_preset"):
+            try:
+                if dev.get_current_preset_name() != self.depth_preset:
+                    dev.load_preset(self.depth_preset)
+                preset_loaded = dev.get_current_preset_name() == self.depth_preset
+                print(f"[orbbec] {self.role}({self.serial}): preset "
+                      f"'{self.depth_preset}' active")
+            except Exception as exc:
+                print(f"[orbbec] {self.role}({self.serial}): depth preset "
+                      f"'{self.depth_preset}' rejected: {exc}")
+        if not preset_loaded and self.depth_work_mode and \
+                hasattr(dev, "set_depth_work_mode"):
             try:
                 current = dev.get_depth_work_mode()
                 if getattr(current, "name", None) != self.depth_work_mode:
@@ -358,8 +439,8 @@ class OrbbecCamera:
                     continue
                 arr = np.frombuffer(depth.get_data(), dtype=np.uint16).reshape(
                     depth.get_height(), depth.get_width()).copy()
-                for x0, y0, x1, y1 in self.mask_rects:
-                    arr[y0:y1, x0:x1] = 0
+                if self._pix_mask is not None:
+                    arr[self._pix_mask] = 0
                 color = None
                 color_jpeg = None
                 if self.color_profile:
@@ -436,6 +517,7 @@ class OrbbecRig:
         self.cameras = {}
         for serial, c in cams.items():
             dp = tuple(c.get("depth_profile", (848, 480, 30)))
+            rects, polys = parse_self_mask_entries(c.get("self_mask_pixels"))
             self.cameras[c["role"]] = OrbbecCamera(
                 serial=serial,
                 role=c["role"],
@@ -443,9 +525,11 @@ class OrbbecRig:
                 # color rate must match depth rate (hardware sync pairing)
                 color_profile=(1280, 800, dp[2]) if color else None,
                 config_dir=config_dir,
-                mask_rects=c.get("self_mask_pixels"),
+                mask_rects=rects,
+                mask_polys=polys,
                 color_format=c.get("color_format", "rgb"),
-                depth_work_mode=c.get("depth_work_mode"))
+                depth_work_mode=c.get("depth_work_mode"),
+                depth_preset=c.get("depth_preset"))
 
     def get(self, role):
         return self.cameras[role]

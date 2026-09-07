@@ -286,6 +286,9 @@ class NavdRecorder:
                  "camera_self_mask_pixels": {
                      role: [list(r) for r in cam.mask_rects]
                      for role, cam in self.rig.cameras.items()},
+                 "camera_self_mask_polygons": {
+                     role: [list(p) for p in getattr(cam, "mask_polys", [])]
+                     for role, cam in self.rig.cameras.items()},
                  "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         self._add(self._ch["calib"], json.dumps(calib).encode())
 
