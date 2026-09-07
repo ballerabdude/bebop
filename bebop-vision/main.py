@@ -319,6 +319,36 @@ def run_record_navd(args):
     elif args.goal_xy is not None:
         goal_slot.set(GoalPoint(*args.goal_xy))
 
+    # --goal-drive: consume app/WS navigation goals and DRIVE on them
+    # (GoalPlanner twists at 10 Hz from the recorder's own BEV grid).
+    # Default off — without it the recorder only records and app goals
+    # are ignored, which is the safe behavior for passive capture.
+    drive_node = None
+    if args.goal_drive:
+        from bebop_vision.goal_planner import GoalDriveNode
+        planner = GoalPlanner()
+        drive_node = GoalDriveNode(
+            robot, planner, lambda: getattr(rec, "grid", None), goal_slot,
+            command_hz=args.command_hz, require_mode=pb.MODE_RUN_POLICY)
+
+        def _on_app_goal(goal):
+            if goal is None:
+                goal_slot.clear()
+                print("[record-navd] goal cleared (app)")
+            elif goal[0] == "heading":
+                goal_slot.set(GoalHeading(goal[1]))
+                print(f"[record-navd] goal: heading "
+                      f"{math.degrees(goal[1]):.1f} deg")
+            else:
+                goal_slot.set(GoalPoint(goal[1], goal[2]))
+                print(f"[record-navd] goal: point "
+                      f"({goal[1]:.2f}, {goal[2]:.2f}) m")
+
+        robot.on_goal.append(_on_app_goal)
+        print("[record-navd] goal-drive ON: app Navigate card drives the "
+              "robot (needs wheels armed + Policy mode); twists are "
+              "recorded like any teleop")
+
     out_dir = Path(args.record_navd).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
     # Fail fast with a readable message: the root-run firmware recreates the
@@ -333,6 +363,7 @@ def run_record_navd(args):
             f"'sudo chown bebop:bebop {out_dir}' or re-run install-jetson.sh")
     budget = args.disk_budget_gb * 1e9
     rate = args.record_rate if args.record_rate is not None else 10.0
+    rec = None
 
     if sys.stdin is not None and sys.stdin.isatty():
         def stdin_loop():
@@ -363,6 +394,19 @@ def run_record_navd(args):
               f"({rec.frames} frames, {rec.bytes_written/1e6:.1f} MB)")
         _prune_sessions(out_dir, budget)
 
+    # Goal-drive tick loop: consumes the recorder's own BEV grid so app
+    # navigation goals steer the robot while recording (--goal-drive).
+    stop_drive_loop = threading.Event()
+
+    def drive_loop():
+        while not stop_drive_loop.is_set():
+            drive_node.on_grid()
+            time.sleep(0.1)
+
+    if drive_node is not None:
+        threading.Thread(target=drive_loop, daemon=True,
+                         name="rec-goal-drive").start()
+
     if not args.auto:
         rec, path, _ = new_segment()
         t0 = _time.monotonic()
@@ -377,6 +421,7 @@ def run_record_navd(args):
             pass
         finally:
             close_segment(rec, path)
+            stop_drive_loop.set()
             if vserver is not None:
                 vserver.stop()
             rig.stop()
@@ -436,6 +481,7 @@ def run_record_navd(args):
                 close_segment(seg, seg_path)
             except OSError as exc:
                 print(f"\n[record-navd] error closing final segment: {exc}")
+        stop_drive_loop.set()
         if vserver is not None:
             vserver.stop()
         rig.stop()
@@ -489,6 +535,10 @@ def main():
                         help="record-navd --auto: roll segment above this many minutes")
     parser.add_argument("--disk-budget-gb", type=float, default=20.0,
                         help="record-navd --auto: prune oldest sessions below this total")
+    parser.add_argument("--goal-drive", action="store_true",
+                        help="record-navd: consume app/WS navigation goals "
+                             "and drive on them (GoalPlanner twists at 10 "
+                             "Hz; needs wheels armed + Policy mode)")
     parser.add_argument("--no-video-server", action="store_true",
                         help="do not serve the operator MJPEG stream on "
                              "--video-port")

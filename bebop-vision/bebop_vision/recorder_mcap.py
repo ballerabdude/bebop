@@ -178,6 +178,10 @@ class NavdRecorder:
         self.builder = builder or BevBuilder()
         self.bytes_written = 0
         self.frames = 0
+        # Latest fused BEV grid from the recorder's own tick — lets the
+        # parent process run a goal-drive loop against the same grid the
+        # teacher labels come from (see main.py --record-navd --goal-drive).
+        self.grid = None
         self._lock = threading.Lock()
         self._running = False
         self._thread = None
@@ -407,6 +411,7 @@ class NavdRecorder:
                           log_ns)
             ages[role] = f.age_s()
         grid = self.builder.fuse(per_cam, ages)
+        self.grid = grid
         bev = {"raw": self._b64(grid.raw) if grid is not None else None,
                "plane_ok": grid.plane_ok if grid is not None else {},
                "stamp_ns": log_ns}
