@@ -17,6 +17,8 @@ of each epoch, stacked into one card per kind): color input, near|far
 depth inputs, teacher|prediction, teacher|prediction with the model's
 disagreements ringed red, and fusion|hand when the sample carries a
 human correction.
+Step checkpoints (--ckpt-every, capped by --ckpt-until): mid-training
+snapshots ckpt_step_<step>.pt next to last.pt/best.pt.
 Hyperparameters + best mIoU land in the TB hparams panel at the end. The
 JSONL log (train_log.jsonl) is unchanged — other tooling reads it.
 """
@@ -212,6 +214,11 @@ def main():
                          "(0 disables the image panels)")
     ap.add_argument("--tb-comment", default="",
                     help="optional string merged into the TB run tag")
+    ap.add_argument("--ckpt-every", type=int, default=0, metavar="N",
+                    help="save ckpt_step_<step>.pt every N optimizer steps "
+                         "(0 = off)")
+    ap.add_argument("--ckpt-until", type=int, default=0, metavar="S",
+                    help="no step checkpoints past this step (0 = no cap)")
     args = ap.parse_args()
 
     root = Path(args.data)
@@ -279,6 +286,12 @@ def main():
                 tb.add_scalar(f"{run_tag}/loss/total", loss.item(), step)
                 tb.add_scalar(f"{run_tag}/loss/ce", ce.item(), step)
                 tb.add_scalar(f"{run_tag}/loss/imitation", im.item(), step)
+            if (args.ckpt_every and step % args.ckpt_every == 0
+                    and (not args.ckpt_until or step <= args.ckpt_until)):
+                torch.save({"model": model.state_dict(), "epoch": epoch,
+                            "step": step},
+                           out / f"ckpt_step_{step:04d}.pt")
+                print(f"[step {step}] ckpt saved", flush=True)
             if i % 25 == 0:
                 print(f"e{epoch} {i}/{len(train_ld)} loss {loss.item():.3f} "
                       f"(ce {ce.item():.3f} im {im.item():.3f})", flush=True)

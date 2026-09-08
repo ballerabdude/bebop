@@ -20,6 +20,15 @@ Class mapping (model -> BEV vocabulary):
   telemetry grid. No runtime inflation: the teacher labels the student
   was trained on already carry the margins.
 
+Self dead disc: cells inside the rig's min_range_m (default 0.55 m) are
+the robot's own ground — the chassis silhouette occludes everything
+closer (measured horizon 0.54 m). They are carved to FREE after the
+class mapping, exactly like the geometric pipeline's min_range drop
+(bev.py): the planner marches rays from r_min = 0.35 m, INSIDE the disc,
+so any blocked cell there seals every ray (v2 teacher labels marked the
+chassis footprint blocked -> all 13 rays first-hit at 0.35 m -> c_best
+0.117 < min_clearance 0.12 -> eternal search; found 2026-09-07).
+
 Threading: predict() runs in the caller's BEV worker thread (never in a
 camera capture thread — §2.8). onnxruntime releases the GIL inside Run;
 preprocessing is numpy/cv2 only.
@@ -36,7 +45,8 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("pip install opencv-python") from exc
 
 from .bev import BevGrid, FREE, OCCUPIED, HAZARD, INFLATED
-from .navd_pre import CELL_M, GRID, build_goal_raster, prep_color, prep_depth
+from .navd_pre import (CELL_M, GRID, RANGE_M, WIDTH_M, build_goal_raster,
+                       prep_color, prep_depth)
 
 BLOCKED, NAVIGABLE, CAUTION = 0, 1, 2
 
@@ -45,6 +55,23 @@ BLOCKED, NAVIGABLE, CAUTION = 0, 1, 2
 # obstacle" the way OCCUPIED would.
 _PLANNING = {BLOCKED: OCCUPIED, NAVIGABLE: FREE, CAUTION: INFLATED}
 _RAW = {BLOCKED: OCCUPIED, NAVIGABLE: FREE, CAUTION: HAZARD}
+
+
+def self_disc_mask(bev_cfg=None):
+    """(60, 60) bool: cells inside the rig's min_range dead disc.
+
+    The robot's own ground: the chassis silhouette occludes everything
+    closer (measured horizon 0.54 m ~= the configured 0.55 m), so these
+    cells carry no scene signal and MUST be free — the planner marches
+    rays from r_min = 0.35 m, inside the disc (see module docstring).
+    """
+    from .orbbec import load_rig_config
+    cfg = (bev_cfg or load_rig_config())["robots"]["default"]["bev"]
+    min_r = float(cfg.get("min_range_m", 0.55))
+    rows, cols = np.mgrid[0:GRID, 0:GRID]
+    x = RANGE_M - (rows + 0.5) * CELL_M
+    y = (cols + 0.5) * CELL_M - WIDTH_M / 2.0
+    return np.hypot(x, y) < min_r
 
 
 def goal_raster_from_slot(goal, odom):
@@ -135,6 +162,7 @@ class NavdGridSource:
         self.model = NavdModel(model_path, providers=providers)
         self.max_frame_age_s = max_frame_age_s
         self.frac_lo, self.frac_hi = frac_range
+        self._self_disc = self_disc_mask()
         self._log = log
         self.last_reason = None   # why the model did not produce the last grid
         self._last_logged = None  # reason already reported (log once per change)
@@ -186,6 +214,11 @@ class NavdGridSource:
             for c in (BLOCKED, CAUTION):
                 occ[cls == c] = _PLANNING[c]
                 raw[cls == c] = _RAW[c]
+            # self dead disc: the robot is not an obstacle to itself (see
+            # self_disc_mask) — carve AFTER the frac gate, which judges the
+            # model's raw output
+            occ[self._self_disc] = FREE
+            raw[self._self_disc] = FREE
             ages = {"near": near.age_s(now), "far": far.age_s(now)}
             return BevGrid(
                 occ=occ, raw=raw, stamp_us=max(near.stamp_us, far.stamp_us),

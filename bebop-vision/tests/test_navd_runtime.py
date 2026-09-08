@@ -29,7 +29,8 @@ from bebop_vision.navd_pre import (IMG_H, IMG_W, build_goal_raster,
                                    prep_color, prep_depth)
 from bebop_vision.navd_runtime import (BLOCKED, NAVIGABLE, CAUTION,
                                        NavdGridSource, gather_frames,
-                                       goal_raster_from_slot)
+                                       goal_raster_from_slot,
+                                       self_disc_mask)
 from bebop_vision.orbbec import StampedFrame
 
 ROWS = COLS = 60
@@ -78,6 +79,7 @@ def make_source(logits=None, error=None, **kw):
     src.model = StubModel(logits, error)
     src.max_frame_age_s = kw.get("max_frame_age_s", 0.3)
     src.frac_lo, src.frac_hi = kw.get("frac_range", (0.05, 0.95))
+    src._self_disc = self_disc_mask()
     src._log = kw.get("log", print)
     src.last_reason = None
     src._last_logged = None
@@ -120,14 +122,58 @@ def test_model_grid_maps_classes():
 
 
 def test_planner_blocks_on_model_caution():
-    """The grid is the seam: a caution cell must stop the polar march."""
-    cls = plausible_scene()
-    cls[50:52, 28:32] = CAUTION     # ~0.5 m ahead, dead ahead
-    src = make_source(logits_for(cls))
-    grid = src.update(sample_frames(), None, (0.0, 0.0, 0.0))
+    """The grid is the seam: a caution cell must stop the polar march.
+
+    The caution band sits just BEYOND the self dead disc (x ~= 0.6 m) —
+    cells inside the disc are carved to FREE by the runtime (the robot is
+    not an obstacle to itself), so an in-disc band would not reach the
+    planner. This is a pure state-machine check on a hand-built grid.
+    """
+    occ = np.full((ROWS, COLS), FREE, np.uint8)
+    occ[50:52, 28:32] = INFLATED     # ~0.4 m ahead, dead ahead
+    grid = _grid_with_occ(occ)
     vx, wz, info = GoalPlanner().compute(grid, GoalHeading(0.0))
     assert info["state"] == "hard_stop"
     assert vx == 0.0 and wz == 0.0
+
+
+def test_self_disc_carved_even_when_model_blocks_it():
+    """v2 teacher labels marked the chassis footprint blocked; the model
+    learned it; the planner marches from r_min=0.35 m INSIDE the disc —
+    a blocked disc cell seals every ray (found 2026-09-07: all 13 rays
+    first-hit at 0.35 m -> c_best 0.117 < min_clearance -> eternal
+    search). The runtime must carve the disc to FREE, no matter what the
+    model says, so the planner can see real obstacles beyond it."""
+    cls = plausible_scene()
+    cls[45:56, 22:38] = BLOCKED      # the (wrongly) blocked chassis block
+    src = make_source(logits_for(cls))
+    grid = src.update(sample_frames(), None, (0.0, 0.0, 0.0))
+    assert grid is not None
+    assert (grid.occ[grid_self_disc()] == FREE).all()   # carved
+    # scene beyond the disc survives
+    assert (grid.occ[0:10, :] == OCCUPIED).all()
+    assert (grid.raw[grid_self_disc()] == FREE).all()
+    # and the planner is unsealed: no longer search/hard_stop (the sealed
+    # failure mode) — it drives or rotates toward a real corridor
+    vx, wz, info = GoalPlanner().compute(grid, GoalHeading(0.0))
+    assert info["state"] in ("drive", "rotate")
+    assert vx > 0.0 or wz != 0.0
+
+
+def grid_self_disc():
+    """Disc mask in grid coordinates (mirrors navd_runtime.self_disc_mask)."""
+    import math
+    rows, cols = np.mgrid[0:ROWS, 0:COLS]
+    x = 3.0 - (rows + 0.5) * CELL
+    y = (cols + 0.5) * CELL - 1.5
+    return np.hypot(x, y) < 0.55
+
+
+def _grid_with_occ(occ):
+    from bebop_vision.bev import BevGrid
+    return BevGrid(occ=occ, raw=occ.copy(), stamp_us=1,
+                   per_camera_age_s={}, plane_ok={}, roles=[],
+                   cell_m=CELL, recv_ts=time.monotonic())
 
 
 # --- no-grid failures (no fallback — the drive node waits) --------------------

@@ -21,11 +21,19 @@ camera, per tick:
                shadow): no blocked mark — left unconfirmed, caution
   caution    everything else (unconfirmed floor, conflicts, out-of-FOV)
 
-Cells inside the body-frame self_mask footprint are never drivable.
-Known gap (accepted 2026-09-07): stair descents / holes that SAM masks as
-ground read navigable — negative obstacles have no label signal; the
-recorded /bev_teacher stays in each npz as bookkeeping so a drop-detection
-term can be re-added later by re-running this tool (no re-recording).
+Cells inside the min_range dead disc (rig bev config, 0.55 m) are the
+robot's own ground — the chassis silhouette occludes everything closer
+(measured horizon 0.54 m) — and are labeled navigable (geometric-era
+dead-disc semantics). They MUST NOT be blocked: the planner marches rays
+from r_min = 0.35 m, inside the disc, so a blocked cell there seals
+every ray (v2 marked the whole chassis footprint blocked -> all 13 rays
+first-hit at 0.35 m -> c_best 0.117 < min_clearance 0.12 -> the drive
+node searched forever; found 2026-09-07).
+
+Self-view pixels (the depth-frame chassis polygon) are excluded from all
+marking: they are the robot, not scene — without this the masked depth
+(zero = invalid) triggers the conservative full-band blocked sweep and
+smears blocked cells across the chassis footprint.
 
 Per session, updates labels/{stamp}.npz in place:
     teacher      uint8 60x60  raw geometric grid (recorded input, bookkeeping)
@@ -61,10 +69,24 @@ FLOOR_TOL_M = 0.25          # |floor landing range - measured depth| gate
 def load_cfg():
     import yaml
     cfg = yaml.safe_load(open(ROOT / "config" / "orbbec_rig.yaml"))
-    cams = cfg["robots"]["default"]["cameras"]
-    bev = cfg["robots"]["default"]["bev"]
-    sm = cfg["robots"]["default"]["robot"]["self_mask"]
-    return cams, bev, sm
+    return cfg["robots"]["default"]
+
+
+def self_pixel_mask(serial, cams, lut, depth_shape=(480, 848)):
+    """bool (n_px,): LUT pixels that look at the robot's own chassis
+    (their depth-frame pixel falls inside the camera's self-view
+    polygon). The recorded depth is already zeroed there (orbbec.py
+    masks before publish) — such pixels are the robot, not scene, and
+    must not mark anything (an invalid-depth pixel otherwise triggers
+    the conservative full-band blocked sweep across its whole footprint)."""
+    from bebop_vision.orbbec import (build_self_view_mask,
+                                     parse_self_mask_entries)
+    rects, polys = parse_self_mask_entries(
+        cams[serial].get("self_mask_pixels"))
+    pix = build_self_view_mask(rects, polys, depth_shape[1], depth_shape[0])
+    if pix is None:
+        return np.zeros(len(lut["u_d"]), bool)
+    return pix[lut["v_d"], lut["u_d"]]
 
 
 def build_lut(serial, cam_cfg, bev, intr):
@@ -179,10 +201,10 @@ def _sweep_blocked(lut, sel, d_m, valid):
     return np.bincount(hits, minlength=60 * 60) > 0
 
 
-def session_fuse(sess_dir, cams, bev, sm, intr_by_serial, roles=("near", "far")):
+def session_fuse(sess_dir, cams, bev, intr_by_serial, roles=("near", "far")):
     serials = {r: next(s for s, c in cams.items() if c["role"] == r)
                for r in roles}
-    luts = {}
+    luts, self_pix = {}, {}
     for r in roles:
         p = ROOT / "config" / f"raylut_{r}.npz"
         if not p.exists():
@@ -191,6 +213,7 @@ def session_fuse(sess_dir, cams, bev, sm, intr_by_serial, roles=("near", "far"))
             np.savez_compressed(p, **lut)
             print(f"[lut] {r}: {lut['n_px']} rays, {len(lut['cells'])} hits")
         luts[r] = load_lut(r)
+        self_pix[r] = self_pixel_mask(serials[r], cams, luts[r])
 
     stats = {"n": 0, "blocked": [], "sem": [], "caution": [],
              "floor": [], "nav": [], "disagree": []}
@@ -211,6 +234,8 @@ def session_fuse(sess_dir, cams, bev, sm, intr_by_serial, roles=("near", "far"))
                 fm = np.load(fp)["mask"]
                 act = fm[::PIXEL_STRIDE, ::PIXEL_STRIDE].ravel()
                 depth_img = dep[role]
+                # self pixels are the robot — never floor, never blocked
+                act = act & ~self_pix[r]
                 # floor confirmations: SAM floor AND depth lands on the
                 # flat-ground prediction
                 fsel = np.where(act)[0]
@@ -237,22 +262,23 @@ def session_fuse(sess_dir, cams, bev, sm, intr_by_serial, roles=("near", "far"))
                     sel = nsel[~on_ground]   # the rest: sweep (windowed/full)
                     blocked = _sweep_blocked(lut, sel, d_m[~on_ground],
                                              valid[~on_ground])
-            x, y_ = cells_to_xy(np.where(blocked)[0], bev)
-            infoot = (x > sm["x_range_m"][0]) & (x < sm["x_range_m"][1]) \
-                & (y_ > sm["y_range_m"][0]) & (y_ < sm["y_range_m"][1])
-            blocked[np.where(blocked)[0][infoot]] = False
             d[f"sem_{role}"] = blocked.astype(np.uint8).reshape(60, 60)
             d[f"floor_{role}"] = floor.astype(np.uint8).reshape(60, 60)
             sem_union |= blocked
             floor_union |= floor
-        # the robot's own footprint is never drivable
+        # self dead disc: ground inside min_range_m is the robot's own —
+        # the chassis silhouette occludes everything closer (measured
+        # horizon 0.54 m ~= the configured 0.55 m), so it carries no scene
+        # signal and MUST be navigable: the planner marches rays from
+        # r_min = 0.35 m, inside the disc, and a blocked cell there seals
+        # every ray (v2 marked the chassis footprint blocked -> all 13
+        # rays first-hit at 0.35 m -> eternal search; found 2026-09-07).
         rows_g, cols_g = np.mgrid[0:60, 0:60]
         xg = bev["range_m"] - (rows_g + 0.5) * bev["cell_m"]
         yg = (cols_g + 0.5) * bev["cell_m"] - bev["width_m"] / 2.0
-        footprint = ((xg > sm["x_range_m"][0]) & (xg < sm["x_range_m"][1])
-                     & (yg > sm["y_range_m"][0]) & (yg < sm["y_range_m"][1]))
-        blocked_all = sem_union | footprint.reshape(-1)
-        navigable = floor_union & ~blocked_all
+        disc = (np.hypot(xg, yg) < float(bev["min_range_m"])).reshape(-1)
+        blocked_all = sem_union & ~disc     # scene obstacles only
+        navigable = (floor_union & ~blocked_all) | disc
         caution = ~blocked_all & ~navigable
         fused = np.ones(60 * 60, np.uint8)
         fused[blocked_all] = 0
@@ -273,21 +299,16 @@ def session_fuse(sess_dir, cams, bev, sm, intr_by_serial, roles=("near", "far"))
     return stats
 
 
-def cells_to_xy(cells, bev):
-    rows, cols = cells // 60, cells % 60
-    x = bev["range_m"] - (rows + 0.5) * bev["cell_m"]
-    y = (cols + 0.5) * bev["cell_m"] - bev["width_m"] / 2.0
-    return x, y
-
 
 def main():
     from bebop_vision.orbbec import load_intrinsics
-    cams, bev, sm = load_cfg()
+    cfg = load_cfg()
+    cams, bev = cfg["cameras"], cfg["bev"]
     intr_by_serial = {s: load_intrinsics(s, str(ROOT / "config"))
                       for s in cams}
     root = ROOT / "datasets" / "navd-v0"
     for sess in sorted(root.glob("navd_session_*")):
-        st = session_fuse(sess, cams, bev, sm, intr_by_serial)
+        st = session_fuse(sess, cams, bev, intr_by_serial)
         n = st["n"]
         print(f"{sess.name}: {n} | blocked {100 * np.mean(st['blocked']):.1f}%"
               f" | floor {100 * np.mean(st['floor']):.1f}% | nav "
