@@ -41,6 +41,20 @@ teacher = [
 train = [
     "tensorboard>=2.12",
 ]
+# ML review dashboard: FastAPI backend (tools/dashboard_api.py) + the React
+# app under dashboard/ (built bundle served as static files). Inference
+# prefers the CUDA EP: on a workstation with an NVIDIA GPU install
+# onnxruntime-gpu==1.22.* (the CUDA 12 build — matches the torch-shipped
+# nvidia-* libs; 1.29 requires CUDA 13 system libs) instead of the CPU
+# `runtime` extra — tools/dashboard_api.py pre-loads the bundled
+# CUDA/cuDNN libs and falls back to CPU automatically. Never install
+# onnxruntime and onnxruntime-gpu into one venv (same import name).
+#   pip install -e ".[dashboard]" + onnxruntime(-gpu)
+dashboard = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "pydantic>=2.7",
+]
 
 [tool.setuptools.packages.find]
 include = ["bebop_vision*"]

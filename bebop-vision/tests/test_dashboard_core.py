@@ -1,10 +1,9 @@
-"""Dataset dashboard unit tests: socket-free handler layer on synthetic data.
+"""Dashboard core unit tests on synthetic data.
 
 Builds a tmp session tree (tiny label/depth npz + JPEGs + manifest), then
-exercises DatasetDashboard methods directly (the HTTP handler is a thin
-shim over them). No hardware, no real dataset dependency. The ray-LUT
-loader is injected as a fake so the overlay path is tested without
-config/raylut_near.npz.
+exercises the DatasetDashboard methods directly. No hardware, no real
+dataset dependency. The ray-LUT loader is injected as a fake so the
+overlay path is tested without config/raylut_near.npz.
 """
 
 import base64
@@ -21,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from dataset_dashboard import DatasetDashboard, build_overlay  # noqa: E402
+from dashboard_core import DatasetDashboard, build_overlay  # noqa: E402
 
 S20 = 1788716672926769002          # one tick stamp; second tick = +100e6
 STRIDE = 4
@@ -283,7 +282,7 @@ def test_stray_directory_ignored(dash):
 
 def test_real_palette_module_shapes():
     """Module-level invariants the UI relies on (no dataset needed)."""
-    from dataset_dashboard import (CLASS_BGR, CLASS_RGB_HEX, DEPTH_VIEW,
+    from dashboard_core import (CLASS_BGR, CLASS_RGB_HEX, DEPTH_VIEW,
                                    GRID, N_CELLS, class_palette_bgr)
     assert GRID == 60 and N_CELLS == 3600
     assert DEPTH_VIEW == (424, 240)
