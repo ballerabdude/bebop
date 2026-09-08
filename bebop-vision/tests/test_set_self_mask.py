@@ -32,7 +32,8 @@ INTR_ID = {
     },
 }
 
-# Same rig with a -20 mm x baseline (SDK units: millimetres).
+# Same rig with a -20 mm x baseline (SDK units: millimetres; the stored
+# transform is depth->color per the SDK, so color->depth shifts +x).
 INTR_BASE = dict(
     INTR_ID,
     color_to_depth_transform={
@@ -55,9 +56,10 @@ def test_full_frame_roi_maps_to_full_depth_frame():
 
 
 def test_translation_shifts_projection_in_mm_units():
-    # -20 mm baseline at z=1: depth u = (x_c - 0.02)/z * fx + cx.
+    # Stored transform is depth->color with t_x=-20 mm; color->depth is
+    # its inverse, so at z=1: x_d = x_c + 0.02 -> depth u = 424 + 8.
     u, v = color_to_depth_point(640, 400, 1.0, INTR_BASE, "extrinsic")
-    assert u == pytest.approx(424 - 8.0)
+    assert u == pytest.approx(424 + 8.0)
     assert v == pytest.approx(240)
     # 'scale' mode must ignore the extrinsic entirely.
     u, v = color_to_depth_point(640, 400, 1.0, INTR_BASE, "scale")
@@ -130,7 +132,10 @@ def test_poly_round_trip_real_intrinsics():
     poly = [[540, 375], [870, 377], [868, 748], [538, 746]]
     d = poly_to_depth_poly(poly, 0.7, intr, "extrinsic")
     c = depth_poly_to_color_poly(d, 0.7, intr, "extrinsic")
-    assert all(abs(a[0] - b[0]) <= 2 and abs(a[1] - b[1]) <= 2
+    # 2 px projection noise; a vertex clamped to the depth-frame edge
+    # (here y=748 projects past the 480-row depth frame -> 479) rounds
+    # out by up to ~4 px when mapped back.
+    assert all(abs(a[0] - b[0]) <= 2 and abs(a[1] - b[1]) <= 4
                for a, b in zip(c, poly))
 
 

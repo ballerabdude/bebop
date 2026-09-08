@@ -47,8 +47,9 @@ into the color view / native on depth).
 Mapping modes ('x' cycles). The magenta shape on the color window is the
 CURRENT config mask projected through the active mode — when the mode is
 right it brackets the chassis:
-    extrinsic   intrinsics + the camera's color->depth extrinsic at the
-                nominal range --range (default 0.7 m) — correct default
+    extrinsic   intrinsics + the camera's depth->color extrinsic (inverted
+                to project color->depth) at the nominal range --range
+                (default 0.7 m) — correct default
     no-trans    rotation only (extrinsic without the 23.6 mm baseline)
     scale       intrinsics-only scaling (the fuse_navd_labels.py
                 convention; lands ~20 px off here)
@@ -119,6 +120,14 @@ def shape_kind(entry):
 
 
 def _extrinsics(intr, mode):
+    """(R, t) mapping DEPTH-camera-frame points -> color-camera-frame
+    points, per mode.
+
+    The SDK's param.transform (cached as color_to_depth_transform) is the
+    DEPTH->COLOR extrinsic (pyorbbecsdk example 04: "rigid transform (R | t)
+    from the depth camera frame to the color camera frame"), t in mm. The
+    stored name is misleading — color->depth needs the inverse (R^T, -R^T t).
+    """
     if mode not in MODES:
         raise ValueError(f"unknown mapping mode {mode!r}")
     if mode == "scale":
@@ -139,7 +148,8 @@ def color_to_depth_point(u, v, z_m, intr, mode):
                   (v - intr["color_cy"]) / intr["color_fy"] * z_m,
                   z_m])
     if R is not None:
-        p = R @ p + (t if t is not None else 0.0)
+        # stored extrinsic is depth->color; color->depth is its inverse
+        p = R.T @ (p - t) if t is not None else R.T @ p
     if p[2] <= 1e-6:
         return None
     return (p[0] / p[2] * intr["fx"] + intr["cx"],
@@ -153,7 +163,8 @@ def depth_to_color_point(u_d, v_d, z_m, intr, mode):
                   (v_d - intr["cy"]) / intr["fy"] * z_m,
                   z_m])
     if R is not None:
-        p = R.T @ (p - t) if t is not None else R.T @ p
+        # stored extrinsic is depth->color: apply it directly
+        p = R @ p + (t if t is not None else 0.0)
     if p[2] <= 1e-6:
         return None
     return (p[0] / p[2] * intr["color_fx"] + intr["color_cx"],

@@ -55,7 +55,7 @@ robots:
         # top corners and both sides.
         # The rigid mount keeps these pixels fixed.
         self_mask_pixels:
-          - [[632, 479], [530, 479], [500, 250], [350, 252], [334, 479], [280, 479]]
+          - [[352, 238], [329, 479], [273, 479], [657, 479], [566, 479], [524, 240], [352, 238]]
       CPBLC53000ED:
         role: far
         height_m: 1.32
