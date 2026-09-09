@@ -57,6 +57,25 @@ deploy HOST:
     rsync -a jetson-agent/deploy/ {{HOST}}:/tmp/deploy/
     ssh {{HOST}} 'sudo /tmp/deploy/scripts/install.sh /tmp/bebop-agent'
 
+# --- Data collection (bebop-vision navd recorder) ---------------------------
+
+JETSON := "bebop@bebop.local"
+CAPTURES := "/var/lib/bebop-captures"
+
+# Start the navd recorder on the robot (teleop from the app; segments
+# open/close with the drive state). Ctrl-C or pkill -TERM to stop.
+collect:
+    ssh -t {{JETSON}} 'cd ~/bebop/bebop-vision && sudo .venv/bin/python -u main.py --record-navd {{CAPTURES}} --auto'
+
+# Mirror sessions to the workstation, extract, and print the audit.
+pull-data:
+    rsync -av --partial {{JETSON}}:{{CAPTURES}}/navd_session_*.mcap bebop-vision/datasets/sessions/
+    cd bebop-vision && .venv/bin/python tools/extract_all_navd.py
+
+# Review dashboard: replay ticks, paint hand corrections (port 8099).
+review:
+    cd bebop-vision && .venv/bin/python tools/dashboard_api.py --data datasets/navd-v0 --port 8099
+
 # --- Mobile app ------------------------------------------------------------
 
 # Run the companion app in Tauri dev mode (desktop).
