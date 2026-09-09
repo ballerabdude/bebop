@@ -157,6 +157,7 @@ def run_record_navd(args):
     budget = args.disk_budget_gb * 1e9
     rate = args.record_rate if args.record_rate is not None else 10.0
     rec = None
+    rec_holder = {"rec": None}   # active segment recorder (set by new_segment)
 
     if sys.stdin is not None and sys.stdin.isatty():
         def stdin_loop():
