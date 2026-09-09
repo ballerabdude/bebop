@@ -47,7 +47,19 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from dashboard_core import DatasetDashboard  # noqa: E402
-from bebop_vision.navd_runtime import self_disc_mask  # noqa: E402
+
+
+def _self_disc_mask():
+    """(60, 60) bool: cells inside the rig's min_range dead disc —
+    inlined from the (excised) navd_runtime; pure rig-geometry numpy."""
+    from bebop_vision.orbbec import load_rig_config
+    from bebop_vision.navd_pre import GRID, RANGE_M, CELL_M, WIDTH_M
+    cfg = load_rig_config()["robots"]["default"]["bev"]
+    min_r = float(cfg.get("min_range_m", 0.55))
+    rows, cols = np.mgrid[0:GRID, 0:GRID]
+    x = RANGE_M - (rows + 0.5) * CELL_M
+    y = (cols + 0.5) * CELL_M - WIDTH_M / 2.0
+    return np.hypot(x, y) < min_r
 
 app = FastAPI(title="bebop-vision dashboard", version="0.1.0")
 dash = DatasetDashboard(_REPO_ROOT / "datasets" / "navd-v0")
@@ -61,7 +73,7 @@ _validate_lock = threading.Lock()
 # self dead disc — the runtime (navd_runtime.NavdGridSource) carves these
 # cells to FREE after the class mapping; replay must mirror that so what
 # the dashboard shows is what the drive node's planner consumes
-_SELF_DISC = self_disc_mask()
+_SELF_DISC = _self_disc_mask()
 
 
 def _get_sess():

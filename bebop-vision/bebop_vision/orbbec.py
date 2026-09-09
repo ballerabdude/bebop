@@ -49,7 +49,10 @@ def intrinsics_path(serial, config_dir=None):
 
 
 def load_rig_config(path=None):
-    with open(path or DEFAULT_RIG_YAML) as f:
+    # encoding is explicit: the rig YAML's comments carry UTF-8 dashes and
+    # `sudo` runs with a C/POSIX locale, whose ASCII default decode would
+    # crash every start
+    with open(path or DEFAULT_RIG_YAML, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -260,7 +263,7 @@ def _dump_intrinsics(pipeline, serial, config_dir=None):
 
 def load_intrinsics(serial, config_dir=None):
     path = intrinsics_path(serial, config_dir)
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 

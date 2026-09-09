@@ -16,6 +16,7 @@ interface NavGoalCardProps {
   onSend: (goal?: {
     headingRad?: number;
     pointOdom?: { x: number; y: number };
+    distanceM?: number;
   }) => Promise<void>;
   busy: boolean;
   estopLatched: boolean;
@@ -102,25 +103,26 @@ export function NavGoalCard({
         onClick={() =>
           void onSend({
             headingRad: (headingDeg * Math.PI) / 180,
-            pointOdom: undefined,
+            distanceM,
           })
         }
         className="w-full"
+        title="Waypoint goal — the screen turns heading + distance into an odom point from the robot's live odometry, so the planner stops when it is reached"
       >
-        {busy ? "Sending…" : "Go (heading hold)"}
+        Go ({distanceM.toFixed(1)} m
+        {headingDeg !== 0 ? ` @ ${headingDeg > 0 ? "+" : ""}${headingDeg}°` : " straight"})
       </Button>
       <Button
         variant="secondary"
         disabled={busy || estopLatched}
         onClick={() =>
           void onSend({
-            pointOdom: { x: 0, y: 0 },
+            headingRad: (headingDeg * Math.PI) / 180,
           })
         }
         className="w-full"
-        title="Waypoint goal — odom coordinates are computed by the robot from the requested heading + distance"
       >
-        Go (waypoint)
+        Go (heading hold)
       </Button>
       {estopLatched ? (
         <span className="block text-xs text-danger">

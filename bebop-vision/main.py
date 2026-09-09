@@ -1,192 +1,25 @@
-"""Entry point: run the bebop-vision navigable-path pipeline.
+"""bebop-vision data recorder (the data-collection pipeline entry point).
 
-The default source is the firmware's MJPEG endpoint (the firmware owns
-the camera; bebop-vision never opens a capture device directly).
+Owns the Orbbec camera rig (exclusivity, docs §2.7), the operator video
+server, and the navd MCAP recorder: teleop sessions -> color (both
+cameras) + lossless depth + cmd_vel/odom/goal + the geometric BEV
+teacher, the dataset every labeling/modeling approach trains from.
 
-Examples:
-    python main.py --display
-    python main.py --record run.mp4 --seconds 10
-    python main.py --record-dataset datasets/indoor-v1 --concepts "floor,wall" --seconds 60
-    python main.py --goal-drive --navd-model weights/navd.onnx --goal-heading-deg 25
-    python main.py --goal-drive --navd-model weights/navd.onnx --goal-xy 1.5 0.5 --display
+    python main.py --record-navd /var/lib/bebop-captures --auto
+
+Drive the robot from the app (manual teleop, or the BEV goal-drive mode
+on the exp/navd-ai branch — this file intentionally carries no driving).
 """
 
 import argparse
-import math
 import os
 import sys
 import threading
 import time
 from pathlib import Path
 
-from bebop_vision import config
-from bebop_vision.robot import DEFAULT_URL
 from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as pb
-
-
-def _render_bev(grid, goal):
-    """BEV debug overlay (bench, --display): cell classes + goal arrow.
-
-    Thin wrapper over the video feed's renderer (videoserver.render_bev)
-    so the local window and the :9092 bev stream look identical — same
-    palette, same camera-aligned mirror, same goal arrow.
-    """
-    from bebop_vision.videoserver import _goal_bearing, render_bev
-    return render_bev(grid, _goal_bearing(goal))
-
-
-def run_goal_drive(args):
-    from bebop_vision.goal_planner import (GoalDriveNode, GoalHeading,
-                                           GoalPlanner, GoalPoint, GoalSlot,
-                                           parse_goal)
-    from bebop_vision.navd_runtime import NavdGridSource, gather_frames
-    from bebop_vision.orbbec import OrbbecRig, load_rig_config
-    from bebop_vision.robot import RobotClient
-    from bebop_vision.videoserver import VideoServer
-
-    robot = RobotClient(args.robot_url).start()
-    if not robot.await_connection(5.0):
-        raise SystemExit(f"cannot reach robot runtime at {robot.url}")
-    print(f"[goal-drive] robot: {robot.describe()}")
-
-    # The student model consumes the near camera's color (§7.2); color is
-    # off by default elsewhere to save USB/CPU, so goal-drive always has it.
-    rig = OrbbecRig(rig_path=args.rig, color=True)
-    vserver = None
-    if not args.no_video_server:
-        vserver = VideoServer(rig, port=args.video_port)
-        vserver.start()
-    if not rig.wait_for_pair(timeout=10.0):
-        rig.stop()
-        raise SystemExit("cameras did not produce fresh frames within 10 s")
-
-    # Same freshness knob the geometric BEV used (rig safety block).
-    safety = load_rig_config()["robots"]["default"].get("safety", {})
-    max_age_s = float(safety.get("max_frame_age_s", 0.3))
-
-    # §7.3, model-only: the student model is the only BEV source — a tick
-    # it cannot serve (stale streams, NaN, implausible output, errors)
-    # yields None and the drive node waits (why is in last_reason).
-    model_src = NavdGridSource(args.navd_model, max_frame_age_s=max_age_s)
-    print(f"[goal-drive] navd model ON: {args.navd_model} drives the "
-          f"BEV (providers: {model_src.model.sess.get_providers()})")
-    planner = GoalPlanner(v_max=args.v_max, wz_max=args.wz_max,
-                          wz_turn=args.wz_turn)
-    goal_slot = GoalSlot()
-    if args.goal_heading_deg is not None:
-        goal_slot.set(GoalHeading(math.radians(args.goal_heading_deg)))
-    elif args.goal_xy is not None:
-        goal_slot.set(GoalPoint(*args.goal_xy))
-
-    state = {"grid": None, "stats_ts": time.monotonic(), "grids": 0}
-    stop_evt = threading.Event()
-
-    def bev_worker():
-        while not stop_evt.is_set():
-            t0 = time.monotonic()
-            frames, _ = gather_frames(rig, max_age_s)
-            try:
-                grid = model_src.update(frames, goal_slot.get(),
-                                        robot.state.odom)
-            except Exception as exc:
-                print(f"[goal-drive] model update error: "
-                      f"{type(exc).__name__}: {exc}")
-                grid = None
-            state["grid"] = grid
-            # Live BEV feed for the operator app: :9092/video?stream=bev
-            if vserver is not None:
-                vserver.publish_bev(grid, goal_slot.get())
-            now = time.monotonic()
-            if now - state["stats_ts"] >= 5.0:
-                state["stats_ts"] = now
-                info = " ".join(f"{r}:{cam.read_fps:.0f}fps" for r, cam in rig.cameras.items())
-                print(f"[goal-drive] {state['grids']} grids | cams {info}")
-                state["grids"] = 0
-            time.sleep(max(0.0, 0.1 - (time.monotonic() - t0)))
-
-    def stdin_loop():
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                g = parse_goal(line)
-            except ValueError as exc:
-                print(f"[goal] {exc}")
-                continue
-            if g == "stop":
-                goal_slot.clear()
-                print("[goal] cleared (stop)")
-            else:
-                goal_slot.set(g)
-                print(f"[goal] set {g}")
-
-    worker = threading.Thread(target=bev_worker, daemon=True, name="bev-worker")
-    worker.start()
-    if sys.stdin is not None and sys.stdin.isatty():
-        threading.Thread(target=stdin_loop, daemon=True, name="goal-stdin").start()
-        print("[goal] type 'heading <deg>' | 'xy <x> <y>' | 'stop' + Enter")
-
-    node = GoalDriveNode(robot, planner, lambda: state["grid"], goal_slot,
-                         command_hz=args.command_hz,
-                         require_mode=None if args.drive_any_mode else pb.MODE_RUN_POLICY)
-    robot.on_estop.append(lambda reason: node.stop())
-
-    # Operator goals from the app ride the runtime WS (plan §8): the
-    # firmware stores SetNavigationGoal and broadcasts it; here we mirror
-    # it into the planner's goal slot. Goals from stdin still work.
-    def _on_app_goal(goal):
-        if goal is None:
-            goal_slot.clear()
-            print("[goal] cleared (app)")
-        elif goal[0] == "heading":
-            goal_slot.set(GoalHeading(goal[1]))
-            print(f"[goal] app heading {math.degrees(goal[1]):.1f}°")
-        else:
-            goal_slot.set(GoalPoint(goal[1], goal[2]))
-            print(f"[goal] app point ({goal[1]:.2f}, {goal[2]:.2f}) m")
-
-    robot.on_goal.append(_on_app_goal)
-    print(f"[goal-drive] running (v_max={args.v_max} wz_max={args.wz_max} "
-          f"hz={args.command_hz}); Ctrl+C to stop")
-    t_start = time.monotonic()
-    t_status = 0.0
-    try:
-        while True:
-            node.on_grid()
-            now = time.monotonic()
-            if now - t_status >= 2.0:
-                t_status = now
-                st = robot.state
-                print(f"[status] {node.last_info} | "
-                      f"odom=({st.odom[0]:.2f}, {st.odom[1]:.2f}, "
-                      f"{math.degrees(st.odom[2]):.0f}deg) | "
-                      f"mode={pb.Mode.Name(st.mode)} estop={st.estop_latched}")
-            if args.display:
-                grid = state["grid"]
-                if grid is not None:
-                    import cv2
-                    cv2.imshow("navd BEV", _render_bev(grid, goal_slot.get()))
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
-            if args.seconds and time.monotonic() - t_start > args.seconds:
-                break
-            time.sleep(0.005)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        stop_evt.set()
-        node.stop()
-        if vserver is not None:
-            vserver.stop()
-        rig.stop()
-        robot.stop()
-        try:
-            import cv2
-            cv2.destroyAllWindows()
-        except Exception:
-            pass
-        print(f"[goal-drive] final: {robot.describe()} last={node.last_info}")
+from bebop_vision.robot import DEFAULT_URL
 
 
 def _dir_bytes(path):
@@ -240,7 +73,6 @@ def _drive_active(robot):
     stays valid for goal-drive sessions.
     """
     st = robot.state
-    from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as pb
     return (st.connected
             and st.mode in (pb.MODE_DIAL_IN, pb.MODE_RUN_POLICY)
             and not st.estop_latched
@@ -254,19 +86,23 @@ def run_record_navd(args):
 
     Default: one session for --seconds (or until Ctrl-C). With --auto the
     recorder follows the drive state instead: a segment opens when the
-    firmware is in MODE_RUN_POLICY with wheels armed (you start driving)
-    and closes when that ends, rolling over on size/time and pruning the
-    oldest files under a disk budget — a mirror of the firmware's own
-    policy-capture design. Manual drive = captured data, no SSH per run.
+    firmware is in a driveable, armed state (you start driving) and closes
+    when that ends, rolling over on size/time and pruning the oldest files
+    under a disk budget — a mirror of the firmware's own policy-capture
+    design. Manual drive = captured data, no SSH per run.
+
+    Navigation goals (app Navigate card or stdin) are recorded per tick:
+    teleop toward an active waypoint makes the dataset goal-conditioned,
+    which is the signal the models train on.
     """
     from bebop_vision.bev import BevBuilder
-    from bebop_vision.goal_planner import (GoalHeading, GoalPlanner, GoalPoint,
-                                           GoalSlot, parse_goal)
+    from bebop_vision.goals import GoalHeading, GoalPoint, GoalSlot, parse_goal
     from bebop_vision.orbbec import OrbbecRig
     from bebop_vision.recorder_mcap import NavdRecorder
     from bebop_vision.videoserver import VideoServer
     from bebop_vision.robot import RobotClient
     import time as _time
+    import math
 
     _acquire_recorder_lock()
     robot = RobotClient(args.robot_url).start()
@@ -287,47 +123,24 @@ def run_record_navd(args):
 
     builder = BevBuilder()
     goal_slot = GoalSlot()
-    if args.goal_heading_deg is not None:
-        goal_slot.set(GoalHeading(math.radians(args.goal_heading_deg)))
-    elif args.goal_xy is not None:
-        goal_slot.set(GoalPoint(*args.goal_xy))
 
-    # --goal-drive: consume app/WS navigation goals and DRIVE on the
-    # student model's grid (GoalPlanner twists at 10 Hz). Requires
-    # --navd-model (enforced in main()); without --goal-drive the
-    # recorder only records and app goals are ignored, which is the
-    # safe behavior for passive capture.
-    drive_node = None
-    model_holder = {"grid": None}
-    rec_holder = {"rec": None}   # active segment recorder (set by new_segment)
-    if args.goal_drive:
-        from bebop_vision.goal_planner import GoalDriveNode
-        planner = GoalPlanner()
+    # Operator goals from the app ride the runtime WS (plan §8): the
+    # firmware stores SetNavigationGoal and broadcasts it; the recorder
+    # writes whatever is in the slot per tick. Goals from stdin still work.
+    def _on_app_goal(goal):
+        if goal is None:
+            goal_slot.clear()
+            print("[record-navd] goal cleared (app)")
+        elif goal[0] == "heading":
+            goal_slot.set(GoalHeading(goal[1]))
+            print(f"[record-navd] goal: heading "
+                  f"{math.degrees(goal[1]):.1f} deg")
+        else:
+            goal_slot.set(GoalPoint(goal[1], goal[2]))
+            print(f"[record-navd] goal: point "
+                  f"({goal[1]:.2f}, {goal[2]:.2f}) m")
 
-        # The student model's grid is the only drive source — None (a tick
-        # the model cannot serve) means the drive node waits.
-        drive_node = GoalDriveNode(
-            robot, planner, lambda: model_holder["grid"], goal_slot,
-            command_hz=args.command_hz,
-            require_mode=None if args.drive_any_mode else pb.MODE_RUN_POLICY)
-
-        def _on_app_goal(goal):
-            if goal is None:
-                goal_slot.clear()
-                print("[record-navd] goal cleared (app)")
-            elif goal[0] == "heading":
-                goal_slot.set(GoalHeading(goal[1]))
-                print(f"[record-navd] goal: heading "
-                      f"{math.degrees(goal[1]):.1f} deg")
-            else:
-                goal_slot.set(GoalPoint(goal[1], goal[2]))
-                print(f"[record-navd] goal: point "
-                      f"({goal[1]:.2f}, {goal[2]:.2f}) m")
-
-        robot.on_goal.append(_on_app_goal)
-        print("[record-navd] goal-drive ON: app Navigate card drives the "
-              "robot (needs wheels armed + Policy mode); twists are "
-              "recorded like any teleop")
+    robot.on_goal.append(_on_app_goal)
 
     out_dir = Path(args.record_navd).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -364,15 +177,10 @@ def run_record_navd(args):
         path = out_dir / f"navd_session_{_time.strftime('%Y%m%d_%H%M%S')}.mcap"
         rec = NavdRecorder(
             rig, robot, goal_slot, path, builder=builder, rate_hz=rate,
-            # Live BEV feed for the operator app: :9092/video?stream=bev.
-            # In model mode the navd-model worker owns the feed (it shows
-            # the grid the planner drives on — model output only), so the
-            # recorder must not double-publish its own geometric teacher
-            # grid over it.
+            # Live BEV feed for the operator app: :9092/video?stream=bev —
+            # the recorder publishes its own tick-aligned teacher grid.
             on_grid=(lambda grid, goal: vserver.publish_bev(grid, goal))
-                    if vserver is not None and not args.goal_drive else None,
-            model_grid_fn=(lambda: model_holder["grid"])
-                           if args.goal_drive else None)
+                    if vserver is not None else None)
         rec.start()
         rec_holder["rec"] = rec
         print(f"\n[record-navd] recording -> {path}")
@@ -386,87 +194,17 @@ def run_record_navd(args):
               f"({rec.frames} frames, {rec.bytes_written/1e6:.1f} MB)")
         _prune_sessions(out_dir, budget)
 
-    # Goal-drive tick loop: consumes the recorder's own BEV grid so app
-    # navigation goals steer the robot while recording (--goal-drive).
-    stop_drive_loop = threading.Event()
-
-    def drive_loop():
-        last_report = ("", 0.0)
-        while not stop_drive_loop.is_set():
-            drive_node.on_grid()
-            # Report gate states so "not moving" is always explainable:
-            # waiting / hold / estop / no_floor / search / rotate / drive.
-            info = drive_node.last_info or {}
-            state = info.get("state", "?")
-            now = time.monotonic()
-            if state != last_report[0] or now - last_report[1] > 5.0:
-                extra = {k: v for k, v in info.items() if k != "state"}
-                print(f"[record-navd] nav: {state} {extra}")
-                last_report = (state, now)
-            time.sleep(0.1)
-
-    if drive_node is not None:
-        threading.Thread(target=drive_loop, daemon=True,
-                         name="rec-goal-drive").start()
-
-    # navd model drive worker (§7.3): the model consumes raw frames straight
-    # from the rig and is the only grid the drive node consumes — a tick it
-    # cannot serve yields None and the drive node waits. The recorder's own
-    # geometric grid is recorded as the teacher (training data) but never
-    # drives. The worker also owns the operator BEV feed.
-    stop_model = threading.Event()
-    if args.goal_drive:   # implies --navd-model (enforced in main())
-        from bebop_vision.navd_runtime import NavdGridSource, gather_frames
-        model_src = NavdGridSource(args.navd_model,
-                                   max_frame_age_s=builder.max_frame_age_s)
-
-        def model_worker():
-            grids, stats_ts = 0, time.monotonic()
-            while not stop_model.is_set():
-                t0 = time.monotonic()
-                frames, _ = gather_frames(rig, builder.max_frame_age_s)
-                try:
-                    grid = model_src.update(frames, goal_slot.get(),
-                                            robot.state.odom)
-                except Exception as exc:
-                    print(f"[navd-model] update error: "
-                          f"{type(exc).__name__}: {exc}")
-                    grid = None
-                model_holder["grid"] = grid
-                # The model worker owns the operator BEV feed for the whole
-                # run in model mode: idle AND while recording (what the app
-                # shows is what the planner drives on — never the teacher).
-                if vserver is not None:
-                    vserver.publish_bev(grid, goal_slot.get())
-                grids += 1
-                now = time.monotonic()
-                if now - stats_ts >= 5.0:
-                    stats_ts = now
-                    lat = model_src.model.last_latency_ms
-                    print(f"[navd-model] {grids} grids "
-                          f"({(lat or 0):.0f} ms/inference)")
-                    grids = 0
-                time.sleep(max(0.0, 0.1 - (time.monotonic() - t0)))
-
-        threading.Thread(target=model_worker, daemon=True,
-                         name="navd-model").start()
-        print(f"[record-navd] navd model ON: {args.navd_model} drives the "
-              "goal planner (recorded teacher grid unchanged)")
-
     # Feed BEV worker: keeps the :9092 bev stream live whenever the rig
     # is open, even with no segment recording — auto mode only opens
     # segments while the drive state is active (wheels armed, no estop),
     # and without this worker the feed went dark exactly then. While a
     # segment IS recording, the recorder's tick publishes its own
     # tick-aligned grid via on_grid, so this worker pauses rather than
-    # computing every grid twice. Same shape as the --goal-drive BEV
-    # worker: serial camera reads, numpy/cv2-only pool work (§2.8).
+    # computing every grid twice. Serial camera reads, numpy/cv2-only
+    # pool work (§2.8).
     stop_feed = threading.Event()
     feed_pool = None
-    # In model mode the navd-model worker owns the idle feed (it publishes
-    # model grids, or none while the model can't serve a tick) — running
-    # both would double-publish the slot and compute every grid twice.
-    if vserver is not None and not args.goal_drive:
+    if vserver is not None:
         from concurrent.futures import ThreadPoolExecutor
         feed_pool = ThreadPoolExecutor(max_workers=2,
                                        thread_name_prefix="bev-feed")
@@ -533,11 +271,7 @@ def run_record_navd(args):
             pass
         finally:
             close_segment(rec, path)
-            stop_drive_loop.set()
-            stop_model.set()
             stop_feed.set()
-            if feed_pool is not None:
-                feed_pool.shutdown(wait=False)
             if vserver is not None:
                 vserver.stop()
             rig.stop()
@@ -597,11 +331,7 @@ def run_record_navd(args):
                 close_segment(seg, seg_path)
             except OSError as exc:
                 print(f"\n[record-navd] error closing final segment: {exc}")
-        stop_drive_loop.set()
-        stop_model.set()
         stop_feed.set()
-        if feed_pool is not None:
-            feed_pool.shutdown(wait=False)
         if vserver is not None:
             vserver.stop()
         rig.stop()
@@ -611,57 +341,26 @@ def run_record_navd(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="bebop-vision navigable-path pipeline")
-    parser.add_argument("--source", default=config.DEFAULT_SOURCE,
-                        help="video source URL or file path (default: the robot's "
-                             "firmware MJPEG endpoint)")
-    parser.add_argument("--nav-model", default=config.DEFAULT_NAV_MODEL)
-    parser.add_argument("--display", action="store_true", help="show live window (needs a display)")
-    parser.add_argument("--no-hud", action="store_true", help="hide the stats overlay")
-    parser.add_argument("--record", metavar="PATH", help="write annotated video to PATH")
-    parser.add_argument("--seconds", type=float, help="stop after this many seconds")
-    parser.add_argument("--record-dataset", metavar="DIR",
-                        help="record a teacher dataset (frames + SAM 3.1 masks) instead of the pipeline")
-    parser.add_argument("--record-rate", type=float, default=None,
-                    help="recording rate in Hz (default: 2 for --record-dataset, 10 for --record-navd)")
-    parser.add_argument("--concepts",
-                        help="comma-separated teacher concepts for --record-dataset")
-    parser.add_argument("--conf", type=float, default=config.DEFAULT_CONFIDENCE)
-    parser.add_argument("--sam-model", default="sam3.1", choices=["sam3", "sam3.1"])
-    parser.add_argument("--sam-trt", metavar="ENGINE",
-                        help="TensorRT engine for the SAM 3 vision encoder")
-    parser.add_argument("--drive", action="store_true",
-                        help="drive the robot: nav mask -> planner -> SetVelocityCommand")
-    parser.add_argument("--goal-drive", action="store_true",
-                        help="navd: goal planner -> twist on the student "
-                             "model's BEV (requires --navd-model)")
-    parser.add_argument("--navd-model", metavar="ONNX",
-                        help="navd student (plan §7.3): the goal-drive BEV "
-                             "source becomes this exported model (onnxruntime "
-                             "CUDA EP) and the only one — a tick the model "
-                             "cannot serve stops the drive node. Implies "
-                             "near-camera color in --goal-drive.")
-    goal_group = parser.add_mutually_exclusive_group()
-    goal_group.add_argument("--goal-heading-deg", type=float, metavar="DEG",
-                            help="initial goal: body-frame heading offset (deg, + left)")
-    goal_group.add_argument("--goal-xy", type=float, nargs=2, metavar=("X", "Y"),
-                            help="initial goal: odom waypoint (m)")
-    parser.add_argument("--rig", metavar="YAML",
-                        help="rig config path (default: config/orbbec_rig.yaml)")
-    parser.add_argument("--color", action="store_true",
-                        help="also stream camera color (recording/debug; costs USB+CPU)")
+    parser = argparse.ArgumentParser(
+        description="bebop-vision data recorder (navd MCAP sessions)")
     parser.add_argument("--record-navd", metavar="DIR",
                         help="navd recorder v2: teleop session -> MCAP in DIR")
     parser.add_argument("--auto", action="store_true",
                         help="record-navd: start/stop segments with the drive "
-                             "state (RunPolicy + armed), roll on size/time, "
-                             "prune under --disk-budget-gb")
+                             "state (wheels armed, no estop), roll on "
+                             "size/time, prune under --disk-budget-gb")
+    parser.add_argument("--seconds", type=float,
+                        help="stop after this many seconds")
+    parser.add_argument("--record-rate", type=float, default=None,
+                        help="recording rate in Hz (default: 10)")
     parser.add_argument("--max-segment-mb", type=float, default=400.0,
                         help="record-navd --auto: roll segment above this size")
     parser.add_argument("--max-segment-min", type=float, default=10.0,
                         help="record-navd --auto: roll segment above this many minutes")
     parser.add_argument("--disk-budget-gb", type=float, default=20.0,
                         help="record-navd --auto: prune oldest sessions below this total")
+    parser.add_argument("--rig", metavar="YAML",
+                        help="rig config path (default: config/orbbec_rig.yaml)")
     parser.add_argument("--no-video-server", action="store_true",
                         help="do not serve the operator MJPEG stream on "
                              "--video-port")
@@ -673,20 +372,13 @@ def main():
                              "(default: all configured, e.g. 'near' while "
                              "the far camera's USB cable is unfixed)")
     parser.add_argument("--robot-url", default=DEFAULT_URL)
-    parser.add_argument("--v-max", type=float, default=0.4)
-    parser.add_argument("--wz-max", type=float, default=1.2)
-    parser.add_argument("--wz-turn", type=float, default=1.8,
-                        help="search/rotate-in-place turn rate (rad/s)")
-    parser.add_argument("--command-hz", type=float, default=10.0)
-    parser.add_argument("--drive-any-mode", action="store_true",
-                        help="command velocity regardless of firmware mode (bench only)")
     args = parser.parse_args()
 
-    # Model-only driving (§7.3): the geometric drive path was removed —
-    # the student model is the only BEV the goal planner drives on.
-    if args.goal_drive and not args.navd_model:
-        parser.error("--goal-drive requires --navd-model (the student model "
-                     "is the only drive-time BEV source)")
+    if not args.record_navd:
+        parser.error(
+            "nothing to do — bebop-vision is a data recorder. Use "
+            "--record-navd <dir> [--auto]; drive the robot from the app. "
+            "(Model/drive code lives on the exp/navd-ai branch.)")
 
     # Graceful SIGTERM: sessions started in the background (nohup ... &
     # inside a non-interactive shell) inherit SIGINT=SIG_IGN — CPython
@@ -694,7 +386,7 @@ def main():
     # arrives and pkill's default SIGTERM would hard-kill the process,
     # leaving the recorder lock behind and any open MCAP segment
     # unflushed (seen 2026-09-06). Translate SIGTERM into the
-    # KeyboardInterrupt path every mode already handles.
+    # KeyboardInterrupt path the recorder loop already handles.
     import signal
 
     def _sigterm_to_int(signum, frame):
@@ -702,70 +394,7 @@ def main():
 
     signal.signal(signal.SIGTERM, _sigterm_to_int)
 
-    # record-navd first: `--record-navd --goal-drive` means "record AND
-    # consume app navigation goals" (run_record_navd reads args.goal_drive);
-    # bare --goal-drive still runs the standalone goal-drive mode.
-    if args.record_navd:
-        run_record_navd(args)
-        return
-
-    if args.goal_drive:
-        run_goal_drive(args)
-        return
-
-    if args.record_dataset:
-        from bebop_vision.recorder import DatasetRecorder
-        concepts = (
-            [c.strip() for c in args.concepts.split(",") if c.strip()]
-            if args.concepts
-            else list(config.RECORD_CONCEPTS)
-        )
-        recorder = DatasetRecorder(
-            source=args.source,
-            out_dir=args.record_dataset,
-            concepts=concepts,
-            conf=args.conf,
-            version=args.sam_model,
-            trt_engine=args.sam_trt,
-            rate_hz=args.record_rate if args.record_rate is not None else 2.0,
-            display=args.display,
-        )
-        recorder.run(duration=args.seconds)
-        return
-
-    from bebop_vision.pipeline import NavPipeline
-
-    pipeline = NavPipeline(
-        source=args.source,
-        nav_model=args.nav_model,
-        display=args.display,
-        record_path=args.record,
-        duration=args.seconds,
-        show_hud=not args.no_hud,
-    )
-
-    if not args.drive:
-        pipeline.run()
-        return
-
-    from bebop_vision.planner import DriveNode, SectorPlanner
-    from bebop_vision.robot import RobotClient
-
-    robot = RobotClient(args.robot_url).start()
-    if not robot.await_connection(5.0):
-        raise SystemExit(f"cannot reach robot runtime at {robot.url}")
-    print(f"[drive] robot: {robot.describe()}")
-
-    planner = SectorPlanner(v_max=args.v_max, wz_max=args.wz_max)
-    drive = DriveNode(robot, planner, command_hz=args.command_hz,
-                      require_mode=None if args.drive_any_mode else pb.MODE_RUN_POLICY)
-    robot.on_estop.append(lambda reason: drive.stop())
-    try:
-        pipeline.run(frame_sink=drive.on_frame)
-    finally:
-        drive.stop()
-        robot.stop()
-        print(f"[drive] final: {robot.describe()}")
+    run_record_navd(args)
 
 
 if __name__ == "__main__":

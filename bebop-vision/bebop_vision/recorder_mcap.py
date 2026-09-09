@@ -54,7 +54,7 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("pip install opencv-python") from exc
 
 from .bev import BevBuilder
-from .goal_planner import GoalHeading, GoalPoint
+from .goals import GoalHeading, GoalPoint
 
 
 # Official Foxglove JSON Schemas (foxglove/foxglove-sdk schemas/jsonschema/) — the recorder registers these verbatim so

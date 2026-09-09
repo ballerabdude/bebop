@@ -169,6 +169,7 @@ export function TeleopScreen({
   const sendNavGoal = async (goal?: {
     headingRad?: number;
     pointOdom?: { x: number; y: number };
+    distanceM?: number;
   }) => {
     setNavBusy(true);
     try {
@@ -189,7 +190,25 @@ export function TeleopScreen({
         } else if (mode === "RUN_POLICY") {
           await t.setMode("DIAL_IN");
         }
-        await t.setNavigationGoal(goal);
+        // Waypoint = live odom + heading offset + distance, computed
+        // here: the firmware stores goals verbatim (nav_goal.rs is a
+        // dumb slot), so without this the "0.5 m straight" card sent a
+        // placeholder point at the odom origin and the robot never had
+        // a target it could reach. The planner stops inside
+        // goal_reach_m (0.3) of the computed point.
+        let msg = goal;
+        if (goal && goal.distanceM !== undefined) {
+          const th = snapshot?.drive?.odomTheta ?? 0;
+          msg = {
+            pointOdom: {
+              x: (snapshot?.drive?.odomX ?? 0)
+                + goal.distanceM * Math.cos(th + (goal.headingRad ?? 0)),
+              y: (snapshot?.drive?.odomY ?? 0)
+                + goal.distanceM * Math.sin(th + (goal.headingRad ?? 0)),
+            },
+          };
+        }
+        await t.setNavigationGoal(msg);
       });
     } finally {
       setNavBusy(false);

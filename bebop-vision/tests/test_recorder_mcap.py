@@ -109,7 +109,7 @@ def builder():
 
 
 def test_mcap_roundtrip(tmp_path, builder):
-    from bebop_vision.goal_planner import GoalSlot, GoalHeading
+    from bebop_vision.goals import GoalSlot, GoalHeading
     rig, robot, slot = FakeRig(), FakeRobot(), GoalSlot()
     slot.set(GoalHeading(0.3))
     path = tmp_path / "session.mcap"
@@ -197,7 +197,7 @@ def test_extractor_layout(tmp_path, builder):
     import sys
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
     from tools.mcap_extract import extract
-    from bebop_vision.goal_planner import GoalSlot
+    from bebop_vision.goals import GoalSlot
     rig, robot, slot = FakeRig(), FakeRobot(), GoalSlot()
     path = tmp_path / "session.mcap"
     rec = NavdRecorder(rig, robot, slot, path, builder=builder, rate_hz=20.0)
@@ -226,7 +226,7 @@ def test_extractor_layout(tmp_path, builder):
 
 def test_on_grid_callback(tmp_path, builder):
     """The parent's live-BEV hook fires per tick with (grid, goal)."""
-    from bebop_vision.goal_planner import GoalSlot, GoalHeading
+    from bebop_vision.goals import GoalSlot, GoalHeading
     rig, robot, slot = FakeRig(), FakeRobot(), GoalSlot()
     slot.set(GoalHeading(0.3))
     calls = []
@@ -248,7 +248,7 @@ def test_model_grid_recorded(tmp_path, builder):
     alongside the geometric /bev_teacher (§7.3 A/B)."""
     import base64
     from bebop_vision.bev import BevGrid
-    from bebop_vision.goal_planner import GoalSlot, GoalHeading
+    from bebop_vision.goals import GoalSlot, GoalHeading
     rig, robot, slot = FakeRig(), FakeRobot(), GoalSlot()
     slot.set(GoalHeading(0.3))
     mgrid = BevGrid(occ=np.full((60, 60), 1, np.uint8),
@@ -299,7 +299,7 @@ def test_pair_frames_matches_capture_instants(tmp_path, builder):
     ~66 ms stale. Pairing must fall back to near's previous frame to match
     far's freshest instant instead of storing a one-period-skewed pair.
     """
-    from bebop_vision.goal_planner import GoalSlot
+    from bebop_vision.goals import GoalSlot
     now = time.monotonic()
     rig = SimpleNamespace(cameras={
         "near": ScriptedCamera("S-NEAR", "near", [
@@ -320,7 +320,7 @@ def test_pair_frames_matches_capture_instants(tmp_path, builder):
 
 def test_pair_frames_single_camera(tmp_path, builder):
     """Near-only rig (roles=("near",)) records without pairing metadata."""
-    from bebop_vision.goal_planner import GoalSlot
+    from bebop_vision.goals import GoalSlot
     now = time.monotonic()
     rig = SimpleNamespace(cameras={
         "near": ScriptedCamera("S-NEAR", "near", [
