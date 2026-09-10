@@ -7,13 +7,9 @@ after the rig opens.
 Routes:
   /video?stream=<name>   multipart/x-mixed-replace MJPEG
        streams: color_near (default) | color_far | depth_near | depth_far
-                | bev
        color streams pass the camera hardware-encoded JPEG through untouched
        (zero CPU); depth streams render a turbo-colormapped 424x240 view
-       (0-4 m, invalid = black) per frame (~3 ms); bev is the fused
-       occupancy grid colorized top-down — BEV workers call publish_bev()
-       once per grid (~10 Hz) and every client replays the same encoded
-       bytes, so the feed costs nothing extra per viewer.
+       (0-4 m, invalid = black) per frame (~3 ms).
   /snapshot?stream=...   single JPEG of the latest frame
   /healthz               liveness
 """
@@ -28,7 +24,7 @@ import cv2
 import numpy as np
 
 PACING_S = 1.0 / 20.0      # serve at most 20 fps; frames arrive at 15
-STREAMS = ("color_near", "color_far", "depth_near", "depth_far", "bev")
+STREAMS = ("color_near", "color_far", "depth_near", "depth_far")
 
 class VideoServer:
     def __init__(self, rig, port=9092):
@@ -52,26 +48,18 @@ class VideoServer:
             def _pick(self):
                 """(stream name, camera role, data kind) from ?stream=,
                 defaulting to color_near. Camera streams are named
-                {kind}_{role} (color_near, depth_far); bev is the fused
-                occupancy-grid feed published by the BEV workers."""
+                {kind}_{role} (color_near, depth_far)."""
                 q = parse_qs(urlparse(self.path).query)
                 name = (q.get("stream") or ["color_near"])[0]
                 if name not in STREAMS:
                     name = "color_near"
-                if name == "bev":
-                    return name, None, "bev"
                 kind, role = name.rsplit("_", 1)
                 return name, role, kind
 
             def _frame(self, role, kind):
-                if kind == "bev":
-                    return server._bev
                 cam = server.rig.cameras.get(role)
                 return cam.read() if cam else None
 
-            def _body(self, fr, kind):
-                if kind == "bev":
-                    return fr.jpeg
                 if kind == "color":
                     return fr.color_jpeg
                 if fr.depth is None:
