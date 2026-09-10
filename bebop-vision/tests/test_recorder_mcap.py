@@ -92,11 +92,9 @@ class FakeRobot:
 
 
 def test_mcap_roundtrip(tmp_path):
-    from bebop_vision.recorder_mcap import GoalSlot, GoalHeading
-    rig, robot, slot = FakeRig(), FakeRobot(), GoalSlot()
-    slot.set(GoalHeading(0.3))
+    rig, robot = FakeRig(), FakeRobot()
     path = tmp_path / "session.mcap"
-    rec = NavdRecorder(rig, robot, slot, path, rate_hz=20.0,
+    rec = NavdRecorder(rig, robot, path, rate_hz=20.0,
                        jpeg_quality=80)
     rec.start()
     time.sleep(0.8)
@@ -115,7 +113,7 @@ def test_mcap_roundtrip(tmp_path):
             msgs.setdefault(channel.topic, []).append(payload)
 
     # every topic present with a sane number of ticks
-    for topic in ("/cmd_vel", "/odom", "/goal",
+    for topic in ("/cmd_vel", "/odom",
                   "/color_near", "/color_far",
                   "/depth_near", "/depth_far",
                   "/depth_near_preview", "/depth_far_preview"):
@@ -153,10 +151,8 @@ def test_mcap_roundtrip(tmp_path):
     cmd = msgs["/cmd_vel"][0]
     assert cmd["vx"] == pytest.approx(0.2)
     assert cmd["wz"] == pytest.approx(-0.1)
-    goal = msgs["/goal"][0]
-    assert goal["type"] == "heading"
-    assert goal["heading_rad"] == pytest.approx(0.3)
-    assert "/bev_teacher" not in msgs and "/bev_map" not in msgs
+    assert "/bev_teacher" not in msgs and "/bev_map" not in msgs \
+        and "/goal" not in msgs
     calib = msgs["/calib"][0]
     from bebop_vision.orbbec import load_rig_config
     assert set(calib["mounts"]) == set(load_rig_config()["robots"]["default"]["cameras"])
@@ -174,10 +170,9 @@ def test_extractor_layout(tmp_path):
     import sys
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
     from tools.mcap_extract import extract
-    from bebop_vision.recorder_mcap import GoalSlot
-    rig, robot, slot = FakeRig(), FakeRobot(), GoalSlot()
+    rig, robot = FakeRig(), FakeRobot()
     path = tmp_path / "session.mcap"
-    rec = NavdRecorder(rig, robot, slot, path, rate_hz=20.0)
+    rec = NavdRecorder(rig, robot, path, rate_hz=20.0)
     rec.start()
     time.sleep(0.6)
     rec.stop()
@@ -224,7 +219,6 @@ def test_pair_frames_matches_capture_instants(tmp_path):
     ~66 ms stale. Pairing must fall back to near's previous frame to match
     far's freshest instant instead of storing a one-period-skewed pair.
     """
-    from bebop_vision.recorder_mcap import GoalSlot
     now = time.monotonic()
     rig = SimpleNamespace(cameras={
         "near": ScriptedCamera("S-NEAR", "near", [
@@ -234,7 +228,7 @@ def test_pair_frames_matches_capture_instants(tmp_path):
             _frame("far", "S-FAR", 201, now - 0.133),
             _frame("far", "S-FAR", 202, now - 0.066)]),
     })
-    rec = NavdRecorder(rig, FakeRobot(), GoalSlot(), tmp_path / "s.mcap",
+    rec = NavdRecorder(rig, FakeRobot(), tmp_path / "s.mcap",
                        rate_hz=20.0)
     frames, pair_ms = rec._pair_frames(max_age_s=0.3)
     assert frames["near"].stamp_us == 100  # not the freshest near frame
@@ -245,13 +239,12 @@ def test_pair_frames_matches_capture_instants(tmp_path):
 
 def test_pair_frames_single_camera(tmp_path):
     """Near-only rig (roles=("near",)) records without pairing metadata."""
-    from bebop_vision.recorder_mcap import GoalSlot
     now = time.monotonic()
     rig = SimpleNamespace(cameras={
         "near": ScriptedCamera("S-NEAR", "near", [
             _frame("near", "S-NEAR", 101, now - 0.002)]),
     })
-    rec = NavdRecorder(rig, FakeRobot(), GoalSlot(), tmp_path / "s.mcap",
+    rec = NavdRecorder(rig, FakeRobot(), tmp_path / "s.mcap",
                        rate_hz=20.0)
     frames, pair_ms = rec._pair_frames(max_age_s=0.3)
     assert frames["near"].stamp_us == 101 and pair_ms == {}

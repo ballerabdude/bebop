@@ -81,8 +81,6 @@ def client(tmp_path):
     dash = DatasetDashboard(
         tmp_path, load_lut=lambda role: dict(land_cells=lc, n_px=n_px))
     dashboard_api.dash = dash
-    dashboard_api._model["sess"] = None
-    dashboard_api._validate_jobs.clear()
     return TestClient(dashboard_api.app)
 
 
@@ -259,17 +257,6 @@ def test_tick_payload_grids_param(client):
     assert "fused" in r.json()["grids"]
 
 
-def test_model_load_missing_file(client):
-    r = client.post("/api/model/load", json={"path": "weights/nope.onnx"})
-    assert r.status_code == 404
-
-
-def test_validate_requires_model(client):
-    r = client.get(f"/api/validate/navd_session_test/{STAMP}")
-    assert r.status_code == 400
-    assert "no model loaded" in r.json()["detail"]
-
-
 def _build_zero_onnx(tmp_path):
     """Export a tiny stand-in ONNX with the navd input/output contract.
 
@@ -312,57 +299,3 @@ def _build_zero_onnx(tmp_path):
     return p
 
 
-def test_validate_tick_and_sweep(client, tmp_path):
-    """Full validation path with a stand-in ONNX (all-navigable model)."""
-    p = _build_zero_onnx(tmp_path)
-    r = client.post("/api/model/load", json={"path": str(p)})
-    assert r.status_code == 200 and r.json()["ok"]
-
-    r = client.get(f"/api/validate/navd_session_test/{STAMP}")
-    assert r.status_code == 200, r.json()
-    v = r.json()
-    model = np.asarray(v["model"], np.uint8)
-    assert model.shape == (60, 60)
-    assert model.max() == 1                      # stand-in favors class 1
-    assert v["label_key"] == "fused"
-    assert v["frac_navigable"] == pytest.approx(1.0)
-    # the runtime's self dead-disc carve is mirrored in replay: the
-    # stand-in is already all-navigable, so it's a no-op here — but the
-    # field must be present and match the rig's min_range disc
-    assert v["self_carved_cells"] == pytest.approx(192, abs=40)
-    # all-navigable stand-in trips the runtime's plausibility gate — the
-    # grid STILL comes back (that is the whole point: see what the model
-    # made + why the drive node would hold)
-    assert v["gate_rejected"] is True
-    assert "drive node would hold" in v["gate_reason"]
-    assert np.asarray(v["prob"][1], np.uint8).shape == (60, 60)
-    agree = np.asarray(v["agreement"], np.uint8)
-    # label tick 0 is all class 0 -> model (class 1) differs everywhere
-    assert agree.max() == 2
-    assert v["agreement_pct"] == pytest.approx(0.0)
-
-    # sweep over both ticks, then results file round-trips
-    r = client.post("/api/validate/navd_session_test/run",
-                    json={"path": str(p)})
-    assert r.status_code == 200
-    import time
-    for _ in range(100):
-        st = client.get("/api/validate/navd_session_test/status").json()
-        if not st.get("running"):
-            break
-        time.sleep(0.05)
-    assert not st.get("running"), st
-    assert st.get("error") is None, st
-    files = st["results_files"]
-    assert files and files[0].startswith("validation_")
-    res = client.get(f"/api/validate/navd_session_test/results?file={files[0]}").json()
-    assert res["ticks_scored"] == 2
-    assert res["ticks_total"] == 2
-    assert len(res["per_class_iou"]) == 3
-    assert res["failures"] == []
-    # both ticks tripped the frac gate (all-navigable stand-in)
-    assert len(res["gate_rejected"]) == 2
-    assert "hold" in res["gate_rejected"][0]["reason"]
-    # bad results filename refused (path-traversal guard)
-    assert client.get("/api/validate/navd_session_test/results?file=../x.json"
-                      ).status_code == 400

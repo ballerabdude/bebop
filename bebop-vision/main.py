@@ -2,13 +2,13 @@
 
 Owns the Orbbec camera rig (exclusivity, docs §2.7), the operator video
 server, and the navd MCAP recorder: teleop sessions -> color (both
-cameras) + lossless depth + cmd_vel/odom/goal, the dataset every
+cameras) + lossless depth + cmd_vel/odom, the dataset every
 labeling/modeling approach trains from.
 
     python main.py --record-navd /var/lib/bebop-captures --auto
 
-Drive the robot from the app (manual teleop, or the BEV goal-drive mode
-on the exp/navd-ai branch — this file intentionally carries no driving).
+Drive the robot from the app (manual teleop only — this file carries no
+driving; the model/drive stack lives on the exp/navd-ai branch).
 """
 
 import argparse
@@ -69,8 +69,7 @@ def _drive_active(robot):
     """True while the robot is in a driveable, armed, non-estop state.
 
     DIAL_IN counts: the app's manual teleop drives in DialIn (armed wheels
-    + cmd_vel), which is the no-policy data-collection mode. RUN_POLICY
-    stays valid for goal-drive sessions.
+    + cmd_vel), which is the data-collection mode.
     """
     st = robot.state
     return (st.connected
@@ -91,13 +90,9 @@ def run_record_navd(args):
     under a disk budget — a mirror of the firmware's own policy-capture
     design. Manual drive = captured data, no SSH per run.
 
-    Navigation goals (app Navigate card or stdin) are recorded per tick:
-    teleop toward an active waypoint makes the dataset goal-conditioned,
-    which is the signal the models train on.
     """
     from bebop_vision.orbbec import OrbbecRig
-    from bebop_vision.recorder_mcap import (GoalHeading, GoalPoint, GoalSlot,
-                                            NavdRecorder, parse_goal)
+    from bebop_vision.recorder_mcap import NavdRecorder
     from bebop_vision.videoserver import VideoServer
     from bebop_vision.robot import RobotClient
     import time as _time
@@ -120,25 +115,6 @@ def run_record_navd(args):
         vserver = VideoServer(rig, port=args.video_port)
         vserver.start()
 
-    goal_slot = GoalSlot()
-
-    # Operator goals from the app ride the runtime WS (plan §8): the
-    # firmware stores SetNavigationGoal and broadcasts it; the recorder
-    # writes whatever is in the slot per tick. Goals from stdin still work.
-    def _on_app_goal(goal):
-        if goal is None:
-            goal_slot.clear()
-            print("[record-navd] goal cleared (app)")
-        elif goal[0] == "heading":
-            goal_slot.set(GoalHeading(goal[1]))
-            print(f"[record-navd] goal: heading "
-                  f"{math.degrees(goal[1]):.1f} deg")
-        else:
-            goal_slot.set(GoalPoint(goal[1], goal[2]))
-            print(f"[record-navd] goal: point "
-                  f"({goal[1]:.2f}, {goal[2]:.2f}) m")
-
-    robot.on_goal.append(_on_app_goal)
 
     out_dir = Path(args.record_navd).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -160,25 +136,10 @@ def run_record_navd(args):
     rec = None
     rec_holder = {"rec": None}   # active segment recorder (set by new_segment)
 
-    if sys.stdin is not None and sys.stdin.isatty():
-        def stdin_loop():
-            for line in sys.stdin:
-                try:
-                    g = parse_goal(line)
-                except ValueError as exc:
-                    print(f"[goal] {exc}")
-                    continue
-                if g == "stop":
-                    goal_slot.clear()
-                else:
-                    goal_slot.set(g)
-        threading.Thread(target=stdin_loop, daemon=True).start()
-        print("[goal] type 'heading <deg>' | 'xy <x> <y>' | 'stop' + Enter")
-
     def new_segment():
         path = out_dir / f"navd_session_{_time.strftime('%Y%m%d_%H%M%S')}.mcap"
         rec = NavdRecorder(
-            rig, robot, goal_slot, path, rate_hz=rate,
+            rig, robot, path, rate_hz=rate,
             max_frame_age_s=max_frame_age_s)
         rec.start()
         rec_holder["rec"] = rec

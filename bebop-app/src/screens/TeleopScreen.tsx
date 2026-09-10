@@ -42,8 +42,6 @@ import type { ReactNode } from "react";
 import { ControlProfilePicker } from "../components/ControlProfilePicker";
 import { DriveJoystick } from "../components/DriveJoystick";
 import { GamepadDrive } from "../components/GamepadDrive";
-import { NavGoalCard } from "../components/NavGoalCard";
-import type { NavGoalUpdate } from "../runtime";
 import { VideoFeed } from "../components/VideoFeed";
 
 const VIDEO_STREAMS: { id: string; label: string }[] = [
@@ -157,63 +155,6 @@ export function TeleopScreen({
   const { connected: padConnected } = useGamepad();
 
   // ---------------------------------------------------------- navigation goals
-  // Heading is a body-frame offset (±90°); distance the straight-line
-  // range of the odom waypoint sent on Go. Goal state mirrors the
-  // firmware's NavigationGoalState push so the card reflects app-,
-  // stdin-, or any-other-client-issued goals identically.
-  const [goalHeadingDeg, setGoalHeadingDeg] = useState(0);
-  const [goalDistanceM, setGoalDistanceM] = useState(1.5);
-  const [activeGoal, setActiveGoal] = useState<NavGoalUpdate | null>(null);
-  const [navBusy, setNavBusy] = useState(false);
-  const sendNavGoal = async (goal?: {
-    headingRad?: number;
-    pointOdom?: { x: number; y: number };
-    distanceM?: number;
-  }) => {
-    setNavBusy(true);
-    try {
-      await refreshAfter("nav", async () => {
-        const t = transportRef.current!;
-        // Go = the autonomy-equivalent of "start driving": the navd
-        // planner's mode gate requires Policy mode and armed wheels, so
-        // a single press puts the robot in the driveable state for
-        // goal-following. Clear = back to Dial-in so manual teleop works
-        // again without hunting for the mode switch.
-        if (goal) {
-          if (mode !== "RUN_POLICY") {
-            await t.setMode("RUN_POLICY");
-          }
-          if (armedWheelCount === 0) {
-            await t.setAllWheelsEnabled(true);
-          }
-        } else if (mode === "RUN_POLICY") {
-          await t.setMode("DIAL_IN");
-        }
-        // Waypoint = live odom + heading offset + distance, computed
-        // here: the firmware stores goals verbatim (nav_goal.rs is a
-        // dumb slot), so without this the "0.5 m straight" card sent a
-        // placeholder point at the odom origin and the robot never had
-        // a target it could reach. The planner stops inside
-        // goal_reach_m (0.3) of the computed point.
-        let msg = goal;
-        if (goal && goal.distanceM !== undefined) {
-          const th = snapshot?.drive?.odomTheta ?? 0;
-          msg = {
-            pointOdom: {
-              x: (snapshot?.drive?.odomX ?? 0)
-                + goal.distanceM * Math.cos(th + (goal.headingRad ?? 0)),
-              y: (snapshot?.drive?.odomY ?? 0)
-                + goal.distanceM * Math.sin(th + (goal.headingRad ?? 0)),
-            },
-          };
-        }
-        await t.setNavigationGoal(msg);
-      });
-    } finally {
-      setNavBusy(false);
-    }
-  };
-
   const transportRef = useRef<RuntimeTransport | null>(null);
 
   // -------------------------------------------------------------- lifecycle
@@ -245,9 +186,6 @@ export function TeleopScreen({
     };
 
     offCallbacks.push(
-      t.onNavGoal((g) => {
-        if (!cancelled) setActiveGoal(g);
-      }),
       t.onTelemetry(scheduleFlush),
       t.onEStopLatched(() => {
         if (!cancelled) {
@@ -1034,21 +972,6 @@ export function TeleopScreen({
           )}
 
           </div>
-
-        {/* Navigation goals (plan §8) — page mode only; exit fullscreen
-            to reach it. The card mirrors the authoritative goal state. */}
-        {wheeled ? (
-          <NavGoalCard
-            activeGoal={activeGoal}
-            headingDeg={goalHeadingDeg}
-            onHeadingDeg={setGoalHeadingDeg}
-            distanceM={goalDistanceM}
-            onDistanceM={setGoalDistanceM}
-            onSend={sendNavGoal}
-            busy={navBusy || busy !== null}
-            estopLatched={estopLatched}
-          />
-        ) : null}
 
         {/* Gamepad bridge — mounted for the screen's whole lifetime
             (hidden in fullscreen) so a drive cycle survives the

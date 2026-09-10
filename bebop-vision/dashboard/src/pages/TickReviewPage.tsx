@@ -40,13 +40,14 @@ const CLS_NAMES = ["blocked", "navigable", "caution"];
 interface Props {
   session: string | null;
   onHandChange: () => void;
-  onStampViewed: (stamp: string) => void;
+  onStampViewed?: (stamp: string) => void;
 }
 
 /** Tick review workspace: filmstrip navigator + camera views + hand-paint
  * BEV canvas. Edits are client-side until Save; the server stores `hand`
  * and never touches teacher keys. */
 export default function TickReviewPage({ session, onHandChange, onStampViewed }: Props) {
+  void onStampViewed;
   const [ticks, setTicks] = useState<TickSummary[]>([]);
   const [idx, setIdx] = useState(0);
   const [payload, setPayload] = useState<TickPayload | null>(null);
@@ -125,7 +126,7 @@ export default function TickReviewPage({ session, onHandChange, onStampViewed }:
         setPayload(p);
         setGrid(cloneGrid(p.grids.hand ?? p.grids.fused ?? p.grids.teacher ?? []));
         setLoading(false);
-        onStampViewed(p.stamp);
+        onStampViewed?.(p.stamp);
       })
       .catch(() => {
         if (my === reqSeq.current) setLoading(false);

@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
-import { api, type ModelInfo, type SessionInfo } from "./api/client";
-import ModelValidationPage from "./pages/ModelValidationPage";
+import { api, type SessionInfo } from "./api/client";
 import PipelinePage from "./pages/PipelinePage";
 import TickReviewPage from "./pages/TickReviewPage";
 import ShortcutsModal from "./components/ShortcutsModal";
 import { Badge, Kbd, Toasts, cn } from "./components/ui";
 
-type Tab = "review" | "validate" | "pipeline";
+type Tab = "review" | "pipeline";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("review");
@@ -14,8 +13,6 @@ export default function App() {
   const [session, setSession] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
-  const [lastStamp, setLastStamp] = useState("");
-  const [model, setModel] = useState<ModelInfo | null>(null);
   const [showKeys, setShowKeys] = useState(false);
 
   useEffect(() => {
@@ -25,10 +22,6 @@ export default function App() {
     }).catch(() => setSessions([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
-
-  useEffect(() => {
-    api.model().then(setModel).catch(() => setModel(null));
-  }, []);
 
   // global "?" opens the shortcuts modal
   useEffect(() => {
@@ -63,7 +56,6 @@ export default function App() {
           {(
             [
               ["review", "Tick review", "Review and correct teacher labels"],
-              ["validate", "Model validation", "Replay the ONNX vs teacher"],
               ["pipeline", "Pipeline", "How data flows to the model"],
             ] as const
           ).map(([k, label, title]) => (
@@ -137,21 +129,6 @@ export default function App() {
         </div>
 
         <footer className="border-t border-white/[0.06] p-3">
-          <button
-            onClick={() => setTab("validate")}
-            className="w-full rounded-lg bg-zinc-900 px-3 py-2 text-left ring-1 ring-inset ring-white/[0.06] hover:bg-zinc-800"
-          >
-            <div className="text-[10px] uppercase tracking-wider text-zinc-600">model</div>
-            {model?.loaded ? (
-              <div className="mt-0.5 truncate text-[11px] text-emerald-400">
-                ● {model.path?.split("/").pop()} [{model.providers?.[0]?.replace("ExecutionProvider", "")}]
-              </div>
-            ) : (
-              <div className="mt-0.5 text-[11px] text-amber-400">
-                ○ not loaded — open validation to load
-              </div>
-            )}
-          </button>
           <div className="mt-2 flex items-center justify-between text-[10px] text-zinc-600">
             <span>
               shortcuts <Kbd>?</Kbd>
@@ -167,21 +144,10 @@ export default function App() {
           <TickReviewPage
             session={session}
             onHandChange={() => setRefreshKey((k) => k + 1)}
-            onStampViewed={setLastStamp}
           />
-        )}
-        {tab === "validate" && (
-          <ModelValidationPage session={session} lastStamp={lastStamp} />
         )}
         {tab === "pipeline" && (
-          <PipelinePage
-            session={session}
-            onOpenReview={(name) => {
-              setSession(name);
-              setTab("review");
-            }}
-            onOpenValidate={() => setTab("validate")}
-          />
+          <PipelinePage session={session} onOpenReview={(name) => { setSession(name); setTab("review"); }} />
         )}
       </main>
 

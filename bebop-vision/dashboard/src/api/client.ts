@@ -94,61 +94,11 @@ export interface TrainArtifacts {
   checkpoints: { name: string; files: string[] }[];
 }
 
-export interface ModelInfo {
-  loaded: boolean;
-  path?: string;
-  providers?: string[];
-  kind?: "bev" | "traj";
-}
-
-
-export interface ValidateTick {
-  model: Grid;
-  prob: Grid[]; // [3][60][60] u8 0-255
-  latency_ms: number;
-  frac_navigable: number;
-  gate_rejected: boolean;
-  gate_reason: string | null;
-  goal_raster: Grid;
-  label_key: "hand" | "fused" | null;
-  label?: Grid;
-  agreement?: Grid; // 0 same, 1..3 = model class + 1 where differ
-  agreement_pct?: number;
-}
 
 export interface GridTexture {
   png: string | null; // 60x60 RGB PNG b64
   coverage: number;
   error?: string;
-}
-
-export interface SweepWorst {
-  stamp: string;
-  agreement: number;
-  frac_navigable: number;
-  latency_ms: number;
-}
-
-export interface SweepResults {
-  model: string;
-  generated: string;
-  ticks_total: number;
-  ticks_scored: number;
-  failures: { stamp: string; reason: string }[];
-  gate_rejected: { stamp: string; reason: string }[];
-  mean_agreement: number;
-  confusion_label_x_model: number[][];
-  per_class_iou: number[];
-  worst: SweepWorst[];
-}
-
-export interface SweepStatus {
-  running?: boolean;
-  done?: number;
-  total?: number | null;
-  error?: string | null;
-  results?: string | null;
-  results_files?: string[];
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -183,7 +133,6 @@ export const api = {
       `/api/sam/${s}/${stamp}?role=${q.role}&mode=${q.mode}`,
     ),
   pipeline: () => req<{ sessions: SessionPipeline[] }>("/api/pipeline"),
-  trainArtifacts: () => req<TrainArtifacts>("/api/pipeline/train"),
   saveHand: (s: string, stamp: string, grid: Grid) =>
     req<{ ok: boolean }>(`/api/tick/${s}/${stamp}/hand`, {
       method: "POST",
@@ -196,22 +145,4 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ clear: true }),
     }),
-  model: () => req<ModelInfo>("/api/model"),
-  loadModel: (path: string) =>
-    req<{ ok: boolean }>("/api/model/load", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
-    }),
-  validateTick: (s: string, stamp: string) =>
-    req<ValidateTick>(`/api/validate/${s}/${stamp}`),
-  runSweep: (s: string, modelPath: string) =>
-    req<{ ok: boolean }>(`/api/validate/${s}/run`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: modelPath }),
-    }),
-  sweepStatus: (s: string) => req<SweepStatus>(`/api/validate/${s}/status`),
-  sweepResults: (s: string, file: string) =>
-    req<SweepResults>(`/api/validate/${s}/results?file=${file}`),
 };

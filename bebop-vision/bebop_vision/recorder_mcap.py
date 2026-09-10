@@ -2,10 +2,9 @@
 
 MCAP is the single data artifact: copied off the robot (scp) it carries
 everything the workstation needs — color, both depths, the operator's
-teleop twist (the imitation label), odometry, the goal slot, the online
-geometric teacher grid, and calibration. Indexed and seekable, opens in
-Foxglove for review, and `tools/mcap_extract.py` unpacks it into the
-`datasets/navd-v0/` training layout.
+teleop twist (the imitation label), odometry, and calibration. Indexed
+and seekable, opens in Foxglove for review, and `tools/mcap_extract.py`
+unpacks it into the `datasets/navd-v0/` training layout.
 
 Channels:
   /color_near   foxglove.CompressedImage (JSON: {format: "jpeg", data: b64})
@@ -17,7 +16,6 @@ Channels:
   /depth_far_preview   foxglove.RawImage (same encoding, far camera)
   /cmd_vel      JSON  {"vx", "wz", "stamp_ns"}   — operator twist (teleop label)
   /odom         JSON  {"x", "y", "theta", "stamp_ns"}
-  /goal         JSON  {"type": "heading"|"point"|"none", ...}
   /calib        JSON  intrinsics + rig extrinsics, written once at start
 
 Training channels are the raw PNGs (tools/mcap_extract.py);
@@ -50,55 +48,6 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError("pip install opencv-python") from exc
 
-
-
-# --- navigation-goal slot (the recorder writes whatever is in it) --------
-
-import dataclasses
-
-
-@dataclasses.dataclass
-class GoalHeading:
-    """Body-frame heading offset (rad, + left). Never 'reaches'."""
-    heading_rad: float
-
-
-@dataclasses.dataclass
-class GoalPoint:
-    """Odom-frame waypoint (m)."""
-    x: float
-    y: float
-
-
-class GoalSlot:
-    """Latest-wins goal slot shared between the app bridge and recorder."""
-
-    def __init__(self):
-        self._goal = None
-
-    def set(self, goal):
-        self._goal = goal
-
-    def clear(self):
-        self._goal = None
-
-    def get(self):
-        return self._goal
-
-
-def parse_goal(line):
-    """Parse a bench stdin goal command: 'heading <deg>' | 'xy <x> <y>' | 'stop'."""
-    parts = line.strip().lower().split()
-    if not parts:
-        return None
-    if parts[0] == "stop":
-        return "stop"
-    if parts[0] == "heading" and len(parts) == 2:
-        return GoalHeading(math.radians(float(parts[1])))
-    if parts[0] == "xy" and len(parts) == 3:
-        return GoalPoint(float(parts[1]), float(parts[2]))
-    raise ValueError(f"bad goal command: {line!r} (use 'heading <deg>', "
-                     f"'xy <x> <y>' or 'stop')")
 
 
 # Official Foxglove JSON Schemas (foxglove/foxglove-sdk schemas/jsonschema/) — the recorder registers these verbatim so
@@ -218,12 +167,11 @@ def _obj_schema(properties):
 class NavdRecorder:
     """Capture the navd teleop session to MCAP at a fixed rate."""
 
-    def __init__(self, rig, robot, goal_slot, out_path,
+    def __init__(self, rig, robot, out_path,
                  rate_hz=10.0, jpeg_quality=85, workers=6,
                  max_frame_age_s=0.3):
         self.rig = rig
         self.robot = robot
-        self.goal_slot = goal_slot
         self.rate_hz = rate_hz
         self.jpeg_quality = jpeg_quality
         self.max_frame_age_s = max_frame_age_s
@@ -235,7 +183,7 @@ class NavdRecorder:
         # Per-camera BEV + encode jobs run here. Only numpy/cv2 work is
         # submitted (both release the GIL); every pyorbbecsdk call stays in
         # the recorder thread and MCAP writes stay serial (Writer is not
-        # thread-safe). Same split as the --goal-drive BEV worker; the
+        # thread-safe). Same split as the excised BEV worker; the
         # corruption in §2.8 was from pooling capture, not processing.
         from concurrent.futures import ThreadPoolExecutor
         self._pool = ThreadPoolExecutor(max_workers=workers,
@@ -269,8 +217,6 @@ class NavdRecorder:
                 "/cmd_vel", "json", self._sch_state),
             "odom": self._writer.register_channel(
                 "/odom", "json", self._sch_state),
-            "goal": self._writer.register_channel(
-                "/goal", "json", self._sch_state),
             "calib": self._writer.register_channel(
                 "/calib", "json", self._sch_calib),
             "color_near": self._writer.register_channel(
@@ -434,15 +380,6 @@ class NavdRecorder:
                   json.dumps({"x": float(st.odom[0]), "y": float(st.odom[1]),
                               "theta": float(st.odom[2]),
                               "stamp_ns": log_ns}).encode(), log_ns)
-        goal = self.goal_slot.get()
-        if isinstance(goal, GoalHeading):
-            g = {"type": "heading", "heading_rad": float(goal.heading_rad)}
-        elif isinstance(goal, GoalPoint):
-            g = {"type": "point", "x": float(goal.x), "y": float(goal.y)}
-        else:
-            g = {"type": "none"}
-        self._add(self._ch["goal"], json.dumps(g).encode(), log_ns)
-
         # Camera reads stay serial in this thread (pyorbbecsdk must not be
         # pooled — §2.8). BEV + PNG/JPEG encodes are numpy/cv2 (GIL-releasing)
         # and run as per-camera jobs in the pool; results are written
