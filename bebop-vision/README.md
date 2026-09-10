@@ -50,7 +50,6 @@ from SAM × measured depth.)
 | `bebop_vision/videoserver.py` | Operator MJPEG streams (`:9092/video?stream=...`) |
 | `bebop_vision/recorder_mcap.py` | navd MCAP writer (10 Hz ticks, shared log_time) |
 | `bebop_vision/sam3_concepts.py` | SAM 3.1 text-prompted concept segmenter (teacher) |
-| `bebop_vision/navd_pre.py` | Shared grid geometry + preprocessing (60×60 @ 5 cm) |
 | `bebop_vision/goals.py` | Navigation-goal slot (heading / odom point) |
 | `tools/mcap_extract.py` | MCAP session -> navd-v0 training layout |
 | `tools/extract_all_navd.py` | Extract + audit every mirrored session |
