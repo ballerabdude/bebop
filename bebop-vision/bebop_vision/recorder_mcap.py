@@ -33,6 +33,7 @@ alignment is verifiable offline.
 """
 
 import base64
+import math
 import json
 import threading
 import time
@@ -83,6 +84,21 @@ class GoalSlot:
 
     def get(self):
         return self._goal
+
+
+def parse_goal(line):
+    """Parse a bench stdin goal command: 'heading <deg>' | 'xy <x> <y>' | 'stop'."""
+    parts = line.strip().lower().split()
+    if not parts:
+        return None
+    if parts[0] == "stop":
+        return "stop"
+    if parts[0] == "heading" and len(parts) == 2:
+        return GoalHeading(math.radians(float(parts[1])))
+    if parts[0] == "xy" and len(parts) == 3:
+        return GoalPoint(float(parts[1]), float(parts[2]))
+    raise ValueError(f"bad goal command: {line!r} (use 'heading <deg>', "
+                     f"'xy <x> <y>' or 'stop')")
 
 
 # Official Foxglove JSON Schemas (foxglove/foxglove-sdk schemas/jsonschema/) — the recorder registers these verbatim so
