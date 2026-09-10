@@ -26,6 +26,15 @@ import numpy as np
 PACING_S = 1.0 / 20.0      # serve at most 20 fps; frames arrive at 15
 STREAMS = ("color_near", "color_far", "depth_near", "depth_far")
 
+def render_depth(depth_mm):
+    """uint16 (480, 848) mm -> half-res BGR turbo view, 0-4 m, invalid=black."""
+    m = depth_mm > 0
+    v = np.clip(depth_mm.astype(np.float32) / 4000.0, 0, 1) * 255
+    vis = cv2.applyColorMap(v.astype(np.uint8), cv2.COLORMAP_TURBO)
+    vis[~m] = 0
+    return cv2.resize(vis, (424, 240), interpolation=cv2.INTER_AREA)
+
+
 class VideoServer:
     def __init__(self, rig, port=9092):
         self.rig = rig
@@ -60,6 +69,7 @@ class VideoServer:
                 cam = server.rig.cameras.get(role)
                 return cam.read() if cam else None
 
+            def _body(self, fr, kind):
                 if kind == "color":
                     return fr.color_jpeg
                 if fr.depth is None:
