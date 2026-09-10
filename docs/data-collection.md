@@ -4,13 +4,13 @@ How to turn robot drive time into training data, and how to know a
 session is good. The pipeline: record on the robot → pull → extract →
 label (SAM × depth) → review → count it.
 
-## Why protocol matters
+## What a session contains
 
-The first 1,624 recorded ticks had **zero active goals** — every tick
-said "no goal". Any model that must follow waypoints (or imitate
-goal-seeking) learns nothing from goal-less data; imitation can only
-reproduce what the data contains. Goal-conditioned legs are the
-cheapest, highest-value kind of tick.
+Each tick records both camera colors, lossless depth, the operator's
+teleop twist, and odometry. There is no navigation-goal concept in the
+pipeline — the data is *what the robot saw* + *what you did*. The label
+pipeline (SAM × depth fusion) turns that into drivable-area supervision
+offline.
 
 ## Per-session checklist
 
@@ -20,11 +20,10 @@ Before:
 - [ ] Know what this session is *for*: one line in the ledger
 
 During (aim for 5–10 minutes of recorded drive time):
-- [ ] **Goal-conditioned legs** — set a Navigate waypoint, teleop toward
-      it (or drive manually and let it correct), `Clear`, repeat. Target
-      ≥10 legs per session, mixed straight/turning, 0.5–3 m.
 - [ ] Obstacle variety: drive near real clutter, around it, past it —
-      the model only sees what you show it.
+      the data only contains what you show it.
+- [ ] Maneuver variety: straight runs, tight turns, approaches and
+      stops, reversing out of tight spots.
 - [ ] Lighting variety when possible (day, evening, lights off).
 - [ ] Speed range: slow approaches, normal cruising, one decisive stop.
 - [ ] A few near-misses (you correct late) — those ticks are gold.
@@ -64,7 +63,6 @@ Sessions land in `bebop-vision/datasets/sessions/` (extracted under
 |---|---|---|
 | sessions | 5 | 15+ |
 | drive time | 15 min | 60+ min |
-| goal-conditioned legs | 30 | 150+ |
 | obstacle layouts | 3 | 10+ |
 | lighting conditions | 2 | 4+ |
 | rooms/areas | 2 | every drivable area |
