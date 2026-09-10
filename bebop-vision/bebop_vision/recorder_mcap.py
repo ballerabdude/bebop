@@ -54,7 +54,40 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("pip install opencv-python") from exc
 
 from .bev import BevBuilder
-from .goals import GoalHeading, GoalPoint
+
+
+# --- navigation-goal slot (the recorder writes whatever is in it) --------
+
+import dataclasses
+
+
+@dataclasses.dataclass
+class GoalHeading:
+    """Body-frame heading offset (rad, + left). Never 'reaches'."""
+    heading_rad: float
+
+
+@dataclasses.dataclass
+class GoalPoint:
+    """Odom-frame waypoint (m)."""
+    x: float
+    y: float
+
+
+class GoalSlot:
+    """Latest-wins goal slot shared between the app bridge and recorder."""
+
+    def __init__(self):
+        self._goal = None
+
+    def set(self, goal):
+        self._goal = goal
+
+    def clear(self):
+        self._goal = None
+
+    def get(self):
+        return self._goal
 
 
 # Official Foxglove JSON Schemas (foxglove/foxglove-sdk schemas/jsonschema/) — the recorder registers these verbatim so

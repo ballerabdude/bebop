@@ -96,9 +96,9 @@ def run_record_navd(args):
     which is the signal the models train on.
     """
     from bebop_vision.bev import BevBuilder
-    from bebop_vision.goals import GoalHeading, GoalPoint, GoalSlot, parse_goal
     from bebop_vision.orbbec import OrbbecRig
-    from bebop_vision.recorder_mcap import NavdRecorder
+    from bebop_vision.recorder_mcap import (GoalHeading, GoalPoint, GoalSlot,
+                                            NavdRecorder, parse_goal)
     from bebop_vision.videoserver import VideoServer
     from bebop_vision.robot import RobotClient
     import time as _time

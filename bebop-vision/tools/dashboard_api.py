@@ -17,7 +17,7 @@ surface:
   GET  /api/validate/<name>/results         cached results file listing
 
 Validation runs the ONNX with the EXACT runtime preprocessing path
-(navd_pre.py via navd_runtime goal-raster construction) so what the
+(the shared navd-preprocessing math, inlined below) so what the
 dashboard shows is what the deployed model saw — the whole point is
 explaining runtime behavior ("the why"), not a parallel pipeline.
 
@@ -53,13 +53,66 @@ def _self_disc_mask():
     """(60, 60) bool: cells inside the rig's min_range dead disc —
     inlined from the (excised) navd_runtime; pure rig-geometry numpy."""
     from bebop_vision.orbbec import load_rig_config
-    from bebop_vision.navd_pre import GRID, RANGE_M, CELL_M, WIDTH_M
     cfg = load_rig_config()["robots"]["default"]["bev"]
     min_r = float(cfg.get("min_range_m", 0.55))
     rows, cols = np.mgrid[0:GRID, 0:GRID]
     x = RANGE_M - (rows + 0.5) * CELL_M
     y = (cols + 0.5) * CELL_M - WIDTH_M / 2.0
     return np.hypot(x, y) < min_r
+
+
+# --- shared navd-preprocessing math (was bebop_vision/navd_pre.py) --------
+# Inlined so the dashboard depends on nothing but this file: the grid
+# geometry (60x60 @ 5 cm, 3 m forward x 3 m wide) is the BEV model's
+# native output frame, and the color/depth normalization must stay
+# byte-identical to what the exported models were trained on.
+
+IMG_H, IMG_W = 240, 424
+GRID = 60
+RANGE_M, WIDTH_M, CELL_M = 3.0, 3.0, 0.05
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], np.float32)
+
+
+def _build_goal_raster(goal, odom):
+    """goal dict from the manifest {type: heading|point|none, ...} ->
+    (60, 60) float32 fan: 1 along the goal bearing from the robot origin,
+    fading with angular distance."""
+    g = np.zeros((GRID, GRID), np.float32)
+    if goal.get("type", "none") == "heading":
+        bearing = float(goal["heading_rad"])
+    elif goal.get("type") == "point":
+        gx, gy = float(goal["x"]), float(goal["y"])
+        ox, oy, oth = float(odom["x"]), float(odom["y"]), float(odom["theta"])
+        bearing = math.atan2(gy - oy, gx - ox) - oth
+    else:
+        return g
+    rows, cols = np.mgrid[0:GRID, 0:GRID]
+    x = RANGE_M - (rows + 0.5) * CELL_M
+    y = (cols + 0.5) * CELL_M - WIDTH_M / 2.0
+    ang = np.arctan2(y, np.maximum(x, 1e-6))
+    d = np.abs(np.angle(np.exp(1j * (ang - bearing))))
+    return np.clip(1.0 - d / (math.pi / 2.0), 0.0, 1.0).astype(np.float32)
+
+
+def _prep_depth(d_mm):
+    """Raw uint16 mm depth -> (meters f32 [1,H,W], validity mask [1,H,W]).
+
+    Invalid (0) pixels stay 0 after clipping; values clip to [0.3, 6.0] m.
+    """
+    import cv2
+    d = cv2.resize(d_mm, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
+    m = (d > 0).astype(np.float32)
+    out = np.clip(d.astype(np.float32) * 1e-3, 0.3, 6.0) * m
+    return out[None], m[None]
+
+
+def _prep_color(rgb):
+    """RGB uint8 image -> ImageNet-normalized f32 [3,H,W] (training norm)."""
+    import cv2
+    c = cv2.resize(rgb, (IMG_W, IMG_H), interpolation=cv2.INTER_AREA)
+    c = (c.astype(np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
+    return c.transpose(2, 0, 1)
 
 app = FastAPI(title="bebop-vision dashboard", version="0.1.0")
 dash = DatasetDashboard(_REPO_ROOT / "datasets" / "navd-v0")
@@ -133,13 +186,13 @@ def _warmup(sess):
 def _prep_frames(session: str, stamp: int):
     """Raw tick files -> (depth_near, depth_far, color_rgb, goal_raster).
 
-    Uses navd_pre.py (shared with training AND runtime) so preprocessing
-    cannot drift from what the robot runs. Mirrors NavdGridSource's
-    MJPEG decode for color (extracted sessions store plain JPEGs).
+    Uses the shared navd-preprocessing math (inlined below, was
+    inlined navd-preprocessing math) so preprocessing cannot drift from what the
+    robot runs. Mirrors NavdGridSource's MJPEG decode for color (extracted
+    sessions store plain JPEGs).
     """
     import cv2
 
-    from bebop_vision.navd_pre import build_goal_raster, prep_color, prep_depth
     d = dash._session_dir(session)
     s20 = f"{int(stamp):020d}"
     dep = d / "depth" / f"{s20}.npz"
@@ -152,13 +205,13 @@ def _prep_frames(session: str, stamp: int):
     with np.load(dep) as z:
         if "near" not in z.files or "far" not in z.files:
             raise HTTPException(404, "depth npz missing near/far arrays")
-        dn, _ = prep_depth(z["near"])
-        df, _ = prep_depth(z["far"])
-    c = prep_color(cv2.cvtColor(cv2.imread(str(jpg)), cv2.COLOR_BGR2RGB))
+        dn, _ = _prep_depth(z["near"])
+        df, _ = _prep_depth(z["far"])
+    c = _prep_color(cv2.cvtColor(cv2.imread(str(jpg)), cv2.COLOR_BGR2RGB))
     row = dash._manifest_row(session, stamp)
     if row is None:
         raise HTTPException(404, f"no manifest row for stamp {stamp}")
-    raster = build_goal_raster(row["goal"], row["odom"])
+    raster = _build_goal_raster(row["goal"], row["odom"])
     label = None
     if lab.exists():
         with np.load(lab) as z:
