@@ -21,6 +21,8 @@ TensorRT runtime) lives on the `exp/navd-ai-20260909` branch.
  (app Navigate)    mcap_extract.py)    ground per camera)     measured depth -> 60x60  as `hand` labels)
                                                               teacher per tick)
 ```
+(The recorded MCAP carries no BEV grid — labels are generated purely
+from SAM × measured depth.)
 
 - **Record** — `main.py --record-navd <dir> --auto` opens/closes MCAP
   segments with the drive state (wheels armed, no estop) and prunes under
@@ -47,7 +49,6 @@ TensorRT runtime) lives on the `exp/navd-ai-20260909` branch.
 | `bebop_vision/robot.py` | Protobuf-over-WS runtime client (telemetry, goals) |
 | `bebop_vision/videoserver.py` | Operator MJPEG streams (`:9092/video?stream=...`) |
 | `bebop_vision/recorder_mcap.py` | navd MCAP writer (10 Hz ticks, shared log_time) |
-| `bebop_vision/bev.py` | Geometric BEV grid builder (the recorded teacher) |
 | `bebop_vision/sam3_concepts.py` | SAM 3.1 text-prompted concept segmenter (teacher) |
 | `bebop_vision/navd_pre.py` | Shared grid geometry + preprocessing (60×60 @ 5 cm) |
 | `bebop_vision/goals.py` | Navigation-goal slot (heading / odom point) |

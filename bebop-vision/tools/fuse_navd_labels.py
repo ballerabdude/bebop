@@ -36,7 +36,8 @@ marking: they are the robot, not scene — without this the masked depth
 smears blocked cells across the chassis footprint.
 
 Per session, updates labels/{stamp}.npz in place:
-    teacher      uint8 60x60  raw geometric grid (recorded input, bookkeeping)
+    teacher      uint8 60x60  raw geometric grid (recorded when the
+                              session carries a BEV builder; bookkeeping)
     sem_near     uint8 60x60  near-camera SAM+depth blocked cells
     sem_far      uint8 60x60  far-camera SAM+depth blocked cells
     floor_near   uint8 60x60  near-camera floor confirmations
@@ -56,7 +57,6 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from bebop_vision.bev import mount_rotation  # noqa: E402
 
 PIXEL_STRIDE = 4
 BAND_LO_M, BAND_HI_M = 0.03, 0.30
@@ -87,6 +87,16 @@ def self_pixel_mask(serial, cams, lut, depth_shape=(480, 848)):
     if pix is None:
         return np.zeros(len(lut["u_d"]), bool)
     return pix[lut["v_d"], lut["u_d"]]
+
+
+def mount_rotation(pitch_deg, yaw_deg=0.0):
+    """Camera-mount rotation, body -> optical (from the excised bev.py):
+    pitch about y (negative = looks down), yaw about z."""
+    cr, sr = np.cos(np.radians(pitch_deg)), np.sin(np.radians(pitch_deg))
+    R_pitch = np.array([[1, 0, 0], [0, cr, sr], [0, -sr, cr]], np.float32)
+    cy, sy = np.cos(np.radians(yaw_deg)), np.sin(np.radians(yaw_deg))
+    R_yaw = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], np.float32)
+    return R_yaw @ R_pitch
 
 
 def build_lut(serial, cam_cfg, bev, intr):
@@ -221,7 +231,12 @@ def session_fuse(sess_dir, cams, bev, intr_by_serial, roles=("near", "far")):
         stamp = int(npz_path.stem)
         dep = np.load(sess_dir / "depth" / f"{stamp:020d}.npz")
         d = dict(np.load(npz_path))
-        teacher = d["teacher"].reshape(-1)   # bookkeeping only (not fused)
+        # recorded geometric teacher (bookkeeping) — absent in sessions
+        # recorded without the BEV builder; the fused output does not
+        # depend on it
+        teacher = (d["teacher"].reshape(-1)
+                   if "teacher" in d and d["teacher"] is not None
+                   else np.ones(60 * 60, np.float32))
         sem_union = np.zeros(60 * 60, bool)      # SAM+depth blocked marks
         floor_union = np.zeros(60 * 60, bool)    # SAM floor confirmations
         for role in roles:

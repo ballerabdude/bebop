@@ -2,8 +2,8 @@
 
 Owns the Orbbec camera rig (exclusivity, docs §2.7), the operator video
 server, and the navd MCAP recorder: teleop sessions -> color (both
-cameras) + lossless depth + cmd_vel/odom/goal + the geometric BEV
-teacher, the dataset every labeling/modeling approach trains from.
+cameras) + lossless depth + cmd_vel/odom/goal, the dataset every
+labeling/modeling approach trains from.
 
     python main.py --record-navd /var/lib/bebop-captures --auto
 
@@ -95,7 +95,6 @@ def run_record_navd(args):
     teleop toward an active waypoint makes the dataset goal-conditioned,
     which is the signal the models train on.
     """
-    from bebop_vision.bev import BevBuilder
     from bebop_vision.orbbec import OrbbecRig
     from bebop_vision.recorder_mcap import (GoalHeading, GoalPoint, GoalSlot,
                                             NavdRecorder, parse_goal)
@@ -121,7 +120,6 @@ def run_record_navd(args):
         vserver = VideoServer(rig, port=args.video_port)
         vserver.start()
 
-    builder = BevBuilder()
     goal_slot = GoalSlot()
 
     # Operator goals from the app ride the runtime WS (plan §8): the
@@ -154,6 +152,9 @@ def run_record_navd(args):
             f"cannot write to {out_dir} "
             f"(owned by {out_dir.owner()}:{out_dir.group()}); fix with "
             f"'sudo chown bebop:bebop {out_dir}' or re-run install-jetson.sh")
+    from bebop_vision.orbbec import load_rig_config
+    safety = load_rig_config()["robots"]["default"].get("safety", {})
+    max_frame_age_s = float(safety.get("max_frame_age_s", 0.3))
     budget = args.disk_budget_gb * 1e9
     rate = args.record_rate if args.record_rate is not None else 10.0
     rec = None
@@ -177,11 +178,8 @@ def run_record_navd(args):
     def new_segment():
         path = out_dir / f"navd_session_{_time.strftime('%Y%m%d_%H%M%S')}.mcap"
         rec = NavdRecorder(
-            rig, robot, goal_slot, path, builder=builder, rate_hz=rate,
-            # Live BEV feed for the operator app: :9092/video?stream=bev —
-            # the recorder publishes its own tick-aligned teacher grid.
-            on_grid=(lambda grid, goal: vserver.publish_bev(grid, goal))
-                    if vserver is not None else None)
+            rig, robot, goal_slot, path, rate_hz=rate,
+            max_frame_age_s=max_frame_age_s)
         rec.start()
         rec_holder["rec"] = rec
         print(f"\n[record-navd] recording -> {path}")
@@ -194,69 +192,6 @@ def run_record_navd(args):
         print(f"\n[record-navd] closed {path.name} "
               f"({rec.frames} frames, {rec.bytes_written/1e6:.1f} MB)")
         _prune_sessions(out_dir, budget)
-
-    # Feed BEV worker: keeps the :9092 bev stream live whenever the rig
-    # is open, even with no segment recording — auto mode only opens
-    # segments while the drive state is active (wheels armed, no estop),
-    # and without this worker the feed went dark exactly then. While a
-    # segment IS recording, the recorder's tick publishes its own
-    # tick-aligned grid via on_grid, so this worker pauses rather than
-    # computing every grid twice. Serial camera reads, numpy/cv2-only
-    # pool work (§2.8).
-    stop_feed = threading.Event()
-    feed_pool = None
-    if vserver is not None:
-        from concurrent.futures import ThreadPoolExecutor
-        feed_pool = ThreadPoolExecutor(max_workers=2,
-                                       thread_name_prefix="bev-feed")
-
-        def feed_bev_worker():
-            feed_builder = BevBuilder()
-            last_stamp, cached = {}, {}
-            grids, stats_ts = 0, time.monotonic()
-            while not stop_feed.is_set():
-                t0 = time.monotonic()
-                if rec_holder["rec"] is not None:
-                    stop_feed.wait(0.25)   # recorder publishes its grid
-                    continue
-                per_cam, ages, jobs = {}, {}, {}
-                for role, cam in rig.cameras.items():
-                    f = cam.read()
-                    if f is None or f.age_s() > feed_builder.max_frame_age_s:
-                        per_cam[role], ages[role] = None, None
-                        continue
-                    ages[role] = f.age_s()
-                    if last_stamp.get(role) != f.stamp_us:
-                        jobs[role] = (
-                            feed_pool.submit(feed_builder.process, f),
-                            f.stamp_us)
-                    per_cam[role] = cached.get(role)
-                for role, (job, stamp) in jobs.items():
-                    try:
-                        cached[role] = job.result()
-                    except Exception as exc:
-                        print(f"[record-navd] feed BEV error ({role}): "
-                              f"{type(exc).__name__}: {exc}")
-                        cached[role] = None
-                    last_stamp[role] = stamp
-                    per_cam[role] = cached.get(role)
-                try:
-                    grid = feed_builder.fuse(per_cam, ages)
-                except Exception as exc:
-                    print(f"[record-navd] feed fuse error: "
-                          f"{type(exc).__name__}: {exc}")
-                    grid = None
-                vserver.publish_bev(grid, goal_slot.get())
-                grids += 1
-                now = time.monotonic()
-                if now - stats_ts >= 5.0:
-                    stats_ts = now
-                    print(f"[record-navd] feed: {grids} grids (idle)")
-                    grids = 0
-                time.sleep(max(0.0, 0.1 - (time.monotonic() - t0)))
-
-        threading.Thread(target=feed_bev_worker, daemon=True,
-                         name="bev-feed").start()
 
     if not args.auto:
         rec, path, _ = new_segment()
@@ -272,7 +207,6 @@ def run_record_navd(args):
             pass
         finally:
             close_segment(rec, path)
-            stop_feed.set()
             if vserver is not None:
                 vserver.stop()
             rig.stop()
@@ -332,7 +266,6 @@ def run_record_navd(args):
                 close_segment(seg, seg_path)
             except OSError as exc:
                 print(f"\n[record-navd] error closing final segment: {exc}")
-        stop_feed.set()
         if vserver is not None:
             vserver.stop()
         rig.stop()

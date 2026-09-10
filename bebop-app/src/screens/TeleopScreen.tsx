@@ -51,7 +51,6 @@ const VIDEO_STREAMS: { id: string; label: string }[] = [
   { id: "depth_near", label: "Depth" },
   { id: "color_far", label: "Far" },
   { id: "depth_far", label: "Far depth" },
-  { id: "bev", label: "BEV" },
 ];
 import { Banner, Button } from "../components/ui";
 import { useGamepad } from "../input";

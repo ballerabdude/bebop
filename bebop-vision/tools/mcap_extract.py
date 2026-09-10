@@ -76,11 +76,13 @@ def extract(mcap_path, out_dir, tol_us=15_000):
                 depth[role] = np.asarray(
                     __import__("cv2").imdecode(arr, __import__("cv2").IMREAD_UNCHANGED))
         np.savez_compressed(out / "depth" / f"{stamp_s}.npz", **depth)
-        teacher = None
+        # no BEV channel -> no recorded teacher; the npz is still written
+        # (fuse_navd_labels fills it with `fused` from SAM x depth)
+        payload = {}
         if bev.get("raw"):
-            teacher = np.frombuffer(base64.b64decode(bev["raw"]), np.uint8).reshape(60, 60)
-        np.savez_compressed(out / "labels" / f"{stamp_s}.npz",
-                            teacher=teacher)
+            payload["teacher"] = np.frombuffer(
+                base64.b64decode(bev["raw"]), np.uint8).reshape(60, 60)
+        np.savez_compressed(out / "labels" / f"{stamp_s}.npz", **payload)
         row = {"stamp_ns": stamp, "dir": stamp_s,
                "cmd_vel": cmd, "odom": odom, "goal": goal,
                "plane_ok": bev.get("plane_ok", {}),

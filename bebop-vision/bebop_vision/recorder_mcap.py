@@ -15,16 +15,12 @@ Channels:
   /depth_far    raw PNG bytes (schemaless)
   /depth_near_preview  foxglove.RawImage (JSON; 106x60 16uc1 — dashboard only)
   /depth_far_preview   foxglove.RawImage (same encoding, far camera)
-  /bev_map      foxglove.RawImage (JSON; 60x60 rgb8 top-down teacher map)
-  /bev_model    JSON {"raw": b64 60x60 uint8, "plane_ok", "stamp_ns"} — the
-                student-model grid the planner drove on (--navd-model only)
   /cmd_vel      JSON  {"vx", "wz", "stamp_ns"}   — operator twist (teleop label)
   /odom         JSON  {"x", "y", "theta", "stamp_ns"}
   /goal         JSON  {"type": "heading"|"point"|"none", ...}
-  /bev_teacher  JSON  {"raw": b64 60x60 uint8, "plane_ok": {...}, "stamp_ns"}
   /calib        JSON  intrinsics + rig extrinsics, written once at start
 
-Training channels are the raw PNGs + /bev_teacher (tools/mcap_extract.py);
+Training channels are the raw PNGs (tools/mcap_extract.py);
 the Foxglove-schema channels exist so sessions open as a live dashboard in
 Foxglove Studio (foxglove/bebop_navd_layout.json).
 
@@ -53,7 +49,6 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError("pip install opencv-python") from exc
 
-from .bev import BevBuilder
 
 
 # --- navigation-goal slot (the recorder writes whatever is in it) --------
@@ -207,30 +202,17 @@ def _obj_schema(properties):
 class NavdRecorder:
     """Capture the navd teleop session to MCAP at a fixed rate."""
 
-    def __init__(self, rig, robot, goal_slot, out_path, builder=None,
-                 rate_hz=10.0, jpeg_quality=85, workers=6, on_grid=None,
-                 model_grid_fn=None):
+    def __init__(self, rig, robot, goal_slot, out_path,
+                 rate_hz=10.0, jpeg_quality=85, workers=6,
+                 max_frame_age_s=0.3):
         self.rig = rig
         self.robot = robot
         self.goal_slot = goal_slot
         self.rate_hz = rate_hz
         self.jpeg_quality = jpeg_quality
-        self.builder = builder or BevBuilder()
-        # Optional parent hook, called with (grid, goal) after every fused
-        # tick — main.py wires VideoServer.publish_bev here so the operator
-        # app gets the live BEV feed while recording. grid may be None.
-        self._on_grid = on_grid
-        # Optional model-drive grid source (plan §7.3 --navd-model): a
-        # zero-arg callable returning BevGrid | None — the grid the goal
-        # planner actually drove on (model-only, no fallback), recorded
-        # as /bev_model for offline A/B against the geometric /bev_teacher.
-        self._model_grid_fn = model_grid_fn
+        self.max_frame_age_s = max_frame_age_s
         self.bytes_written = 0
         self.frames = 0
-        # Latest fused BEV grid from the recorder's own tick — lets the
-        # parent process run a goal-drive loop against the same grid the
-        # teacher labels come from (see main.py --record-navd --goal-drive).
-        self.grid = None
         self._lock = threading.Lock()
         self._running = False
         self._thread = None
@@ -252,10 +234,6 @@ class NavdRecorder:
         state_schema = _obj_schema({"stamp_us": {"type": "integer"}})
         self._sch_state = self._writer.register_schema(
             "bebop.navd.State", "jsonschema", state_schema)
-        self._sch_bev = self._writer.register_schema(
-            "bebop.navd.BevTeacher", "jsonschema", _obj_schema(
-                {"raw": {"type": "string"}, "plane_ok": {"type": "object"},
-                 "stamp_us": {"type": "integer"}}))
         self._sch_calib = self._writer.register_schema(
             "bebop.navd.Calib", "jsonschema", _obj_schema({}))
         # Foxglove well-known schemas (JSON-encoded): Foxglove Studio
@@ -277,8 +255,6 @@ class NavdRecorder:
                 "/odom", "json", self._sch_state),
             "goal": self._writer.register_channel(
                 "/goal", "json", self._sch_state),
-            "bev": self._writer.register_channel(
-                "/bev_teacher", "json", self._sch_bev),
             "calib": self._writer.register_channel(
                 "/calib", "json", self._sch_calib),
             "color_near": self._writer.register_channel(
@@ -289,10 +265,6 @@ class NavdRecorder:
                 "/depth_near_preview", "json", self._sch_raw_image),
             "depth_far_preview": self._writer.register_channel(
                 "/depth_far_preview", "json", self._sch_raw_image),
-            "bev_map": self._writer.register_channel(
-                "/bev_map", "json", self._sch_raw_image),
-            "bev_model": self._writer.register_channel(
-                "/bev_model", "json", self._sch_bev),
             # Training-depth channels: CompressedImage-wrapped lossless PNG
             # (16-bit). Foxglove rejects schemaless "raw" channels, so the
             # bytes ride in base64 like the color channel; the extractor
@@ -307,15 +279,25 @@ class NavdRecorder:
     # --- payloads ------------------------------------------------------------
 
     def _write_calib(self):
-        calib = {"intrinsics": self.builder.intrinsics,
-                 "mounts": {s: {"height_m": m.height_m, "pitch_deg": m.pitch_deg,
-                                "yaw_deg": m.yaw_deg}
-                            for s, m in self.builder.mounts.items()},
-                 "bev": {"range_m": self.builder.range_m,
-                         "width_m": self.builder.width_m,
-                         "cell_m": self.builder.cell_m,
-                         "near_authority_m": self.builder.near_authority_m,
-                         "min_range_m": self.builder.min_range_m},
+        from .orbbec import load_intrinsics, load_rig_config
+        cfg = load_rig_config()["robots"]["default"]
+        bev = cfg["bev"]
+        calib = {"intrinsics": {
+                     serial: {**{k: float(intr[k])
+                                 for k in ("fx", "fy", "cx", "cy")},
+                              "width": int(intr.get("width", 0)),
+                              "height": int(intr.get("height", 0))}
+                     for serial in cfg["cameras"]
+                     for intr in [load_intrinsics(serial)]},
+                 "mounts": {s: {"height_m": float(c["height_m"]),
+                                "pitch_deg": float(c["pitch_deg"]),
+                                "yaw_deg": float(c.get("yaw_deg", 0.0))}
+                            for s, c in cfg["cameras"].items()},
+                 "bev": {"range_m": float(bev["range_m"]),
+                         "width_m": float(bev["width_m"]),
+                         "cell_m": float(bev["cell_m"]),
+                         "near_authority_m": float(bev["near_authority_m"]),
+                         "min_range_m": float(bev.get("min_range_m", 0.55))},
                  "camera_self_mask_pixels": {
                      role: [list(r) for r in cam.mask_rects]
                      for role, cam in self.rig.cameras.items()},
@@ -461,7 +443,7 @@ class NavdRecorder:
         # histories; the residual |Δrecv| rides in the image messages
         # (pair_ms) with the device stamp (stamp_us) so offline consumers
         # can verify alignment.
-        frames, pair_ms = self._pair_frames(self.builder.max_frame_age_s)
+        frames, pair_ms = self._pair_frames(self.max_frame_age_s)
         jobs = {}
         for role, f in frames.items():
             cached = self._cache.get(role)
@@ -469,7 +451,6 @@ class NavdRecorder:
                 jobs[role] = cached[1]
                 continue
             jobs[role] = {"fut": {
-                "bev": self._pool.submit(self.builder.process, f),
                 "png": self._pool.submit(self._encode_png16, f.depth),
                 # Camera-MJPEG frames arrive pre-encoded (rig color_format:
                 # mjpg) — the bytes go into the MCAP verbatim, no CPU encode.
@@ -478,26 +459,18 @@ class NavdRecorder:
                                            self.jpeg_quality)
                          if f.color is not None else None)),
             }}
-        per_cam, ages = {}, {}
         for role, f in frames.items():
             job = jobs[role]
             if "fut" in job:
                 fut = job["fut"]
-                try:
-                    bev = fut["bev"].result()
-                except Exception as exc:
-                    print(f"[recorder] BEV error ({role}): "
-                          f"{type(exc).__name__}: {exc}")
-                    bev = None
                 png = fut["png"].result()
                 jpg = fut["jpg"]
                 if jpg is not None and hasattr(jpg, "result"):
                     jpg = jpg.result()
-                job = {"png": png, "jpg": jpg, "bev": bev}
+                job = {"png": png, "jpg": jpg}
                 jobs[role] = job
                 self._cache[role] = (f.stamp_us, job)
             png, jpg = job["png"], job["jpg"]
-            per_cam[role] = job["bev"]
             meta = {"stamp_us": f.stamp_us, "pair_ms": pair_ms.get(role)}
             self._add(self._ch[self._depth_topic(role)],
                       self._compressed_image_msg(f"depth_{role}", "png", png,
@@ -513,24 +486,6 @@ class NavdRecorder:
                           self._depth_preview(f.depth, log_ns,
                                               frame_id=f"{role}_depth_preview"),
                           log_ns)
-            ages[role] = f.age_s()
-        grid = self.builder.fuse(per_cam, ages)
-        self.grid = grid
-        if self._on_grid is not None:
-            self._on_grid(grid, goal)
-        bev = {"raw": self._b64(grid.raw) if grid is not None else None,
-               "plane_ok": grid.plane_ok if grid is not None else {},
-               "stamp_ns": log_ns}
-        self._add(self._ch["bev"], json.dumps(bev).encode(), log_ns)
-        if grid is not None:
-            self._add(self._ch["bev_map"],
-                      self._bev_map_image(grid, goal, log_ns), log_ns)
-        if self._model_grid_fn is not None:
-            mgrid = self._model_grid_fn()
-            bm = {"raw": self._b64(mgrid.raw) if mgrid is not None else None,
-                  "plane_ok": mgrid.plane_ok if mgrid is not None else {},
-                  "stamp_ns": log_ns}
-            self._add(self._ch["bev_model"], json.dumps(bm).encode(), log_ns)
 
     @staticmethod
     def _encode_jpeg(color, quality):
@@ -560,45 +515,6 @@ class NavdRecorder:
             "data": base64.b64encode(small.tobytes()).decode(),
         }).encode()
 
-    @staticmethod
-    def _bev_map_image(grid, goal=None, log_ns=0):
-        """Top-down 60x60 rgb8 RawImage of the fused teacher grid.
-
-        Row 0 = far edge (+range), row grows toward the robot; col 0 =
-        right edge (y = -width/2). Free cells dark, occupied red, hazard
-        orange, inflated blue-gray — same colors as the --display overlay.
-        """
-        colors = {
-            0: (40, 40, 40),    # free
-            1: (60, 40, 220),   # occupied (rgb)
-            2: (40, 150, 255),  # hazard
-            3: (150, 90, 90),   # inflated
-        }
-        h, w = grid.occ.shape
-        img = np.zeros((h, w, 3), np.uint8)
-        for cls, rgb in colors.items():
-            img[grid.occ == cls] = rgb
-        if goal is not None:
-            bearing = (goal.heading_rad if hasattr(goal, "heading_rad")
-                       else goal[2] if isinstance(goal, tuple) else None)
-            if bearing is not None:
-                import math
-                cy, cx = h - 1, w // 2
-                hy = int(round(cy - 20 * math.cos(bearing)))
-                hx = int(round(cx + 20 * math.sin(bearing)))
-                cv2.line(img, (cx, cy), (hx, hy), (255, 255, 255), 1)
-        # Camera-aligned: body +y (left) renders LEFT, matching the color
-        # view (col 0 = robot right). Foxglove reviewers see the map in the
-        # same orientation as the cameras.
-        img = np.ascontiguousarray(img[:, ::-1])
-        return json.dumps({
-            "timestamp": NavdRecorder._stamp(log_ns),
-            "frame_id": "navd_bev",
-            "width": int(w), "height": int(h),
-            "encoding": "rgb8", "step": int(w * 3),
-            "data": base64.b64encode(img.tobytes()).decode(),
-        }).encode()
-
     def stop(self):
         self._running = False
         if self._thread is not None:
@@ -607,3 +523,4 @@ class NavdRecorder:
         with self._lock:
             self._writer.finish()
             self._file.close()
+

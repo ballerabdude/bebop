@@ -91,30 +91,13 @@ class FakeRobot:
                                      wheel_armed={"left": True, "right": True})
 
 
-@pytest.fixture
-def builder():
-    cfg = {
-        "cameras": {"S-NEAR": {"role": "near"}, "S-FAR": {"role": "far"}},
-        "bev": {"range_m": 3.0, "width_m": 3.0, "cell_m": 0.05,
-                "near_authority_m": 1.5, "min_range_m": 0.0},
-        "robot": {},
-        "safety": {},
-    }
-    intr = {s: {"fx": 424.0, "fy": 424.0, "cx": 424.0, "cy": 240.0,
-                "width": 848, "height": 480} for s in ("S-NEAR", "S-FAR")}
-    from bebop_vision.bev import BevBuilder, Mount
-    mounts = {s: Mount(1.0, -30.0, 0.0) for s in ("S-NEAR", "S-FAR")}
-    return BevBuilder(rig_cfg=cfg, mounts=mounts, intrinsics=intr,
-                      inflate_radius_m=0.0, seed=1)
-
-
-def test_mcap_roundtrip(tmp_path, builder):
+def test_mcap_roundtrip(tmp_path):
     from bebop_vision.recorder_mcap import GoalSlot, GoalHeading
     rig, robot, slot = FakeRig(), FakeRobot(), GoalSlot()
     slot.set(GoalHeading(0.3))
     path = tmp_path / "session.mcap"
-    rec = NavdRecorder(rig, robot, slot, path, builder=builder,
-                       rate_hz=20.0, jpeg_quality=80)
+    rec = NavdRecorder(rig, robot, slot, path, rate_hz=20.0,
+                       jpeg_quality=80)
     rec.start()
     time.sleep(0.8)
     rec.stop()
@@ -132,10 +115,10 @@ def test_mcap_roundtrip(tmp_path, builder):
             msgs.setdefault(channel.topic, []).append(payload)
 
     # every topic present with a sane number of ticks
-    for topic in ("/cmd_vel", "/odom", "/goal", "/bev_teacher",
+    for topic in ("/cmd_vel", "/odom", "/goal",
                   "/color_near", "/color_far",
                   "/depth_near", "/depth_far",
-                  "/depth_near_preview", "/depth_far_preview", "/bev_map"):
+                  "/depth_near_preview", "/depth_far_preview"):
         assert topic in msgs, f"missing {topic}"
         assert len(msgs[topic]) >= 3, f"{topic}: too few messages"
     assert len(msgs["/calib"]) == 1  # written once at session start
@@ -166,10 +149,6 @@ def test_mcap_roundtrip(tmp_path, builder):
     assert prev["encoding"] == "16UC1" and prev["width"] == 106
     prev_arr = np.frombuffer(base64.b64decode(prev["data"]), np.uint16)
     assert prev_arr.size == prev["width"] * prev["height"]
-    bev_map = msgs["/bev_map"][0]
-    assert bev_map["encoding"] == "rgb8"
-    map_arr = np.frombuffer(base64.b64decode(bev_map["data"]), np.uint8)
-    assert map_arr.size == bev_map["width"] * bev_map["height"] * 3
     # state payloads decode and carry the fake robot's values
     cmd = msgs["/cmd_vel"][0]
     assert cmd["vx"] == pytest.approx(0.2)
@@ -177,12 +156,10 @@ def test_mcap_roundtrip(tmp_path, builder):
     goal = msgs["/goal"][0]
     assert goal["type"] == "heading"
     assert goal["heading_rad"] == pytest.approx(0.3)
-    bev = msgs["/bev_teacher"][0]
-    grid = np.frombuffer(__import__("base64").b64decode(bev["raw"]), np.uint8)
-    assert grid.shape == (60 * 60,)
-    assert set(bev["plane_ok"]) == {"near", "far"}
+    assert "/bev_teacher" not in msgs and "/bev_map" not in msgs
     calib = msgs["/calib"][0]
-    assert calib["intrinsics"]["S-NEAR"]["fx"] == pytest.approx(424.0)
+    from bebop_vision.orbbec import load_rig_config
+    assert set(calib["mounts"]) == set(load_rig_config()["robots"]["default"]["cameras"])
     # ticks share log_time across channels (extractor alignment contract)
     with open(path, "rb") as f:
         times = {}
@@ -193,14 +170,14 @@ def test_mcap_roundtrip(tmp_path, builder):
     assert aligned, "no tick aligned across topics"
 
 
-def test_extractor_layout(tmp_path, builder):
+def test_extractor_layout(tmp_path):
     import sys
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
     from tools.mcap_extract import extract
     from bebop_vision.recorder_mcap import GoalSlot
     rig, robot, slot = FakeRig(), FakeRobot(), GoalSlot()
     path = tmp_path / "session.mcap"
-    rec = NavdRecorder(rig, robot, slot, path, builder=builder, rate_hz=20.0)
+    rec = NavdRecorder(rig, robot, slot, path, rate_hz=20.0)
     rec.start()
     time.sleep(0.6)
     rec.stop()
@@ -215,65 +192,13 @@ def test_extractor_layout(tmp_path, builder):
     data = np.load(d)
     assert data["near"].shape == (480, 848)
     lab = np.load(out / "labels" / f"{row['stamp_ns']:020d}.npz")
-    assert lab["teacher"].shape == (60, 60)
+    assert "teacher" not in lab.files   # no BEV builder -> no recorded teacher
     assert row["cmd_vel"]["vx"] == pytest.approx(0.2)
     assert row["has_color"] is True and row["has_color_far"] is True
     import cv2
     for sub in ("color", "color_far"):
         img = cv2.imread(str(out / sub / f"{row['stamp_ns']:020d}.jpg"))
         assert img is not None and img.shape == (800, 1280, 3), sub
-
-
-def test_on_grid_callback(tmp_path, builder):
-    """The parent's live-BEV hook fires per tick with (grid, goal)."""
-    from bebop_vision.recorder_mcap import GoalSlot, GoalHeading
-    rig, robot, slot = FakeRig(), FakeRobot(), GoalSlot()
-    slot.set(GoalHeading(0.3))
-    calls = []
-    path = tmp_path / "session.mcap"
-    rec = NavdRecorder(rig, robot, slot, path, builder=builder,
-                       rate_hz=20.0,
-                       on_grid=lambda grid, goal: calls.append((grid, goal)))
-    rec.start()
-    time.sleep(0.6)
-    rec.stop()
-    assert len(calls) >= 3
-    grid, goal = calls[-1]
-    assert grid is not None and grid is rec.grid
-    assert goal is slot.get()
-
-
-def test_model_grid_recorded(tmp_path, builder):
-    """--navd-model: the grid the planner drove on lands in /bev_model,
-    alongside the geometric /bev_teacher (§7.3 A/B)."""
-    import base64
-    from bebop_vision.bev import BevGrid
-    from bebop_vision.recorder_mcap import GoalSlot, GoalHeading
-    rig, robot, slot = FakeRig(), FakeRobot(), GoalSlot()
-    slot.set(GoalHeading(0.3))
-    mgrid = BevGrid(occ=np.full((60, 60), 1, np.uint8),
-                    raw=np.zeros((60, 60), np.uint8), stamp_us=42,
-                    per_camera_age_s={}, plane_ok={}, roles=["navd"],
-                    cell_m=0.05, recv_ts=time.monotonic())
-    path = tmp_path / "session.mcap"
-    rec = NavdRecorder(rig, robot, slot, path, builder=builder,
-                       rate_hz=20.0,
-                       model_grid_fn=lambda: mgrid)
-    rec.start()
-    time.sleep(0.6)
-    rec.stop()
-
-    from mcap.reader import make_reader
-    topics = {}
-    with open(path, "rb") as f:
-        for schema, channel, message in make_reader(f).iter_messages():
-            if channel.message_encoding == "json":
-                topics.setdefault(channel.topic, []).append(
-                    json.loads(message.data))
-    assert "/bev_model" in topics and len(topics["/bev_model"]) >= 3
-    for m in topics["/bev_model"]:
-        raw = np.frombuffer(base64.b64decode(m["raw"]), np.uint8)
-        assert raw.shape == (60 * 60,)
 
 
 def test_prune_sessions(tmp_path):
@@ -292,7 +217,7 @@ def test_prune_sessions(tmp_path):
                          "policy_capture_x.mcap"]  # oldest navd pruned first
 
 
-def test_pair_frames_matches_capture_instants(tmp_path, builder):
+def test_pair_frames_matches_capture_instants(tmp_path):
     """Freshest same-instant pair wins over two independent latest reads.
 
     Scenario (the measured 76 ms case): near slot is fresh, far slot is
@@ -310,7 +235,7 @@ def test_pair_frames_matches_capture_instants(tmp_path, builder):
             _frame("far", "S-FAR", 202, now - 0.066)]),
     })
     rec = NavdRecorder(rig, FakeRobot(), GoalSlot(), tmp_path / "s.mcap",
-                       builder=builder, rate_hz=20.0)
+                       rate_hz=20.0)
     frames, pair_ms = rec._pair_frames(max_age_s=0.3)
     assert frames["near"].stamp_us == 100  # not the freshest near frame
     assert frames["far"].stamp_us == 202
@@ -318,7 +243,7 @@ def test_pair_frames_matches_capture_instants(tmp_path, builder):
     rec.stop()
 
 
-def test_pair_frames_single_camera(tmp_path, builder):
+def test_pair_frames_single_camera(tmp_path):
     """Near-only rig (roles=("near",)) records without pairing metadata."""
     from bebop_vision.recorder_mcap import GoalSlot
     now = time.monotonic()
@@ -327,7 +252,7 @@ def test_pair_frames_single_camera(tmp_path, builder):
             _frame("near", "S-NEAR", 101, now - 0.002)]),
     })
     rec = NavdRecorder(rig, FakeRobot(), GoalSlot(), tmp_path / "s.mcap",
-                       builder=builder, rate_hz=20.0)
+                       rate_hz=20.0)
     frames, pair_ms = rec._pair_frames(max_age_s=0.3)
     assert frames["near"].stamp_us == 101 and pair_ms == {}
     rec.stop()
