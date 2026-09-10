@@ -68,7 +68,20 @@ hand-review progress bars, a filter box, and the loaded-model status pill.
 
 - **Toolbar**: tick navigation, jump filters (disagree / caution /
   unreviewed), the displayed grid (auto = hand-else-fused / hand / fused),
-  mining-channel overlays, and the SAM label overlay with alpha slider.
+  mining-channel overlays, the SAM label overlay with alpha slider, and
+  the SAM mask opacity slider.
+- **SAM segmentation (step-3 artifact view)**: each color card (near +
+  far) has an `off / sam / gate` selector.
+  - `sam` — the raw SAM 3.1 floor mask from `sam_floor{,_far}/` in green.
+  - `gate` — the SAM+depth per-pixel decision fuse_navd_labels.py applies:
+    **green** = floor confirmed by the measured depth landing on the
+    flat-ground prediction (became navigable), **red** = blocked evidence
+    (off-ground surface or no depth at all), **transparent** =
+    depth-consistent ground SAM missed (stays unconfirmed), sky, and the
+    robot's own chassis. Gate needs the ray LUT + rig config; when they
+    are unavailable only raw mode is offered.
+  - Opacity is applied client-side (the slider never refetches); the card
+    footer shows mask coverage and, in gate mode, navigable/blocked px.
 - **Filmstrip**: every tick as a tiny class-balance bar (red/green/amber),
   with green top marks for hand-reviewed ticks and red marks for
   disagree ticks — scan a whole session at a glance and click to jump.
@@ -85,6 +98,17 @@ hand-review progress bars, a filter box, and the loaded-model status pill.
 - Full keyboard model: `←/→` nav · `1/2/3` classes · `[ ]` brush · `u` undo
   · `s` save · `r` revert · `t` grid source · `o` overlay · `d/c/n/f` jumps
   · `?` shortcuts modal.
+
+### Pipeline (the artifact browser)
+
+One live row per session across the seven pipeline stages: **record**
+(raw MCAP in `datasets/sessions/`, size), **extract** (tick count +
+manifest), **SAM** (mask counts + sampled mean coverage per camera),
+**fuse** (`fused` labels per tick), **review** (hand edits) — click the
+session name to open it in tick review. Below: the global **train +
+export** artifacts (every `train_log.jsonl` under `runs/` and `weights/`
+with epochs + best val_miou, the exported ONNX files with sizes, and the
+torch checkpoint dirs) and a jump into model validation. Refresh rescans.
 
 ### Model validation (the "why" tab)
 

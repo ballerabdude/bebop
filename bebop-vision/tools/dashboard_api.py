@@ -8,7 +8,10 @@ surface:
   GET  /api/session/<name>/ticks
   GET  /api/tick/<name>/<stamp>
   GET  /api/overlay/<name>/<stamp>?role&src&alpha
+  GET  /api/sam/<name>/<stamp>?role&mode&alpha     raw SAM mask / +depth gate
   POST /api/tick/<name>/<stamp>/hand        {"grid"} | {"clear": true}
+  GET  /api/pipeline                        per-session stage artifact status
+  GET  /api/pipeline/train                  runs / ONNX / checkpoint artifacts
   GET  /api/model                           loaded model info | null
   POST /api/model/load                      {"path": weights/navd.onnx}
   GET  /api/validate/<name>/<stamp>         one-tick replay vs teacher
@@ -17,7 +20,7 @@ surface:
   GET  /api/validate/<name>/results         cached results file listing
 
 Validation runs the ONNX with the EXACT runtime preprocessing path
-(the shared navd-preprocessing math, inlined below) so what the
+(navd_pre.py via navd_runtime goal-raster construction) so what the
 dashboard shows is what the deployed model saw — the whole point is
 explaining runtime behavior ("the why"), not a parallel pipeline.
 
@@ -28,6 +31,7 @@ LD_LIBRARY_PATH gymnastics in the user's shell. CPU is the fallback.
 """
 
 import json
+import math
 import sys
 import threading
 import time
@@ -46,6 +50,7 @@ if str(_TOOLS_DIR) not in sys.path:
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from dashboard_core import DatasetDashboard  # noqa: E402
 from dashboard_core import DatasetDashboard  # noqa: E402
 
 
@@ -114,12 +119,14 @@ def _prep_color(rgb):
     c = (c.astype(np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
     return c.transpose(2, 0, 1)
 
+
 app = FastAPI(title="bebop-vision dashboard", version="0.1.0")
 dash = DatasetDashboard(_REPO_ROOT / "datasets" / "navd-v0")
 
 # --- model state (workstation replay inference) --------------------------
 
-_model = {"sess": None, "path": None, "providers": None}
+_model = {"sess": None, "path": None, "providers": None, "kind": None}
+_TRAJ_INPUTS = {"color", "color_far", "goal_vec", "last_twist"}
 _validate_jobs = {}   # session name -> {"running", "done", "total", "error"}
 _validate_lock = threading.Lock()
 
@@ -127,6 +134,12 @@ _validate_lock = threading.Lock()
 # cells to FREE after the class mapping; replay must mirror that so what
 # the dashboard shows is what the drive node's planner consumes
 _SELF_DISC = _self_disc_mask()
+
+# pipeline artifact roots (step 1 MCAPs + step 6 training outputs);
+# overridable in tests — None means "sibling `sessions/` of the data dir"
+_MCAP_DIR = None
+_TRAIN_ROOT = _REPO_ROOT / "runs"
+_WEIGHTS_ROOT = _REPO_ROOT / "weights"
 
 
 def _get_sess():
@@ -186,10 +199,9 @@ def _warmup(sess):
 def _prep_frames(session: str, stamp: int):
     """Raw tick files -> (depth_near, depth_far, color_rgb, goal_raster).
 
-    Uses the shared navd-preprocessing math (inlined below, was
-    inlined navd-preprocessing math) so preprocessing cannot drift from what the
-    robot runs. Mirrors NavdGridSource's MJPEG decode for color (extracted
-    sessions store plain JPEGs).
+    Uses navd_pre.py (shared with training AND runtime) so preprocessing
+    cannot drift from what the robot runs. Mirrors NavdGridSource's
+    MJPEG decode for color (extracted sessions store plain JPEGs).
     """
     import cv2
 
@@ -328,6 +340,29 @@ def overlay(name: str, stamp: int, role: str = "near", src: str = "auto",
     return out
 
 
+@app.get("/api/sam/{name}/{stamp}")
+def sam_overlay(name: str, stamp: int, role: str = "near",
+                mode: str = "sam", alpha: float = 0.5):
+    """Step-3 artifact view: the raw SAM floor mask over the camera
+    image (`mode=sam`, green) or the SAM+depth per-pixel gate
+    (`mode=gate`) that reproduces fuse_navd_labels.py's decision —
+    green = floor confirmed by depth (navigable), red = blocked
+    evidence (off-ground / no depth), transparent = unconfirmed /
+    sky / the robot's own chassis."""
+    if role not in ("near", "far"):
+        raise HTTPException(400, "role must be near|far")
+    if mode not in ("sam", "gate"):
+        raise HTTPException(400, "mode must be sam|gate")
+    try:
+        out = dash.sam_overlay_payload(name, int(stamp), role=role,
+                                       mode=mode, alpha=alpha)
+    except FileNotFoundError:
+        raise HTTPException(404, "unknown session")
+    if "error" in out:
+        raise HTTPException(404, out["error"])
+    return out
+
+
 @app.post("/api/tick/{name}/{stamp}/hand")
 def hand(name: str, stamp: int, body: HandBody):
     if body.clear:
@@ -341,6 +376,71 @@ def hand(name: str, stamp: int, body: HandBody):
     return {"ok": True, "message": msg}
 
 
+# --- pipeline artifact status (stages 1-7) --------------------------------
+
+@app.get("/api/pipeline")
+def pipeline():
+    """Per-session artifact status for the data stages: record (raw
+    MCAP), extract (ticks + manifest), sam (mask counts + sampled
+    coverage per camera), fuse (labels carrying `fused`), review (hand
+    edits). Train/export/runtime are global — see /api/pipeline/train."""
+    return {"sessions": dash.pipeline_status(mcap_dir=_MCAP_DIR)}
+
+
+@app.get("/api/pipeline/train")
+def pipeline_train():
+    """Step-6 artifacts: training runs (parsed from runs/*/ AND
+    weights/*/train_log.jsonl — epochs, best val_miou + per-class IoUs),
+    exported ONNX files in weights/, and torch checkpoint dirs. The
+    export parity-gate result is stdout-only (never persisted), so it
+    cannot be reported here."""
+    runs = []
+    seen = set()
+    for root in (_TRAIN_ROOT, _WEIGHTS_ROOT):
+        if not root.is_dir():
+            continue
+        for d in sorted(root.iterdir()):
+            log = d / "train_log.jsonl"
+            if not log.is_file() or d in seen:
+                continue
+            seen.add(d)
+            if not log.is_file():
+                continue
+            epochs, best_miou, best_ious = 0, None, None
+            try:
+                for line in log.read_text().splitlines():
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if "val_miou" not in row:
+                        continue
+                    epochs += 1
+                    if best_miou is None or row["val_miou"] > best_miou:
+                        best_miou = round(float(row["val_miou"]), 4)
+                        best_ious = [round(float(x), 4)
+                                     for x in row.get("ious", [])]
+            except OSError:
+                continue
+            runs.append({"name": d.name, "epochs": epochs,
+                         "best_val_miou": best_miou,
+                         "best_ious": best_ious,
+                         "mtime": int(log.stat().st_mtime)})
+    onnx, ckpts = [], []
+    if _WEIGHTS_ROOT.is_dir():
+        for p in sorted(_WEIGHTS_ROOT.glob("*.onnx")):
+            st = p.stat()
+            onnx.append({"name": p.name,
+                         "size_mb": round(st.st_size / 1e6, 1),
+                         "mtime": int(st.st_mtime)})
+        for d in sorted(_WEIGHTS_ROOT.iterdir()):
+            if d.is_dir():
+                files = sorted(p.name for p in d.iterdir() if p.is_file())
+                if files:
+                    ckpts.append({"name": d.name, "files": files})
+    return {"runs": runs, "onnx": onnx, "checkpoints": ckpts}
+
+
 # --- model validation -----------------------------------------------------
 
 @app.get("/api/model")
@@ -348,7 +448,7 @@ def model_info():
     if _model["sess"] is None:
         return {"loaded": False}
     return {"loaded": True, "path": _model["path"],
-            "providers": _model["providers"]}
+            "providers": _model["providers"], "kind": _model["kind"]}
 
 
 @app.post("/api/model/load")
@@ -369,8 +469,10 @@ def model_load(body: ModelLoadBody):
     _model["sess"] = sess
     _model["path"] = str(p)
     _model["providers"] = providers
+    _model["kind"] = ("traj" if {i.name for i in sess.get_inputs()}
+                      == _TRAJ_INPUTS else "bev")
     return {"ok": True, "path": str(p), "providers": providers,
-            "warmup_ms": warmup_ms}
+            "kind": _model["kind"], "warmup_ms": warmup_ms}
 
 
 # NOTE: /run, /status, /results must be declared BEFORE /validate/{name}/{
@@ -482,6 +584,7 @@ def _label_is_hand(name, stamp):
         return False
 
 
+
 def _run_sweep(name: str, model_path: str):
     """Background: replay every tick, aggregate + persist results."""
     p = Path(model_path)
@@ -561,6 +664,9 @@ def _run_sweep(name: str, model_path: str):
     finally:
         _model["sess"], _model["path"], _model["providers"] = \
             old_sess, old_path, old_prov
+
+
+
 
 
 # --- static frontend (built React bundle) --------------------------------

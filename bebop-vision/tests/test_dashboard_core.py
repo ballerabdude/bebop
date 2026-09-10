@@ -9,6 +9,7 @@ overlay path is tested without config/raylut_near.npz.
 import base64
 import io
 import json
+import time
 from types import SimpleNamespace
 
 import cv2
@@ -46,6 +47,18 @@ def _fake_lut():
     return dict(land_cells=lc, n_px=n_px)
 
 
+def _gate_lut(t_g=1.5, u_d=847, v_d=479):
+    """Fake LUT with the depth-sampling fields the SAM+depth gate needs:
+    every pixel samples the depth image at one (v_d, u_d) spot with a
+    flat ground-plane prediction of `t_g` (meters)."""
+    lut = _fake_lut()
+    n_px = lut["n_px"]
+    lut["u_d"] = np.full(n_px, u_d, np.int64)
+    lut["v_d"] = np.full(n_px, v_d, np.int64)
+    lut["t_g"] = np.full(n_px, t_g, np.float32)
+    return lut
+
+
 def _tiny_jpeg(value):
     ok, jpg = cv2.imencode(".jpg", np.full((COLOR_H, COLOR_W, 3), value,
                                            np.uint8))
@@ -63,7 +76,8 @@ def dash(tmp_path):
     images; the manifest has one row per tick.
     """
     sess = tmp_path / "navd_session_test"
-    for sub in ("labels", "color", "color_far", "depth"):
+    for sub in ("labels", "color", "color_far", "depth",
+                "sam_floor", "sam_floor_far"):
         (sess / sub).mkdir(parents=True)
     rows = []
     for k, off in enumerate((0, 100_000_000, 200_000_000)):
@@ -81,6 +95,12 @@ def dash(tmp_path):
         depth[:10, :10] = 0                        # invalid mm -> black
         np.savez_compressed(sess / "depth" / f"{s20}.npz",
                             near=depth, far=depth)
+        mask = np.zeros((COLOR_H, COLOR_W), bool)
+        mask[:, : COLOR_W // 2] = True             # left half = SAM floor
+        np.savez_compressed(sess / "sam_floor" / f"{s20}.npz", mask=mask)
+        fmask = np.zeros((COLOR_H, COLOR_W), bool)
+        fmask[: COLOR_H // 4] = True               # top quarter (far cam)
+        np.savez_compressed(sess / "sam_floor_far" / f"{s20}.npz", mask=fmask)
         (sess / "color" / f"{s20}.jpg").write_bytes(_tiny_jpeg(40 + k))
         (sess / "color_far" / f"{s20}.jpg").write_bytes(_tiny_jpeg(90))
         rows.append({"stamp_ns": stamp,
@@ -291,3 +311,124 @@ def test_real_palette_module_shapes():
     assert pal.shape == (N_CELLS + 1, 3)
     for cls, bgr in CLASS_BGR.items():
         assert pal[cls].tolist() == list(bgr)
+
+
+# ------------------------------------------------------------ SAM overlays
+
+def test_sam_overlay_raw(dash):
+    """Raw SAM mask mode: green exactly on the mask half, transparent
+    elsewhere, floor_frac = mask density."""
+    out = dash.sam_overlay_payload("navd_session_test", S20)
+    assert "error" not in out, out.get("error")
+    assert out["mode"] == "sam" and out["role"] == "near"
+    assert out["floor_frac"] == pytest.approx(0.5)
+    assert out["gate"] is None
+    bgra = cv2.imdecode(
+        np.frombuffer(base64.b64decode(out["overlay"]), np.uint8),
+        cv2.IMREAD_UNCHANGED)
+    assert bgra.shape == (COLOR_H, COLOR_W, 4)
+    assert (bgra[:, : COLOR_W // 2, 3] == 255).all()
+    assert (bgra[:, COLOR_W // 2:, 3] == 0).all()
+    assert (bgra[0, 0, :3] == np.array([67, 160, 46])).all()   # class green
+    blend = cv2.imdecode(
+        np.frombuffer(base64.b64decode(out["blend"]), np.uint8),
+        cv2.IMREAD_COLOR)
+    assert blend.shape == (COLOR_H, COLOR_W, 3)
+
+
+def test_sam_overlay_gate(dash, tmp_path, monkeypatch):
+    """Gate mode mirrors the fuse_navd_labels pixel decision: SAM floor
+    with depth on the ground plane -> navigable evidence; non-floor
+    off-ground (or depthless) -> blocked evidence; the rest clear."""
+    import fuse_navd_labels as fuse
+    monkeypatch.setattr(
+        fuse, "self_pixel_mask",
+        lambda serial, cams, lut: np.zeros(len(lut["u_d"]), bool))
+    # measured depth 1.5 m everywhere sampled: t_g = 1.5 -> floor confirms
+    d1 = DatasetDashboard(tmp_path, load_lut=lambda role: _gate_lut(1.5))
+    out = d1.sam_overlay_payload("navd_session_test", S20, mode="gate")
+    assert "error" not in out, out.get("error")
+    assert out["gate"] == {"floor_px": 72, "blocked_px": 0}
+    assert out["floor_frac"] == pytest.approx(0.5)
+    # ground-plane prediction 1 m off the measured surface: no floor
+    # confirmations; every non-floor pixel with a landing cell is
+    # blocked evidence
+    d2 = DatasetDashboard(tmp_path, load_lut=lambda role: _gate_lut(0.5))
+    out = d2.sam_overlay_payload("navd_session_test", S20, mode="gate")
+    assert "error" not in out, out.get("error")
+    assert out["gate"] == {"floor_px": 0, "blocked_px": 72}
+    # sampling an invalid-depth (0 mm) pixel: non-floor pixels there are
+    # blocked evidence too (conservative full-band in fuse)
+    d3 = DatasetDashboard(
+        tmp_path, load_lut=lambda role: _gate_lut(1.5, u_d=5, v_d=5))
+    out = d3.sam_overlay_payload("navd_session_test", S20, mode="gate")
+    assert "error" not in out, out.get("error")
+    assert out["gate"] == {"floor_px": 0, "blocked_px": 72}
+
+
+def test_sam_overlay_gate_no_lut(dash, tmp_path):
+    plain = DatasetDashboard(tmp_path, load_lut=lambda role: None)
+    out = plain.sam_overlay_payload("navd_session_test", S20, mode="gate")
+    assert "no ray LUT" in out["error"]
+    # raw mode still works without any LUT
+    out = plain.sam_overlay_payload("navd_session_test", S20)
+    assert "error" not in out
+
+
+def test_sam_overlay_errors(dash, tmp_path):
+    # tick with a color image but no mask at all
+    stamp = S20 + 300_000_000
+    s20 = f"{stamp:020d}"
+    (tmp_path / "navd_session_test" / "color" / f"{s20}.jpg").write_bytes(
+        _tiny_jpeg(9))
+    out = dash.sam_overlay_payload("navd_session_test", stamp)
+    assert "no SAM floor mask" in out["error"]
+    # mask/image shape mismatch — scratch session (no labels dir, so it
+    # stays invisible to the session listings)
+    scratch = tmp_path / "navd_session_scratch"
+    (scratch / "color").mkdir(parents=True)
+    (scratch / "sam_floor").mkdir()
+    (scratch / "color" / f"{S20:020d}.jpg").write_bytes(_tiny_jpeg(7))
+    np.savez_compressed(scratch / "sam_floor" / f"{S20:020d}.npz",
+                        mask=np.zeros((COLOR_H + 4, COLOR_W), bool))
+    out = dash.sam_overlay_payload("navd_session_scratch", S20)
+    assert "SAM mask" in out["error"]
+    # missing color image (scratch tick with a mask but no jpg)
+    scratch = tmp_path / "navd_session_scratch2"
+    (scratch / "sam_floor").mkdir(parents=True)
+    np.savez_compressed(scratch / "sam_floor" / f"{S20:020d}.npz",
+                        mask=np.zeros((COLOR_H, COLOR_W), bool))
+    out = dash.sam_overlay_payload("navd_session_scratch2", S20)
+    assert "no color image" in out["error"]
+
+
+# ----------------------------------------------------------- pipeline view
+
+def test_pipeline_status(dash, tmp_path):
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    (caps / "navd_session_test.mcap").write_bytes(b"x" * (2 * 1024 * 1024))
+    rows = dash.pipeline_status(mcap_dir=caps)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["name"] == "navd_session_test" and r["ticks"] == 3
+    assert r["record"]["present"] and r["record"]["size_mb"] > 0
+    assert r["extract"] == {"ticks": 3, "manifest": True}
+    near = r["sam"]["near"]
+    assert near["done"] == 3 and near["total"] == 3 and near["complete"]
+    assert near["coverage"] == pytest.approx(0.5)
+    assert r["sam"]["far"]["coverage"] == pytest.approx(0.25)
+    assert r["fuse"] == {"fused": 3, "total": 3, "complete": True}
+    assert r["review"] == {"hand": 0}
+    # without the captures dir wired: record stage shows absent
+    r0 = dash.pipeline_status()[0]
+    assert r0["record"]["present"] is False
+    assert r0["record"]["size_mb"] is None
+
+
+def test_key_counts_cache_invalidation(dash):
+    assert dash._key_counts("navd_session_test") == {"fused": 3, "hand": 0}
+    time.sleep(0.01)                       # mtime granularity safety
+    dash.save_hand("navd_session_test", S20, _tiny_grid(1).tolist())
+    # the (count, newest mtime) cache key changes on the npz rewrite
+    assert dash._key_counts("navd_session_test") == {"fused": 3, "hand": 1}

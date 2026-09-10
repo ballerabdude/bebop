@@ -173,7 +173,16 @@ export default function App() {
         {tab === "validate" && (
           <ModelValidationPage session={session} lastStamp={lastStamp} />
         )}
-        {tab === "pipeline" && <PipelinePage />}
+        {tab === "pipeline" && (
+          <PipelinePage
+            session={session}
+            onOpenReview={(name) => {
+              setSession(name);
+              setTab("review");
+            }}
+            onOpenValidate={() => setTab("validate")}
+          />
+        )}
       </main>
 
       <ShortcutsModal open={showKeys} onClose={() => setShowKeys(false)} />

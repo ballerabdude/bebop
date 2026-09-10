@@ -46,11 +46,61 @@ export interface OverlayPayload {
   blend: string | null;
 }
 
+export type SamMode = "off" | "sam" | "gate";
+
+export interface SamOverlayPayload {
+  role: string;
+  mode: "sam" | "gate";
+  overlay: string | null;
+  blend: string | null;
+  floor_frac: number;
+  gate: { floor_px: number; blocked_px: number } | null;
+}
+
+export interface StageRecord {
+  present: boolean;
+  size_mb: number | null;
+  mtime: number | null;
+}
+
+export interface StageSam {
+  done: number;
+  total: number;
+  complete: boolean;
+  coverage: number | null;
+}
+
+export interface SessionPipeline {
+  name: string;
+  ticks: number;
+  record: StageRecord;
+  extract: { ticks: number; manifest: boolean };
+  sam: { near: StageSam; far: StageSam };
+  fuse: { fused: number; total: number; complete: boolean };
+  review: { hand: number };
+}
+
+export interface TrainRun {
+  name: string;
+  epochs: number;
+  best_val_miou: number | null;
+  best_ious: number[] | null;
+  mtime: number;
+}
+
+export interface TrainArtifacts {
+  runs: TrainRun[];
+  onnx: { name: string; size_mb: number; mtime: number }[];
+  checkpoints: { name: string; files: string[] }[];
+}
+
 export interface ModelInfo {
   loaded: boolean;
   path?: string;
   providers?: string[];
+  kind?: "bev" | "traj";
 }
+
 
 export interface ValidateTick {
   model: Grid;
@@ -128,6 +178,12 @@ export const api = {
     req<OverlayPayload>(
       `/api/overlay/${s}/${stamp}?role=${q.role}&src=${q.src}&alpha=${q.alpha}`,
     ),
+  samOverlay: (s: string, stamp: string, q: { role: "near" | "far"; mode: "sam" | "gate" }) =>
+    req<SamOverlayPayload>(
+      `/api/sam/${s}/${stamp}?role=${q.role}&mode=${q.mode}`,
+    ),
+  pipeline: () => req<{ sessions: SessionPipeline[] }>("/api/pipeline"),
+  trainArtifacts: () => req<TrainArtifacts>("/api/pipeline/train"),
   saveHand: (s: string, stamp: string, grid: Grid) =>
     req<{ ok: boolean }>(`/api/tick/${s}/${stamp}/hand`, {
       method: "POST",

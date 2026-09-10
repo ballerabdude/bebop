@@ -3,6 +3,8 @@ import {
   api,
   type Grid,
   type OverlayPayload,
+  type SamMode,
+  type SamOverlayPayload,
   type TickPayload,
   type TickSummary,
 } from "../api/client";
@@ -59,6 +61,14 @@ export default function TickReviewPage({ session, onHandChange, onStampViewed }:
   const [overlayOn, setOverlayOn] = useState(false);
   const [alpha, setAlpha] = useState(0.5);
   const [overlay, setOverlay] = useState<OverlayPayload | null>(null);
+  const [samModes, setSamModes] = useState<Record<"near" | "far", SamMode>>({
+    near: "off",
+    far: "off",
+  });
+  const [sam, setSam] = useState<Partial<Record<"near" | "far", SamOverlayPayload>>>({});
+  const [samMiss, setSamMiss] = useState<Record<"near" | "far", boolean>>({ near: false, far: false });
+  const [samAlpha, setSamAlpha] = useState(0.45);
+  const samSeq = useRef(0);
   const [hover, setHover] = useState<{ r: number; c: number; value: number } | null>(null);
   const [tex, setTex] = useState<string | null>(null);
   const [texOn, setTexOn] = useState(true);
@@ -105,6 +115,8 @@ export default function TickReviewPage({ session, onHandChange, onStampViewed }:
     setUndoStack([]);
     setOverlay(null);
     setOverlayOn(false);
+    setSam({});
+    setSamMiss({ near: false, far: false });
     setTex(null);
     api
       .tick(session, stamp)
@@ -129,6 +141,28 @@ export default function TickReviewPage({ session, onHandChange, onStampViewed }:
       .then(setOverlay)
       .catch(() => setOverlay(null));
   }, [overlayOn, session, stamp, src, alpha]);
+
+  // SAM segmentation overlays (step-3 artifact view) — the mask PNG is
+  // fetched per (tick, role, mode); opacity is applied client-side so
+  // the alpha slider never refetches
+  useEffect(() => {
+    if (!session || !stamp) return;
+    const my = ++samSeq.current;
+    (["near", "far"] as const).forEach((role) => {
+      const mode = samModes[role];
+      if (mode === "off") return;
+      api
+        .samOverlay(session, stamp, { role, mode })
+        .then((p) => {
+          if (my !== samSeq.current) return;
+          setSam((o) => ({ ...o, [role]: p }));
+        })
+        .catch(() => {
+          if (my !== samSeq.current) return;
+          setSamMiss((m) => ({ ...m, [role]: true }));
+        });
+    });
+  }, [session, stamp, samModes]);
 
   useEffect(() => {
     if (!session || !stamp || !texOn) return;
@@ -284,6 +318,12 @@ export default function TickReviewPage({ session, onHandChange, onStampViewed }:
   const cellCount = (k: string) =>
     g[k] ? (g[k] as Grid).flat().filter((v) => v > 0).length : 0;
   const m = payload?.manifest;
+  const samView = (role: "near" | "far") => {
+    const p = sam[role];
+    return samModes[role] !== "off" && p && p.mode === samModes[role]
+      ? p
+      : undefined;
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -351,6 +391,18 @@ export default function TickReviewPage({ session, onHandChange, onStampViewed }:
               className="w-20 accent-indigo-500"
             />
           </span>
+          <span className="flex items-center gap-2 text-[11px] text-zinc-500">
+            sam α
+            <input
+              type="range"
+              min={10}
+              max={90}
+              value={samAlpha * 100}
+              onChange={(e) => setSamAlpha(Number(e.target.value) / 100)}
+              className="w-16 accent-indigo-500"
+              title="SAM mask overlay opacity (off/sam/gate on the color cards)"
+            />
+          </span>
           {payload?.legacy && <Badge tone="amber">legacy — view only</Badge>}
           {hasHand && <Badge tone="green">hand-reviewed</Badge>}
         </div>
@@ -369,20 +421,45 @@ export default function TickReviewPage({ session, onHandChange, onStampViewed }:
             title="near color"
             bodyClass="p-2"
             actions={
-              overlayOn && overlay ? <Badge tone="indigo">{overlay.src}</Badge> : null
+              <>
+                {overlayOn && overlay ? <Badge tone="indigo">{overlay.src}</Badge> : null}
+                <SamCtl
+                  mode={samModes.near}
+                  onChange={(m) => setSamModes((s) => ({ ...s, near: m }))}
+                  miss={samModes.near !== "off" && samMiss.near}
+                />
+              </>
             }
           >
-            <Img
-              b64={overlayOn && overlay?.blend ? overlay.blend : payload?.color_near}
-              mime="image/jpeg"
-            />
+            <div className="relative">
+              <Img
+                b64={overlayOn && overlay?.blend ? overlay.blend : payload?.color_near}
+                mime="image/jpeg"
+              />
+              <SamImg p={samView("near")} alpha={samAlpha} />
+            </div>
+            <SamInfo p={samView("near")} />
           </Card>
           <div className="grid grid-cols-2 gap-3">
             <Card title="depth near" bodyClass="p-2">
               <Img b64={payload?.depth_near} mime="image/png" />
             </Card>
-            <Card title="far color" bodyClass="p-2">
-              <Img b64={payload?.color_far} mime="image/jpeg" />
+            <Card
+              title="far color"
+              bodyClass="p-2"
+              actions={
+                <SamCtl
+                  mode={samModes.far}
+                  onChange={(m) => setSamModes((s) => ({ ...s, far: m }))}
+                  miss={samModes.far !== "off" && samMiss.far}
+                />
+              }
+            >
+              <div className="relative">
+                <Img b64={payload?.color_far} mime="image/jpeg" />
+                <SamImg p={samView("far")} alpha={samAlpha} />
+              </div>
+              <SamInfo p={samView("far")} />
             </Card>
           </div>
           <Card title="depth far" bodyClass="p-2">
@@ -538,6 +615,72 @@ function ClsDot({ i }: { i: number }) {
       <span className="inline-block h-2.5 w-2.5 rounded-[3px]" style={{ background: CLS_HEX[i] }} />
       {CLS_NAMES[i]}
     </span>
+  );
+}
+
+/** SAM segmentation view selector for one color card (step-3 artifact). */
+function SamCtl({
+  mode,
+  onChange,
+  miss,
+}: {
+  mode: SamMode;
+  onChange: (m: SamMode) => void;
+  miss?: boolean;
+}) {
+  return (
+    <span className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+      SAM
+      <Segmented
+        size="sm"
+        value={mode}
+        onChange={onChange}
+        options={[
+          { value: "off", label: "off", title: "no SAM overlay" },
+          { value: "sam", label: "sam", title: "raw SAM floor mask (green)" },
+          {
+            value: "gate",
+            label: "gate",
+            title:
+              "SAM + depth gate: green = floor confirmed by depth (navigable), red = blocked evidence, clear = unconfirmed",
+          },
+        ]}
+      />
+      {miss && <span className="text-amber-400">no SAM</span>}
+    </span>
+  );
+}
+
+function SamImg({ p, alpha }: { p?: SamOverlayPayload; alpha: number }) {
+  if (!p?.overlay) return null;
+  return (
+    <img
+      src={`data:image/png;base64,${p.overlay}`}
+      alt=""
+      className="pointer-events-none absolute inset-0 w-full"
+      style={{ opacity: alpha }}
+    />
+  );
+}
+
+function SamInfo({ p }: { p?: SamOverlayPayload }) {
+  if (!p) return null;
+  return (
+    <div className="px-1 pt-1 text-[10px] leading-tight text-zinc-500">
+      SAM {p.mode} · floor {Math.round(p.floor_frac * 100)}%
+      {p.gate && (
+        <>
+          {" "}
+          · nav <b className="text-emerald-500">{p.gate.floor_px}</b> · blocked{" "}
+          <b className="text-red-400">{p.gate.blocked_px}</b> px
+        </>
+      )}
+      <span className="text-zinc-600">
+        {p.mode === "gate"
+          ? " · green floor→navigable · red blocked evidence"
+          : " · green = raw SAM floor"}
+      </span>
+    </div>
   );
 }
 

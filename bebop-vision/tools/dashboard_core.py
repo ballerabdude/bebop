@@ -155,6 +155,8 @@ class DatasetDashboard:
         self._luts = {}            # role -> lut dict | None (cached)
         self._manifests = {}       # session name -> {stamp_ns: manifest row}
         self._legacy = {}          # session name -> bool (no fused labels)
+        self._keycounts = {}       # session name -> ((n, mtime), counts)
+        self._sam_cov = {}         # (name, role, n) -> sampled coverage
 
     # ------------------------------------------------------------ sessions
 
@@ -168,21 +170,34 @@ class DatasetDashboard:
     def _label_paths(self, name):
         return sorted((self._session_dir(name) / "labels").glob("*.npz"))
 
-    def _hand_count(self, name):
-        """Number of ticks whose labels npz already carries a `hand` array.
+    def _key_counts(self, name):
+        """{'fused': n, 'hand': n} over the session's label npz files.
 
-        Cheap: np.load only reads the zip directory for a key check, no
-        array decompression.
+        Cheap per file: np.load only reads the zip directory for a key
+        check, no array decompression. Cached per session and invalidated
+        by (file count, newest mtime) so the pipeline view can poll
+        without rescanning unchanged sessions.
         """
-        n = 0
-        for p in self._label_paths(name):
+        paths = self._label_paths(name)
+        key = (len(paths),
+               max((p.stat().st_mtime for p in paths), default=0.0))
+        cached = self._keycounts.get(name)
+        if cached and cached[0] == key:
+            return cached[1]
+        counts = {"fused": 0, "hand": 0}
+        for p in paths:
             try:
                 with np.load(p) as z:
-                    if "hand" in z.files:
-                        n += 1
+                    counts["fused"] += "fused" in z.files
+                    counts["hand"] += "hand" in z.files
             except Exception:
                 pass
-        return n
+        self._keycounts[name] = (key, counts)
+        return counts
+
+    def _hand_count(self, name):
+        """Number of ticks whose labels npz already carries a `hand` array."""
+        return self._key_counts(name)["hand"]
 
     def _is_legacy(self, name):
         """True when the session predates the label pipeline: its label
@@ -362,6 +377,209 @@ class DatasetDashboard:
         return {"role": role, "src": eff_src,
                 "overlay": _b64(png.tobytes()) if ok else None,
                 "blend": _b64(jpeg.tobytes()) if ok2 else None}
+
+    # ------------------------------------------------------- SAM artifacts
+
+    def _self_pixels(self, role, lut):
+        """LUT pixels looking at the robot's own chassis (self-view
+        polygon from the rig config). The robot is not scene — the gate
+        view never paints it. Best effort: empty on any config failure.
+        """
+        try:
+            import fuse_navd_labels as fuse
+            cfg = fuse.load_cfg()
+            cams = cfg["cameras"]
+            serial = next(s for s, c in cams.items() if c["role"] == role)
+            return np.asarray(fuse.self_pixel_mask(serial, cams, lut), bool)
+        except Exception:
+            return np.zeros(len(lut["land_cells"]), bool)
+
+    def _gate_classes(self, role, mask, depth_path, img_h, img_w):
+        """Per-LUT-pixel SAM+depth gate classes (mode "gate").
+
+        Mirrors the fuse_navd_labels.py per-pixel decision exactly:
+          0 green        SAM floor AND the ray's measured depth lands
+                         within FLOOR_TOL of the flat-floor prediction
+                         (these pixels became navigable confirmations)
+          1 red          non-floor pixel, off-ground surface or no depth
+                         at all (blocked evidence; fuse sweeps the whole
+                         band when depth is missing)
+          2 transparent  depth-consistent ground SAM missed (stays
+                         unconfirmed), sky / no-landing pixels, and the
+                         robot's own self-view pixels
+
+        Returns {"small": u8 (rows, cols), "counts": [floor, blocked]}
+        or {"error": ...} when the LUT/depth/config machinery is
+        unavailable (raw `sam` mode still works everywhere).
+        """
+        try:
+            import fuse_navd_labels as fuse
+            lut = self._lut(role)
+            if lut is None or "land_cells" not in lut:
+                return {"error": f"no ray LUT for role {role} (gate mode)"}
+            rows, cols = grid_shape_for_lut(lut, img_h, img_w)
+            if rows * cols != len(lut["land_cells"]):
+                return {"error": "LUT shape does not match image size"}
+            with np.load(depth_path) as z:
+                if role not in z.files:
+                    return {"error": f"no {role} depth npz for gate mode"}
+                depth_img = z[role]
+            d_m = depth_img[lut["v_d"], lut["u_d"]].astype(np.float32) * 1e-3
+            valid = (d_m > 0.05) & (d_m < 6.0)
+            on_ground = valid & \
+                (np.abs(np.asarray(lut["t_g"], np.float32) - d_m)
+                 <= fuse.FLOOR_TOL_M)
+            stride = max(1, img_h // rows)
+            self_pix = self._self_pixels(role, lut)
+            act = mask[::stride, ::stride].ravel() & ~self_pix
+            lc = np.asarray(lut["land_cells"]).astype(np.int64)
+            has = lc >= 0                       # pixel has a landing cell
+            small = np.full(rows * cols, 2, np.uint8)     # clear default
+            small[has & act & on_ground] = 0              # floor -> navigable
+            small[has & ~act & ~on_ground & ~self_pix] = 1   # blocked evidence
+            return {"small": small.reshape(rows, cols),
+                    "counts": [int((small == 0).sum()),
+                               int((small == 1).sum())]}
+        except Exception as exc:   # noqa: BLE001 — gate is best-effort
+            return {"error": f"gate mode unavailable: "
+                             f"{type(exc).__name__}: {exc}"}
+
+    def sam_overlay_payload(self, name, stamp, role="near", mode="sam",
+                            alpha=0.5):
+        """Step-3 artifact view: the raw SAM floor mask over the camera
+        image (mode "sam") or the SAM+depth per-pixel gate (mode "gate").
+
+        Returns {"role", "mode", "overlay": png-b64 RGBA (transparent
+        off-mask), "blend": jpeg-b64 (composited at `alpha`),
+        "floor_frac", "gate": {"floor_px", "blocked_px"} | None} or
+        {"error": ...}. The client applies opacity in CSS to `overlay`;
+        `blend` is the server-side composite for a single-shot look.
+        """
+        d = self._session_dir(name)
+        s20 = f"{int(stamp):020d}"
+        sub = "color" if role == "near" else "color_far"
+        img = cv2.imread(str(d / sub / f"{s20}.jpg"))
+        if img is None:
+            return {"error": f"no {sub} image for stamp {stamp}"}
+        mp = d / ("sam_floor" if role == "near" else "sam_floor_far") \
+            / f"{s20}.npz"
+        if not mp.exists():
+            return {"error": f"no SAM floor mask for stamp {stamp} ({role})"
+                             " — run tools/sam_floor_label.py"}
+        with np.load(mp) as z:
+            mask = z["mask"]
+        if mask.shape[:2] != img.shape[:2]:
+            return {"error": f"SAM mask {mask.shape[:2]} != image "
+                             f"{img.shape[:2]} for stamp {stamp}"}
+        h, w = img.shape[:2]
+        if mode == "gate":
+            gate = self._gate_classes(role, mask, d / "depth" / f"{s20}.npz",
+                                      h, w)
+            if "error" in gate:
+                return gate
+            # index 2 (clear) must exist for the gather; its alpha is 0
+            pal = np.array([CLASS_BGR[1], CLASS_BGR[0], (0, 0, 0)], np.uint8)
+            up = cv2.resize(pal[gate["small"]], (w, h),
+                            interpolation=cv2.INTER_NEAREST)
+            vmask = cv2.resize((gate["small"] < 2).astype(np.uint8),
+                               (w, h), interpolation=cv2.INTER_NEAREST) > 0
+            bgra = cv2.cvtColor(up, cv2.COLOR_BGR2BGRA)
+            bgra[..., 3] = vmask * 255
+            gate_out = {"floor_px": gate["counts"][0],
+                        "blocked_px": gate["counts"][1]}
+        else:
+            bgra = np.zeros((h, w, 4), np.uint8)
+            bgra[mask] = (*CLASS_BGR[1], 255)     # green = raw SAM floor
+            gate_out = None
+        ok, png = cv2.imencode(".png", bgra,
+                               [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+        blend = img.copy()
+        sel = bgra[..., 3] > 0
+        if sel.any():
+            blend[sel] = np.clip(
+                (1.0 - alpha) * blend[sel].astype(np.float32)
+                + alpha * bgra[sel][..., :3].astype(np.float32),
+                0, 255).astype(np.uint8)
+        ok2, jpeg = cv2.imencode(".jpg", blend,
+                                 [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        return {"role": role, "mode": mode,
+                "overlay": _b64(png.tobytes()) if ok else None,
+                "blend": _b64(jpeg.tobytes()) if ok2 else None,
+                "floor_frac": round(float(mask.mean()), 4),
+                "gate": gate_out}
+
+    # ------------------------------------------------------ pipeline view
+
+    def _sam_dir_stats(self, name, role, sample=16):
+        """{done, total, complete, coverage} for one camera's SAM masks.
+
+        Coverage is the mean mask density over an evenly spaced sample
+        of frames (loading every 800x1280 mask every poll would be far
+        too slow); cached per (session, role, file count) so it is
+        recomputed only while the SAM pass is adding files.
+        """
+        d = self._session_dir(name)
+        out = d / ("sam_floor" if role == "near" else "sam_floor_far")
+        files = sorted(out.glob("*.npz")) if out.is_dir() else []
+        total = len(self._label_paths(name))
+        cov = None
+        if files:
+            ck = (name, role, len(files))
+            cov = self._sam_cov.get(ck)
+            if cov is None:
+                step = max(1, len(files) // sample)
+                vals = []
+                for p in files[::step][:sample]:
+                    try:
+                        with np.load(p) as z:
+                            vals.append(float(z["mask"].mean()))
+                    except Exception:
+                        pass
+                cov = round(float(np.mean(vals)), 4) if vals else None
+                self._sam_cov[ck] = cov
+        return {"done": len(files), "total": total,
+                "complete": bool(files) and len(files) == total,
+                "coverage": cov}
+
+    def pipeline_status(self, mcap_dir=None):
+        """Per-session artifact status for each pipeline stage.
+
+        Stages: record (raw MCAP in the captures dir), extract (session
+        tree + manifest), sam (mask counts + sampled coverage per
+        camera), fuse (labels npz carrying `fused`), review (hand
+        edits). Train/export/runtime are global artifacts — the API
+        serves those from /api/pipeline/train, not per session.
+        """
+        mcap_dir = Path(mcap_dir) if mcap_dir else \
+            self.root.parent / "sessions"
+        out = []
+        for d in sorted(self.root.iterdir()):
+            if not (d / "labels").is_dir():
+                continue
+            name = d.name
+            ticks = len(self._label_paths(name))
+            kc = self._key_counts(name)
+            mp = mcap_dir / f"{name}.mcap"
+            if mp.exists():
+                st = mp.stat()
+                record = {"present": True,
+                          "size_mb": round(st.st_size / 1e6, 1),
+                          "mtime": int(st.st_mtime)}
+            else:
+                record = {"present": False, "size_mb": None, "mtime": None}
+            out.append({
+                "name": name,
+                "ticks": ticks,
+                "record": record,
+                "extract": {"ticks": ticks,
+                            "manifest": (d / "manifest.jsonl").exists()},
+                "sam": {"near": self._sam_dir_stats(name, "near"),
+                        "far": self._sam_dir_stats(name, "far")},
+                "fuse": {"fused": kc["fused"], "total": ticks,
+                         "complete": ticks > 0 and kc["fused"] == ticks},
+                "review": {"hand": kc["hand"]},
+            })
+        return out
 
     # ---------------------------------------------------------- hand edits
 

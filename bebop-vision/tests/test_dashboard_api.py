@@ -45,7 +45,8 @@ def client(tmp_path):
     """API client against a synthetic 2-tick session (fake ray LUT injected
     so the overlay route works without config/raylut_near.npz)."""
     sess = tmp_path / "navd_session_test"
-    for sub in ("labels", "color", "color_far", "depth"):
+    for sub in ("labels", "color", "color_far", "depth",
+                "sam_floor", "sam_floor_far"):
         (sess / sub).mkdir(parents=True)
     rows = []
     for k, off in enumerate((0, 100_000_000)):
@@ -60,6 +61,10 @@ def client(tmp_path):
         depth = np.full((480, 848), 1500, np.uint16)
         depth[:10, :10] = 0
         np.savez_compressed(sess / "depth" / f"{s20}.npz", near=depth, far=depth)
+        mask = np.zeros((COLOR_H, COLOR_W), bool)
+        mask[:, : COLOR_W // 2] = True             # left half = SAM floor
+        np.savez_compressed(sess / "sam_floor" / f"{s20}.npz", mask=mask)
+        np.savez_compressed(sess / "sam_floor_far" / f"{s20}.npz", mask=mask)
         (sess / "color" / f"{s20}.jpg").write_bytes(_tiny_jpeg(40 + k))
         (sess / "color_far" / f"{s20}.jpg").write_bytes(_tiny_jpeg(90))
         rows.append({"stamp_ns": stamp,
@@ -146,6 +151,103 @@ def test_gridtex_route(client):
     # stamp without a color image -> clean error, not 500
     r = client.get("/api/gridtex/navd_session_test/123")
     assert r.status_code in (200, 404)
+
+
+def test_sam_route_raw(client):
+    r = client.get(f"/api/sam/navd_session_test/{STAMP}")
+    assert r.status_code == 200, r.json()
+    out = r.json()
+    assert out["mode"] == "sam" and out["role"] == "near"
+    assert out["floor_frac"] == pytest.approx(0.5)
+    assert out["gate"] is None
+    png = cv2.imdecode(
+        np.frombuffer(base64.b64decode(out["overlay"]), np.uint8),
+        cv2.IMREAD_UNCHANGED)
+    assert png.shape == (COLOR_H, COLOR_W, 4)
+
+
+def test_sam_route_far_and_gate_error(client):
+    r = client.get(f"/api/sam/navd_session_test/{STAMP}?role=far")
+    assert r.status_code == 200 and r.json()["role"] == "far"
+    # gate mode with the injected key-less fake LUT -> clean 404, not 500
+    r = client.get(f"/api/sam/navd_session_test/{STAMP}?mode=gate")
+    assert r.status_code == 404
+    assert "gate" in r.json()["detail"]
+
+
+def test_sam_route_validation(client):
+    assert client.get(
+        f"/api/sam/navd_session_test/{STAMP}?role=side").status_code == 400
+    assert client.get(
+        f"/api/sam/navd_session_test/{STAMP}?mode=bogus").status_code == 400
+    assert client.get("/api/sam/navd_session_test/123").status_code == 404
+    assert client.get("/api/sam/no_such/123").status_code == 404
+
+
+def test_pipeline_route(client):
+    r = client.get("/api/pipeline")
+    assert r.status_code == 200
+    rows = r.json()["sessions"]
+    assert [x["name"] for x in rows] == ["navd_session_test"]
+    s = rows[0]
+    assert s["ticks"] == 2
+    assert s["extract"] == {"ticks": 2, "manifest": True}
+    near = s["sam"]["near"]
+    assert near["done"] == 2 and near["total"] == 2 and near["complete"]
+    assert near["coverage"] == pytest.approx(0.5)
+    assert s["fuse"] == {"fused": 2, "total": 2, "complete": True}
+    assert s["review"] == {"hand": 0}
+    assert s["record"]["present"] is False   # no captures dir wired here
+
+
+def test_pipeline_route_with_mcap(client, monkeypatch, tmp_path):
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    (caps / "navd_session_test.mcap").write_bytes(b"x" * (2 * 1024 * 1024))
+    monkeypatch.setattr(dashboard_api, "_MCAP_DIR", caps)
+    s = client.get("/api/pipeline").json()["sessions"][0]
+    assert s["record"]["present"] is True
+    assert s["record"]["size_mb"] > 0
+    assert s["record"]["mtime"] > 0
+
+
+def test_pipeline_train_route(client, monkeypatch, tmp_path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    d = runs / "navd_vX"
+    d.mkdir()
+    rows = [
+        {"epoch": 1, "val_miou": 0.10, "ious": [0.1, 0.1, 0.1]},
+        {"epoch": 2, "val_miou": 0.50, "ious": [0.4, 0.5, 0.6]},
+        {"epoch": 3, "val_miou": 0.40, "ious": [0.3, 0.4, 0.5]},
+    ]
+    (d / "train_log.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n")
+    (runs / "not_a_run").mkdir()             # no train_log -> skipped
+    w = tmp_path / "weights"
+    w.mkdir()
+    (w / "navd.onnx").write_bytes(b"\x00" * 1024)
+    ck = w / "navd_vX"
+    ck.mkdir()
+    (ck / "best.pt").write_bytes(b"x")
+    (ck / "last.pt").write_bytes(b"x")
+    monkeypatch.setattr(dashboard_api, "_TRAIN_ROOT", runs)
+    monkeypatch.setattr(dashboard_api, "_WEIGHTS_ROOT", w)
+    out = client.get("/api/pipeline/train").json()
+    assert len(out["runs"]) == 1
+    run = out["runs"][0]
+    assert run["name"] == "navd_vX" and run["epochs"] == 3
+    assert run["best_val_miou"] == pytest.approx(0.5)
+    assert run["best_ious"] == [0.4, 0.5, 0.6]
+    assert out["onnx"][0]["name"] == "navd.onnx"
+    assert out["onnx"][0]["size_mb"] == pytest.approx(0.0, abs=0.01)
+    assert out["checkpoints"] == [{"name": "navd_vX",
+                                   "files": ["best.pt", "last.pt"]}]
+    # empty roots -> empty lists, not 500
+    monkeypatch.setattr(dashboard_api, "_TRAIN_ROOT", tmp_path / "nope")
+    monkeypatch.setattr(dashboard_api, "_WEIGHTS_ROOT", tmp_path / "nope")
+    out = client.get("/api/pipeline/train").json()
+    assert out == {"runs": [], "onnx": [], "checkpoints": []}
 
 
 def test_tick_payload_grids_param(client):
