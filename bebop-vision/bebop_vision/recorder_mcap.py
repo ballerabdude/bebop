@@ -188,7 +188,7 @@ class NavdRecorder:
         from concurrent.futures import ThreadPoolExecutor
         self._pool = ThreadPoolExecutor(max_workers=workers,
                                         thread_name_prefix="navd-rec")
-        # role -> (stamp_us, {"png", "jpg", "bev"}) for the last encoded frame
+        # role -> (stamp_us, {"png", "jpg"}) for the last encoded frame
         self._cache = {}
         self._file = open(out_path, "wb")
         # No chunk compression: payloads are already-compressed JPEG/PNG,
@@ -243,7 +243,6 @@ class NavdRecorder:
     def _write_calib(self):
         from .orbbec import load_intrinsics, load_rig_config
         cfg = load_rig_config()["robots"]["default"]
-        bev = cfg["bev"]
         calib = {"intrinsics": {
                      serial: {**{k: float(intr[k])
                                  for k in ("fx", "fy", "cx", "cy")},
@@ -255,11 +254,6 @@ class NavdRecorder:
                                 "pitch_deg": float(c["pitch_deg"]),
                                 "yaw_deg": float(c.get("yaw_deg", 0.0))}
                             for s, c in cfg["cameras"].items()},
-                 "bev": {"range_m": float(bev["range_m"]),
-                         "width_m": float(bev["width_m"]),
-                         "cell_m": float(bev["cell_m"]),
-                         "near_authority_m": float(bev["near_authority_m"]),
-                         "min_range_m": float(bev.get("min_range_m", 0.55))},
                  "camera_self_mask_pixels": {
                      role: [list(r) for r in cam.mask_rects]
                      for role, cam in self.rig.cameras.items()},
