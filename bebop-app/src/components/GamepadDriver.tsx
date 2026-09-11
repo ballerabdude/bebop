@@ -6,7 +6,7 @@
 //   * use the left stick (Y axis) as a rate source that integrates into
 //     the active joint's target position,
 //   * gate motion behind the right trigger as a deadman, mirroring the
-//     robot-side teleop flow in `controller/teleop.rs`,
+//     dial-in flow,
 //   * latch / clear the runtime E-STOP from the East / South face
 //     buttons, again paralleling the agent-side controller bindings so
 //     muscle memory transfers between the two flows.

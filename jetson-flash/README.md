@@ -15,10 +15,10 @@ This sits at the very start of the Jetson lifecycle:
   jetson-flash/   ← you are here (factory flash, ~once per device)
       │
       ▼
-  jetson-agent/   ← the systemd daemon that runs on every boot
+  jetson-agent/   ← the provisioning daemon that runs on every boot
       │
       ▼
-  OTA updates     ← see docs/ota-flow.md
+  bebop-app       ← join the robot's hotspot, set up Wi-Fi
 ```
 
 Use this folder when:

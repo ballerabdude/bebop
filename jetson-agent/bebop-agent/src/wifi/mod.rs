@@ -2,11 +2,12 @@
 //! `nmcli`. This is the path NVIDIA's default L4T images already support,
 //! and it avoids depending on a specific NM D-Bus crate version.
 //!
-//! All public functions in this module are safe to call from the BLE
+//! All public functions in this module are safe to call from the setup
 //! dispatcher.
 
 use anyhow::{Context, Result};
 use tokio::process::Command;
+use tracing::{debug, info};
 
 use crate::error::AgentError;
 use crate::state::{AppState, WifiRuntimeStatus};
@@ -147,9 +148,34 @@ pub async fn query_status() -> Result<WifiRuntimeStatus> {
     })
 }
 
+/// Long-running poller: keeps `AppState`'s Wi-Fi snapshot fresh so the AP
+/// supervisor and setup server can make decisions without shelling out.
+pub async fn run(state: AppState) -> anyhow::Result<()> {
+    info!("wifi status poller online");
+    loop {
+        match query_status().await {
+            Ok(status) => state.set_wifi_status(status).await,
+            Err(e) => debug!(error = %e, "wifi status poll failed"),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
+
 async fn ip_of(device: &str) -> Result<String> {
     let out = nmcli(&["-g", "IP4.ADDRESS", "device", "show", device]).await?;
     Ok(out.lines().next().unwrap_or("").trim().to_owned())
+}
+
+/// Name of the first Wi-Fi device managed by NetworkManager (e.g. `wlan0`).
+pub async fn wifi_device() -> Result<String> {
+    let out = nmcli(&["-t", "-f", "DEVICE,TYPE", "device", "status"]).await?;
+    for line in out.lines() {
+        let fields = split_nmcli(line);
+        if fields.len() >= 2 && fields[1] == "wifi" {
+            return Ok(fields[0].clone());
+        }
+    }
+    anyhow::bail!("no wifi device found")
 }
 
 async fn nmcli(args: &[&str]) -> Result<String> {

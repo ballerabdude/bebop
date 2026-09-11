@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import { Banner, Button, Card, Field, Spinner } from "../components/ui";
 
 const STORAGE_KEY = "bebop.connectByIp";
-const DEFAULT_PORT = 9090;
 
 interface StoredEndpoint {
   ip: string;
@@ -11,33 +10,40 @@ interface StoredEndpoint {
 }
 
 interface ConnectByIpProps {
-  /** Called once we've successfully reached the runtime server. */
+  /** Called once we've successfully reached the server's `/healthz`. */
   onConnected: (ip: string, port: number) => void;
-  /** Optional cancel — only present when BLE is available, so the user
-   *  can fall back to the BLE setup wizard. */
+  /** Optional cancel. */
   onCancel?: () => void;
-  /** Pre-fill from auto-detected (e.g. via BLE WifiStatus) IP. */
+  /** Pre-fill the address field (e.g. a previously detected IP). */
   prefillIp?: string;
+  /** Heading shown above the form. */
+  heading?: string;
+  /** One-line explanation under the heading. */
+  description?: string;
+  /** Label for the submit button (default "Connect"). */
+  submitLabel?: string;
+  /** Port to use when there's nothing stored. */
+  defaultPort?: number;
+  /** Address to use when there's nothing stored. */
+  defaultIp?: string;
 }
 
-/** Manual entry point: type the robot's IP, hit Connect, jump to the
- *  motor bench. Useful when:
- *    - the browser doesn't support Web Bluetooth (Firefox / mobile Safari)
- *    - you've already paired before and just want to manage motors
- *    - you're running the operator app on a workstation that talks to a
- *      robot on the same LAN
- *
- *  We probe the runtime server's `GET /healthz` endpoint as a connection
- *  pre-flight: it's fast, doesn't speak protobuf, and surfaces clear
- *  errors (DNS / unreachable / wrong port) without leaving WS state hanging.
- */
+/// Manual connection entry point. Probes `GET /healthz` as a pre-flight so
+/// DNS / unreachable / wrong-port errors surface clearly before we open a
+/// WebSocket. Used both for the provisioning server (bebop-agent, :9091)
+/// and the runtime controls server (bebop-linux, :9090).
 export function ConnectByIpScreen({
   onConnected,
   onCancel,
   prefillIp,
+  heading = "Connect by IP",
+  description = "Enter the address of a robot.",
+  submitLabel = "Connect",
+  defaultPort = 9090,
+  defaultIp = "",
 }: ConnectByIpProps) {
-  const [ip, setIp] = useState<string>(prefillIp ?? "");
-  const [port, setPort] = useState<number>(DEFAULT_PORT);
+  const [ip, setIp] = useState<string>(prefillIp ?? defaultIp);
+  const [port, setPort] = useState<number>(defaultPort);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -53,6 +59,7 @@ export function ConnectByIpScreen({
     } catch {
       /* ignore corrupt storage */
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefillIp]);
 
   async function connect(e?: React.FormEvent) {
@@ -60,36 +67,22 @@ export function ConnectByIpScreen({
     setError(null);
     const trimmed = ip.trim();
     if (!trimmed) {
-      setError("Enter the robot's IP address.");
+      setError("Enter the robot's IP address or hostname.");
       return;
     }
-    // `0.0.0.0` is a bind-side wildcard, not a client destination. If you
-    // see it printed in `bebop-linux`'s "starting WS runtime server"
-    // log line, you want `127.0.0.1` (same machine) or the LAN IP.
     if (trimmed === "0.0.0.0") {
       setError(
-        "0.0.0.0 is the server's bind address, not a destination. " +
-          "Use 127.0.0.1 (or localhost) if bebop-linux is on this machine, " +
-          "otherwise use the robot's LAN IP.",
+        "0.0.0.0 is a server bind address, not a destination. Use the " +
+          "robot's address (e.g. 192.168.42.1 over its hotspot).",
       );
       return;
     }
     setBusy(true);
     try {
-      // Pre-flight via HTTP; fast and gives clear errors. AbortController
-      // gives us a 4-second timeout which is more useful than the browser's
-      // default minutes-long fetch timeout. We deliberately don't open a
-      // probe WebSocket here: that would race with MotorBenchScreen's own
-      // WS connect and (under React StrictMode dev double-mount) leave a
-      // stale socket the firmware would later trip over when broadcasting
-      // ModeChanged. /healthz is on the same listener as /ws — if the HTTP
-      // route answers, the WS route is reachable too. Any genuine WS
-      // failure (firmware proto mismatch, etc.) surfaces in the motor
-      // screen's connect path via a clear error banner.
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 4_000);
       try {
-        const res = await fetch(`http://${ip}:${port}/healthz`, {
+        const res = await fetch(`http://${trimmed}:${port}/healthz`, {
           signal: ctrl.signal,
         });
         if (!res.ok) {
@@ -99,22 +92,21 @@ export function ConnectByIpScreen({
         clearTimeout(t);
       }
 
-      // Persist for next visit.
       try {
         window.localStorage.setItem(
           STORAGE_KEY,
-          JSON.stringify({ ip: ip.trim(), port }),
+          JSON.stringify({ ip: trimmed, port }),
         );
       } catch {
         /* localStorage may be disabled */
       }
 
-      onConnected(ip.trim(), port);
+      onConnected(trimmed, port);
     } catch (err) {
       const message =
         err instanceof Error
           ? err.name === "AbortError"
-            ? "Connection timed out — check the IP, port, and that bebop-linux is running."
+            ? "Connection timed out — check the address, port, and that the robot is powered on."
             : err.message
           : String(err);
       setError(message);
@@ -132,10 +124,9 @@ export function ConnectByIpScreen({
         <div className="text-[40px] mb-2" aria-hidden>
           🛰️
         </div>
-        <h1 className="text-xl font-semibold">Connect by IP</h1>
+        <h1 className="text-xl font-semibold">{heading}</h1>
         <p className="text-sm text-text-dim mt-1.5 leading-relaxed">
-          Skip Bluetooth setup. Enter the address of a robot already on
-          your network.
+          {description}
         </p>
       </div>
 
@@ -144,17 +135,11 @@ export function ConnectByIpScreen({
       <Card>
         <div className="flex flex-col gap-3 py-2">
           <Field
-            label="Robot IP or hostname"
-            hint="Use the LAN IP (e.g. 192.168.1.42) or a hostname like bebop.local."
+            label="Robot address"
+            hint="Use the hotspot gateway (192.168.42.1) or the robot's LAN IP."
           >
             <input
               autoFocus
-              // Default text keyboard on mobile so hostnames like
-              // "bebop.local" are typeable; "url" hints the keyboard
-              // toward `.` and `/` which is handy for both IPv4 dots
-              // and DNS labels. We deliberately don't use
-              // `inputMode="decimal"` here — it locks iOS / Android to
-              // a numeric keypad with no letters.
               inputMode="url"
               type="text"
               autoComplete="off"
@@ -163,11 +148,18 @@ export function ConnectByIpScreen({
               spellCheck={false}
               value={ip}
               onChange={(e) => setIp(e.target.value)}
-              placeholder="192.168.1.42 or bebop.local"
+              placeholder="192.168.42.1 or bebop.local"
               className="w-full bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-3 text-text outline-none focus:border-accent text-base"
             />
           </Field>
-          <Field label="Port" hint="The runtime server defaults to 9090.">
+          <Field
+            label="Port"
+            hint={
+              defaultPort === 9091
+                ? "The setup server defaults to 9091."
+                : "The runtime server defaults to 9090."
+            }
+          >
             <input
               type="number"
               inputMode="numeric"
@@ -175,7 +167,7 @@ export function ConnectByIpScreen({
               max={65535}
               value={port}
               onChange={(e) =>
-                setPort(parseInt(e.target.value || "0", 10) || DEFAULT_PORT)
+                setPort(parseInt(e.target.value || "0", 10) || defaultPort)
               }
               className="w-full bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-3 text-text outline-none focus:border-accent text-base"
             />
@@ -184,12 +176,12 @@ export function ConnectByIpScreen({
       </Card>
 
       <Button type="submit" loading={busy}>
-        {busy ? "Connecting…" : "Connect"}
+        {busy ? "Connecting…" : submitLabel}
       </Button>
 
       {onCancel ? (
         <Button variant="ghost" type="button" onClick={onCancel} disabled={busy}>
-          Use Bluetooth setup instead
+          Back
         </Button>
       ) : null}
 

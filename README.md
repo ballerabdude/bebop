@@ -9,23 +9,18 @@ of Bebop robots — plus the customer-facing companion app.
 ## High-Level Architecture
 
 ```
- ┌────────────────────┐   BLE (GATT)    ┌──────────────────────────┐
- │  Mobile App        │ ───────────────▶│  bebop-agent (Rust)      │
- │ (iOS / Android)    │ ◀─── status ────│  running on Jetson       │
- └────────────────────┘                  │                          │
-                                         │  ┌────────────────────┐  │
-                                         │  │ BLE GATT server    │  │
-                                         │  │ Wi-Fi provisioner  │  │
-                                         │  │ Container manager  │  │
-                                         │  │ OTA updater        │  │
-                                         │  └────────────────────┘  │
-                                         └──────────────┬───────────┘
-                                                        │ Docker API
-                                                        ▼
-                                            ┌──────────────────────┐
-                                            │ Robot App container  │
-                                            │ (nvidia runtime)     │
-                                            └──────────────────────┘
+ ┌────────────────────┐  SoftAP + WS :9091  ┌──────────────────────────┐
+ │  Mobile App        │ ──────────────────▶ │  bebop-agent (Rust)      │
+ │ (iOS / Android)    │ ◀──── status ────── │  running on Jetson       │
+ └─────────┬──────────┘                     │  ┌────────────────────┐  │
+           │  Wi-Fi / LAN                    │  │ Wi-Fi provisioner  │  │
+           │                                 │  │ SoftAP fallback    │  │
+           │  runtime WS :9090               │  │ Setup server       │  │
+           ▼                                 │  └────────────────────┘  │
+ ┌────────────────────┐                      └──────────────────────────┘
+ │  bebop-linux       │
+ │  (Rust firmware)   │──── SocketCAN ── motors
+ └────────────────────┘
 ```
 
 ## Repository Layout
@@ -33,13 +28,13 @@ of Bebop robots — plus the customer-facing companion app.
 | Path                | Purpose                                                                                                                   |
 |---------------------|---------------------------------------------------------------------------------------------------------------------------|
 | `jetson-flash/`     | One-time host-side provisioning: downloads NVIDIA L4T and flashes a fresh Jetson Orin Nano over USB. Runs once per device. |
-| `jetson-agent/`     | Rust workspace + on-device deployables. `bebop-agent` daemon, `bebop-proto` (BLE wire format), `deploy/` (systemd + install scripts), and `robot-app/` (the container the agent supervises). |
+| `jetson-agent/`     | Rust workspace + on-device deployables. `bebop-agent` provisioning daemon (Wi-Fi + SoftAP), `bebop-proto` (setup wire format), `deploy/` (systemd + install scripts). |
 | `bebop-app/`        | Customer-facing companion app (Tauri 2 + React + TypeScript). Desktop / iOS / Android.                                    |
-| `firmware/`         | Embedded C++ firmware (PlatformIO): `bebop-linux/` and `bebop-locomotion/`. C/C++ tooling pinned via `firmware/.clangd`.  |
+| `firmware/`         | Embedded firmware: `bebop-linux/` (Rust runtime) and `bebop-locomotion/` (PlatformIO). C/C++ tooling pinned via `firmware/.clangd`. |
 | `bebop-vision/`     | Robot vision stack: SAM 3.1 teacher pipeline (dataset auto-labeling + distillation) and the SegFormer navigable-path student, sector planner, and drive tooling. See `bebop-vision/README.md`. |
 | `sim/`              | Isaac Sim / Isaac Lab containers, the `bebop_training` Python RL extension, and `usd/` scene assets. Runs off-robot on a workstation with an NVIDIA GPU. |
 | `ros2/`             | ROS 2 Jazzy workspace used on the dev workstation: `src/bebop_pilot`, `src/bebopv2_description` (URDF), and the dev container under `docker/`. |
-| `docs/`             | Cross-cutting docs: architecture, BLE protocol, OTA flow, onboarding, hardware reference.                                 |
+| `docs/`             | Cross-cutting docs: architecture, setup protocol, onboarding, hardware reference.                                          |
 | `docker-compose.yml`| Orchestrates the dev-workstation containers (`ros2_docker`, `isaac_sim`, `isaac_lab`) under the `sim` / `lab` profiles.   |
 | `justfile`          | Convenience recipes (`just check`, `just build-jetson`, `just sim-up`, `just lab-up`, ...).                               |
 | `.github/`          | CI workflows.                                                                                                             |

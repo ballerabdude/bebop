@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/bebop/agent.toml";
 pub const CONFIG_PATH_ENV: &str = "BEBOP_AGENT_CONFIG";
 
+/// Default WPA2 passphrase for the setup SoftAP. Must be 8..=63 bytes.
+/// Deliberately simple for now; replace with a per-device derived code
+/// before shipping to customers.
+pub const DEFAULT_AP_PASSWORD: &str = "bebopbebop";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// Human readable robot identifier (defaults to hostname).
@@ -21,212 +26,51 @@ pub struct AgentConfig {
     pub state_dir: PathBuf,
 
     #[serde(default)]
-    pub ble: BleConfig,
-
-    #[serde(default)]
-    pub app: AppConfig,
-
-    #[serde(default)]
-    pub ota: OtaConfig,
-
-    #[serde(default)]
-    pub controller: ControllerConfig,
-
-    #[serde(default)]
-    pub net: NetConfig,
+    pub network: NetworkConfig,
 }
 
+/// Wi-Fi / SoftAP provisioning behaviour.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BleConfig {
-    /// Adapter name to use. `None` means use the default adapter.
-    #[serde(default)]
-    pub adapter: Option<String>,
+pub struct NetworkConfig {
+    /// `auto` | `client` | `ap`. See `proto/bebop.proto` for semantics.
+    #[serde(default = "default_network_mode")]
+    pub mode: String,
 
-    /// Advertised BLE local name (what users see in their phone's scanner).
-    #[serde(default = "default_ble_local_name")]
-    pub local_name: String,
+    /// SSID prefix for the setup SoftAP. A short device id is appended.
+    #[serde(default = "default_ap_ssid_prefix")]
+    pub ap_ssid_prefix: String,
 
-    /// If true, require the mobile app to complete a pairing challenge
-    /// (using a pre-shared pairing code) before any writes take effect.
-    #[serde(default = "default_true")]
-    pub require_pairing: bool,
+    /// WPA2 passphrase for the SoftAP (8..=63 chars).
+    #[serde(default = "default_ap_password")]
+    pub ap_password: String,
+
+    /// In `auto` mode, how long to wait for a known network before
+    /// raising the SoftAP.
+    #[serde(default = "default_ap_auto_after_secs")]
+    pub ap_auto_after_secs: u64,
+
+    /// Bind address for the setup server. `0.0.0.0` listens on every
+    /// interface (LAN + SoftAP); `127.0.0.1` restricts to the robot.
+    #[serde(default = "default_setup_bind_addr")]
+    pub setup_bind_addr: String,
 }
 
-impl Default for BleConfig {
+impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            adapter: None,
-            local_name: default_ble_local_name(),
-            require_pairing: true,
+            mode: default_network_mode(),
+            ap_ssid_prefix: default_ap_ssid_prefix(),
+            ap_password: default_ap_password(),
+            ap_auto_after_secs: default_ap_auto_after_secs(),
+            setup_bind_addr: default_setup_bind_addr(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppConfig {
-    /// Name of the primary robot application container.
-    #[serde(default = "default_app_name")]
-    pub name: String,
-
-    /// Image to pull and run for the robot application container.
-    ///
-    /// `None` means "no app configured": the container supervisor stays
-    /// idle and makes no pull attempts. This is the right default for a
-    /// freshly-flashed device that hasn't been pointed at a registry yet.
-    #[serde(default)]
-    pub image: Option<String>,
-
-    /// Use nvidia container runtime (passes `--runtime=nvidia`).
-    #[serde(default = "default_true")]
-    pub use_nvidia_runtime: bool,
-
-    /// Extra environment variables to inject into the robot app container.
-    #[serde(default)]
-    pub env: Vec<String>,
-
-    /// Host paths to mount into the container (`/host:/container[:ro]`).
-    #[serde(default)]
-    pub volumes: Vec<String>,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            name: default_app_name(),
-            image: None,
-            use_nvidia_runtime: true,
-            env: vec![],
-            volumes: vec![],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OtaConfig {
-    /// How often (seconds) to poll the update channel.
-    #[serde(default = "default_ota_poll_secs")]
-    pub poll_interval_secs: u64,
-
-    /// URL returning a manifest describing the desired image for this channel.
-    /// e.g. `https://updates.bebop.example.com/channels/stable.json`.
-    #[serde(default)]
-    pub manifest_url: Option<String>,
-
-    /// Update channel name (purely informational; the URL is authoritative).
-    #[serde(default = "default_channel")]
-    pub channel: String,
-}
-
-impl Default for OtaConfig {
-    fn default() -> Self {
-        Self {
-            poll_interval_secs: default_ota_poll_secs(),
-            manifest_url: None,
-            channel: default_channel(),
-        }
-    }
-}
-
-/// Network control surface — same `bebop.v1.ClientRequest` /
-/// `AgentResponse` protobuf protocol as the BLE GATT server, but tunnelled
-/// over a TCP/WebSocket so a Tauri app already on the LAN can pair
-/// controllers / read status without going through Bluetooth pairing.
-///
-/// Default bind is `0.0.0.0:9091` so the operator app can reach the agent
-/// over the same Wi-Fi link it uses to talk to `bebop-linux` on `:9090`.
-/// Set to `"127.0.0.1:9091"` (or `disabled = true`) on robots that should
-/// only accept BLE provisioning.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NetConfig {
-    /// Disable the network control surface entirely. Useful for hardened
-    /// deployments where the agent should only be reachable over BLE.
-    #[serde(default)]
-    pub disabled: bool,
-
-    /// `host:port` to bind. `0.0.0.0` listens on every interface.
-    #[serde(default = "default_net_bind_addr")]
-    pub ws_bind_addr: String,
-}
-
-impl Default for NetConfig {
-    fn default() -> Self {
-        Self {
-            disabled: false,
-            ws_bind_addr: default_net_bind_addr(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ControllerConfig {
-    /// Master switch. With no `paired_mac` set the supervisor idles
-    /// regardless, so leaving this `true` is safe even on robots that
-    /// have never paired a controller.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-
-    /// UDP `host:port` the agent forwards `{xvel,yvel,angvel}` JSON to.
-    /// Defaults to bebop-linux's documented teleop endpoint on
-    /// localhost; change only if bebop-linux runs on a different host.
-    #[serde(default = "default_controller_target_addr")]
-    pub target_addr: String,
-
-    /// MAC of the currently bound gamepad. Populated automatically by
-    /// the BLE-driven pairing flow; clear it (or unpair from the app)
-    /// to forget the device.
-    #[serde(default)]
-    pub paired_mac: String,
-
-    /// Cached human-readable name of the paired gamepad, for UI / logs.
-    #[serde(default)]
-    pub device_name: String,
-
-    /// Radial deadzone applied to each analog stick (0..1). Anything
-    /// inside this radius is treated as centred.
-    #[serde(default = "default_deadzone")]
-    pub deadzone: f32,
-
-    /// Maximum body-frame linear velocity emitted (m/s).
-    #[serde(default = "default_max_lin_vel")]
-    pub max_lin_vel: f32,
-
-    /// Maximum body-frame angular velocity emitted (rad/s).
-    #[serde(default = "default_max_ang_vel")]
-    pub max_ang_vel: f32,
-
-    /// Trigger threshold (0..1) above which the deadman is considered
-    /// engaged. R2 on a PS5 DualSense reports `ABS_RZ`; we normalise it
-    /// to 0..1 in `mapping.rs`.
-    #[serde(default = "default_deadman_threshold")]
-    pub deadman_threshold: f32,
-
-    /// Maximum gap between input events before the watchdog kicks in
-    /// and forces a zero-velocity command. Guards against a controller
-    /// that disconnects mid-motion.
-    #[serde(default = "default_watchdog_ms")]
-    pub watchdog_ms: u32,
-
-    /// How often to flush the latest velocity command over UDP.
-    /// 50 Hz is plenty for body-velocity teleop and matches the
-    /// firmware's outer control loop.
-    #[serde(default = "default_send_rate_hz")]
-    pub send_rate_hz: u32,
-}
-
-impl Default for ControllerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            target_addr: default_controller_target_addr(),
-            paired_mac: String::new(),
-            device_name: String::new(),
-            deadzone: default_deadzone(),
-            max_lin_vel: default_max_lin_vel(),
-            max_ang_vel: default_max_ang_vel(),
-            deadman_threshold: default_deadman_threshold(),
-            watchdog_ms: default_watchdog_ms(),
-            send_rate_hz: default_send_rate_hz(),
-        }
+impl NetworkConfig {
+    /// Current AP SSID: prefix + short device id.
+    pub fn ap_ssid(&self) -> String {
+        format!("{}-{}", self.ap_ssid_prefix, short_id())
     }
 }
 
@@ -254,11 +98,7 @@ impl AgentConfig {
         Self {
             robot_name: default_robot_name(),
             state_dir: default_state_dir(),
-            ble: BleConfig::default(),
-            app: AppConfig::default(),
-            ota: OtaConfig::default(),
-            controller: ControllerConfig::default(),
-            net: NetConfig::default(),
+            network: NetworkConfig::default(),
         }
     }
 }
@@ -278,7 +118,7 @@ pub fn config_path() -> PathBuf {
 /// Note: this serialises via `toml::to_string_pretty`, which loses any
 /// comments that were present in the source file. The shipped template at
 /// `deploy/examples/agent.toml` is fully commented; the first call to
-/// `save` after a BLE-driven edit will replace it with concrete values.
+/// `save` after an app-driven edit will replace it with concrete values.
 pub fn save(cfg: &AgentConfig, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -310,58 +150,24 @@ fn default_state_dir() -> PathBuf {
     PathBuf::from("/var/lib/bebop")
 }
 
-fn default_ble_local_name() -> String {
-    format!("Bebop-{}", short_id())
+fn default_network_mode() -> String {
+    "auto".into()
 }
 
-fn default_app_name() -> String {
-    "bebop-app".into()
+fn default_ap_ssid_prefix() -> String {
+    "Bebop".into()
 }
 
-fn default_ota_poll_secs() -> u64 {
-    300
+fn default_ap_password() -> String {
+    DEFAULT_AP_PASSWORD.into()
 }
 
-fn default_channel() -> String {
-    "stable".into()
+fn default_ap_auto_after_secs() -> u64 {
+    25
 }
 
-fn default_controller_target_addr() -> String {
-    // bebop-linux's documented teleop UDP endpoint
-    // (firmware/bebop-linux/README.md).
-    "127.0.0.1:10000".into()
-}
-
-fn default_deadzone() -> f32 {
-    0.10
-}
-
-fn default_max_lin_vel() -> f32 {
-    0.6
-}
-
-fn default_max_ang_vel() -> f32 {
-    1.5
-}
-
-fn default_deadman_threshold() -> f32 {
-    0.5
-}
-
-fn default_watchdog_ms() -> u32 {
-    200
-}
-
-fn default_send_rate_hz() -> u32 {
-    50
-}
-
-fn default_net_bind_addr() -> String {
+fn default_setup_bind_addr() -> String {
     "0.0.0.0:9091".into()
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn hostname_or(fallback: String) -> String {
@@ -370,11 +176,31 @@ fn hostname_or(fallback: String) -> String {
         .unwrap_or(fallback)
 }
 
-/// Short, stable-ish per-device id for advertising names.
+/// Short, stable-ish per-device id used to make AP SSIDs unique.
 /// Uses the machine-id (truncated) when available.
 fn short_id() -> String {
     std::fs::read_to_string("/etc/machine-id")
         .ok()
         .map(|s| s.trim().chars().take(6).collect::<String>())
         .unwrap_or_else(|| "000000".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_valid() {
+        let cfg = NetworkConfig::default();
+        assert_eq!(cfg.mode, "auto");
+        assert!(cfg.ap_password.len() >= 8);
+        assert!(!cfg.ap_ssid().is_empty());
+    }
+
+    #[test]
+    fn parses_minimal_config() {
+        let cfg: AgentConfig = toml::from_str("robot_name = \"lab\"").unwrap();
+        assert_eq!(cfg.robot_name, "lab");
+        assert_eq!(cfg.network.mode, "auto");
+    }
 }

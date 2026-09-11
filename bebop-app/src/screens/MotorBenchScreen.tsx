@@ -26,12 +26,6 @@ interface MotorBenchProps {
   /** Optional override for the runtime port. Defaults to 9090. */
   runtimePort?: number;
   onBack: () => void;
-  /** When provided, render a "Bluetooth controller" link so the operator
-   *  can jump straight from dial-in to gamepad pairing without bouncing
-   *  through the dashboard. Only set on the BLE-supported path: the
-   *  controller subsystem lives behind `BebopTransport` (which the
-   *  IP-only path doesn't have). */
-  onOpenControllers?: () => void;
   /** When provided, render a "Live video" link to the firmware's MJPEG
    *  stream (`GET /video`). Available on both connection paths — the
    *  endpoint only needs the runtime's host/port. */
@@ -61,7 +55,6 @@ export function MotorBenchScreen({
   robotIp,
   runtimePort = 9090,
   onBack,
-  onOpenControllers,
   onOpenVideo,
   onOpenTeleop,
 }: MotorBenchProps) {
@@ -979,11 +972,6 @@ export function MotorBenchScreen({
         {onOpenTeleop ? (
           <Button variant="secondary" onClick={onOpenTeleop}>
             Teleop · live video &amp; drive
-          </Button>
-        ) : null}
-        {onOpenControllers ? (
-          <Button variant="ghost" onClick={onOpenControllers}>
-            Bluetooth controller
           </Button>
         ) : null}
         {onOpenVideo ? (

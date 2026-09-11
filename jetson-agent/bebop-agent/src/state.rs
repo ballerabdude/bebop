@@ -16,54 +16,8 @@ pub struct AppState {
 
 struct Inner {
     config: RwLock<AgentConfig>,
-    app: RwLock<AppRuntimeStatus>,
-    ota: RwLock<OtaRuntimeStatus>,
     wifi: RwLock<WifiRuntimeStatus>,
-    controller: RwLock<ControllerRuntimeStatus>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AppRuntimeStatus {
-    pub image: String,
-    pub image_digest: String,
-    pub container_id: String,
-    pub state: AppLifecycle,
-    pub started_at_unix: i64,
-    pub restart_count: i32,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum AppLifecycle {
-    #[default]
-    Stopped,
-    Starting,
-    Running,
-    Crashed,
-    // Scaffolding: set by the OTA updater while a container swap is in
-    // flight. Wiring lands when `ota::apply` is taught to flip app
-    // lifecycle (currently it only mutates `OtaLifecycle`).
-    #[allow(dead_code)]
-    Updating,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct OtaRuntimeStatus {
-    pub state: OtaLifecycle,
-    pub current_image: String,
-    pub target_image: String,
-    pub progress_percent: u32,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum OtaLifecycle {
-    #[default]
-    Idle,
-    Checking,
-    Downloading,
-    Applying,
-    Success,
-    Failed,
+    ap: RwLock<ApRuntimeStatus>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -74,17 +28,18 @@ pub struct WifiRuntimeStatus {
     pub signal_dbm: i32,
 }
 
-/// Live state of the Bluetooth-controller subsystem. Mirrors the
-/// `bebop.v1.ControllerStatus` proto so the dispatcher can convert
-/// without hand-writing field maps in two places.
+/// Live state of the setup SoftAP.
 #[derive(Debug, Clone, Default)]
-pub struct ControllerRuntimeStatus {
-    pub paired_mac: String,
-    pub device_name: String,
-    pub connected: bool,
-    pub armed: bool,
-    pub estop_latched: bool,
-    pub last_event_unix_ms: i64,
+pub struct ApRuntimeStatus {
+    pub active: bool,
+    pub ssid: String,
+    /// `host:port` the app should use to reach the setup server while the
+    /// AP is up (e.g. `192.168.42.1:9091`).
+    pub address: String,
+    /// True while a Wi-Fi join triggered from the setup UI is in flight.
+    /// Suppresses the AP supervisor so it doesn't race the connection.
+    pub connecting: bool,
+    pub last_error: Option<String>,
 }
 
 impl AppState {
@@ -92,10 +47,8 @@ impl AppState {
         Ok(Self {
             inner: Arc::new(Inner {
                 config: RwLock::new(config),
-                app: RwLock::new(AppRuntimeStatus::default()),
-                ota: RwLock::new(OtaRuntimeStatus::default()),
                 wifi: RwLock::new(WifiRuntimeStatus::default()),
-                controller: RwLock::new(ControllerRuntimeStatus::default()),
+                ap: RwLock::new(ApRuntimeStatus::default()),
             }),
         })
     }
@@ -112,22 +65,6 @@ impl AppState {
         f(&mut g);
     }
 
-    pub async fn app_status(&self) -> AppRuntimeStatus {
-        self.inner.app.read().await.clone()
-    }
-
-    pub async fn set_app_status(&self, s: AppRuntimeStatus) {
-        *self.inner.app.write().await = s;
-    }
-
-    pub async fn ota_status(&self) -> OtaRuntimeStatus {
-        self.inner.ota.read().await.clone()
-    }
-
-    pub async fn set_ota_status(&self, s: OtaRuntimeStatus) {
-        *self.inner.ota.write().await = s;
-    }
-
     pub async fn wifi_status(&self) -> WifiRuntimeStatus {
         self.inner.wifi.read().await.clone()
     }
@@ -136,23 +73,15 @@ impl AppState {
         *self.inner.wifi.write().await = s;
     }
 
-    pub async fn controller_status(&self) -> ControllerRuntimeStatus {
-        self.inner.controller.read().await.clone()
+    pub async fn ap_status(&self) -> ApRuntimeStatus {
+        self.inner.ap.read().await.clone()
     }
 
-    #[allow(dead_code)] // parallel API to set_wifi_status; reserved for future use
-    pub async fn set_controller_status(&self, s: ControllerRuntimeStatus) {
-        *self.inner.controller.write().await = s;
-    }
-
-    /// Apply `f` to the current controller status in-place. Used by the
-    /// teleop loop where we only flip a couple of fields and want to
-    /// avoid cloning + re-storing the whole struct.
-    pub async fn update_controller_status<F>(&self, f: F)
+    pub async fn update_ap_status<F>(&self, f: F)
     where
-        F: FnOnce(&mut ControllerRuntimeStatus),
+        F: FnOnce(&mut ApRuntimeStatus),
     {
-        let mut g = self.inner.controller.write().await;
+        let mut g = self.inner.ap.write().await;
         f(&mut g);
     }
 }

@@ -14,43 +14,27 @@ repository = "https://github.com/your-org/bebop"
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1.40", features = ["full"] }
-tokio-stream = "0.1"
+tokio   = { version = "1.40", features = ["full"] }
 futures = "0.3"
-async-trait = "0.1"
 
 # Errors / logging
-anyhow = "1.0"
-thiserror = "1.0"
-tracing = "0.1"
+anyhow             = "1.0"
+thiserror          = "1.0"
+tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-toml = "0.8"
+toml  = "0.8"
 
 # Protobuf
-prost = "0.13"
+prost       = "0.13"
 prost-build = "0.13"
 
-# Docker API client
-bollard = "0.17"
-
-# HTTP (for OTA manifest checks)
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-
-# Network control surface (mirror of the BLE GATT server, for clients on
-# the LAN). Same `axum 0.7` we use in `bebop-linux`'s runtime server so
-# the two stacks stay in sync.
+# Setup control surface (protobuf-over-WS + status page). Same `axum 0.7`
+# used by `bebop-linux`'s runtime server so the two stacks stay in sync.
 axum       = { version = "0.7", features = ["ws", "macros"] }
-tower      = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
-
-# UUIDs, time, misc
-uuid = { version = "1.10", features = ["v4", "serde"] }
-time = { version = "0.3", features = ["serde", "formatting"] }
-bytes = "1.7"
 
 # Local crates
 bebop-proto = { path = "bebop-proto" }

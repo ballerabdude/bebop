@@ -632,8 +632,7 @@ export class RuntimeTransport {
     const bytes = new Uint8Array(ev.data);
     // A corrupt/partial frame decoding off the wire shouldn't tear down
     // the whole WS receive path. Drop quietly and let the next frame
-    // recover — mirrors the wsAgentTransport's handling. The firmware's
-    // telemetry pump is resilient to a missed frame.
+    // recover. The firmware's telemetry pump is resilient to a missed frame.
     let msg: ServerRuntimeMessage;
     try {
       msg = fromBinary(ServerRuntimeMessageSchema, bytes);

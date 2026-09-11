@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file bebop.proto.
  */
 export const file_bebop: GenFile = /*@__PURE__*/
-  fileDesc("CgtiZWJvcC5wcm90bxIIYmVib3AudjEipQcKDUNsaWVudFJlcXVlc3QSEgoKcmVxdWVzdF9pZBgBIAEoDRI5Cg9nZXRfZGV2aWNlX2luZm8YCiABKAsyHi5iZWJvcC52MS5HZXREZXZpY2VJbmZvUmVxdWVzdEgAEi4KCXNjYW5fd2lmaRgLIAEoCzIZLmJlYm9wLnYxLlNjYW5XaWZpUmVxdWVzdEgAEkMKFHNldF93aWZpX2NyZWRlbnRpYWxzGAwgASgLMiMuYmVib3AudjEuU2V0V2lmaUNyZWRlbnRpYWxzUmVxdWVzdEgAEjkKD2dldF93aWZpX3N0YXR1cxgNIAEoCzIeLmJlYm9wLnYxLkdldFdpZmlTdGF0dXNSZXF1ZXN0SAASOwoQc2V0X3JvYm90X2NvbmZpZxgOIAEoCzIfLmJlYm9wLnYxLlNldFJvYm90Q29uZmlnUmVxdWVzdEgAEjsKEGdldF9yb2JvdF9jb25maWcYDyABKAsyHy5iZWJvcC52MS5HZXRSb2JvdENvbmZpZ1JlcXVlc3RIABI3Cg5nZXRfYXBwX3N0YXR1cxgQIAEoCzIdLmJlYm9wLnYxLkdldEFwcFN0YXR1c1JlcXVlc3RIABIyCgtjb250cm9sX2FwcBgRIAEoCzIbLmJlYm9wLnYxLkNvbnRyb2xBcHBSZXF1ZXN0SAASMgoLdHJpZ2dlcl9vdGEYEiABKAsyGy5iZWJvcC52MS5UcmlnZ2VyT3RhUmVxdWVzdEgAEjcKDmdldF9vdGFfc3RhdHVzGBMgASgLMh0uYmVib3AudjEuR2V0T3RhU3RhdHVzUmVxdWVzdEgAEjUKDXNldF9hcHBfaW1hZ2UYFCABKAsyHC5iZWJvcC52MS5TZXRBcHBJbWFnZVJlcXVlc3RIABI8ChBzY2FuX2NvbnRyb2xsZXJzGBUgASgLMiAuYmVib3AudjEuU2NhbkNvbnRyb2xsZXJzUmVxdWVzdEgAEjoKD3BhaXJfY29udHJvbGxlchgWIAEoCzIfLmJlYm9wLnYxLlBhaXJDb250cm9sbGVyUmVxdWVzdEgAEj4KEXVucGFpcl9jb250cm9sbGVyGBcgASgLMiEuYmVib3AudjEuVW5wYWlyQ29udHJvbGxlclJlcXVlc3RIABJFChVnZXRfY29udHJvbGxlcl9zdGF0dXMYGCABKAsyJC5iZWJvcC52MS5HZXRDb250cm9sbGVyU3RhdHVzUmVxdWVzdEgAQgkKB3BheWxvYWQi+QMKDUFnZW50UmVzcG9uc2USEgoKcmVxdWVzdF9pZBgBIAEoDRIoCgZzdGF0dXMYAiABKA4yGC5iZWJvcC52MS5SZXNwb25zZVN0YXR1cxIPCgdtZXNzYWdlGAMgASgJEisKC2RldmljZV9pbmZvGAogASgLMhQuYmVib3AudjEuRGV2aWNlSW5mb0gAEjQKEHdpZmlfc2Nhbl9yZXN1bHQYCyABKAsyGC5iZWJvcC52MS5XaWZpU2NhblJlc3VsdEgAEisKC3dpZmlfc3RhdHVzGAwgASgLMhQuYmVib3AudjEuV2lmaVN0YXR1c0gAEi0KDHJvYm90X2NvbmZpZxgNIAEoCzIVLmJlYm9wLnYxLlJvYm90Q29uZmlnSAASKQoKYXBwX3N0YXR1cxgOIAEoCzITLmJlYm9wLnYxLkFwcFN0YXR1c0gAEikKCm90YV9zdGF0dXMYDyABKAsyEy5iZWJvcC52MS5PdGFTdGF0dXNIABJAChZjb250cm9sbGVyX3NjYW5fcmVzdWx0GBAgASgLMh4uYmVib3AudjEuQ29udHJvbGxlclNjYW5SZXN1bHRIABI3ChFjb250cm9sbGVyX3N0YXR1cxgRIAEoCzIaLmJlYm9wLnYxLkNvbnRyb2xsZXJTdGF0dXNIAEIJCgdwYXlsb2FkIhYKFEdldERldmljZUluZm9SZXF1ZXN0InQKCkRldmljZUluZm8SFQoNc2VyaWFsX251bWJlchgBIAEoCRINCgVtb2RlbBgCIAEoCRIVCg1hZ2VudF92ZXJzaW9uGAMgASgJEhcKD2pldHBhY2tfdmVyc2lvbhgEIAEoCRIQCghob3N0bmFtZRgFIAEoCSIRCg9TY2FuV2lmaVJlcXVlc3QiUAoLV2lmaU5ldHdvcmsSDAoEc3NpZBgBIAEoCRISCgpzaWduYWxfZGJtGAIgASgFEhAKCHNlY3VyaXR5GAMgASgJEg0KBXNhdmVkGAQgASgIIjkKDldpZmlTY2FuUmVzdWx0EicKCG5ldHdvcmtzGAEgAygLMhUuYmVib3AudjEuV2lmaU5ldHdvcmsiSwoZU2V0V2lmaUNyZWRlbnRpYWxzUmVxdWVzdBIMCgRzc2lkGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEg4KBmhpZGRlbhgDIAEoCCIWChRHZXRXaWZpU3RhdHVzUmVxdWVzdCJVCgpXaWZpU3RhdHVzEhEKCWNvbm5lY3RlZBgBIAEoCBIMCgRzc2lkGAIgASgJEhIKCmlwX2FkZHJlc3MYAyABKAkSEgoKc2lnbmFsX2RibRgEIAEoBSKkAQoLUm9ib3RDb25maWcSEgoKcm9ib3RfbmFtZRgBIAEoCRIQCghvd25lcl9pZBgCIAEoCRIQCgh0aW1lem9uZRgDIAEoCRIvCgVleHRyYRhkIAMoCzIgLmJlYm9wLnYxLlJvYm90Q29uZmlnLkV4dHJhRW50cnkaLAoKRXh0cmFFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIj4KFVNldFJvYm90Q29uZmlnUmVxdWVzdBIlCgZjb25maWcYASABKAsyFS5iZWJvcC52MS5Sb2JvdENvbmZpZyIXChVHZXRSb2JvdENvbmZpZ1JlcXVlc3QiqwEKCUFwcFN0YXR1cxIQCghhcHBfbmFtZRgBIAEoCRINCgVpbWFnZRgCIAEoCRIUCgxpbWFnZV9kaWdlc3QYAyABKAkSIQoFc3RhdGUYBCABKA4yEi5iZWJvcC52MS5BcHBTdGF0ZRIUCgxjb250YWluZXJfaWQYBSABKAkSFwoPc3RhcnRlZF9hdF91bml4GAYgASgDEhUKDXJlc3RhcnRfY291bnQYByABKAUiFQoTR2V0QXBwU3RhdHVzUmVxdWVzdCJMChFDb250cm9sQXBwUmVxdWVzdBIQCghhcHBfbmFtZRgBIAEoCRIlCgdjb21tYW5kGAIgASgOMhQuYmVib3AudjEuQXBwQ29tbWFuZCIjChJTZXRBcHBJbWFnZVJlcXVlc3QSDQoFaW1hZ2UYASABKAkiKQoRVHJpZ2dlck90YVJlcXVlc3QSFAoMdGFyZ2V0X2ltYWdlGAEgASgJIoQBCglPdGFTdGF0dXMSIQoFc3RhdGUYASABKA4yEi5iZWJvcC52MS5PdGFTdGF0ZRIVCg1jdXJyZW50X2ltYWdlGAIgASgJEhQKDHRhcmdldF9pbWFnZRgDIAEoCRIYChBwcm9ncmVzc19wZXJjZW50GAQgASgNEg0KBWVycm9yGAUgASgJIhUKE0dldE90YVN0YXR1c1JlcXVlc3QiLAoWU2NhbkNvbnRyb2xsZXJzUmVxdWVzdBISCgp0aW1lb3V0X21zGAEgASgNIiQKFVBhaXJDb250cm9sbGVyUmVxdWVzdBILCgNtYWMYASABKAkiJgoXVW5wYWlyQ29udHJvbGxlclJlcXVlc3QSCwoDbWFjGAEgASgJIhwKGkdldENvbnRyb2xsZXJTdGF0dXNSZXF1ZXN0InAKFERpc2NvdmVyZWRDb250cm9sbGVyEgsKA21hYxgBIAEoCRIMCgRuYW1lGAIgASgJEgwKBHJzc2kYAyABKAUSDgoGcGFpcmVkGAQgASgIEhEKCWNvbm5lY3RlZBgFIAEoCBIMCgRraW5kGAYgASgJIkcKFENvbnRyb2xsZXJTY2FuUmVzdWx0Ei8KB2RldmljZXMYASADKAsyHi5iZWJvcC52MS5EaXNjb3ZlcmVkQ29udHJvbGxlciK2AQoQQ29udHJvbGxlclN0YXR1cxIPCgdlbmFibGVkGAEgASgIEhIKCnBhaXJlZF9tYWMYAiABKAkSEwoLZGV2aWNlX25hbWUYAyABKAkSEQoJY29ubmVjdGVkGAQgASgIEg0KBWFybWVkGAUgASgIEhUKDWVzdG9wX2xhdGNoZWQYBiABKAgSGgoSbGFzdF9ldmVudF91bml4X21zGAcgASgDEhMKC3RhcmdldF9hZGRyGAggASgJKqcBCg5SZXNwb25zZVN0YXR1cxIfChtSRVNQT05TRV9TVEFUVVNfVU5TUEVDSUZJRUQQABIWChJSRVNQT05TRV9TVEFUVVNfT0sQARIZChVSRVNQT05TRV9TVEFUVVNfRVJST1IQAhIgChxSRVNQT05TRV9TVEFUVVNfVU5BVVRIT1JJWkVEEAMSHwobUkVTUE9OU0VfU1RBVFVTX0lOX1BST0dSRVNTEAQqmgEKCEFwcFN0YXRlEhkKFUFQUF9TVEFURV9VTlNQRUNJRklFRBAAEhUKEUFQUF9TVEFURV9TVE9QUEVEEAESFgoSQVBQX1NUQVRFX1NUQVJUSU5HEAISFQoRQVBQX1NUQVRFX1JVTk5JTkcQAxIVChFBUFBfU1RBVEVfQ1JBU0hFRBAEEhYKEkFQUF9TVEFURV9VUERBVElORxAFKm8KCkFwcENvbW1hbmQSGwoXQVBQX0NPTU1BTkRfVU5TUEVDSUZJRUQQABIVChFBUFBfQ09NTUFORF9TVEFSVBABEhQKEEFQUF9DT01NQU5EX1NUT1AQAhIXChNBUFBfQ09NTUFORF9SRVNUQVJUEAMqsQEKCE90YVN0YXRlEhkKFU9UQV9TVEFURV9VTlNQRUNJRklFRBAAEhIKDk9UQV9TVEFURV9JRExFEAESFgoST1RBX1NUQVRFX0NIRUNLSU5HEAISGQoVT1RBX1NUQVRFX0RPV05MT0FESU5HEAMSFgoST1RBX1NUQVRFX0FQUExZSU5HEAQSFQoRT1RBX1NUQVRFX1NVQ0NFU1MQBRIUChBPVEFfU1RBVEVfRkFJTEVEEAZiBnByb3RvMw");
+  fileDesc("CgtiZWJvcC5wcm90bxIIYmVib3AudjEilQQKDUNsaWVudFJlcXVlc3QSEgoKcmVxdWVzdF9pZBgBIAEoDRI5Cg9nZXRfZGV2aWNlX2luZm8YCiABKAsyHi5iZWJvcC52MS5HZXREZXZpY2VJbmZvUmVxdWVzdEgAEi4KCXNjYW5fd2lmaRgLIAEoCzIZLmJlYm9wLnYxLlNjYW5XaWZpUmVxdWVzdEgAEkMKFHNldF93aWZpX2NyZWRlbnRpYWxzGAwgASgLMiMuYmVib3AudjEuU2V0V2lmaUNyZWRlbnRpYWxzUmVxdWVzdEgAEjkKD2dldF93aWZpX3N0YXR1cxgNIAEoCzIeLmJlYm9wLnYxLkdldFdpZmlTdGF0dXNSZXF1ZXN0SAASOwoQc2V0X3JvYm90X2NvbmZpZxgOIAEoCzIfLmJlYm9wLnYxLlNldFJvYm90Q29uZmlnUmVxdWVzdEgAEjsKEGdldF9yb2JvdF9jb25maWcYDyABKAsyHy5iZWJvcC52MS5HZXRSb2JvdENvbmZpZ1JlcXVlc3RIABI/ChJnZXRfbmV0d29ya19jb25maWcYECABKAsyIS5iZWJvcC52MS5HZXROZXR3b3JrQ29uZmlnUmVxdWVzdEgAEj8KEnNldF9uZXR3b3JrX2NvbmZpZxgRIAEoCzIhLmJlYm9wLnYxLlNldE5ldHdvcmtDb25maWdSZXF1ZXN0SABCCQoHcGF5bG9hZCLbAgoNQWdlbnRSZXNwb25zZRISCgpyZXF1ZXN0X2lkGAEgASgNEigKBnN0YXR1cxgCIAEoDjIYLmJlYm9wLnYxLlJlc3BvbnNlU3RhdHVzEg8KB21lc3NhZ2UYAyABKAkSKwoLZGV2aWNlX2luZm8YCiABKAsyFC5iZWJvcC52MS5EZXZpY2VJbmZvSAASNAoQd2lmaV9zY2FuX3Jlc3VsdBgLIAEoCzIYLmJlYm9wLnYxLldpZmlTY2FuUmVzdWx0SAASKwoLd2lmaV9zdGF0dXMYDCABKAsyFC5iZWJvcC52MS5XaWZpU3RhdHVzSAASLQoMcm9ib3RfY29uZmlnGA0gASgLMhUuYmVib3AudjEuUm9ib3RDb25maWdIABIxCg5uZXR3b3JrX2NvbmZpZxgOIAEoCzIXLmJlYm9wLnYxLk5ldHdvcmtDb25maWdIAEIJCgdwYXlsb2FkIhYKFEdldERldmljZUluZm9SZXF1ZXN0InQKCkRldmljZUluZm8SFQoNc2VyaWFsX251bWJlchgBIAEoCRINCgVtb2RlbBgCIAEoCRIVCg1hZ2VudF92ZXJzaW9uGAMgASgJEhcKD2pldHBhY2tfdmVyc2lvbhgEIAEoCRIQCghob3N0bmFtZRgFIAEoCSIRCg9TY2FuV2lmaVJlcXVlc3QiUAoLV2lmaU5ldHdvcmsSDAoEc3NpZBgBIAEoCRISCgpzaWduYWxfZGJtGAIgASgFEhAKCHNlY3VyaXR5GAMgASgJEg0KBXNhdmVkGAQgASgIIjkKDldpZmlTY2FuUmVzdWx0EicKCG5ldHdvcmtzGAEgAygLMhUuYmVib3AudjEuV2lmaU5ldHdvcmsiSwoZU2V0V2lmaUNyZWRlbnRpYWxzUmVxdWVzdBIMCgRzc2lkGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEg4KBmhpZGRlbhgDIAEoCCIWChRHZXRXaWZpU3RhdHVzUmVxdWVzdCJVCgpXaWZpU3RhdHVzEhEKCWNvbm5lY3RlZBgBIAEoCBIMCgRzc2lkGAIgASgJEhIKCmlwX2FkZHJlc3MYAyABKAkSEgoKc2lnbmFsX2RibRgEIAEoBSKkAQoLUm9ib3RDb25maWcSEgoKcm9ib3RfbmFtZRgBIAEoCRIQCghvd25lcl9pZBgCIAEoCRIQCgh0aW1lem9uZRgDIAEoCRIvCgVleHRyYRhkIAMoCzIgLmJlYm9wLnYxLlJvYm90Q29uZmlnLkV4dHJhRW50cnkaLAoKRXh0cmFFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIj4KFVNldFJvYm90Q29uZmlnUmVxdWVzdBIlCgZjb25maWcYASABKAsyFS5iZWJvcC52MS5Sb2JvdENvbmZpZyIXChVHZXRSb2JvdENvbmZpZ1JlcXVlc3QiQgoNTmV0d29ya0NvbmZpZxIMCgRtb2RlGAEgASgJEg8KB2FwX3NzaWQYAiABKAkSEgoKYXBfYWRkcmVzcxgDIAEoCSIZChdHZXROZXR3b3JrQ29uZmlnUmVxdWVzdCJCChdTZXROZXR3b3JrQ29uZmlnUmVxdWVzdBInCgZjb25maWcYASABKAsyFy5iZWJvcC52MS5OZXR3b3JrQ29uZmlnKqcBCg5SZXNwb25zZVN0YXR1cxIfChtSRVNQT05TRV9TVEFUVVNfVU5TUEVDSUZJRUQQABIWChJSRVNQT05TRV9TVEFUVVNfT0sQARIZChVSRVNQT05TRV9TVEFUVVNfRVJST1IQAhIgChxSRVNQT05TRV9TVEFUVVNfVU5BVVRIT1JJWkVEEAMSHwobUkVTUE9OU0VfU1RBVFVTX0lOX1BST0dSRVNTEARiBnByb3RvMw");
 
 /**
  * @generated from message bebop.v1.ClientRequest
@@ -62,58 +62,16 @@ export type ClientRequest = Message<"bebop.v1.ClientRequest"> & {
     case: "getRobotConfig";
   } | {
     /**
-     * @generated from field: bebop.v1.GetAppStatusRequest get_app_status = 16;
+     * @generated from field: bebop.v1.GetNetworkConfigRequest get_network_config = 16;
      */
-    value: GetAppStatusRequest;
-    case: "getAppStatus";
+    value: GetNetworkConfigRequest;
+    case: "getNetworkConfig";
   } | {
     /**
-     * @generated from field: bebop.v1.ControlAppRequest control_app = 17;
+     * @generated from field: bebop.v1.SetNetworkConfigRequest set_network_config = 17;
      */
-    value: ControlAppRequest;
-    case: "controlApp";
-  } | {
-    /**
-     * @generated from field: bebop.v1.TriggerOtaRequest trigger_ota = 18;
-     */
-    value: TriggerOtaRequest;
-    case: "triggerOta";
-  } | {
-    /**
-     * @generated from field: bebop.v1.GetOtaStatusRequest get_ota_status = 19;
-     */
-    value: GetOtaStatusRequest;
-    case: "getOtaStatus";
-  } | {
-    /**
-     * @generated from field: bebop.v1.SetAppImageRequest set_app_image = 20;
-     */
-    value: SetAppImageRequest;
-    case: "setAppImage";
-  } | {
-    /**
-     * @generated from field: bebop.v1.ScanControllersRequest scan_controllers = 21;
-     */
-    value: ScanControllersRequest;
-    case: "scanControllers";
-  } | {
-    /**
-     * @generated from field: bebop.v1.PairControllerRequest pair_controller = 22;
-     */
-    value: PairControllerRequest;
-    case: "pairController";
-  } | {
-    /**
-     * @generated from field: bebop.v1.UnpairControllerRequest unpair_controller = 23;
-     */
-    value: UnpairControllerRequest;
-    case: "unpairController";
-  } | {
-    /**
-     * @generated from field: bebop.v1.GetControllerStatusRequest get_controller_status = 24;
-     */
-    value: GetControllerStatusRequest;
-    case: "getControllerStatus";
+    value: SetNetworkConfigRequest;
+    case: "setNetworkConfig";
   } | { case: undefined; value?: undefined };
 };
 
@@ -174,28 +132,10 @@ export type AgentResponse = Message<"bebop.v1.AgentResponse"> & {
     case: "robotConfig";
   } | {
     /**
-     * @generated from field: bebop.v1.AppStatus app_status = 14;
+     * @generated from field: bebop.v1.NetworkConfig network_config = 14;
      */
-    value: AppStatus;
-    case: "appStatus";
-  } | {
-    /**
-     * @generated from field: bebop.v1.OtaStatus ota_status = 15;
-     */
-    value: OtaStatus;
-    case: "otaStatus";
-  } | {
-    /**
-     * @generated from field: bebop.v1.ControllerScanResult controller_scan_result = 16;
-     */
-    value: ControllerScanResult;
-    case: "controllerScanResult";
-  } | {
-    /**
-     * @generated from field: bebop.v1.ControllerStatus controller_status = 17;
-     */
-    value: ControllerStatus;
-    case: "controllerStatus";
+    value: NetworkConfig;
+    case: "networkConfig";
   } | { case: undefined; value?: undefined };
 };
 
@@ -459,383 +399,61 @@ export const GetRobotConfigRequestSchema: GenMessage<GetRobotConfigRequest> = /*
   messageDesc(file_bebop, 12);
 
 /**
- * @generated from message bebop.v1.AppStatus
+ * @generated from message bebop.v1.NetworkConfig
  */
-export type AppStatus = Message<"bebop.v1.AppStatus"> & {
+export type NetworkConfig = Message<"bebop.v1.NetworkConfig"> & {
   /**
-   * @generated from field: string app_name = 1;
+   * @generated from field: string mode = 1;
    */
-  appName: string;
+  mode: string;
 
   /**
-   * e.g. "registry/bebop-app:1.2.3"
-   *
-   * @generated from field: string image = 2;
+   * @generated from field: string ap_ssid = 2;
    */
-  image: string;
+  apSsid: string;
 
   /**
-   * @generated from field: string image_digest = 3;
+   * @generated from field: string ap_address = 3;
    */
-  imageDigest: string;
-
-  /**
-   * @generated from field: bebop.v1.AppState state = 4;
-   */
-  state: AppState;
-
-  /**
-   * @generated from field: string container_id = 5;
-   */
-  containerId: string;
-
-  /**
-   * @generated from field: int64 started_at_unix = 6;
-   */
-  startedAtUnix: bigint;
-
-  /**
-   * @generated from field: int32 restart_count = 7;
-   */
-  restartCount: number;
+  apAddress: string;
 };
 
 /**
- * Describes the message bebop.v1.AppStatus.
- * Use `create(AppStatusSchema)` to create a new message.
+ * Describes the message bebop.v1.NetworkConfig.
+ * Use `create(NetworkConfigSchema)` to create a new message.
  */
-export const AppStatusSchema: GenMessage<AppStatus> = /*@__PURE__*/
+export const NetworkConfigSchema: GenMessage<NetworkConfig> = /*@__PURE__*/
   messageDesc(file_bebop, 13);
 
 /**
- * @generated from message bebop.v1.GetAppStatusRequest
+ * @generated from message bebop.v1.GetNetworkConfigRequest
  */
-export type GetAppStatusRequest = Message<"bebop.v1.GetAppStatusRequest"> & {
+export type GetNetworkConfigRequest = Message<"bebop.v1.GetNetworkConfigRequest"> & {
 };
 
 /**
- * Describes the message bebop.v1.GetAppStatusRequest.
- * Use `create(GetAppStatusRequestSchema)` to create a new message.
+ * Describes the message bebop.v1.GetNetworkConfigRequest.
+ * Use `create(GetNetworkConfigRequestSchema)` to create a new message.
  */
-export const GetAppStatusRequestSchema: GenMessage<GetAppStatusRequest> = /*@__PURE__*/
+export const GetNetworkConfigRequestSchema: GenMessage<GetNetworkConfigRequest> = /*@__PURE__*/
   messageDesc(file_bebop, 14);
 
 /**
- * @generated from message bebop.v1.ControlAppRequest
+ * @generated from message bebop.v1.SetNetworkConfigRequest
  */
-export type ControlAppRequest = Message<"bebop.v1.ControlAppRequest"> & {
+export type SetNetworkConfigRequest = Message<"bebop.v1.SetNetworkConfigRequest"> & {
   /**
-   * @generated from field: string app_name = 1;
+   * @generated from field: bebop.v1.NetworkConfig config = 1;
    */
-  appName: string;
-
-  /**
-   * @generated from field: bebop.v1.AppCommand command = 2;
-   */
-  command: AppCommand;
+  config?: NetworkConfig | undefined;
 };
 
 /**
- * Describes the message bebop.v1.ControlAppRequest.
- * Use `create(ControlAppRequestSchema)` to create a new message.
+ * Describes the message bebop.v1.SetNetworkConfigRequest.
+ * Use `create(SetNetworkConfigRequestSchema)` to create a new message.
  */
-export const ControlAppRequestSchema: GenMessage<ControlAppRequest> = /*@__PURE__*/
+export const SetNetworkConfigRequestSchema: GenMessage<SetNetworkConfigRequest> = /*@__PURE__*/
   messageDesc(file_bebop, 15);
-
-/**
- * Update the configured robot-app container image and persist it to
- * the agent's on-disk config. Empty string clears the configured image
- * (the supervisor then idles). The new image takes effect on the next
- * container restart (control_app with APP_COMMAND_RESTART, or
- * stop+start). Response: AppStatus reflecting the current container.
- *
- * @generated from message bebop.v1.SetAppImageRequest
- */
-export type SetAppImageRequest = Message<"bebop.v1.SetAppImageRequest"> & {
-  /**
-   * @generated from field: string image = 1;
-   */
-  image: string;
-};
-
-/**
- * Describes the message bebop.v1.SetAppImageRequest.
- * Use `create(SetAppImageRequestSchema)` to create a new message.
- */
-export const SetAppImageRequestSchema: GenMessage<SetAppImageRequest> = /*@__PURE__*/
-  messageDesc(file_bebop, 16);
-
-/**
- * @generated from message bebop.v1.TriggerOtaRequest
- */
-export type TriggerOtaRequest = Message<"bebop.v1.TriggerOtaRequest"> & {
-  /**
-   * If empty, agent consults its configured update channel.
-   *
-   * @generated from field: string target_image = 1;
-   */
-  targetImage: string;
-};
-
-/**
- * Describes the message bebop.v1.TriggerOtaRequest.
- * Use `create(TriggerOtaRequestSchema)` to create a new message.
- */
-export const TriggerOtaRequestSchema: GenMessage<TriggerOtaRequest> = /*@__PURE__*/
-  messageDesc(file_bebop, 17);
-
-/**
- * @generated from message bebop.v1.OtaStatus
- */
-export type OtaStatus = Message<"bebop.v1.OtaStatus"> & {
-  /**
-   * @generated from field: bebop.v1.OtaState state = 1;
-   */
-  state: OtaState;
-
-  /**
-   * @generated from field: string current_image = 2;
-   */
-  currentImage: string;
-
-  /**
-   * @generated from field: string target_image = 3;
-   */
-  targetImage: string;
-
-  /**
-   * @generated from field: uint32 progress_percent = 4;
-   */
-  progressPercent: number;
-
-  /**
-   * @generated from field: string error = 5;
-   */
-  error: string;
-};
-
-/**
- * Describes the message bebop.v1.OtaStatus.
- * Use `create(OtaStatusSchema)` to create a new message.
- */
-export const OtaStatusSchema: GenMessage<OtaStatus> = /*@__PURE__*/
-  messageDesc(file_bebop, 18);
-
-/**
- * @generated from message bebop.v1.GetOtaStatusRequest
- */
-export type GetOtaStatusRequest = Message<"bebop.v1.GetOtaStatusRequest"> & {
-};
-
-/**
- * Describes the message bebop.v1.GetOtaStatusRequest.
- * Use `create(GetOtaStatusRequestSchema)` to create a new message.
- */
-export const GetOtaStatusRequestSchema: GenMessage<GetOtaStatusRequest> = /*@__PURE__*/
-  messageDesc(file_bebop, 19);
-
-/**
- * @generated from message bebop.v1.ScanControllersRequest
- */
-export type ScanControllersRequest = Message<"bebop.v1.ScanControllersRequest"> & {
-  /**
-   * Discovery duration in milliseconds. Defaults to ~8000 if zero.
-   *
-   * @generated from field: uint32 timeout_ms = 1;
-   */
-  timeoutMs: number;
-};
-
-/**
- * Describes the message bebop.v1.ScanControllersRequest.
- * Use `create(ScanControllersRequestSchema)` to create a new message.
- */
-export const ScanControllersRequestSchema: GenMessage<ScanControllersRequest> = /*@__PURE__*/
-  messageDesc(file_bebop, 20);
-
-/**
- * @generated from message bebop.v1.PairControllerRequest
- */
-export type PairControllerRequest = Message<"bebop.v1.PairControllerRequest"> & {
-  /**
-   * BT MAC address (colon-separated, uppercase) as returned by
-   * ScanControllers. Agent runs `bluetoothctl pair / trust / connect`
-   * and persists the MAC to agent.toml on success.
-   *
-   * @generated from field: string mac = 1;
-   */
-  mac: string;
-};
-
-/**
- * Describes the message bebop.v1.PairControllerRequest.
- * Use `create(PairControllerRequestSchema)` to create a new message.
- */
-export const PairControllerRequestSchema: GenMessage<PairControllerRequest> = /*@__PURE__*/
-  messageDesc(file_bebop, 21);
-
-/**
- * @generated from message bebop.v1.UnpairControllerRequest
- */
-export type UnpairControllerRequest = Message<"bebop.v1.UnpairControllerRequest"> & {
-  /**
-   * BT MAC to remove. If empty, the currently paired controller is
-   * unpaired.
-   *
-   * @generated from field: string mac = 1;
-   */
-  mac: string;
-};
-
-/**
- * Describes the message bebop.v1.UnpairControllerRequest.
- * Use `create(UnpairControllerRequestSchema)` to create a new message.
- */
-export const UnpairControllerRequestSchema: GenMessage<UnpairControllerRequest> = /*@__PURE__*/
-  messageDesc(file_bebop, 22);
-
-/**
- * @generated from message bebop.v1.GetControllerStatusRequest
- */
-export type GetControllerStatusRequest = Message<"bebop.v1.GetControllerStatusRequest"> & {
-};
-
-/**
- * Describes the message bebop.v1.GetControllerStatusRequest.
- * Use `create(GetControllerStatusRequestSchema)` to create a new message.
- */
-export const GetControllerStatusRequestSchema: GenMessage<GetControllerStatusRequest> = /*@__PURE__*/
-  messageDesc(file_bebop, 23);
-
-/**
- * @generated from message bebop.v1.DiscoveredController
- */
-export type DiscoveredController = Message<"bebop.v1.DiscoveredController"> & {
-  /**
-   * @generated from field: string mac = 1;
-   */
-  mac: string;
-
-  /**
-   * @generated from field: string name = 2;
-   */
-  name: string;
-
-  /**
-   * @generated from field: int32 rssi = 3;
-   */
-  rssi: number;
-
-  /**
-   * @generated from field: bool paired = 4;
-   */
-  paired: boolean;
-
-  /**
-   * @generated from field: bool connected = 5;
-   */
-  connected: boolean;
-
-  /**
-   * "gamepad" if the device's Class-of-Device or HID descriptor look
-   * like a gamepad/joystick; "unknown" otherwise. The mobile app
-   * hides non-gamepads by default.
-   *
-   * @generated from field: string kind = 6;
-   */
-  kind: string;
-};
-
-/**
- * Describes the message bebop.v1.DiscoveredController.
- * Use `create(DiscoveredControllerSchema)` to create a new message.
- */
-export const DiscoveredControllerSchema: GenMessage<DiscoveredController> = /*@__PURE__*/
-  messageDesc(file_bebop, 24);
-
-/**
- * @generated from message bebop.v1.ControllerScanResult
- */
-export type ControllerScanResult = Message<"bebop.v1.ControllerScanResult"> & {
-  /**
-   * @generated from field: repeated bebop.v1.DiscoveredController devices = 1;
-   */
-  devices: DiscoveredController[];
-};
-
-/**
- * Describes the message bebop.v1.ControllerScanResult.
- * Use `create(ControllerScanResultSchema)` to create a new message.
- */
-export const ControllerScanResultSchema: GenMessage<ControllerScanResult> = /*@__PURE__*/
-  messageDesc(file_bebop, 25);
-
-/**
- * @generated from message bebop.v1.ControllerStatus
- */
-export type ControllerStatus = Message<"bebop.v1.ControllerStatus"> & {
-  /**
-   * Whether the controller subsystem is enabled in agent.toml.
-   *
-   * @generated from field: bool enabled = 1;
-   */
-  enabled: boolean;
-
-  /**
-   * MAC + cached human-readable name of the currently bound controller.
-   * Empty when no controller has been paired.
-   *
-   * @generated from field: string paired_mac = 2;
-   */
-  pairedMac: string;
-
-  /**
-   * @generated from field: string device_name = 3;
-   */
-  deviceName: string;
-
-  /**
-   * Whether the OS sees the paired controller as currently connected.
-   *
-   * @generated from field: bool connected = 4;
-   */
-  connected: boolean;
-
-  /**
-   * True iff the deadman trigger is held AND the e-stop latch is clear.
-   * Velocity commands only flow downstream when this is true.
-   *
-   * @generated from field: bool armed = 5;
-   */
-  armed: boolean;
-
-  /**
-   * @generated from field: bool estop_latched = 6;
-   */
-  estopLatched: boolean;
-
-  /**
-   * Wall-clock timestamp of the most recent input event from the pad
-   * (milliseconds since the Unix epoch). Zero before any events arrive.
-   *
-   * @generated from field: int64 last_event_unix_ms = 7;
-   */
-  lastEventUnixMs: bigint;
-
-  /**
-   * UDP target the agent forwards teleop commands to (e.g. "127.0.0.1:10000").
-   *
-   * @generated from field: string target_addr = 8;
-   */
-  targetAddr: string;
-};
-
-/**
- * Describes the message bebop.v1.ControllerStatus.
- * Use `create(ControllerStatusSchema)` to create a new message.
- */
-export const ControllerStatusSchema: GenMessage<ControllerStatus> = /*@__PURE__*/
-  messageDesc(file_bebop, 26);
 
 /**
  * @generated from enum bebop.v1.ResponseStatus
@@ -872,122 +490,4 @@ export enum ResponseStatus {
  */
 export const ResponseStatusSchema: GenEnum<ResponseStatus> = /*@__PURE__*/
   enumDesc(file_bebop, 0);
-
-/**
- * @generated from enum bebop.v1.AppState
- */
-export enum AppState {
-  /**
-   * @generated from enum value: APP_STATE_UNSPECIFIED = 0;
-   */
-  UNSPECIFIED = 0,
-
-  /**
-   * @generated from enum value: APP_STATE_STOPPED = 1;
-   */
-  STOPPED = 1,
-
-  /**
-   * @generated from enum value: APP_STATE_STARTING = 2;
-   */
-  STARTING = 2,
-
-  /**
-   * @generated from enum value: APP_STATE_RUNNING = 3;
-   */
-  RUNNING = 3,
-
-  /**
-   * @generated from enum value: APP_STATE_CRASHED = 4;
-   */
-  CRASHED = 4,
-
-  /**
-   * @generated from enum value: APP_STATE_UPDATING = 5;
-   */
-  UPDATING = 5,
-}
-
-/**
- * Describes the enum bebop.v1.AppState.
- */
-export const AppStateSchema: GenEnum<AppState> = /*@__PURE__*/
-  enumDesc(file_bebop, 1);
-
-/**
- * @generated from enum bebop.v1.AppCommand
- */
-export enum AppCommand {
-  /**
-   * @generated from enum value: APP_COMMAND_UNSPECIFIED = 0;
-   */
-  UNSPECIFIED = 0,
-
-  /**
-   * @generated from enum value: APP_COMMAND_START = 1;
-   */
-  START = 1,
-
-  /**
-   * @generated from enum value: APP_COMMAND_STOP = 2;
-   */
-  STOP = 2,
-
-  /**
-   * @generated from enum value: APP_COMMAND_RESTART = 3;
-   */
-  RESTART = 3,
-}
-
-/**
- * Describes the enum bebop.v1.AppCommand.
- */
-export const AppCommandSchema: GenEnum<AppCommand> = /*@__PURE__*/
-  enumDesc(file_bebop, 2);
-
-/**
- * @generated from enum bebop.v1.OtaState
- */
-export enum OtaState {
-  /**
-   * @generated from enum value: OTA_STATE_UNSPECIFIED = 0;
-   */
-  UNSPECIFIED = 0,
-
-  /**
-   * @generated from enum value: OTA_STATE_IDLE = 1;
-   */
-  IDLE = 1,
-
-  /**
-   * @generated from enum value: OTA_STATE_CHECKING = 2;
-   */
-  CHECKING = 2,
-
-  /**
-   * @generated from enum value: OTA_STATE_DOWNLOADING = 3;
-   */
-  DOWNLOADING = 3,
-
-  /**
-   * @generated from enum value: OTA_STATE_APPLYING = 4;
-   */
-  APPLYING = 4,
-
-  /**
-   * @generated from enum value: OTA_STATE_SUCCESS = 5;
-   */
-  SUCCESS = 5,
-
-  /**
-   * @generated from enum value: OTA_STATE_FAILED = 6;
-   */
-  FAILED = 6,
-}
-
-/**
- * Describes the enum bebop.v1.OtaState.
- */
-export const OtaStateSchema: GenEnum<OtaState> = /*@__PURE__*/
-  enumDesc(file_bebop, 3);
 

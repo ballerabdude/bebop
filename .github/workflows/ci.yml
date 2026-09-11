@@ -20,10 +20,9 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # bebop-agent (jetson-agent/) — on-device daemon (BLE GATT, container
-  # supervisor, OTA, controller subsystem). Runs the full host-side check
-  # matrix on x86_64 Linux so the Linux-only modules (bluer, evdev, the
-  # controller supervisor) are in the compile graph.
+  # bebop-agent (jetson-agent/) — on-device provisioning daemon (Wi-Fi setup
+  # + SoftAP fallback + setup server). Runs the host-side check matrix
+  # (fmt, clippy, test) on x86_64 Linux.
   # ---------------------------------------------------------------------------
   rust:
     name: agent · host checks (fmt, clippy, test)
@@ -34,10 +33,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system deps (BlueZ, D-Bus, protoc)
+      - name: Install system deps (protoc)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config protobuf-compiler
+          sudo apt-get install -y protobuf-compiler
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -69,10 +68,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system deps (BlueZ, D-Bus, protoc)
+      - name: Install system deps (protoc)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config protobuf-compiler
+          sudo apt-get install -y protobuf-compiler
 
       - uses: dtolnay/rust-toolchain@master
         with:

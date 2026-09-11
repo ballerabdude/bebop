@@ -1,7 +1,6 @@
 // Segmented control for switching the active control-sensitivity
 // profile (`src/input/profile.ts`). Mounted wherever the user drives:
-// the controllers screen (full form, with descriptions), the motor
-// bench's drive card (on-screen joystick + WASD), and the two
+// the motor bench's drive card (on-screen joystick + WASD) and the two
 // gamepad bridge cards — so the setting is always at hand without a
 // separate settings screen.
 

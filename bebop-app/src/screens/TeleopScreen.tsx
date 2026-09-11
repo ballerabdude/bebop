@@ -69,10 +69,6 @@ interface TeleopScreenProps {
   onBack: () => void;
   /** Label for the back button, e.g. "Back to motor bench". */
   backLabel?: string;
-  /** Optional link to controller pairing — offered when the robot has
-   *  no wheeled drive (body-velocity teleop pairs a pad to the robot's
-   *  own BlueZ instead) and as a convenience link in the footer. */
-  onOpenControllers?: () => void;
 }
 
 const MODE_LABEL: Record<RuntimeMode, string> = {
@@ -98,7 +94,6 @@ export function TeleopScreen({
   runtimePort = 9090,
   onBack,
   backLabel = "Back",
-  onOpenControllers,
 }: TeleopScreenProps) {
   // Video stream + runtime link are independent transports (HTTP vs
   // WS), so the screen renders immediately: the feed shows its own
@@ -950,24 +945,7 @@ export function TeleopScreen({
                 there&rsquo;s nothing to drive from the app. Aim the camera
                 with the pad on the right, or use the motor bench for
                 per-joint dial-in.
-                {onOpenControllers ? (
-                  <>
-                    {" "}
-                    For body-velocity teleop, pair a controller to the{" "}
-                    <span className="text-text">robot&rsquo;s</span> BlueZ
-                    stack.
-                  </>
-                ) : null}
               </div>
-              {onOpenControllers ? (
-                <Button
-                  variant="secondary"
-                  onClick={onOpenControllers}
-                  className="py-2! text-sm! self-start"
-                >
-                  Bluetooth controller
-                </Button>
-              ) : null}
             </div>
           )}
 
@@ -995,11 +973,6 @@ export function TeleopScreen({
               ? "Controller: left stick drives · right stick turns"
               : "WASD / arrows drive"}
           </span>
-          {onOpenControllers ? (
-            <Button variant="ghost" onClick={onOpenControllers}>
-              Bluetooth controller
-            </Button>
-          ) : null}
           <Button variant="ghost" onClick={onBack}>
             {backLabel}
           </Button>

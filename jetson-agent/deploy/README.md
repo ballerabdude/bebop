@@ -41,21 +41,9 @@ SSH.
 `install.sh` will (idempotently) install and enable what it can from the
 distro repos:
 
-- `bluez` (BlueZ 5.x)
-- `network-manager`
+- `network-manager` (the agent uses `nmcli` to scan/join Wi-Fi and to raise
+  the setup SoftAP)
 - `dbus`
-- Docker (`docker.io` from the Ubuntu/Debian repo, with the unit enabled)
-
-It will additionally **probe** for `nvidia-container-toolkit` and print
-remediation if missing. It does **not** auto-install it, because that
-requires NVIDIA's apt repo and the right keyring for your JetPack
-release. On JetPack:
-
-```sh
-sudo apt-get install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
-```
 
 If your base image already has everything baked in, pass
 `--skip-prereqs` to leave system packages alone:

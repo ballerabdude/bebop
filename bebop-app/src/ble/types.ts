@@ -1,24 +1,5 @@
-// Plain TypeScript mirrors of the protobuf messages defined in
-// `bebop-proto/proto/bebop.proto`. Until we wire up a generated protobuf
-// client, we treat the agent responses as already-decoded JSON — the real
-// transport will handle encode/decode internally.
-
-export type AppState =
-  | "UNSPECIFIED"
-  | "STOPPED"
-  | "STARTING"
-  | "RUNNING"
-  | "CRASHED"
-  | "UPDATING";
-
-export type OtaState =
-  | "UNSPECIFIED"
-  | "IDLE"
-  | "CHECKING"
-  | "DOWNLOADING"
-  | "APPLYING"
-  | "SUCCESS"
-  | "FAILED";
+// Plain TypeScript mirrors of the provisioned setup messages defined in
+// `bebop-proto/proto/bebop.proto`.
 
 export interface DeviceInfo {
   serialNumber: string;
@@ -49,54 +30,17 @@ export interface RobotConfig {
   extra: Record<string, string>;
 }
 
-export interface AppStatus {
-  appName: string;
-  image: string;
-  imageDigest: string;
-  state: AppState;
-  containerId: string;
-  startedAtUnix: number;
-  restartCount: number;
-}
+/// Wi-Fi provisioning mode for the robot.
+///
+/// - `auto`   — join a known network; fall back to the setup hotspot.
+/// - `client` — only ever act as a Wi-Fi client.
+/// - `ap`     — always host the setup hotspot.
+export type NetworkMode = "auto" | "client" | "ap";
 
-export interface OtaStatus {
-  state: OtaState;
-  currentImage: string;
-  targetImage: string;
-  progressPercent: number;
-  error: string;
-}
-
-export interface DiscoveredRobot {
-  id: string; // platform-specific peripheral id
-  name: string;
-  rssi: number;
-}
-
-/// One Bluetooth device returned by `scanControllers`. `kind` is
-/// `"gamepad"` when the agent's Class-of-Device / UUID / name
-/// heuristics match, `"unknown"` otherwise — the UI hides
-/// non-gamepads behind a "Show all" toggle.
-export interface DiscoveredController {
-  mac: string;
-  name: string;
-  rssi: number;
-  paired: boolean;
-  connected: boolean;
-  kind: "gamepad" | "unknown";
-}
-
-/// Live status of the agent's Bluetooth-controller subsystem. Mirrors
-/// `bebop.v1.ControllerStatus`. `armed` is true iff the deadman is
-/// held AND no e-stop is latched — i.e. velocity commands are
-/// flowing to bebop-linux.
-export interface ControllerStatus {
-  enabled: boolean;
-  pairedMac: string;
-  deviceName: string;
-  connected: boolean;
-  armed: boolean;
-  estopLatched: boolean;
-  lastEventUnixMs: number;
-  targetAddr: string;
+export interface NetworkConfig {
+  mode: NetworkMode;
+  /// SSID of the robot's setup hotspot (read-only).
+  apSsid: string;
+  /// `host:port` to reach the setup server while the hotspot is up.
+  apAddress: string;
 }

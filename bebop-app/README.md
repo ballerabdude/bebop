@@ -1,120 +1,80 @@
 # Bebop
 
 The Bebop companion app. One customer-facing app for every interaction
-with a Bebop robot — first-time setup, ongoing configuration, app status,
-and OTA updates.
+with a Bebop robot — first-time setup, ongoing Wi-Fi configuration, motor
+bench, and driving.
 
 Built with [Tauri 2](https://tauri.app) + React + TypeScript + Vite.
 Runs on desktop today and targets iOS and Android.
 
 ## Features
 
-Today:
-
-* **Setup wizard** — scan for nearby robots over BLE, connect, configure
-  Wi-Fi, name the robot, choose owner + timezone.
-* **Dashboard** — live app status (container state, image) and OTA status
-  with a "check for updates" action; also lets the operator
-  start / stop / restart the robot-app container and edit the
-  configured image.
-* **Connect by IP** — skip BLE entirely when the robot is already on
-  the LAN. The IP-only path goes straight to the motor bench and the
-  agent control surface (`WsAgentTransport`).
-* **Motor bench** — live per-joint telemetry, dial-in slider with
-  re-zero affordance, power-board card, sticky toolbar with E-STOP.
+* **Setup wizard** — the robot broadcasts a `Bebop-XXXX` hotspot when it has
+  no Wi-Fi. Join it, connect the app to the robot's setup server
+  (`192.168.42.1:9091`), then scan/join your Wi-Fi and name the robot.
+* **Dashboard** — live Wi-Fi state and a network-mode switch
+  (`auto` / `client` / `ap`), plus access to the operator screens.
+* **Connect by IP** — talk to the runtime controls server on a robot that is
+  already on the network.
+* **Motor bench** — live per-joint telemetry, dial-in slider with re-zero
+  affordance, power-board card, sticky toolbar with E-STOP.
 * **Live video** — the bebop-vision process's MJPEG streams
-  (`:9092/video?stream=...`): color + depth for both Orbbec cameras
-  and the BEV planner view (the fused occupancy grid the robot
-  navigates on), each a toggleable tile (`VideoScreen`).
-* **Teleop** — live video and driving in one screen (`TeleopScreen`),
-  the primary way to operate a wheeled robot: the primary stream front
-  and center with any other open stream docked as a clickable filmstrip
-  thumbnail (beneath the feed on the page, top row on phones /
-  right-hand column in fullscreen — click promotes it to primary), a
-  sticky HUD (link / mode / wheels / battery / E-STOP), a one-tap
-  "Start driving" quick-start (switches to Dial-in + arms every wheel),
-  and every input path side by side — on-screen joystick, WASD /
-  arrows, or a paired gamepad. The video container follows the
-  stream's negotiated aspect (the UVC driver may not serve exactly
-  what the YAML asks for). On phones the screen opens in a fullscreen
-  layout — primary video filling the screen with the drive pad
-  floating over it; desktops use the page layout with an explicit
-  Fullscreen button.
-* **Bluetooth gamepad dial-in & drive** — pair an 8BitDo / DualSense /
-  Xbox / Switch Pro pad to your phone or laptop; drive the active
-  joint's target with the left stick (legged), or drive the wheeled
-  chassis directly. See [Bluetooth controllers](#bluetooth-controllers).
-* **Robot-side gamepad pairing** — pair a controller to the robot's
-  BlueZ stack for body-velocity teleop forwarded to `bebop-linux`
-  over UDP. Owned by `jetson-agent/bebop-agent/src/controller/`; the
-  app just orchestrates the scan/pair/unpair RPCs.
-
-Planned:
-
-* Re-pair / switch between multiple robots owned by the same user.
-* Manage robot settings after initial provisioning.
-* Surface logs and diagnostics for support escalations.
+  (`:9092/video?stream=...`): color + depth for both Orbbec cameras, each a
+  toggleable tile (`VideoScreen`).
+* **Teleop** — live video and driving in one screen (`TeleopScreen`): the
+  primary stream front and center with other open streams docked as
+  clickable thumbnails, a sticky HUD (link / mode / wheels / battery /
+  E-STOP), a one-tap "Start driving" quick-start, and every input path side
+  by side — on-screen joystick, WASD / arrows, or a gamepad connected to the
+  device running the app.
+* **App-side gamepad dial-in & drive** — connect an 8BitDo / DualSense /
+  Xbox / Switch Pro pad to your phone or laptop and drive the active joint's
+  target (legged) or the wheeled chassis directly. See
+  [Gamepad controls](#gamepad-controls).
 
 ## Architecture
 
-The UI talks to the robot through a `BebopTransport` abstraction
-(`src/ble/transport.ts`). Three implementations ship today:
+Two independent transports, split by purpose:
 
-| Transport              | When it&rsquo;s picked                                | Where it lives                                        |
-| ---------------------- | ----------------------------------------------------- | ----------------------------------------------------- |
-| `TauriTransport`       | Inside the Tauri shell (desktop / mobile)             | `src/ble/tauriTransport.ts`, `src-tauri/src/ble.rs`   |
-| `WebBluetoothTransport`| Plain browser with Web Bluetooth (Chrome, Edge)       | `src/ble/webBluetoothTransport.ts`                    |
-| `WsAgentTransport`     | The "Connect by IP" flow — talks to the agent's network control surface over WebSocket on port 9091 instead of BLE | `src/ble/wsAgentTransport.ts`                         |
+| Purpose      | Talks to                    | Transport                                          | Default port |
+|--------------|-----------------------------|----------------------------------------------------|--------------|
+| Provisioning | `bebop-agent` (setup server)| `SetupTransport` — protobuf over binary WebSocket  | 9091         |
+| Operating    | `bebop-linux` (runtime)     | `RuntimeTransport` — protobuf over binary WebSocket| 9090         |
 
-`createTransport()` picks Tauri or Web Bluetooth at runtime based on
-what's available on `window`. The IP-only path constructs a
-`WsAgentTransport` directly when the user types in an IP. If no
-BLE backend is available the app falls back to the IP form
-automatically; if BLE *is* available the welcome screen offers both
-paths.
+`SetupTransport` (`src/ble/setupTransport.ts`) implements the
+`BebopTransport` interface (`src/ble/transport.ts`) and provides Wi-Fi
+scan/join, robot naming, and network-mode selection. It is reached either
+over the robot's setup hotspot or over the LAN.
 
-The runtime side (motor bench, telemetry, joint targets) is a
-separate WS to `bebop-linux` itself (`src/runtime/wsTransport.ts`,
-default port 9090). It carries a different protobuf envelope
-(`bebop.runtime.v1.*`) and runs at much higher frame rates than the
-agent WS — telemetry pushes at 30 Hz by default.
+`RuntimeTransport` (`src/runtime/wsTransport.ts`) carries the high-rate
+operator API — telemetry, modes, motor/wheel control, twists — using the
+`bebop.runtime.v1.*` envelope and pushes telemetry at ~30 Hz.
 
-`TauriTransport` calls Rust commands defined in `src-tauri/src/ble/`,
-which are backed by [`btleplug`](https://github.com/deviceplug/btleplug)
-(macOS / Linux / Windows today; iOS/Android via the same crate or a
-platform plugin in the future). The Rust side owns scanning, GATT
-connection management, and length-prefixed framing.
+Both envelopes are shared with the robot. TypeScript bindings are generated
+by [`@bufbuild/protoc-gen-es`](https://github.com/bufbuild/protobuf-es) and
+committed:
 
-Both transports speak **protobuf** (`bebop.v1.ClientRequest` /
-`bebop.v1.AgentResponse`) on the wire, sharing the schema with the
-agent. On this side the bindings come from:
+* `src/proto/bebop_pb.ts` — setup protocol (from `bebop.proto`).
+* `src/proto/bebop_runtime_pb.ts` — runtime protocol (from `bebop_runtime.proto`).
 
-* TypeScript: `src/proto/bebop_pb.ts` (generated by
-  [`@bufbuild/protoc-gen-es`](https://github.com/bufbuild/protobuf-es)
-  via `npm run gen-proto`; committed so CI doesn't need a codegen step
-  before `tsc` / `vite build`).
-* Rust: `bebop-proto` consumed as a path dep
-  (`../../jetson-agent/bebop-proto`); identical types to the agent.
+Regenerate after editing a `.proto`:
 
-> macOS only: the first time the app accesses Bluetooth, the system will
-> prompt for permission. For release builds you&rsquo;ll also need to set
-> `NSBluetoothAlwaysUsageDescription` in the bundle&rsquo;s `Info.plist`.
+```sh
+npm run gen-proto
+```
 
-## Bluetooth controllers
+## Gamepad controls
 
-There are three distinct BT-controller flows and they connect at
-different layers:
+The app-side gamepad flows use the
+[Web Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API)
+and work with any pad the browser/WebView surfaces. The pad stays paired to
+the device running the app and streams commands over the runtime WS — the
+robot's own Bluetooth stack is not involved.
 
-| Flow                 | Pairs to                | Drives                                                                 | Where it lives                                       |
-| -------------------- | ----------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------- |
-| Robot-side teleop    | The robot (BlueZ)       | Body velocity (xvel/yvel/angvel) → bebop-linux UDP                     | `jetson-agent/bebop-agent/src/controller/`           |
-| App-side dial-in     | Your phone / laptop     | Per-joint target position via the runtime WS `setMotorTarget` (legged) | `src/input/`, `src/components/GamepadDriver.tsx`     |
-| App-side drive       | Your phone / laptop     | Body twist (vx, wz) via the runtime WS `SetVelocityCommand` (wheeled)  | `src/input/`, `src/components/GamepadDrive.tsx`      |
-
-The app-side flows use the [Web Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API)
-and work with any pad the browser/WebView surfaces. The pad never
-touches the robot's BT stack; it stays paired to the device running
-bebop-app.
+| Flow              | Drives                                                                 | Where it lives                                   |
+|-------------------|------------------------------------------------------------------------|--------------------------------------------------|
+| App-side dial-in  | Per-joint target position via `setMotorTarget` (legged)                | `src/input/`, `src/components/GamepadDriver.tsx` |
+| App-side drive    | Body twist (vx, wz) via `setVelocityCommand` (wheeled)                 | `src/input/`, `src/components/GamepadDrive.tsx`  |
 
 ### Layout auto-detection
 
@@ -122,144 +82,71 @@ The driver supports both common HID layouts and picks one per pad in
 `src/input/mapping.ts`:
 
 | Layout      | Picked when                              | Examples                                              |
-| ----------- | ---------------------------------------- | ----------------------------------------------------- |
+|-------------|------------------------------------------|-------------------------------------------------------|
 | `standard`  | `Gamepad.mapping === "standard"`         | Xbox Wireless, DualSense over BT, 8BitDo in **X-input** mode (hold START + Y for 3 s) |
 | `dinput`    | Anything else (8BitDo / generic HID)     | 8BitDo Mobile / Pro 2 / Zero 2 in their default Android mode, generic HID pads |
 
-The active layout name appears as a small badge on the controller
-card. Each layout knows the chord text printed on its physical pad,
-so the on-screen hints read **"LB / RB"** under standard and
-**"L1 / R1"** under D-input — matching what the user sees on the
-hardware. Logical intents (`prevJoint`, `nextJoint`, `deadman`,
-`estop`, `resetEStop`, `armToggle`) are the same across layouts;
-consumers just read `snapshot.logical.*` and don't deal with raw
-button indices.
+The active layout name appears as a small badge on the controller card. Each
+layout knows the chord text printed on its physical pad, so the on-screen
+hints read **"LB / RB"** under standard and **"L1 / R1"** under D-input.
+Logical intents (`prevJoint`, `nextJoint`, `deadman`, `estop`, `resetEStop`,
+`armToggle`) are the same across layouts; consumers read `snapshot.logical.*`
+and don't deal with raw button indices.
 
-### Bindings (in the motor bench)
+### Bindings
 
-When a pad is detected on the **motor bench** screen, a controller
-card appears with these bindings (chord names shown as
-`standard / dinput` where they differ):
+**Motor bench (legged dial-in):**
 
 * **LB / L1**, **RB / R1** — cycle the active joint
-* **Left stick ↕** — nudge the active joint's target position (rate
-  scaled by trigger pressure; capped at the firmware slew ceiling)
-* **RT / R2** held — deadman; release to halt motion immediately
-* **L3 (left-stick click)** — arm / disarm the active joint
+* **Left stick ↕** — nudge the active joint's target (rate scaled by trigger)
+* **RT / R2** held — deadman; release to halt immediately
+* **L3** — arm / disarm the active joint
 * **B / Circle** — latch the runtime E-STOP
 * **A / Cross** — clear a latched E-STOP
 
-### Drive mode (wheeled chassis)
+**Wheeled drive** (motor bench + teleop):
 
-On a wheeled robot (firmware `drive:` config), the controller card
-becomes a drive bridge instead of a joint dial-in: it streams body
-twists over the same runtime WS path (`SetVelocityCommand`) as the
-on-screen joystick and the WASD keyboard drive, so no firmware change
-is involved. The gamepad card appears on both the motor bench and the
-teleop screen. Bindings (chord names shown as `standard / dinput`
-where they differ):
-
-* **Sticks** — drive, in one of two layouts. Toggle on the card; the
-  choice is persisted per device and *split* is the default:
-  * *Split* — left stick ↕ = forward/back, right stick ↔ = turn
-  * *Arcade* — the left stick does both (up = forward, right = turn
-    right), matching the on-screen joystick
-  * On the teleop screen with a camera, the right stick aims the
-    camera instead (pan ↔, tilt ↕ at the on-screen pad's rates;
-    centred = hold), the layout locks to *arcade*, and the on-screen
-    drive pad hides while a controller is connected. Camera aim is
-    not deadman- or mode-gated — it works from any mode.
-* **RT / R2** held — deadman; release to halt immediately. Trigger
-  pressure also scales the request: just clearing the threshold
-  creeps (~64% of the profile's soft limit), a full pull reaches it
-* **L3 (left-stick click)** — arm / disarm all wheels
+* **Sticks** — drive in *split* (default: left ↕ forward, right ↔ turn) or
+  *arcade* (left stick does both) layout; toggled on the card, persisted per
+  device. On the teleop screen with a camera, the right stick aims the camera
+  instead and the layout locks to arcade.
+* **RT / R2** held — deadman; release to halt immediately. Trigger pressure
+  scales the request.
+* **L3** — arm / disarm all wheels
 * **B / Circle** — latch the runtime E-STOP
 * **A / Cross** — clear a latched E-STOP
 
-The firmware holds the last commanded twist until told otherwise, so
-the bridge owns stopping: deadman release, E-STOP latch, pad
-disconnect, leaving the motor-bench screen, hiding the tab, or any
-interruption of the gamepad poll loop (250 ms watchdog) all enqueue a
-zero twist exactly once per drive cycle.
+The firmware holds the last commanded twist until told otherwise, so the
+bridge owns stopping: deadman release, E-STOP latch, pad disconnect, leaving
+the screen, hiding the tab, or any interruption of the gamepad poll loop
+(250 ms watchdog) all enqueue a zero twist exactly once per drive cycle.
 
 ### Control profiles
 
-How sensitive the controls feel is a per-device setting switched in
-the app — pickers live on the controllers screen, the drive card, and
-both gamepad cards. A profile sizes every app-side input path at once
-(gamepad sticks, the on-screen drive joystick, and the WASD keyboard
-drive); the choice persists in localStorage under
+How sensitive the controls feel is a per-device setting switched in the app —
+pickers live on the drive card and both gamepad cards. A profile sizes every
+app-side input path at once and persists in localStorage under
 `bebop.controlProfile`. Defined in `src/input/profile.ts`:
 
 | Profile    | Stick deadzone | Expo | Drive limits        | Dial-in rate |
-| ---------- | -------------- | ---- | ------------------- | ------------ |
+|------------|----------------|------|---------------------|--------------|
 | Gentle     | 18%            | 0.5  | 0.5 m/s · 1.0 rad/s | 1.0 rad/s    |
 | Standard   | 12%            | —    | 1.0 m/s · 2.0 rad/s | 2.0 rad/s    |
 | Sport      | 8%             | —    | 1.5 m/s · 3.0 rad/s | 3.0 rad/s    |
 
-*Standard* reproduces the historical hard-coded values exactly, so
-nothing changes for existing operators until they pick another
-preset. *Gentle* widens the deadzone and adds expo stick shaping
-(`(1-e)·x + e·x³`, the same curve as the ROS2 pilot node's `expo`
-param) for fine centre control; *Sport* narrows the deadzone and lifts
-the soft limits. The firmware still clamps twists to each wheel's
-`vel_max` and dial-in steps to `slew.max_pos_step_per_tick`, so a
-faster profile can't exceed the robot's hard ceilings.
-
-Robot-side teleop (pad paired to the robot's BlueZ) is *not* covered —
-its deadzone / max-vel knobs are agent config in
-`/etc/bebop/agent.toml` (`[controller]`).
+The firmware still clamps twists to each wheel's `vel_max` and dial-in steps
+to `slew.max_pos_step_per_tick`, so a faster profile can't exceed the robot's
+hard ceilings.
 
 ### Keyboard chords per screen
 
-The app has two keyboard-operated surfaces, and their chords are
-deliberately disjoint so both can be live at once:
-
 | Screen      | Drive (vx / wz)  | Camera PTZ      |
-| ----------- | ---------------- | --------------- |
+|-------------|------------------|-----------------|
 | Video       | —                | WASD + arrows   |
 | Teleop      | WASD + arrows    | I / J / K / L   |
 
-On the teleop screen the drive chord owns WASD + arrows, so the camera
-pad takes the home row around it — the same physical position as the
-right stick on a gamepad. Every pad also stops-on-exit: keys held at
-unmount, at a `disabled` flip (E-STOP, mode change), or at the
-fullscreen toggle enqueue a stop/hold exactly once, so a gesture can
-never outlive its screen.
-
-### Tuning the dial-in rate
-
-Two coordinated knobs decide how fast a stick deflection moves the
-joint target:
-
-| Knob                              | Lives in                                              | Notes                                                                                        |
-| --------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `dialInRate`                      | `src/input/profile.ts` (active control profile)       | Per-second rate at full stick + full trigger. `Standard` = `2.0` rad/s (~115°/s).              |
-| `slew.max_pos_step_per_tick`      | `firmware/bebop-linux/config/bebop_v2.yaml`           | Hard ceiling enforced on the firmware side at 100 Hz. Default `0.030` rad → `3.0` rad/s cap.   |
-
-The firmware silently clamps at its slew cap, so any `dialInRate`
-above `max_pos_step_per_tick × 100` just feels capped. To genuinely
-move faster:
-
-1. Bump `slew.max_pos_step_per_tick` in the firmware YAML and
-   restart `bebop-linux`.
-2. Bump the dial-in rate on the app side — either switch to a faster
-   control profile or edit the preset in `src/input/profile.ts` to
-   the same ceiling.
-3. Watch the per-joint **Δ** chip in the motor row while you push
-   the stick — if it grows on aggressive moves, the joint can't
-   actually keep up at the new rate and you'll start wearing the PD
-   loop.
-
-## BLE protocol
-
-The UUIDs and framing scheme are mirrored from the Rust agent:
-
-* UUIDs — `src/ble/protocol.ts` ←→ `../jetson-agent/bebop-agent/src/ble/uuids.rs`
-* Length-prefixed framing — `src/ble/protocol.ts` ←→ `../jetson-agent/bebop-agent/src/ble/framing.rs`
-* Wire messages — `../jetson-agent/bebop-proto/proto/bebop.proto`
-
-Treat those three files as the public ABI between the app and the robot.
+Every pad stops-on-exit: keys held at unmount or at a `disabled` flip enqueue
+a stop/hold exactly once.
 
 ## Developing
 
@@ -272,22 +159,11 @@ npm run tauri android init && npm run tauri android dev
 npm run tauri ios init && npm run tauri ios dev
 ```
 
-If you change `../jetson-agent/bebop-proto/proto/bebop.proto`, regenerate
-the TypeScript bindings:
-
-```sh
-npm run gen-proto
-```
-
-The Rust path-dep picks up changes automatically on the next
-`cargo check` / `npm run tauri dev`.
-
 Prerequisites:
 
 * Node 20+ (managed via `nvm`)
 * Rust toolchain (`rustup` stable)
-* `protoc` on `PATH` (the Tauri build pulls in `bebop-proto`, which
-  uses `prost-build` to compile the schema). On macOS:
+* `protoc` on `PATH` (for regenerating bindings). On macOS:
   `brew install protobuf`. On Debian/Ubuntu:
   `sudo apt-get install -y protobuf-compiler`.
 * For mobile: Android Studio / Xcode toolchains (see Tauri docs)
@@ -298,22 +174,20 @@ Prerequisites:
 bebop-app/
 ├── src/                  # React + TypeScript UI
 │   ├── App.tsx           # App shell + flow orchestration
-│   ├── ble/              # BebopTransport + Tauri / Web Bluetooth / WS-agent impls
-│   ├── runtime/          # bebop-linux runtime WS client (motor bench, telemetry)
+│   ├── ble/              # SetupTransport + BebopTransport interface + types
+│   ├── runtime/          # bebop-linux runtime WS client (motor bench, teleop)
 │   ├── input/            # Web Gamepad API hook + per-layout button mapping
 │   ├── proto/            # Generated protobuf bindings (npm run gen-proto)
-│   │   ├── bebop_pb.ts            # Agent envelope (BLE + WS-agent)
+│   │   ├── bebop_pb.ts            # Setup envelope
 │   │   └── bebop_runtime_pb.ts    # bebop-linux runtime envelope
 │   ├── components/       # Shared UI primitives + input bridges
 │   │   ├── VideoFeed.tsx          # MJPEG feed tile (video/teleop)
 │   │   ├── DriveJoystick.tsx      # Differential-drive pad (bench/teleop)
-│   │   └── GamepadDriver/Drive    # Bluetooth pad → dial-in / drive bridges
-│   └── screens/          # Welcome, Scan, Wifi, Config, Done, Dashboard,
-│                         # ConnectByIp, MotorBench, Teleop, Video,
-│                         # Controllers, DirectControllers
+│   │   └── GamepadDriver/Drive    # Web-gamepad → dial-in / drive bridges
+│   └── screens/          # Welcome, ConnectByIp, Wifi, Config, Dashboard,
+│                         # MotorBench, Teleop, Video
 ├── src-tauri/            # Rust / Tauri shell
-│   ├── src/ble/          # Tauri commands + btleplug-based BLE central
-│   └── src/lib.rs        # invoke_handler + managed state registration
+│   └── src/lib.rs        # Tauri builder
 ├── buf.gen.yaml          # protoc-gen-es codegen config (TS bindings)
 └── README.md
 ```

@@ -1,19 +1,13 @@
 [Unit]
-Description=Bebop robot on-device agent (BLE provisioning + container manager)
+Description=Bebop on-device provisioning agent (Wi-Fi setup + SoftAP)
 Documentation=https://github.com/your-org/bebop
-After=network-online.target bluetooth.service docker.service NetworkManager.service
-Wants=network-online.target bluetooth.service docker.service NetworkManager.service
-# Make sure we start after BlueZ is actually ready to accept D-Bus calls.
-Requires=bluetooth.service
+After=network-online.target NetworkManager.service
+Wants=network-online.target NetworkManager.service
 
 [Service]
 Type=notify-reload
-# The agent runs as root because it needs:
-#   - BlueZ D-Bus access (for GATT server + advertising)
-#   - NetworkManager write access (for Wi-Fi provisioning)
-#   - Docker socket access (for container management)
-# If you prefer tightening this, create a `bebop` user and grant
-# the `bluetooth`, `netdev`, and `docker` groups instead.
+# The setup agent runs as root because it needs NetworkManager write access
+# to scan/join Wi-Fi and to raise the setup SoftAP (`nmcli`).
 User=root
 Group=root
 
@@ -23,11 +17,10 @@ Environment=BEBOP_AGENT_CONFIG=/etc/bebop/agent.toml
 ExecStart=/usr/local/bin/bebop-agent
 Restart=always
 RestartSec=3
-# Don't kill the child container supervisor tasks too aggressively.
 KillMode=mixed
 TimeoutStopSec=15
 
-# Hardening — relaxed because the agent needs broad capability.
+# Hardening — relaxed because the agent needs NetworkManager D-Bus access.
 NoNewPrivileges=false
 ProtectSystem=false
 ProtectHome=true

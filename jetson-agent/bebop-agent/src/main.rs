@@ -1,28 +1,21 @@
-// On non-Linux hosts the real BLE server is cfg'd out, so much of the
-// scaffolding (dispatcher, framing, UUIDs, ...) appears dead to the
-// compiler. Silence that noise while keeping it meaningful on Linux.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
-
-//! Bebop Agent — entrypoint.
+//! Bebop agent — entrypoint.
 //!
-//! Orchestrates all long-running subsystems:
-//!   * BLE GATT server (provisioning / control surface for the mobile app)
-//!   * Wi-Fi provisioner (wraps NetworkManager)
-//!   * Container manager (Docker / NVIDIA runtime)
-//!   * OTA updater
+//! Provisioning-only daemon:
+//!   * Wi-Fi status poller (wraps NetworkManager)
+//!   * SoftAP fallback supervisor (`auto` / `client` / `ap` modes)
+//!   * Setup server (protobuf-over-WebSocket + a status page), reachable on
+//!     the LAN or directly over the robot's setup hotspot.
 //!
-//! Each subsystem runs on its own tokio task and communicates with the others
-//! through the shared [`AppState`] handle.
+//! Each subsystem runs on its own tokio task and communicates through the
+//! shared [`AppState`].
 
-mod ble;
+mod ap;
 mod config;
-mod containers;
-mod controller;
+mod dispatcher;
 mod error;
-mod ota;
+mod server;
 mod state;
 mod wifi;
-mod ws;
 
 use anyhow::Context;
 use tracing::{error, info};
@@ -40,17 +33,15 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::AgentConfig::load().context("failed to load agent configuration")?;
     info!(?cfg, "configuration loaded");
 
-    let state = AppState::new(cfg.clone()).await?;
+    let state = AppState::new(cfg).await?;
 
-    // Spawn long-running subsystems. Each returns a JoinHandle so we can
-    // supervise them and exit if any of them crashes fatally.
     let mut tasks = tokio::task::JoinSet::new();
 
     {
         let s = state.clone();
         tasks.spawn(async move {
-            if let Err(e) = containers::run(s).await {
-                error!(error = ?e, "container manager exited");
+            if let Err(e) = wifi::run(s).await {
+                error!(error = ?e, "wifi poller exited");
             }
         });
     }
@@ -58,8 +49,8 @@ async fn main() -> anyhow::Result<()> {
     {
         let s = state.clone();
         tasks.spawn(async move {
-            if let Err(e) = ota::run(s).await {
-                error!(error = ?e, "ota updater exited");
+            if let Err(e) = ap::run(s).await {
+                error!(error = ?e, "network supervisor exited");
             }
         });
     }
@@ -67,34 +58,12 @@ async fn main() -> anyhow::Result<()> {
     {
         let s = state.clone();
         tasks.spawn(async move {
-            if let Err(e) = ble::run(s).await {
-                error!(error = ?e, "ble server exited");
+            if let Err(e) = server::run(s).await {
+                error!(error = ?e, "setup server exited");
             }
         });
     }
 
-    {
-        let s = state.clone();
-        tasks.spawn(async move {
-            if let Err(e) = controller::run(s).await {
-                error!(error = ?e, "controller subsystem exited");
-            }
-        });
-    }
-
-    // Network control surface — WS mirror of the BLE GATT API. Lets the
-    // operator app pair controllers / read status without going through
-    // BLE (the IP-only path in `bebop-app`).
-    {
-        let s = state.clone();
-        tasks.spawn(async move {
-            if let Err(e) = ws::run(s).await {
-                error!(error = ?e, "agent WS server exited");
-            }
-        });
-    }
-
-    // Graceful shutdown on SIGINT / SIGTERM.
     tokio::select! {
         _ = shutdown_signal() => {
             info!("shutdown signal received; exiting");

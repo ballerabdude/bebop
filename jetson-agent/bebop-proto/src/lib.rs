@@ -1,6 +1,6 @@
 //! Shared wire-format crate.
 //!
-//! - [`v1`] — BLE control surface used by `bebop-agent` and the Tauri app
+//! - [`v1`] — setup control surface used by `bebop-agent` and the companion app
 //!   for one-shot setup / provisioning / lifecycle requests.
 //! - [`runtime::v1`] — protobuf-over-WebSocket runtime API exposed by
 //!   `bebop-linux` for live motor control and telemetry.

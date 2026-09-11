@@ -1039,30 +1039,9 @@ enable_unit_if_present() {
 
 if [[ "${SKIP_PREREQS}" -eq 0 && "${INSTALL_AGENT}" -eq 1 ]]; then
     if command -v apt-get >/dev/null 2>&1; then
-        echo "==> ensuring system prereqs (bluez, network-manager, dbus, docker)"
-        apt_install_if_missing bluez network-manager dbus
-        if ! command -v docker >/dev/null 2>&1; then
-            apt_install_if_missing docker.io
-        else
-            echo "    already installed: docker ($(docker --version 2>/dev/null || echo unknown))"
-        fi
-        enable_unit_if_present bluetooth.service
+        echo "==> ensuring system prereqs (network-manager, dbus)"
+        apt_install_if_missing network-manager dbus
         enable_unit_if_present NetworkManager.service
-        enable_unit_if_present docker.service
-
-        if ! command -v nvidia-ctk >/dev/null 2>&1 \
-            && ! dpkg -s nvidia-container-toolkit >/dev/null 2>&1; then
-            cat >&2 <<'EOF'
-
-WARN: nvidia-container-toolkit not detected.
-      The agent can still start, but the robot-app container will
-      not get GPU access until you install it. On JetPack:
-        sudo apt-get install -y nvidia-container-toolkit
-        sudo nvidia-ctk runtime configure --runtime=docker
-        sudo systemctl restart docker
-
-EOF
-        fi
     else
         echo "==> non-Debian system; skipping prereq install"
     fi

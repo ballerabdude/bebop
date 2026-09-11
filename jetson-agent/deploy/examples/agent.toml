@@ -1,12 +1,12 @@
 # /etc/bebop/agent.toml
 #
-# Reference config for bebop-agent. This file ships as a template:
-# every key is commented out, and the agent uses the compiled-in
-# defaults from bebop-agent/src/config/mod.rs for anything you do not
-# override here.
+# Reference config for bebop-agent (the on-robot provisioning daemon).
+# This file ships as a template: every key is commented out, and the agent
+# uses the compiled-in defaults from bebop-agent/src/config/mod.rs for
+# anything you do not override here.
 #
-# Uncomment and edit a line only when you actually want to deviate
-# from the default. Restart the service after editing:
+# Uncomment and edit a line only when you actually want to deviate from the
+# default. Restart the service after editing:
 #
 #     sudo systemctl restart bebop-agent
 
@@ -20,130 +20,33 @@
 # Default: "/var/lib/bebop"
 # state_dir = "/var/lib/bebop"
 
-# --- BLE ------------------------------------------------------------------
-# [ble]
+# --- network / provisioning ----------------------------------------------
+# [network]
 #
-# Force a specific HCI adapter. Leave unset to use the system default.
-# adapter = "hci0"
+# How the robot obtains connectivity:
+#   "auto"   — join a known Wi-Fi network; fall back to the setup hotspot
+#              if none connects within `ap_auto_after_secs`.
+#   "client" — only ever act as a Wi-Fi client (never raise the hotspot).
+#   "ap"     — always host the setup hotspot.
+# Default: "auto"
+# mode = "auto"
 #
-# Name advertised over BLE (what the mobile app sees while scanning).
-# Default: "Bebop-<first 6 chars of /etc/machine-id>" so every device
-# is unique out of the box. Override only if you want a custom name.
-# local_name = "Bebop-Lab-01"
+# SSID prefix for the setup hotspot. A short device id is appended, e.g.
+# "Bebop-1a2b3c".
+# Default: "Bebop"
+# ap_ssid_prefix = "Bebop"
 #
-# Require the mobile app to complete a pairing challenge before any
-# write takes effect. You almost never want this off in production.
-# Default: true
-# require_pairing = true
-
-# --- Robot application container ------------------------------------------
-# [app]
+# WPA2 passphrase for the setup hotspot. Must be 8..=63 characters.
+# Default: "bebopbebop"
+# TODO: replace with a per-device derived code before shipping to customers.
+# ap_password = "bebopbebop"
 #
-# Container name the agent manages.
-# Default: "bebop-app"
-# name = "bebop-app"
+# In "auto" mode, how long to wait for a known network before raising the
+# setup hotspot (seconds).
+# Default: 25
+# ap_auto_after_secs = 25
 #
-# Image to pull and run. Default: unset, which keeps the container
-# supervisor idle (no pull attempts, no error spam). Set this to your
-# registry path to enable the robot application container.
-# image = "nvcr.io/your-org/bebop-app:1.2.3"
-#
-# Pass --runtime=nvidia to docker (required for GPU access on Jetson).
-# Default: true
-# use_nvidia_runtime = true
-#
-# Extra env vars injected into the app container.
-# Default: []
-# env = ["RUST_LOG=info"]
-#
-# Bind mounts: "host_path:container_path[:ro]".
-# Default: []
-# volumes = [
-#     "/var/lib/bebop/app-data:/data",
-#     "/dev:/dev",
-# ]
-
-# --- OTA updater ----------------------------------------------------------
-# [ota]
-#
-# Manifest URL describing the desired image for this channel.
-# Leave unset (compiled default) to fully disable OTA polling.
-# manifest_url = "https://updates.bebop.example.com/channels/stable.json"
-#
-# Update channel name (informational; the URL is authoritative).
-# Default: "stable"
-# channel = "stable"
-#
-# How often to poll the manifest, in seconds.
-# Default: 300
-# poll_interval_secs = 300
-
-# --- Bluetooth gamepad teleop --------------------------------------------
-# [controller]
-#
-# Master switch for the controller subsystem. With no `paired_mac` set
-# the supervisor idles regardless, so leaving this `true` is safe even
-# on robots that have never paired a gamepad. Set false only if you
-# want to fully disable the subsystem (no scan/pair from the app).
-# Default: true
-# enabled = true
-#
-# UDP target the agent forwards `{xvel,yvel,angvel}` JSON to. Defaults
-# to bebop-linux's documented teleop endpoint on localhost. Change only
-# if bebop-linux runs on a different host.
-# Default: "127.0.0.1:10000"
-# target_addr = "127.0.0.1:10000"
-#
-# MAC + cached display name of the bound gamepad. Populated automatically
-# by the bebop-app pairing flow; clear them (or unpair from the app) to
-# forget the controller.
-# paired_mac = "AA:BB:CC:DD:EE:FF"
-# device_name = "DualSense Wireless Controller"
-#
-# Stick deadzone (radial, 0..1). Anything inside this radius is
-# clamped to centre.
-# Default: 0.10
-# deadzone = 0.10
-#
-# Velocity caps. Body-frame, ROS REP-103.
-# Default: 0.6 m/s, 1.5 rad/s
-# max_lin_vel = 0.6
-# max_ang_vel = 1.5
-#
-# Right-trigger threshold (0..1) above which the deadman is engaged.
-# Default: 0.5
-# deadman_threshold = 0.5
-#
-# If no input event arrives within this many milliseconds the agent
-# forces a zero-velocity command. Guards against a stalled pad.
-# Default: 200
-# watchdog_ms = 200
-#
-# How often to flush the latest command over UDP. 50 Hz matches the
-# bebop-linux outer loop and is plenty for body-velocity teleop.
-# Default: 50
-# send_rate_hz = 50
-
-# --- Network control surface ---------------------------------------------
-# [net]
-#
-# Mirror of the BLE GATT API exposed over a binary WebSocket so the
-# operator app can pair controllers / read status without a Bluetooth
-# link. This is what makes the "Connect by IP" path in bebop-app able to
-# manage the controller subsystem. Endpoints:
-#
-#   - GET /healthz  → "ok" (pre-flight probe)
-#   - GET /ws       → binary WebSocket (bebop.v1.ClientRequest in,
-#                     bebop.v1.AgentResponse out)
-#
-# Disable entirely (BLE-only deployment).
-# Default: false
-# disabled = false
-#
-# `host:port` to bind. `0.0.0.0` listens on every interface, which is
-# what you want when an operator laptop / tablet on the LAN should be
-# able to reach the agent. Set to `127.0.0.1:9091` for localhost-only.
-# The runtime-server (bebop-linux) defaults to :9090; this listener
-# should sit on a different port (default :9091).
+# Address the setup server binds. "0.0.0.0" listens on the LAN and the
+# setup hotspot; "127.0.0.1:9091" restricts it to the robot itself.
 # Default: "0.0.0.0:9091"
-# ws_bind_addr = "0.0.0.0:9091"
+# setup_bind_addr = "0.0.0.0:9091"

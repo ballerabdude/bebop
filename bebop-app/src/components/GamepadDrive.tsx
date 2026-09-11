@@ -6,8 +6,7 @@
 // on-screen `DriveJoystick` and the WASD keyboard drive use — so no
 // firmware or agent change is involved.
 //
-// Bindings mirror the dial-in bridge and the robot-side teleop state
-// machine (`controller/teleop.rs`) so muscle memory transfers between
+// Bindings mirror the dial-in bridge so muscle memory transfers between
 // flows:
 //
 //   * sticks drive the chassis — layout selectable below,
@@ -51,7 +50,7 @@ const DEADMAN_THRESHOLD = 0.4;
 /// If no gamepad tick arrives for this long while driving, halt.
 /// Covers the RAF poll loop stalling (tab backgrounded, WebView
 /// paused) and a pad that silently drops off mid-drive. Sits just
-/// above the 200 ms watchdog in the robot-side `controller/teleop.rs`
+/// above the firmware's 200 ms operator link-loss watchdog
 /// to avoid racing the ~60 Hz poll loop's normal jitter.
 const WATCHDOG_MS = 250;
 

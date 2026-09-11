@@ -11,10 +11,8 @@
 # now, so there's no per-target subdir.
 #
 # Unless `--skip-prereqs` is passed, the script will also (idempotently)
-# install and enable: bluez, network-manager, dbus, and docker. It will
-# additionally probe for `nvidia-container-toolkit` and print remediation
-# instructions if missing (it does not auto-add NVIDIA's apt repo, since
-# that is JetPack-version-specific).
+# install and enable network-manager and dbus (the agent uses `nmcli` and
+# raises the setup SoftAP via NetworkManager).
 
 set -euo pipefail
 
@@ -84,34 +82,13 @@ if [[ "${SKIP_PREREQS}" -eq 0 ]]; then
     if ! command -v apt-get >/dev/null 2>&1; then
         echo "==> non-Debian system detected; skipping prereq install"
         echo "    (re-run with --skip-prereqs to silence this, and install"
-        echo "     bluez, network-manager, dbus, docker, and nvidia-container-toolkit by hand)"
+        echo "     network-manager and dbus by hand)"
     else
         echo "==> ensuring system prereqs are present"
-        apt_install_if_missing bluez network-manager dbus
+        apt_install_if_missing network-manager dbus
 
-        if ! command -v docker >/dev/null 2>&1; then
-            echo "    docker not found; installing docker.io from distro repo"
-            apt_install_if_missing docker.io
-        else
-            echo "    already installed: docker ($(docker --version 2>/dev/null || echo unknown))"
-        fi
-
-        echo "==> enabling system services (bluetooth, NetworkManager, docker)"
-        enable_unit_if_present bluetooth.service
+        echo "==> enabling system services (NetworkManager)"
         enable_unit_if_present NetworkManager.service
-        enable_unit_if_present docker.service
-
-        if ! command -v nvidia-ctk >/dev/null 2>&1 \
-            && ! dpkg -s nvidia-container-toolkit >/dev/null 2>&1; then
-            echo
-            echo "WARN: nvidia-container-toolkit not detected."
-            echo "      The agent can still start, but the robot-app container will"
-            echo "      not get GPU access until you install it. On JetPack:"
-            echo "        sudo apt-get install -y nvidia-container-toolkit"
-            echo "        sudo nvidia-ctk runtime configure --runtime=docker"
-            echo "        sudo systemctl restart docker"
-            echo
-        fi
     fi
 else
     echo "==> --skip-prereqs set; not touching system packages"

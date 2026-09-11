@@ -11,7 +11,7 @@ default:
 
 # --- Rust / agent ----------------------------------------------------------
 
-# Full workspace check on the host (stubs BLE on non-Linux).
+# Full workspace check on the host.
 check:
     cd jetson-agent && cargo check --workspace --all-targets
 
@@ -32,21 +32,6 @@ lint:
 # From an x86 host, grab the `bebop-agent-aarch64` artifact from CI instead.
 build-jetson:
     cd jetson-agent && cargo build --release -p bebop-agent
-
-# --- Robot app container ---------------------------------------------------
-
-APP_IMAGE := env_var_or_default("APP_IMAGE", "your-registry/bebop-app:dev")
-
-# Build the robot application image for arm64 Jetsons.
-build-app:
-    docker buildx build \
-        --platform linux/arm64 \
-        -t {{APP_IMAGE}} \
-        -f jetson-agent/robot-app/Dockerfile \
-        jetson-agent/robot-app
-
-push-app:
-    docker push {{APP_IMAGE}}
 
 # --- Install on a robot ----------------------------------------------------
 

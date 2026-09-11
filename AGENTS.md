@@ -10,9 +10,18 @@
   1.26.4 (numpy 2.x breaks pyorbbecsdk) — never upgrade it.
 - Firmware: `bebop-linux.service` runs as root from
   `/usr/local/bin/bebop-linux`; config `/etc/bebop/bebop_wheeled.yaml`.
-- Other services: `bebop-agent` owns port 9091 (its `/healthz`) — do NOT
-  use 9091 for anything new. Firmware WS/HTTP is 9090, the bebop-vision
-  videoserver is 9092.
+- Other services: `bebop-agent` owns port 9091 (its `/healthz` + setup
+  WebSocket) — do NOT use 9091 for anything new. Firmware WS/HTTP is 9090,
+  the bebop-vision videoserver is 9092.
+- `bebop-agent` is provisioning-only: Wi-Fi (nmcli) + a SoftAP fallback
+  (`Bebop-<machine-id>`, WPA2 passphrase `bebopbebop`, gateway
+  `192.168.42.1:9091`) + the setup server. It no longer does BLE,
+  containers, OTA, or controller pairing.
+- AP capability on this robot is confirmed (`nmcli -f WIFI-PROPERTIES.AP
+  dev show wlP1p1s0` → yes; `iw list` shows `* AP`). It is a single radio,
+  so the hotspot and a client Wi-Fi connection are mutually exclusive —
+  expect the SSH link to drop if you bring the AP up over Wi-Fi. Prefer
+  read-only checks (`iw list`, `nmcli ... dev show`) while connected.
 
 ## Deployment process (what actually works)
 
@@ -85,6 +94,12 @@
   as root — and the bracket trick in a separate ssh command.
 - `install-jetson.sh` prereqs: don't add flags without initializing the
   variable in the defaults block (`set -u` will kill the script).
+- SoftAP bring-up uses NetworkManager shared mode
+  (`nmcli con add ... 802-11-wireless.mode ap ipv4.method shared`). The
+  regulatory domain is unset (`country 00`) on this robot; AP on 2.4 GHz
+  still works, but set `iw reg set <CC>` if a channel is rejected. Creating
+  the profile (`con add`) does not disrupt the current Wi-Fi link; only
+  `con up` does — safe to validate command syntax read-only.
 - Protobuf: three binding sets (Rust prost auto via build.rs, app TS via
   `npm run gen-proto` in bebop-app/, Python pb2 checked in at
   `bebop-vision/bebop_vision/proto/bebop/runtime/v1/`). The Python pb2
