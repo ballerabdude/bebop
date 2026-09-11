@@ -23,8 +23,9 @@ use crate::state::AppState;
 use crate::wifi;
 
 /// NetworkManager connection profile name for the setup AP. Fixed so we can
-/// reliably find/replace it.
-const AP_CON_NAME: &str = "bebop-setup";
+/// reliably find/replace it, and so `wifi::query_status` can exclude it from
+/// the "client network" check (an active AP otherwise looks `connected`).
+pub const AP_CON_NAME: &str = "bebop-setup";
 
 /// Static gateway assigned to the AP interface. Clients get addresses in
 /// this /24 via NetworkManager's shared mode.

@@ -133,7 +133,9 @@ pub async fn query_status() -> Result<WifiRuntimeStatus> {
         return Ok(WifiRuntimeStatus::default());
     };
 
-    let connected = state == "connected";
+    // An active setup AP is also reported as `connected` by NetworkManager;
+    // exclude it so the link status reflects the *client* network only.
+    let connected = state == "connected" && connection != crate::ap::AP_CON_NAME;
     let ip_address = if connected {
         ip_of(&device).await.unwrap_or_default()
     } else {

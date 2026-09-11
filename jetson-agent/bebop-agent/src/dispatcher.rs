@@ -91,6 +91,9 @@ async fn set_wifi(
     let ssid_task = ssid.clone();
     tokio::spawn(async move {
         let _ = ap::lower_now(&task_state).await;
+        // Give the single radio a moment to leave AP mode before the client
+        // join; the AP profile is inactive but the driver still transitions.
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         match wifi::connect(&task_state, &ssid_task, &password, hidden).await {
             Ok(status) => {
                 tracing::info!(ssid = %ssid_task, connected = status.connected, "wifi join finished");
