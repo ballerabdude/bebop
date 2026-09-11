@@ -5,7 +5,7 @@ After=network-online.target NetworkManager.service
 Wants=network-online.target NetworkManager.service
 
 [Service]
-Type=notify-reload
+Type=simple
 # The setup agent runs as root because it needs NetworkManager write access
 # to scan/join Wi-Fi and to raise the setup SoftAP (`nmcli`).
 User=root

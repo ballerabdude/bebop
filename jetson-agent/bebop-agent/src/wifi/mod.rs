@@ -163,7 +163,9 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
 
 async fn ip_of(device: &str) -> Result<String> {
     let out = nmcli(&["-g", "IP4.ADDRESS", "device", "show", device]).await?;
-    Ok(out.lines().next().unwrap_or("").trim().to_owned())
+    let raw = out.lines().next().unwrap_or("").trim();
+    // nmcli reports "a.b.c.d/prefix"; hand callers a bare host.
+    Ok(raw.split('/').next().unwrap_or("").trim().to_owned())
 }
 
 /// Name of the first Wi-Fi device managed by NetworkManager (e.g. `wlan0`).
