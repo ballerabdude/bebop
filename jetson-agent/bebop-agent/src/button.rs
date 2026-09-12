@@ -119,36 +119,46 @@ fn button_loop(
     };
     info!(idle, "button line idle level");
 
+    let mut prev_pressed = read_pressed(&request);
+    if prev_pressed {
+        info!("button line already active at startup; waiting for a new press");
+    }
     let mut pressed_since: Option<Instant> = None;
     let mut fired = false;
     loop {
+        std::thread::sleep(POLL);
         let pressed = read_pressed(&request);
-        if pressed {
-            if pressed_since.is_none() {
-                info!("button pressed; hold to toggle");
-                pressed_since = Some(Instant::now());
-                fired = false;
-            }
-            if !fired {
-                if let Some(t0) = pressed_since {
-                    if t0.elapsed() >= hold {
-                        info!(
-                            held_ms = t0.elapsed().as_millis(),
-                            "button long-press detected"
-                        );
-                        fired = true;
-                        let _ = tx.blocking_send(());
-                    }
-                }
-            }
-        } else {
-            if pressed_since.is_some() {
+
+        // Edge-triggered: only start the hold timer on an inactive->active
+        // transition. A line that is already active when the agent starts
+        // (e.g. a switch left on) must not fire until it is released and
+        // pressed again.
+        if pressed && !prev_pressed {
+            info!("button pressed; hold to toggle");
+            pressed_since = Some(Instant::now());
+            fired = false;
+        } else if !pressed {
+            if prev_pressed {
                 info!("button released");
             }
             pressed_since = None;
             fired = false;
         }
-        std::thread::sleep(POLL);
+
+        if pressed && !fired {
+            if let Some(t0) = pressed_since {
+                if t0.elapsed() >= hold {
+                    info!(
+                        held_ms = t0.elapsed().as_millis(),
+                        "button long-press detected"
+                    );
+                    fired = true;
+                    let _ = tx.blocking_send(());
+                }
+            }
+        }
+
+        prev_pressed = pressed;
     }
 }
 
