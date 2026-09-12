@@ -9,6 +9,10 @@
 //
 //   * the MJPEG feed front and center, with the optional navigable-path
 //     overlay and a one-tap "Labels" toggle,
+//   * a toolbar video on/off toggle: playback is a purely client-side
+//     concern, so turning it off (persisted across visits) drops the
+//     MJPEG connection while the robot keeps recording via bebop-vision
+//     and the drive link stays live — teleop with no video,
 //   * a sticky HUD (connection, mode, wheels armed, battery, camera
 //     pose) with E-STOP always in reach,
 //   * a "Start driving" quick-start that switches the runtime to
@@ -86,6 +90,11 @@ const MODE_LABEL: Record<RuntimeMode, string> = {
 /// packets of slack.
 const TWIST_KEEPALIVE_MS = 100;
 
+/// localStorage key for the video-playback toggle. Persisted so an
+/// operator teleoping without video (e.g. bebop-vision recording only,
+/// or a low-bandwidth link) doesn't have to turn it off on every visit.
+const VIDEO_ENABLED_KEY = "bebop.teleop.videoEnabled";
+
 const fmt = (v: number): string =>
   v >= 0 ? `+${v.toFixed(2)}` : v.toFixed(2);
 
@@ -131,6 +140,17 @@ export function TeleopScreen({
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Video playback on/off. This only controls the app's MJPEG playback:
+  // the robot's recording (bebop-vision) and the drive link are
+  // unaffected, so an operator can teleop with video off to save
+  // bandwidth. Persisted across visits; see `VIDEO_ENABLED_KEY`.
+  const [videoEnabled, setVideoEnabledState] = useState(() => {
+    try {
+      return window.localStorage.getItem(VIDEO_ENABLED_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
   // Nav overlay: off by default so the raw video is what you get on
   // entry; one tap adds the navigable-path wash.
   // Phones open in the immersive layout by default — a small screen
@@ -142,9 +162,20 @@ export function TeleopScreen({
   // user chose.
   const [fullscreen, setFullscreen] = useState(() =>
     typeof window !== "undefined"
-      ? window.matchMedia("(max-width: 639px)").matches
+      ? videoEnabled && window.matchMedia("(max-width: 639px)").matches
       : false,
   );
+  // Toggle video playback. Turning it off also leaves fullscreen (a
+  // fullscreen layout with no feed is just an empty black screen).
+  const setVideoEnabled = useCallback((enabled: boolean) => {
+    setVideoEnabledState(enabled);
+    try {
+      window.localStorage.setItem(VIDEO_ENABLED_KEY, enabled ? "1" : "0");
+    } catch {
+      /* private mode / storage disabled — in-memory toggle still works */
+    }
+    if (!enabled) setFullscreen(false);
+  }, []);
   // A connected gamepad replaces the on-screen drive pads (and adds
   // right-stick camera aim below) — one way to drive at a time.
   const { connected: padConnected } = useGamepad();
@@ -681,7 +712,20 @@ export function TeleopScreen({
               <Button
                 variant="secondary"
                 className="py-2! text-sm!"
+                onClick={() => setVideoEnabled(!videoEnabled)}
+                title={
+                  videoEnabled
+                    ? "Stop playing the camera stream in the app. Recording (bebop-vision) and driving keep running."
+                    : "Resume camera playback."
+                }
+              >
+                {videoEnabled ? "Video off" : "Video on"}
+              </Button>
+              <Button
+                variant="secondary"
+                className="py-2! text-sm!"
                 onClick={() => setFullscreen(true)}
+                disabled={!videoEnabled}
                 title="Fill the screen with the live feed and float the drive controls over it"
               >
                 Fullscreen
@@ -747,8 +791,22 @@ export function TeleopScreen({
           primary breaks out of the page padding (-mx-4) and drops the
           card chrome so the video is edge-to-edge — the aspect follows
           the negotiated stream, not a hard-coded box. */}
-      <div className={fullscreen ? "relative flex-1 min-h-0" : "contents"}>
-        {fullscreen ? (
+      <div className={fullscreen && videoEnabled ? "relative flex-1 min-h-0" : "contents"}>
+        {!videoEnabled ? (
+          <div className="w-full -mx-4 sm:mx-0 rounded-none sm:rounded-[var(--radius-card)] border-y sm:border border-border bg-bg-elev px-4 py-6 flex flex-col items-center gap-3 text-center">
+            <span className="text-sm text-text-dim">
+              Video playback is off. The robot still records via
+              bebop-vision, and driving controls below are fully live.
+            </span>
+            <Button
+              variant="secondary"
+              onClick={() => setVideoEnabled(true)}
+              className="py-2! text-sm!"
+            >
+              Turn on video
+            </Button>
+          </div>
+        ) : fullscreen ? (
           <div className="flex h-full min-h-0 flex-col-reverse gap-1 overflow-hidden sm:flex-row">
             <div className="relative min-h-0 min-w-0 flex-1">
               <VideoFeed
@@ -809,11 +867,12 @@ export function TeleopScreen({
       {/* Page content below the feed — hidden, never unmounted, in
           fullscreen (the gamepad bridge must keep its poll loop). */}
       <div className={fullscreen ? "hidden" : "contents"}>
-        {streamState === "error" ? (
+        {videoEnabled && streamState === "error" ? (
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <span className="text-xs text-text-dim">
-              Camera stream failed — bebop-linux may be down or the robot has
-              no <code>video:</code> config. Driving controls still work.
+              Camera stream failed — bebop-vision may be stopped or
+              unreachable. Driving controls still work, and the video
+              toggle is in the toolbar above.
             </span>
             <Button
               variant="secondary"
