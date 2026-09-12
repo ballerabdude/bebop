@@ -68,14 +68,17 @@ pub struct NetworkConfig {
     #[serde(default = "default_button_chip")]
     pub button_chip: String,
 
-    /// GPIO line offset on `button_chip`. Default 41 = header **pin 32**
-    /// (`GPIO07`); this pin idles high on the Orin Nano so a button to GND
-    /// works as active-low. (Pin 29 / line 105 idles low on this board.)
+    /// GPIO line offset on `button_chip`. Default 105 = header **pin 29**;
+    /// this pin idles low on the Orin Nano, so the button ties it to 3.3 V.
+    /// (Set `button_active_low = true` and use an external pull-up for a
+    /// button-to-GND instead.)
     #[serde(default = "default_button_line")]
     pub button_line: u32,
 
     /// True when the button shorts the line to GND when pressed.
-    #[serde(default = "default_true")]
+    /// Default false: on this board header pin 29 idles low, so the button
+    /// connects the pin to 3.3 V (press = high).
+    #[serde(default = "default_false")]
     pub button_active_low: bool,
 
     /// Internal line bias while idle: `"pull-up"`, `"pull-down"`, `"none"`.
@@ -98,7 +101,7 @@ impl Default for NetworkConfig {
             button_enabled: true,
             button_chip: default_button_chip(),
             button_line: default_button_line(),
-            button_active_low: true,
+            button_active_low: default_false(),
             button_bias: default_button_bias(),
             button_hold_secs: default_button_hold_secs(),
         }
@@ -235,11 +238,11 @@ fn default_button_chip() -> String {
 }
 
 fn default_button_line() -> u32 {
-    41 // Orin Nano 40-pin header pin 32 (GPIO07)
+    105 // Orin Nano 40-pin header pin 29 (GPIO01); idles low -> active-high
 }
 
 fn default_button_bias() -> String {
-    "pull-up".into()
+    "pull-down".into()
 }
 
 fn default_button_hold_secs() -> u64 {
@@ -248,6 +251,10 @@ fn default_button_hold_secs() -> u64 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 fn hostname_or(fallback: String) -> String {
@@ -286,7 +293,7 @@ mod tests {
         assert!(cfg.hosts_ap());
         assert!(cfg.ap_password.len() >= 8);
         assert_eq!(cfg.nm_band(), "bg");
-        assert_eq!(cfg.button_line, 41);
+        assert_eq!(cfg.button_line, 105);
     }
 
     #[test]

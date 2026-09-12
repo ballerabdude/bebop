@@ -8,7 +8,7 @@ On-device provisioning daemon that runs on every Bebop robot. Responsibilities:
   while `mode = "ap"` (boot default) and tears it down for `mode = "client"`.
   No automatic fallback.
 - **Mode button** (`src/button.rs`) — a GPIO long-press (default header
-  pin 32 / `gpiochip0` line 41) toggles the mode
+  pin 29 / `gpiochip0` line 105) toggles the mode
   between Hosted (`ap`) and Known (`client`) and persists it. Edit the
   Hosted SSID/password/band from the app.
 - **Setup server** (`src/server.rs`) — protobuf-over-WebSocket on `:9091`
@@ -47,7 +47,7 @@ Hosting the network requires root.
 See [`../deploy/examples/agent.toml`](../deploy/examples/agent.toml). The
 key knobs are `[network] mode` (`ap` / `client`, button-owned) and
 `ap_ssid` / `ap_password` / `ap_band` for the Hosted Network. The mode
-button is under `[network] button_*` (default pin 32 / `gpiochip0` line 41).
+button is under `[network] button_*` (default pin 29 / `gpiochip0` line 105).
 
 ## Packaging / Install
 
