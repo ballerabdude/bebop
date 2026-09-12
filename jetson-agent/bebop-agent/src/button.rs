@@ -74,8 +74,16 @@ fn button_loop(
     bias: Option<Bias>,
     tx: mpsc::Sender<()>,
 ) {
+    // gpiocdev wants a device path; accept either "gpiochip0" or the full
+    // "/dev/gpiochip0".
+    let chip_path = if chip.starts_with('/') {
+        chip.to_owned()
+    } else {
+        format!("/dev/{chip}")
+    };
+
     let request = Request::builder()
-        .on_chip(chip)
+        .on_chip(&chip_path)
         .with_consumer("bebop-agent")
         .with_line(line)
         .with_edge_detection(EdgeDetection::BothEdges)
@@ -85,10 +93,17 @@ fn button_loop(
     let request = match request {
         Ok(r) => r,
         Err(e) => {
-            warn!(error = %e, chip, line, "failed to request button GPIO line");
+            warn!(error = %e, chip = %chip_path, line, "failed to request button GPIO line");
             return;
         }
     };
+
+    // Diagnostic: idle level with the configured bias. A pull-up should
+    // read Active (high) while the switch is open.
+    match request.value(line) {
+        Ok(v) => info!(?v, "button line idle level"),
+        Err(e) => warn!(error = %e, "failed to read button idle level"),
+    }
 
     let mut press_ts: Option<u64> = None;
     for event in request.edge_events() {
