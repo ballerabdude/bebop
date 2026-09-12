@@ -148,6 +148,22 @@ hard ceilings.
 Every pad stops-on-exit: keys held at unmount or at a `disabled` flip enqueue
 a stop/hold exactly once.
 
+## Running on the robot
+
+For bench work, the app can be served from the Jetson itself so any device on
+the same network (or the robot's Hosted Network) can open the UI in a browser:
+
+```sh
+# on the robot, from the repo root
+cd bebop-app && npm install          # once
+sudo ./bebop-app/deploy/install-app-dev.sh   # installs + enables the unit
+```
+
+This installs `bebop-app.service`, which runs `deploy/dev-server.sh`
+(`npm run dev`) as the `bebop` user on boot. Vite serves on `0.0.0.0:1420`
+(`vite.config.ts`), so open `http://bebop.local:1420` or
+`http://<robot-ip>:1420`. It's a development server, not a production build.
+
 ## Developing
 
 ```sh
