@@ -86,9 +86,9 @@ joins the saved network and drops the hotspot.
   `nmcli -f WIFI-PROPERTIES.AP dev show <iface>`.
 - It is a single radio: the robot cannot be a Wi-Fi client and a hotspot at
   the same time, so mode switches drop the previous link.
-- The mode button defaults to header **pin 29** (`gpiochip0` line 105,
-  idles low; wire the switch to 3.3 V, active-high). Avoid pins 7 and 15
-  (IMU INT/RST). The setup passphrase is fixed
+- The mode button defaults to header **pin 32** (`gpiochip0` line 41,
+  internal pull-down; wire the switch to 3.3 V, active-high, no resistor).
+  Avoid pins 7 and 15 (IMU INT/RST) and pin 29 (no internal pull). The setup passphrase is fixed
   (`bebopbebop`) for now; move to a per-device derived code before customer
   shipments.
 

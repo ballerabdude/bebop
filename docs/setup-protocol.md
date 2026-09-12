@@ -23,10 +23,11 @@ A momentary switch from a GPIO header pin to 3.3 V. A **press** (debounced)
 toggles the mode and persists it to `/etc/bebop/agent.toml`. Set
 `button_hold_secs > 0` to require a hold instead of a press.
 
-- Default pin: Orin Nano header **pin 29** = `gpiochip0` line **105**
-  (`GPIO01`). This pin idles low, so wire the switch from the pin to
-  **3.3 V** (header pins 1/17) and leave `button_active_low = false`.
-  Avoid pins 7 and 15 (IMU INT/RST).
+- Default pin: Orin Nano header **pin 32** = `gpiochip0` line **41**
+  (`GPIO07`). It has an internal pull-down in the pinmux, so wire the
+  switch from the pin to **3.3 V** (header pins 1/17) — no resistor needed
+  — and leave `button_active_low = false`. Avoid pins 7 and 15 (IMU
+  INT/RST), and pin 29 (no internal pull; it floats).
 - The agent requests the line via the pure-Rust `gpiocdev` crate (GPIO
   uAPI v2). The Jetson pinmux fixes each pin's idle bias (a runtime bias
   request is effectively cosmetic), so pick the wiring to match the pin's
@@ -103,7 +104,7 @@ is effectively cosmetic — so confirm the wiring matches the idle level
 before relying on the button.
 
 ```sh
-# Idle level on header pin 29 (gpiochip0 line 105). With the default
+# Idle level on header pin 32 (gpiochip0 line 41). With the default
 # active-high wiring (switch to 3.3 V) this should read 0.
 gpioget gpiochip0 105
 

@@ -1,7 +1,8 @@
 //! Physical mode-toggle button.
 //!
 //! A momentary switch wired between a GPIO header pin (default: Orin Nano
-//! pin 29 → `gpiochip0` line 105, which idles low) and 3.3 V. Pressing it
+//! pin 32 → `gpiochip0` line 41, which has an internal pull-down) and
+//! 3.3 V (no external resistor needed). Pressing it
 //! toggles the robot between `client` ("Known Network") and `ap` ("Hosted
 //! Network"). By default (`button_hold_secs = 0`) a debounced press toggles
 //! immediately; set `button_hold_secs > 0` to require holding the line

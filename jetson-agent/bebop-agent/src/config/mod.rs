@@ -69,16 +69,18 @@ pub struct NetworkConfig {
     #[serde(default = "default_button_chip")]
     pub button_chip: String,
 
-    /// GPIO line offset on `button_chip`. Default 105 = header **pin 29**;
-    /// this pin idles low on the Orin Nano, so the button ties it to 3.3 V.
-    /// (Set `button_active_low = true` and use an external pull-up for a
-    /// button-to-GND instead.)
+    /// GPIO line offset on `button_chip`.
+    ///
+    /// Default 41 = header **pin 32** (`GPIO07`). Its pinmux has an internal
+    /// pull-down, so a momentary button wired to **3.3 V** gives a clean
+    /// idle-low / pressed-high with no external resistor. (Pin 29 has no
+    /// internal pull and floats — avoid it for a resistorless button.)
     #[serde(default = "default_button_line")]
     pub button_line: u32,
 
     /// True when the button shorts the line to GND when pressed.
-    /// Default false: on this board header pin 29 idles low, so the button
-    /// connects the pin to 3.3 V (press = high).
+    /// Default false: the recommended pin idles low via its internal
+    /// pull-down, and the button ties it to 3.3 V (press = high).
     #[serde(default = "default_false")]
     pub button_active_low: bool,
 
@@ -241,11 +243,12 @@ fn default_button_chip() -> String {
 }
 
 fn default_button_line() -> u32 {
-    105 // Orin Nano 40-pin header pin 29 (GPIO01); idles low -> active-high
+    41 // Orin Nano 40-pin header pin 32 (GPIO07); internal pull-down
 }
 
 fn default_button_bias() -> String {
-    "pull-down".into()
+    // Leave the line's pinmux bias alone: pin 32 already has a pull-down.
+    "none".into()
 }
 
 fn default_button_hold_secs() -> u64 {
@@ -296,7 +299,7 @@ mod tests {
         assert!(cfg.hosts_ap());
         assert!(cfg.ap_password.len() >= 8);
         assert_eq!(cfg.nm_band(), "bg");
-        assert_eq!(cfg.button_line, 105);
+        assert_eq!(cfg.button_line, 41);
     }
 
     #[test]

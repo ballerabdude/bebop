@@ -57,13 +57,14 @@
 # --- mode button ----------------------------------------------------------
 # A momentary switch between the GPIO pin and 3.3 V. A press toggles
 # between Hosted Network (ap) and Known Network (client). On the Orin Nano
-# 40-pin header, pin 29 is gpiochip0 line 105 and idles low, so wire the
-# switch from pin 29 to 3.3 V (pins 1/17) and keep button_active_low=false
-# (avoid pins 7 and 15, which the IMU uses).
+# 40-pin header, pin 32 is gpiochip0 line 41 and has an internal
+# pull-down, so wire the switch from pin 32 to 3.3 V (pins 1/17) and keep
+# button_active_low=false — no resistor needed (avoid pins 7/15 (IMU) and
+# pin 29, which has no internal pull).
 #
 # button_enabled = true
 # button_chip = "gpiochip0"
-# button_line = 105          # header pin 29 (GPIO01)
+# button_line = 41           # header pin 32 (GPIO07)
 # button_active_low = false  # switch ties the line to 3.3 V when pressed
-# button_bias = "pull-down"  # pull-down | pull-up | none (pinmux wins on Jetson)
+# button_bias = "none"       # leave the pinmux's built-in pull-down alone
 # button_hold_secs = 0       # 0 = toggle on press; >0 = require a hold
