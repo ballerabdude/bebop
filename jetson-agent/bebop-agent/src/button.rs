@@ -125,6 +125,7 @@ fn button_loop(
         let pressed = read_pressed(&request);
         if pressed {
             if pressed_since.is_none() {
+                info!("button pressed; hold to toggle");
                 pressed_since = Some(Instant::now());
                 fired = false;
             }
@@ -141,7 +142,7 @@ fn button_loop(
                 }
             }
         } else {
-            if fired {
+            if pressed_since.is_some() {
                 info!("button released");
             }
             pressed_since = None;
