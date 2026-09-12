@@ -6,7 +6,7 @@ setup server, and how the physical mode button works.
 ## Network modes
 
 The robot has exactly two network modes, switched **only** by the physical
-button long-press. There is no automatic fallback.
+button press. There is no automatic fallback.
 
 | Mode     | Name           | Behaviour                                                           |
 |----------|----------------|---------------------------------------------------------------------|
@@ -19,9 +19,9 @@ link. A fresh robot boots into Hosted Network so it is reachable at
 
 ## Mode button
 
-A momentary switch from a GPIO header pin to GND. A **long press** (default
-5 s, fired on release) toggles the mode and persists it to
-`/etc/bebop/agent.toml`. Short taps are ignored.
+A momentary switch from a GPIO header pin to 3.3 V. A **press** (debounced)
+toggles the mode and persists it to `/etc/bebop/agent.toml`. Set
+`button_hold_secs > 0` to require a hold instead of a press.
 
 - Default pin: Orin Nano header **pin 29** = `gpiochip0` line **105**
   (`GPIO01`). This pin idles low, so wire the switch from the pin to
@@ -84,7 +84,7 @@ extra length prefix — the WebSocket frame boundary is the message boundary.
   saved network only when the button switches it to Known Network, at which
   point the profile autoconnects.
 
-The app's Wi-Fi screen shows a "saved — long-press to switch" confirmation
+The app's Wi-Fi screen shows a "saved — press the button to switch" confirmation
 when provisioning while Hosted.
 
 ## Editing the Hosted Network
@@ -113,14 +113,14 @@ sudo systemctl stop bebop-agent
 gpiomon gpiochip0 105          # Ctrl-C to exit; press the button
 sudo systemctl start bebop-agent
 
-# End-to-end: long-press ~5 s, then watch the toggle + hotspot come up.
+# End-to-end: press the button, then watch the toggle + hotspot come up.
 journalctl -u bebop-agent -f
-# ... press and hold ~5 s, then release ...
+# ... press the button ...
 # expect: "button pressed" -> "mode button toggled network mode mode=ap"
 #         -> "Hosted Network raised ssid=Bebop-XXXX"
 ```
 
-To go back to Known Network, long-press again (~5 s). If the hotspot is up,
+To go back to Known Network, press the button again. If the hotspot is up,
 join `Bebop-XXXX` on a phone/PC and open `http://192.168.42.1:9091`.
 
 ## Regenerating bindings

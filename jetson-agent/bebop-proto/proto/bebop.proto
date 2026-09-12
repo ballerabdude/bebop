@@ -116,7 +116,7 @@ message GetRobotConfigRequest {}
 //   * "client" — join a saved network ("Known Network").
 //   * "ap"     — host the setup hotspot ("Hosted Network").
 //
-// The mode is changed by the physical button long-press, not by the app.
+// The mode is changed by the physical button, not by the app.
 //
 // `ap_ssid`, `ap_password` and `ap_band` are editable Hosted Network
 // settings. In `SetNetworkConfigRequest`, an empty `ap_password` keeps the

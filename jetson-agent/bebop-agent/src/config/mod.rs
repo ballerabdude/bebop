@@ -36,7 +36,8 @@ pub struct AgentConfig {
 ///   * `ap` — host the setup hotspot ("Hosted Network"); stays up
 ///     indefinitely and is only changed by the physical button.
 ///
-/// The GPIO button long-press toggles `mode`.
+/// The GPIO button toggles `mode` (a press by default; a hold if
+/// `button_hold_secs > 0`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
     /// `"ap"` (default) or `"client"`.
@@ -85,7 +86,9 @@ pub struct NetworkConfig {
     #[serde(default = "default_button_bias")]
     pub button_bias: String,
 
-    /// Hold time (seconds) required to toggle the mode on release.
+    /// Hold time in seconds before the press toggles the mode. `0` (the
+    /// default) toggles on a debounced press edge, which suits a momentary
+    /// push-button.
     #[serde(default = "default_button_hold_secs")]
     pub button_hold_secs: u64,
 }
@@ -246,7 +249,7 @@ fn default_button_bias() -> String {
 }
 
 fn default_button_hold_secs() -> u64 {
-    5
+    0
 }
 
 fn default_true() -> bool {

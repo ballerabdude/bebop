@@ -19,7 +19,7 @@
   containers, OTA, or controller pairing.
 - Network mode is a two-way switch with **no fallback**: `ap` (Hosted
   Network, boot default) or `client` (Known Network). The **physical button
-  long-press (~5 s)** toggles it; the app cannot. Button default = Orin Nano
+  press** toggles it; the app cannot. Button default = Orin Nano
   header **pin 29** (`gpiochip0` line 105, idles low; wire the switch to
   3.3 V, active-high). Avoid pins 7/15 (IMU).
 - AP capability on this robot is confirmed (`nmcli -f WIFI-PROPERTIES.AP

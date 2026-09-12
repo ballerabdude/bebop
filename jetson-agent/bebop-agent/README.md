@@ -7,7 +7,7 @@ On-device provisioning daemon that runs on every Bebop robot. Responsibilities:
 - **Hosted Network** (`src/ap.rs`) — hosts the `Bebop-XXXX` WPA2 hotspot
   while `mode = "ap"` (boot default) and tears it down for `mode = "client"`.
   No automatic fallback.
-- **Mode button** (`src/button.rs`) — a GPIO long-press (default header
+- **Mode button** (`src/button.rs`) — a GPIO press (default header
   pin 29 / `gpiochip0` line 105) toggles the mode
   between Hosted (`ap`) and Known (`client`) and persists it. Edit the
   Hosted SSID/password/band from the app.

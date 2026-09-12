@@ -1,14 +1,15 @@
 //! Physical mode-toggle button.
 //!
-//! A switch wired between a GPIO header pin (default: Orin Nano pin 29 →
-//! `gpiochip0` line 105, which idles low) and 3.3 V. Holding the line in its
-//! active state for `button_hold_secs` (default 5 s) toggles the robot
-//! between the two network modes: `client` ("Known Network") and `ap`
-//! ("Hosted Network").
+//! A momentary switch wired between a GPIO header pin (default: Orin Nano
+//! pin 29 → `gpiochip0` line 105, which idles low) and 3.3 V. Pressing it
+//! toggles the robot between `client` ("Known Network") and `ap` ("Hosted
+//! Network"). By default (`button_hold_secs = 0`) a debounced press toggles
+//! immediately; set `button_hold_secs > 0` to require holding the line
+//! active for that long instead.
 //!
-//! The hold is measured by **polling the line level**, not by timing edges,
-//! so it works with both momentary push-buttons and latching switches, and
-//! does not depend on a release edge arriving.
+//! The line level is **polled**, not edge-timed, so it works with momentary
+//! push-buttons and latching switches alike and does not depend on a release
+//! edge arriving.
 //!
 //! Implemented with the pure-Rust [`gpiocdev`] crate (GPIO uAPI v2), so it
 //! needs no `libgpiod` build dependency and can request a line bias.
@@ -41,7 +42,8 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
     let chip = cfg.button_chip.clone();
     let line = cfg.button_line;
     let active_low = cfg.button_active_low;
-    let hold = Duration::from_secs(cfg.button_hold_secs.max(1));
+    let hold = Duration::from_secs(cfg.button_hold_secs);
+    let immediate = hold.is_zero();
     let bias = parse_bias(&cfg.button_bias);
 
     let spawned = std::thread::Builder::new()
@@ -52,7 +54,8 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
             chip = %cfg.button_chip,
             line = cfg.button_line,
             hold_secs = hold.as_secs(),
-            "mode button armed (hold to toggle Known/Hosted)"
+            trigger = if immediate { "press" } else { "hold" },
+            "mode button armed (toggles Known/Hosted)"
         ),
         Err(e) => {
             warn!(error = %e, "failed to spawn button thread; button unavailable");
@@ -119,6 +122,8 @@ fn button_loop(
     };
     info!(idle, "button line idle level");
 
+    let immediate = hold.is_zero();
+
     // Let the line settle after the request (bias/direction take effect
     // asynchronously) before sampling the initial level, so a startup
     // transient isn't mistaken for a press.
@@ -146,9 +151,15 @@ fn button_loop(
 
         if stable != prev_pressed && stable_count >= 2 {
             if stable {
-                info!("button pressed; hold to toggle");
-                pressed_since = Some(Instant::now());
-                fired = false;
+                if immediate {
+                    info!("button pressed; toggling mode");
+                    fired = true;
+                    let _ = tx.blocking_send(());
+                } else {
+                    info!("button pressed; hold to toggle");
+                    pressed_since = Some(Instant::now());
+                    fired = false;
+                }
             } else {
                 info!("button released");
                 pressed_since = None;
@@ -157,7 +168,7 @@ fn button_loop(
             prev_pressed = stable;
         }
 
-        if prev_pressed && !fired {
+        if !immediate && prev_pressed && !fired {
             if let Some(t0) = pressed_since {
                 if t0.elapsed() >= hold {
                     info!(

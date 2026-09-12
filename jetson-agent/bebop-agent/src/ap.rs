@@ -4,7 +4,7 @@
 //!   * `mode = "ap"`     — host the `Bebop-XXXX` hotspot continuously.
 //!   * `mode = "client"` — join a saved network; never host.
 //!
-//! The physical button long-press toggles the mode; this module reconciles
+//! The physical button toggles the mode; this module reconciles
 //! the running hotspot with whichever mode is configured. The Wi-Fi radio is
 //! single-ended, so hosting the AP necessarily drops any client link.
 //!

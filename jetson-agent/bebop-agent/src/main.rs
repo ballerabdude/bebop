@@ -3,7 +3,7 @@
 //! Provisioning-only daemon:
 //!   * Wi-Fi status poller (wraps NetworkManager)
 //!   * Hosted Network supervisor (`ap` / `client` modes)
-//!   * GPIO mode button (long-press toggles Known/Hosted)
+//!   * GPIO mode button (press toggles Known/Hosted)
 //!   * Setup server (protobuf-over-WebSocket + a status page), reachable on
 //!     the LAN or directly over the robot's setup hotspot.
 //!

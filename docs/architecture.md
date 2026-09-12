@@ -13,7 +13,7 @@ Subsystems (see `jetson-agent/bebop-agent/src/`):
 - **`ap.rs`** — Hosted Network supervisor. Hosts the `Bebop-XXXX` hotspot
   while `mode = "ap"` and tears it down for `mode = "client"`. No automatic
   fallback; the mode is a two-way switch.
-- **`button.rs`** — the physical mode button (GPIO long-press) that toggles
+- **`button.rs`** — the physical mode button (GPIO press) that toggles
   `ap` ⇄ `client` and persists the choice.
 - **`server.rs`** — setup server: protobuf-over-WebSocket (`:9091`) plus a
   status page. Reachable on the LAN or over the Hosted Network.
@@ -68,7 +68,7 @@ The customer-facing companion app:
 
 On first boot the Hosted Network comes up immediately (boot default
 `mode = "ap"`); the user joins `Bebop-XXXX`, provisions Wi-Fi through the
-app, then long-presses the mode button to switch to Known Network, which
+app, then presses the mode button to switch to Known Network, which
 joins the saved network and drops the hotspot.
 
 ## Process / trust boundaries

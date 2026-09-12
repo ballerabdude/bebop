@@ -29,7 +29,7 @@
 #              fresh robot is reachable at 192.168.42.1:9091.
 #   "client" — Known Network: the robot joins a saved Wi-Fi network and
 #              never hosts.
-# Changed by the physical button long-press (see [button] below), not by
+# Changed by the physical button (see [button] below), not by
 # the app.
 # Default: "ap"
 # mode = "ap"
@@ -55,7 +55,7 @@
 # setup_bind_addr = "0.0.0.0:9091"
 
 # --- mode button ----------------------------------------------------------
-# A momentary switch between the GPIO pin and GND. A long press toggles
+# A momentary switch between the GPIO pin and 3.3 V. A press toggles
 # between Hosted Network (ap) and Known Network (client). On the Orin Nano
 # 40-pin header, pin 29 is gpiochip0 line 105 and idles low, so wire the
 # switch from pin 29 to 3.3 V (pins 1/17) and keep button_active_low=false
@@ -66,4 +66,4 @@
 # button_line = 105          # header pin 29 (GPIO01)
 # button_active_low = false  # switch ties the line to 3.3 V when pressed
 # button_bias = "pull-down"  # pull-down | pull-up | none (pinmux wins on Jetson)
-# button_hold_secs = 5       # long-press duration
+# button_hold_secs = 0       # 0 = toggle on press; >0 = require a hold
