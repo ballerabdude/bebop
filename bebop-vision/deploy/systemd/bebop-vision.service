@@ -1,0 +1,39 @@
+[Unit]
+Description=Bebop vision recorder (Orbbec rig + navd MCAP sessions + MJPEG on :9092)
+Documentation=https://github.com/ballerabdude/bebop
+# The recorder opens the Orbbec cameras and connects to the bebop-linux
+# runtime WebSocket for drive-state + telemetry. It does not need the
+# runtime to be up to start (RobotClient retries), but ordering keeps the
+# two from racing at boot when the operator has enabled this unit.
+After=network-online.target bebop-linux.service
+Wants=network-online.target bebop-linux.service
+
+[Service]
+Type=simple
+# Runs as root, like the documented manual recorder (`sudo .venv/bin/python`
+# in AGENTS.md). The shared capture dir is root-owned (bebop-linux's
+# `StateDirectory=bebop-captures` makes systemd chown
+# /var/lib/bebop-captures to root:root 0750) and the Orbbec SDK writes
+# Log/ + the recorder lock in /tmp, all of which a `bebop` user can't
+# touch. Root here is deliberate, not an oversight.
+User=root
+Group=root
+WorkingDirectory=/home/bebop/bebop/bebop-vision
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/bebop/bebop/bebop-vision/.venv/bin/python -u main.py \
+    --record-navd /var/lib/bebop-captures \
+    --auto \
+    --robot-url ws://127.0.0.1:9090/ws
+
+# SIGTERM is translated by main.py into its KeyboardInterrupt path, which
+# flushes any open MCAP segment and releases /tmp/navd_recorder.lock, so
+# give it room to finish before systemd escalates.
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=3
+
+[Install]
+# Deliberately NOT enabled by install-jetson.sh: the operator starts and
+# stops the recorder from the app. `systemctl enable bebop-vision` opts
+# into auto-start at boot.
+WantedBy=multi-user.target

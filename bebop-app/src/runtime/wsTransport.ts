@@ -33,6 +33,7 @@ import {
   SetPolicyDryRunSchema,
   SetNavigationGoalSchema,
   SetVelocityCommandSchema,
+  SetVisionEnabledSchema,
   Vec2Schema,
   SetWheelEnabledSchema,
   SetAllWheelsEnabledSchema,
@@ -51,6 +52,7 @@ import {
   type PolicyIoStats as ProtoPolicyIoStats,
   type WheelState as ProtoWheelState,
   type DriveState as ProtoDriveState,
+  type VisionState as ProtoVisionState,
 } from "../proto/bebop_runtime_pb";
 import type {
   BusView,
@@ -61,6 +63,7 @@ import type {
   PowerView,
   RuntimeMode,
   RuntimeSnapshot,
+  VisionView,
   WheelView,
 } from "./types";
 
@@ -589,6 +592,19 @@ export class RuntimeTransport {
     });
   }
 
+  // -------------------------------------------------------------- vision
+
+  /// Start or stop the Python bebop-vision service (`bebop-vision.service`)
+  /// on the robot. The firmware forwards the request to systemd and acks
+  /// immediately; the resulting state arrives asynchronously in telemetry
+  /// (`snapshot.vision`).
+  async setVisionEnabled(enabled: boolean): Promise<void> {
+    await this.requestAck({
+      case: "setVisionEnabled",
+      value: create(SetVisionEnabledSchema, { enabled }),
+    });
+  }
+
   // -------------------------------------------------------------- internals
   private async requestAck(payload: ClientPayload): Promise<void> {
     const reply = await this.request(payload);
@@ -703,6 +719,7 @@ function snapshotFromProto(s: Snapshot | TelemetryFrame): RuntimeSnapshot {
     power: powerFromProto(s.power),
     imu: imuFromProto(s.imu),
     policyIo: policyIoFromProto(s.policyIo),
+    vision: visionFromProto(s.vision),
   };
 }
 
@@ -803,6 +820,31 @@ const EMPTY_POLICY_IO_VIEW: PolicyIoView = {
   capturePath: "",
   captureRows: 0,
   captureDropped: 0,
+};
+
+function visionFromProto(p: ProtoVisionState | undefined): VisionView {
+  // Absent field on older firmware collapses to "not installed" — the UI
+  // hides the vision control rather than offering a button that can't work.
+  if (!p) {
+    return EMPTY_VISION_VIEW;
+  }
+  return {
+    present: p.present,
+    running: p.running,
+    state: p.state,
+    detail: p.detail,
+    service: p.service,
+    mode: p.mode,
+  };
+}
+
+const EMPTY_VISION_VIEW: VisionView = {
+  present: false,
+  running: false,
+  state: "",
+  detail: "",
+  service: "",
+  mode: "",
 };
 
 function powerFromProto(p: ProtoPowerStats | undefined): PowerView {

@@ -12,7 +12,10 @@
   `/usr/local/bin/bebop-linux`; config `/etc/bebop/bebop_wheeled.yaml`.
 - Other services: `bebop-agent` owns port 9091 (its `/healthz` + setup
   WebSocket) — do NOT use 9091 for anything new. Firmware WS/HTTP is 9090,
-  the bebop-vision videoserver is 9092.
+  the bebop-vision videoserver is 9092. `bebop-vision.service` (root,
+  installed but NOT enabled) runs the Python recorder; start/stop it from
+  the app's Teleop vision card — the firmware shells out to `systemctl` and
+  mirrors the unit state in telemetry (`VisionState`).
 - `bebop-agent` is provisioning-only: Wi-Fi (nmcli) + a Hosted Network
   hotspot (`Bebop-<machine-id>`, WPA2 passphrase `bebopbebop`, gateway
   `192.168.42.1:9091`) + the setup server. It no longer does BLE,

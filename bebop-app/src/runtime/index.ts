@@ -11,5 +11,6 @@ export type {
   PowerView,
   RuntimeMode,
   RuntimeSnapshot,
+  VisionView,
   WheelView,
 } from "./types";

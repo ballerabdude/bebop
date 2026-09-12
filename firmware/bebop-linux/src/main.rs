@@ -24,6 +24,7 @@ use bebop_linux::safety::power_monitor::spawn_power_monitor;
 use bebop_linux::safety::supervisor::spawn_rx_threads;
 use bebop_linux::safety::{BusPool, Supervisor};
 use bebop_linux::server;
+use bebop_linux::vision;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -181,6 +182,10 @@ async fn main() -> Result<()> {
 
     // Spawn one OS thread per CAN bus to drain feedback frames.
     let shutdown_flag = Arc::new(AtomicBool::new(false));
+
+    // Operator control of the Python bebop-vision service (start/stop via
+    // systemd). The background poller also feeds `VisionState` telemetry.
+    let vision_shared = vision::spawn_vision_supervisor(shutdown_flag.clone());
 
     // Shared latest IMU reading (always present; the I²C reader fills it
     // when an `imu:` block exists in the YAML, otherwise stays at default
@@ -426,6 +431,7 @@ async fn main() -> Result<()> {
     let server_policy_control = policy_control_shared.clone();
     let server_capture_dir = capture_dir.clone();
     let server_nav_goal = std::sync::Arc::new(NavGoalShared::new());
+    let server_vision = vision_shared.clone();
     let bind_addr = cfg.server.bind_addr.clone();
     let server_handle = tokio::spawn(async move {
         let state = bebop_linux::server::AppState {
@@ -436,6 +442,7 @@ async fn main() -> Result<()> {
             policy_control: server_policy_control,
             capture_dir: server_capture_dir,
             nav_goal: server_nav_goal,
+            vision: server_vision,
         };
         if let Err(e) = server::run_server(state, &bind_addr).await {
             error!(error = %e, "server task exited with error");

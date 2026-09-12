@@ -38,3 +38,4 @@ pub mod robstride;
 pub mod safety;
 pub mod server;
 pub mod udp_command;
+pub mod vision;

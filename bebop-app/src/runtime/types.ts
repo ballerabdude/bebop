@@ -163,6 +163,10 @@ export interface RuntimeSnapshot {
   /// Policy observation/action I/O. `policyIo.present === false` when
   /// `policy.onnx` failed to load at boot.
   policyIo: PolicyIoView;
+  /// bebop-vision service state. `vision.present === false` when the
+  /// `bebop-vision.service` unit isn't installed — the UI hides the
+  /// vision control card in that case.
+  vision: VisionView;
 }
 
 /// Policy I/O view. Mirrors the scalar capture/lifecycle fields of the
@@ -189,4 +193,19 @@ export interface PolicyIoView {
    *  lifetime; 0 means the writer is keeping up. UIs should flag a
    *  non-zero value as data loss. */
   captureDropped: number;
+}
+
+/// State of the Python bebop-vision service (`bebop-vision.service`).
+/// `present === false` means the unit isn't installed on this robot; the
+/// UI should hide the vision control card. `running` is true while the
+/// unit is systemd-`active` (the recorder process is up). `state` is the
+/// raw systemd ActiveState for transition rendering; `detail` carries the
+/// SubState or the last systemctl error.
+export interface VisionView {
+  present: boolean;
+  running: boolean;
+  state: string;
+  detail: string;
+  service: string;
+  mode: string;
 }

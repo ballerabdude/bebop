@@ -22,7 +22,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file bebop_runtime.proto.
  */
 export const file_bebop_runtime: GenFile = /*@__PURE__*/
-  fileDesc("ChNiZWJvcF9ydW50aW1lLnByb3RvEhBiZWJvcC5ydW50aW1lLnYxIpMLChRDbGllbnRSdW50aW1lTWVzc2FnZRISCgpyZXF1ZXN0X2lkGGQgASgNEkMKE3N1YnNjcmliZV90ZWxlbWV0cnkYASABKAsyJC5iZWJvcC5ydW50aW1lLnYxLlN1YnNjcmliZVRlbGVtZXRyeUgAEkcKFXVuc3Vic2NyaWJlX3RlbGVtZXRyeRgCIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVUZWxlbWV0cnlIABI1CgxnZXRfc25hcHNob3QYAyABKAsyHS5iZWJvcC5ydW50aW1lLnYxLkdldFNuYXBzaG90SAASPgoRc2V0X21vdG9yX2VuYWJsZWQYBCABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldE1vdG9yRW5hYmxlZEgAEkcKFnNldF9hbGxfbW90b3JzX2VuYWJsZWQYBSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbE1vdG9yc0VuYWJsZWRIABItCghzZXRfbW9kZRgGIAEoCzIZLmJlYm9wLnJ1bnRpbWUudjEuU2V0TW9kZUgAEjkKDmVtZXJnZW5jeV9zdG9wGAcgASgLMh8uYmVib3AucnVudGltZS52MS5FbWVyZ2VuY3lTdG9wSAASMwoLcmVzZXRfZXN0b3AYCCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlJlc2V0RVN0b3BIABI8ChBzZXRfbW90b3JfdGFyZ2V0GAkgASgLMiAuYmVib3AucnVudGltZS52MS5TZXRNb3RvclRhcmdldEgAEkIKE3NldF9tZWNoYW5pY2FsX3plcm8YCiABKAsyIy5iZWJvcC5ydW50aW1lLnYxLlNldE1lY2hhbmljYWxaZXJvSAASPwoSc2V0X3BvbGljeV9kcnlfcnVuGAsgASgLMiEuYmVib3AucnVudGltZS52MS5TZXRQb2xpY3lEcnlSdW5IABJJChdzZXRfbWVjaGFuaWNhbF96ZXJvX2FsbBgNIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuU2V0TWVjaGFuaWNhbFplcm9BbGxIABJEChRzZXRfdmVsb2NpdHlfY29tbWFuZBgOIAEoCzIkLmJlYm9wLnJ1bnRpbWUudjEuU2V0VmVsb2NpdHlDb21tYW5kSAASPgoRc2V0X3doZWVsX2VuYWJsZWQYDyABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldFdoZWVsRW5hYmxlZEgAEkcKFnNldF9hbGxfd2hlZWxzX2VuYWJsZWQYECABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbFdoZWVsc0VuYWJsZWRIABI5Cg5yZXNldF9vZG9tZXRyeRgRIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUmVzZXRPZG9tZXRyeUgAEjsKD2NhbGlicmF0ZV93aGVlbBgSIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuQ2FsaWJyYXRlV2hlZWxIABI+Cg9zZXRfY2FtZXJhX3Bvc2UYEyABKAsyHy5iZWJvcC5ydW50aW1lLnYxLlNldENhbWVyYVBvc2VCAhgBSAASOwoNc3Vic2NyaWJlX25hdhgUIAEoCzIeLmJlYm9wLnJ1bnRpbWUudjEuU3Vic2NyaWJlTmF2QgIYAUgAEj8KD3Vuc3Vic2NyaWJlX25hdhgVIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVOYXZCAhgBSAASQgoTc2V0X25hdmlnYXRpb25fZ29hbBgWIAEoCzIjLmJlYm9wLnJ1bnRpbWUudjEuU2V0TmF2aWdhdGlvbkdvYWxIAEIJCgdwYXlsb2FkSgQIDBANUhJzZXRfcG9saWN5X2NhcHR1cmUiiAQKFFNlcnZlclJ1bnRpbWVNZXNzYWdlEhIKCnJlcXVlc3RfaWQYZCABKA0SJAoDYWNrGAEgASgLMhUuYmVib3AucnVudGltZS52MS5BY2tIABIoCgVlcnJvchgCIAEoCzIXLmJlYm9wLnJ1bnRpbWUudjEuRXJyb3JIABIuCghzbmFwc2hvdBgDIAEoCzIaLmJlYm9wLnJ1bnRpbWUudjEuU25hcHNob3RIABI1Cgl0ZWxlbWV0cnkYBCABKAsyIC5iZWJvcC5ydW50aW1lLnYxLlRlbGVtZXRyeUZyYW1lSAASNQoMbW9kZV9jaGFuZ2VkGAUgASgLMh0uYmVib3AucnVudGltZS52MS5Nb2RlQ2hhbmdlZEgAEjcKDWVzdG9wX2xhdGNoZWQYBiABKAsyHi5iZWJvcC5ydW50aW1lLnYxLkVTdG9wTGF0Y2hlZEgAEjcKCmJ1c19zdGF0dXMYByABKAsyIS5iZWJvcC5ydW50aW1lLnYxLkJ1c1N0YXR1c1VwZGF0ZUgAEjYKCG5hdl9tYXNrGAggASgLMh4uYmVib3AucnVudGltZS52MS5OYXZNYXNrRnJhbWVCAhgBSAASOQoIbmF2X2dvYWwYCSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLk5hdmlnYXRpb25Hb2FsU3RhdGVIAEIJCgdwYXlsb2FkIoEDCgpNb3RvclN0YXRlEhIKCmpvaW50X25hbWUYASABKAkSFQoNY2FuX2ludGVyZmFjZRgCIAEoCRIQCghtb3Rvcl9pZBgDIAEoDRINCgVtb2RlbBgEIAEoCRINCgVhcm1lZBgFIAEoCBIWCg5mZWVkYmFja19zdGFsZRgGIAEoCBISCgpmYXVsdF9iaXRzGAcgASgNEhQKDHBvc2l0aW9uX3JhZBgKIAEoAhIWCg52ZWxvY2l0eV9yYWRfcxgLIAEoAhIRCgl0b3JxdWVfbm0YDCABKAISFQoNdGVtcGVyYXR1cmVfYxgNIAEoAhIZChFwb3NpdGlvbl9yZWNlaXZlZBgPIAEoCBIbChN0YXJnZXRfcG9zaXRpb25fcmFkGA4gASgCEhMKC3Bvc19taW5fcmFkGBQgASgCEhMKC3Bvc19tYXhfcmFkGBUgASgCEg8KB3ZlbF9tYXgYFiABKAISDwoHdGF1X21heBgXIAEoAhIQCgh0ZW1wX21heBgYIAEoAiKKAgoKV2hlZWxTdGF0ZRIMCgRuYW1lGAEgASgJEhUKDWNhbl9pbnRlcmZhY2UYAiABKAkSDwoHbm9kZV9pZBgDIAEoDRINCgVhcm1lZBgFIAEoCBIWCg5mZWVkYmFja19zdGFsZRgGIAEoCBIZChFwb3NpdGlvbl9yZWNlaXZlZBgPIAEoCBISCgplcnJvcl9jb2RlGAcgASgNEhQKDHBvc2l0aW9uX3JhZBgKIAEoAhIWCg52ZWxvY2l0eV9yYWRfcxgLIAEoAhIdChV0YXJnZXRfdmVsb2NpdHlfcmFkX3MYDiABKAISDwoHdmVsX21heBgWIAEoAhISCgpheGlzX3N0YXRlGBcgASgNItQBCgpEcml2ZVN0YXRlEg8KB3ByZXNlbnQYASABKAgSFAoMY21kX2xpbmVhcl94GAIgASgCEhUKDWNtZF9hbmd1bGFyX3oYAyABKAISFgoOb3BlcmF0b3Jfc3RhbGUYBCABKAgSGwoTaGFzX2FjdGl2ZV9vcGVyYXRvchgFIAEoCBIfChd5b3VfYXJlX2FjdGl2ZV9vcGVyYXRvchgGIAEoCBIOCgZvZG9tX3gYCiABKAISDgoGb2RvbV95GAsgASgCEhIKCm9kb21fdGhldGEYDCABKAIiUQoLQ2FtZXJhU3RhdGUSDwoHcHJlc2VudBgBIAEoCBIPCgdwYW5fZGVnGAIgASgCEhAKCHRpbHRfZGVnGAMgASgCEg4KBm1vdmluZxgEIAEoCCJBCghCdXNFbnRyeRIVCg1jYW5faW50ZXJmYWNlGAEgASgJEg0KBXN0YXRlGAIgASgJEg8KB2hlYWx0aHkYAyABKAgi6QQKClBvd2VyU3RhdHMSDwoHcHJlc2VudBgBIAEoCBIVCg1jYW5faW50ZXJmYWNlGAIgASgJEhAKCHBvd2VyX2lkGAMgASgNEhgKEGZpcm13YXJlX3ZlcnNpb24YBCABKAkSFwoPc3RhdHVzX3JlY2VpdmVkGAogASgIEhQKDHN0YXR1c19zdGFsZRgLIAEoCBIaChJsYXN0X3N0YXR1c19hZ2VfbXMYDCABKA0SGQoRYmF0dGVyeV92b2x0YWdlX3YYFCABKAISFwoPbW90b3Jfdm9sdGFnZV92GBUgASgCEhsKE2JvYXJkX3RlbXBlcmF0dXJlX2MYFiABKAISEgoKZmF1bHRfYml0cxgeIAEoDRIZChFmYXVsdF9kZXNjcmlwdGlvbhgfIAEoCRITCgtyYWlsXzEydl9vbhggIAEoCBIVCg1zb2Z0X3N0YXJ0X29uGCEgASgIEhUKDW1vdG9yX3JhaWxfb24YIiABKAgSEwoLcmFpbF8yNHZfb24YIyABKAgSFAoMY3VycmVudF9hbF9hGCggASgCEhQKDGN1cnJlbnRfYXJfYRgpIAEoAhIUCgxjdXJyZW50X2xsX2EYKiABKAISFAoMY3VycmVudF9scl9hGCsgASgCEh0KFXRvdGFsX21vdG9yX2N1cnJlbnRfYRgsIAEoAhIVCg1iYXR0ZXJ5X2NlbGxzGDIgASgNEhsKE3BhY2tfZnVsbF92b2x0YWdlX3YYMyABKAISHAoUcGFja19lbXB0eV92b2x0YWdlX3YYNCABKAISGwoTc3RhdGVfb2ZfY2hhcmdlX3BjdBg1IAEoAiKXBAoOVGVsZW1ldHJ5RnJhbWUSFAoMaG9zdF91bml4X21zGAEgASgEEiQKBG1vZGUYAiABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUSFQoNZXN0b3BfbGF0Y2hlZBgDIAEoCBIUCgxlc3RvcF9yZWFzb24YBCABKAkSLAoGbW90b3JzGAogAygLMhwuYmVib3AucnVudGltZS52MS5Nb3RvclN0YXRlEikKBWJ1c2VzGAsgAygLMhouYmVib3AucnVudGltZS52MS5CdXNFbnRyeRIrCgVwb3dlchgMIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuUG93ZXJTdGF0cxInCgNpbXUYDSABKAsyGi5iZWJvcC5ydW50aW1lLnYxLkltdVN0YXRzEjIKCXBvbGljeV9pbxgOIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUG9saWN5SW9TdGF0cxIsCgZ3aGVlbHMYDyADKAsyHC5iZWJvcC5ydW50aW1lLnYxLldoZWVsU3RhdGUSKwoFZHJpdmUYECABKAsyHC5iZWJvcC5ydW50aW1lLnYxLkRyaXZlU3RhdGUSMQoGY2FtZXJhGBEgASgLMh0uYmVib3AucnVudGltZS52MS5DYW1lcmFTdGF0ZUICGAESKwoDbmF2GBIgASgLMhouYmVib3AucnVudGltZS52MS5OYXZTdGF0ZUICGAEikQQKCFNuYXBzaG90EhQKDGhvc3RfdW5peF9tcxgBIAEoBBIkCgRtb2RlGAIgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlEhUKDWVzdG9wX2xhdGNoZWQYAyABKAgSFAoMZXN0b3BfcmVhc29uGAQgASgJEiwKBm1vdG9ycxgKIAMoCzIcLmJlYm9wLnJ1bnRpbWUudjEuTW90b3JTdGF0ZRIpCgVidXNlcxgLIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkSKwoFcG93ZXIYDCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlBvd2VyU3RhdHMSJwoDaW11GA0gASgLMhouYmVib3AucnVudGltZS52MS5JbXVTdGF0cxIyCglwb2xpY3lfaW8YDiABKAsyHy5iZWJvcC5ydW50aW1lLnYxLlBvbGljeUlvU3RhdHMSLAoGd2hlZWxzGA8gAygLMhwuYmVib3AucnVudGltZS52MS5XaGVlbFN0YXRlEisKBWRyaXZlGBAgASgLMhwuYmVib3AucnVudGltZS52MS5Ecml2ZVN0YXRlEjEKBmNhbWVyYRgRIAEoCzIdLmJlYm9wLnJ1bnRpbWUudjEuQ2FtZXJhU3RhdGVCAhgBEisKA25hdhgSIAEoCzIaLmJlYm9wLnJ1bnRpbWUudjEuTmF2U3RhdGVCAhgBIjwKD0J1c1N0YXR1c1VwZGF0ZRIpCgVidXNlcxgBIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkiJQoSU3Vic2NyaWJlVGVsZW1ldHJ5Eg8KB3JhdGVfaHoYASABKA0iFgoUVW5zdWJzY3JpYmVUZWxlbWV0cnkiDQoLR2V0U25hcHNob3QiNgoPU2V0TW90b3JFbmFibGVkEhIKCmpvaW50X25hbWUYASABKAkSDwoHZW5hYmxlZBgCIAEoCCImChNTZXRBbGxNb3RvcnNFbmFibGVkEg8KB2VuYWJsZWQYASABKAgiOQoSU2V0VmVsb2NpdHlDb21tYW5kEhAKCGxpbmVhcl94GAEgASgCEhEKCWFuZ3VsYXJfehgCIAEoAiI2Cg9TZXRXaGVlbEVuYWJsZWQSEgoKd2hlZWxfbmFtZRgBIAEoCRIPCgdlbmFibGVkGAIgASgIIiYKE1NldEFsbFdoZWVsc0VuYWJsZWQSDwoHZW5hYmxlZBgBIAEoCCIkCg5DYWxpYnJhdGVXaGVlbBISCgp3aGVlbF9uYW1lGAEgASgJIjIKDVNldENhbWVyYVBvc2USDwoHcGFuX2RlZxgBIAEoAhIQCgh0aWx0X2RlZxgCIAEoAiIPCg1SZXNldE9kb21ldHJ5Ii8KB1NldE1vZGUSJAoEbW9kZRgBIAEoDjIWLmJlYm9wLnJ1bnRpbWUudjEuTW9kZSIfCg1FbWVyZ2VuY3lTdG9wEg4KBnJlYXNvbhgBIAEoCSIMCgpSZXNldEVTdG9wIjoKDlNldE1vdG9yVGFyZ2V0EhIKCmpvaW50X25hbWUYASABKAkSFAoMcG9zaXRpb25fcmFkGAIgASgCIicKEVNldE1lY2hhbmljYWxaZXJvEhIKCmpvaW50X25hbWUYASABKAkiFgoUU2V0TWVjaGFuaWNhbFplcm9BbGwiIgoPU2V0UG9saWN5RHJ5UnVuEg8KB2VuYWJsZWQYASABKAgiIgoDQWNrEgoKAm9rGAEgASgIEg8KB21lc3NhZ2UYAiABKAkiGAoFRXJyb3ISDwoHbWVzc2FnZRgBIAEoCSIzCgtNb2RlQ2hhbmdlZBIkCgRtb2RlGAEgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlIh4KDEVTdG9wTGF0Y2hlZBIOCgZyZWFzb24YASABKAkizgEKCEltdVN0YXRzEg8KB3ByZXNlbnQYASABKAgSEAoIcmVjZWl2ZWQYCiABKAgSDQoFc3RhbGUYCyABKAgSGgoSbGFzdF91cGRhdGVfYWdlX21zGAwgASgNEhQKDHF1YXRlcm5pb25feBgUIAEoAhIUCgxxdWF0ZXJuaW9uX3kYFSABKAISFAoMcXVhdGVybmlvbl96GBYgASgCEhQKDHF1YXRlcm5pb25fdxgXIAEoAhIcChRoZWFkaW5nX2FjY3VyYWN5X3JhZBgYIAEoAiK1AgoNUG9saWN5SW9TdGF0cxIPCgdwcmVzZW50GAEgASgIEg4KBmFjdGl2ZRgCIAEoCBIQCghpbXVfbGl2ZRgDIAEoCBIPCgdkcnlfcnVuGAUgASgIEhYKDmNhcHR1cmVfYWN0aXZlGAYgASgIEhQKDGNhcHR1cmVfcGF0aBgHIAEoCRIUCgxjYXB0dXJlX3Jvd3MYCCABKAQSFwoPY2FwdHVyZV9kcm9wcGVkGAkgASgEEhMKC29ic2VydmF0aW9uGAogAygCEhIKCnJhd19hY3Rpb24YCyADKAISHAoUcG9zaXRpb25fdGFyZ2V0c19yYWQYFCADKAISCgoCa3AYFSADKAISCgoCa2QYFiADKAISEwoLam9pbnRfbmFtZXMYHiADKAlKBAgEEAVSCWd5cm9fbGl2ZSIfCgxTdWJzY3JpYmVOYXYSDwoHcmF0ZV9oehgBIAEoDSIQCg5VbnN1YnNjcmliZU5hdiKwAQoITmF2U3RhdGUSDwoHcHJlc2VudBgBIAEoCBIQCghyZWNlaXZlZBgCIAEoCBIPCgdtYXNrX2h6GAMgASgCEhAKCHByb3ZpZGVyGAQgASgJEgsKA3NlcRgKIAEoBBINCgV0c191cxgLIAEoBBIUCgxmcmFjX2Jsb2NrZWQYFCABKAISFgoOZnJhY19uYXZpZ2FibGUYFSABKAISFAoMZnJhY19jYXV0aW9uGBYgASgCIr4BCgxOYXZNYXNrRnJhbWUSCwoDc2VxGAEgASgEEg0KBXRzX3VzGAIgASgEEg0KBXdpZHRoGAMgASgNEg4KBmhlaWdodBgEIAEoDRIMCgRncmlkGAUgASgMEhQKDGZyYWNfYmxvY2tlZBgKIAEoAhIWCg5mcmFjX25hdmlnYWJsZRgLIAEoAhIUCgxmcmFjX2NhdXRpb24YDCABKAISDwoHbWFza19oehgNIAEoAhIQCghwcm92aWRlchgOIAEoCSIcCgRWZWMyEgkKAXgYASABKAISCQoBeRgCIAEoAiJvChFTZXROYXZpZ2F0aW9uR29hbBIVCgtoZWFkaW5nX3JhZBgBIAEoAkgAEiwKCnBvaW50X29kb20YAiABKAsyFi5iZWJvcC5ydW50aW1lLnYxLlZlYzJIABINCgVjbGVhchgDIAEoCEIGCgRnb2FsInIKE05hdmlnYXRpb25Hb2FsU3RhdGUSDgoGYWN0aXZlGAEgASgIEhUKC2hlYWRpbmdfcmFkGAIgASgCSAASLAoKcG9pbnRfb2RvbRgDIAEoCzIWLmJlYm9wLnJ1bnRpbWUudjEuVmVjMkgAQgYKBGdvYWwqUgoETW9kZRIUChBNT0RFX1VOU1BFQ0lGSUVEEAASDQoJTU9ERV9JRExFEAESEAoMTU9ERV9ESUFMX0lOEAISEwoPTU9ERV9SVU5fUE9MSUNZEANiBnByb3RvMw");
+  fileDesc("ChNiZWJvcF9ydW50aW1lLnByb3RvEhBiZWJvcC5ydW50aW1lLnYxItULChRDbGllbnRSdW50aW1lTWVzc2FnZRISCgpyZXF1ZXN0X2lkGGQgASgNEkMKE3N1YnNjcmliZV90ZWxlbWV0cnkYASABKAsyJC5iZWJvcC5ydW50aW1lLnYxLlN1YnNjcmliZVRlbGVtZXRyeUgAEkcKFXVuc3Vic2NyaWJlX3RlbGVtZXRyeRgCIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVUZWxlbWV0cnlIABI1CgxnZXRfc25hcHNob3QYAyABKAsyHS5iZWJvcC5ydW50aW1lLnYxLkdldFNuYXBzaG90SAASPgoRc2V0X21vdG9yX2VuYWJsZWQYBCABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldE1vdG9yRW5hYmxlZEgAEkcKFnNldF9hbGxfbW90b3JzX2VuYWJsZWQYBSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbE1vdG9yc0VuYWJsZWRIABItCghzZXRfbW9kZRgGIAEoCzIZLmJlYm9wLnJ1bnRpbWUudjEuU2V0TW9kZUgAEjkKDmVtZXJnZW5jeV9zdG9wGAcgASgLMh8uYmVib3AucnVudGltZS52MS5FbWVyZ2VuY3lTdG9wSAASMwoLcmVzZXRfZXN0b3AYCCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlJlc2V0RVN0b3BIABI8ChBzZXRfbW90b3JfdGFyZ2V0GAkgASgLMiAuYmVib3AucnVudGltZS52MS5TZXRNb3RvclRhcmdldEgAEkIKE3NldF9tZWNoYW5pY2FsX3plcm8YCiABKAsyIy5iZWJvcC5ydW50aW1lLnYxLlNldE1lY2hhbmljYWxaZXJvSAASPwoSc2V0X3BvbGljeV9kcnlfcnVuGAsgASgLMiEuYmVib3AucnVudGltZS52MS5TZXRQb2xpY3lEcnlSdW5IABJJChdzZXRfbWVjaGFuaWNhbF96ZXJvX2FsbBgNIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuU2V0TWVjaGFuaWNhbFplcm9BbGxIABJEChRzZXRfdmVsb2NpdHlfY29tbWFuZBgOIAEoCzIkLmJlYm9wLnJ1bnRpbWUudjEuU2V0VmVsb2NpdHlDb21tYW5kSAASPgoRc2V0X3doZWVsX2VuYWJsZWQYDyABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldFdoZWVsRW5hYmxlZEgAEkcKFnNldF9hbGxfd2hlZWxzX2VuYWJsZWQYECABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbFdoZWVsc0VuYWJsZWRIABI5Cg5yZXNldF9vZG9tZXRyeRgRIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUmVzZXRPZG9tZXRyeUgAEjsKD2NhbGlicmF0ZV93aGVlbBgSIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuQ2FsaWJyYXRlV2hlZWxIABI+Cg9zZXRfY2FtZXJhX3Bvc2UYEyABKAsyHy5iZWJvcC5ydW50aW1lLnYxLlNldENhbWVyYVBvc2VCAhgBSAASOwoNc3Vic2NyaWJlX25hdhgUIAEoCzIeLmJlYm9wLnJ1bnRpbWUudjEuU3Vic2NyaWJlTmF2QgIYAUgAEj8KD3Vuc3Vic2NyaWJlX25hdhgVIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVOYXZCAhgBSAASQgoTc2V0X25hdmlnYXRpb25fZ29hbBgWIAEoCzIjLmJlYm9wLnJ1bnRpbWUudjEuU2V0TmF2aWdhdGlvbkdvYWxIABJAChJzZXRfdmlzaW9uX2VuYWJsZWQYFyABKAsyIi5iZWJvcC5ydW50aW1lLnYxLlNldFZpc2lvbkVuYWJsZWRIAEIJCgdwYXlsb2FkSgQIDBANUhJzZXRfcG9saWN5X2NhcHR1cmUiiAQKFFNlcnZlclJ1bnRpbWVNZXNzYWdlEhIKCnJlcXVlc3RfaWQYZCABKA0SJAoDYWNrGAEgASgLMhUuYmVib3AucnVudGltZS52MS5BY2tIABIoCgVlcnJvchgCIAEoCzIXLmJlYm9wLnJ1bnRpbWUudjEuRXJyb3JIABIuCghzbmFwc2hvdBgDIAEoCzIaLmJlYm9wLnJ1bnRpbWUudjEuU25hcHNob3RIABI1Cgl0ZWxlbWV0cnkYBCABKAsyIC5iZWJvcC5ydW50aW1lLnYxLlRlbGVtZXRyeUZyYW1lSAASNQoMbW9kZV9jaGFuZ2VkGAUgASgLMh0uYmVib3AucnVudGltZS52MS5Nb2RlQ2hhbmdlZEgAEjcKDWVzdG9wX2xhdGNoZWQYBiABKAsyHi5iZWJvcC5ydW50aW1lLnYxLkVTdG9wTGF0Y2hlZEgAEjcKCmJ1c19zdGF0dXMYByABKAsyIS5iZWJvcC5ydW50aW1lLnYxLkJ1c1N0YXR1c1VwZGF0ZUgAEjYKCG5hdl9tYXNrGAggASgLMh4uYmVib3AucnVudGltZS52MS5OYXZNYXNrRnJhbWVCAhgBSAASOQoIbmF2X2dvYWwYCSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLk5hdmlnYXRpb25Hb2FsU3RhdGVIAEIJCgdwYXlsb2FkIoEDCgpNb3RvclN0YXRlEhIKCmpvaW50X25hbWUYASABKAkSFQoNY2FuX2ludGVyZmFjZRgCIAEoCRIQCghtb3Rvcl9pZBgDIAEoDRINCgVtb2RlbBgEIAEoCRINCgVhcm1lZBgFIAEoCBIWCg5mZWVkYmFja19zdGFsZRgGIAEoCBISCgpmYXVsdF9iaXRzGAcgASgNEhQKDHBvc2l0aW9uX3JhZBgKIAEoAhIWCg52ZWxvY2l0eV9yYWRfcxgLIAEoAhIRCgl0b3JxdWVfbm0YDCABKAISFQoNdGVtcGVyYXR1cmVfYxgNIAEoAhIZChFwb3NpdGlvbl9yZWNlaXZlZBgPIAEoCBIbChN0YXJnZXRfcG9zaXRpb25fcmFkGA4gASgCEhMKC3Bvc19taW5fcmFkGBQgASgCEhMKC3Bvc19tYXhfcmFkGBUgASgCEg8KB3ZlbF9tYXgYFiABKAISDwoHdGF1X21heBgXIAEoAhIQCgh0ZW1wX21heBgYIAEoAiKKAgoKV2hlZWxTdGF0ZRIMCgRuYW1lGAEgASgJEhUKDWNhbl9pbnRlcmZhY2UYAiABKAkSDwoHbm9kZV9pZBgDIAEoDRINCgVhcm1lZBgFIAEoCBIWCg5mZWVkYmFja19zdGFsZRgGIAEoCBIZChFwb3NpdGlvbl9yZWNlaXZlZBgPIAEoCBISCgplcnJvcl9jb2RlGAcgASgNEhQKDHBvc2l0aW9uX3JhZBgKIAEoAhIWCg52ZWxvY2l0eV9yYWRfcxgLIAEoAhIdChV0YXJnZXRfdmVsb2NpdHlfcmFkX3MYDiABKAISDwoHdmVsX21heBgWIAEoAhISCgpheGlzX3N0YXRlGBcgASgNItQBCgpEcml2ZVN0YXRlEg8KB3ByZXNlbnQYASABKAgSFAoMY21kX2xpbmVhcl94GAIgASgCEhUKDWNtZF9hbmd1bGFyX3oYAyABKAISFgoOb3BlcmF0b3Jfc3RhbGUYBCABKAgSGwoTaGFzX2FjdGl2ZV9vcGVyYXRvchgFIAEoCBIfChd5b3VfYXJlX2FjdGl2ZV9vcGVyYXRvchgGIAEoCBIOCgZvZG9tX3gYCiABKAISDgoGb2RvbV95GAsgASgCEhIKCm9kb21fdGhldGEYDCABKAIiUQoLQ2FtZXJhU3RhdGUSDwoHcHJlc2VudBgBIAEoCBIPCgdwYW5fZGVnGAIgASgCEhAKCHRpbHRfZGVnGAMgASgCEg4KBm1vdmluZxgEIAEoCCJBCghCdXNFbnRyeRIVCg1jYW5faW50ZXJmYWNlGAEgASgJEg0KBXN0YXRlGAIgASgJEg8KB2hlYWx0aHkYAyABKAgi6QQKClBvd2VyU3RhdHMSDwoHcHJlc2VudBgBIAEoCBIVCg1jYW5faW50ZXJmYWNlGAIgASgJEhAKCHBvd2VyX2lkGAMgASgNEhgKEGZpcm13YXJlX3ZlcnNpb24YBCABKAkSFwoPc3RhdHVzX3JlY2VpdmVkGAogASgIEhQKDHN0YXR1c19zdGFsZRgLIAEoCBIaChJsYXN0X3N0YXR1c19hZ2VfbXMYDCABKA0SGQoRYmF0dGVyeV92b2x0YWdlX3YYFCABKAISFwoPbW90b3Jfdm9sdGFnZV92GBUgASgCEhsKE2JvYXJkX3RlbXBlcmF0dXJlX2MYFiABKAISEgoKZmF1bHRfYml0cxgeIAEoDRIZChFmYXVsdF9kZXNjcmlwdGlvbhgfIAEoCRITCgtyYWlsXzEydl9vbhggIAEoCBIVCg1zb2Z0X3N0YXJ0X29uGCEgASgIEhUKDW1vdG9yX3JhaWxfb24YIiABKAgSEwoLcmFpbF8yNHZfb24YIyABKAgSFAoMY3VycmVudF9hbF9hGCggASgCEhQKDGN1cnJlbnRfYXJfYRgpIAEoAhIUCgxjdXJyZW50X2xsX2EYKiABKAISFAoMY3VycmVudF9scl9hGCsgASgCEh0KFXRvdGFsX21vdG9yX2N1cnJlbnRfYRgsIAEoAhIVCg1iYXR0ZXJ5X2NlbGxzGDIgASgNEhsKE3BhY2tfZnVsbF92b2x0YWdlX3YYMyABKAISHAoUcGFja19lbXB0eV92b2x0YWdlX3YYNCABKAISGwoTc3RhdGVfb2ZfY2hhcmdlX3BjdBg1IAEoAiLGBAoOVGVsZW1ldHJ5RnJhbWUSFAoMaG9zdF91bml4X21zGAEgASgEEiQKBG1vZGUYAiABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUSFQoNZXN0b3BfbGF0Y2hlZBgDIAEoCBIUCgxlc3RvcF9yZWFzb24YBCABKAkSLAoGbW90b3JzGAogAygLMhwuYmVib3AucnVudGltZS52MS5Nb3RvclN0YXRlEikKBWJ1c2VzGAsgAygLMhouYmVib3AucnVudGltZS52MS5CdXNFbnRyeRIrCgVwb3dlchgMIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuUG93ZXJTdGF0cxInCgNpbXUYDSABKAsyGi5iZWJvcC5ydW50aW1lLnYxLkltdVN0YXRzEjIKCXBvbGljeV9pbxgOIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUG9saWN5SW9TdGF0cxIsCgZ3aGVlbHMYDyADKAsyHC5iZWJvcC5ydW50aW1lLnYxLldoZWVsU3RhdGUSKwoFZHJpdmUYECABKAsyHC5iZWJvcC5ydW50aW1lLnYxLkRyaXZlU3RhdGUSMQoGY2FtZXJhGBEgASgLMh0uYmVib3AucnVudGltZS52MS5DYW1lcmFTdGF0ZUICGAESKwoDbmF2GBIgASgLMhouYmVib3AucnVudGltZS52MS5OYXZTdGF0ZUICGAESLQoGdmlzaW9uGBMgASgLMh0uYmVib3AucnVudGltZS52MS5WaXNpb25TdGF0ZSLABAoIU25hcHNob3QSFAoMaG9zdF91bml4X21zGAEgASgEEiQKBG1vZGUYAiABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUSFQoNZXN0b3BfbGF0Y2hlZBgDIAEoCBIUCgxlc3RvcF9yZWFzb24YBCABKAkSLAoGbW90b3JzGAogAygLMhwuYmVib3AucnVudGltZS52MS5Nb3RvclN0YXRlEikKBWJ1c2VzGAsgAygLMhouYmVib3AucnVudGltZS52MS5CdXNFbnRyeRIrCgVwb3dlchgMIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuUG93ZXJTdGF0cxInCgNpbXUYDSABKAsyGi5iZWJvcC5ydW50aW1lLnYxLkltdVN0YXRzEjIKCXBvbGljeV9pbxgOIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUG9saWN5SW9TdGF0cxIsCgZ3aGVlbHMYDyADKAsyHC5iZWJvcC5ydW50aW1lLnYxLldoZWVsU3RhdGUSKwoFZHJpdmUYECABKAsyHC5iZWJvcC5ydW50aW1lLnYxLkRyaXZlU3RhdGUSMQoGY2FtZXJhGBEgASgLMh0uYmVib3AucnVudGltZS52MS5DYW1lcmFTdGF0ZUICGAESKwoDbmF2GBIgASgLMhouYmVib3AucnVudGltZS52MS5OYXZTdGF0ZUICGAESLQoGdmlzaW9uGBMgASgLMh0uYmVib3AucnVudGltZS52MS5WaXNpb25TdGF0ZSI8Cg9CdXNTdGF0dXNVcGRhdGUSKQoFYnVzZXMYASADKAsyGi5iZWJvcC5ydW50aW1lLnYxLkJ1c0VudHJ5IiUKElN1YnNjcmliZVRlbGVtZXRyeRIPCgdyYXRlX2h6GAEgASgNIhYKFFVuc3Vic2NyaWJlVGVsZW1ldHJ5Ig0KC0dldFNuYXBzaG90IjYKD1NldE1vdG9yRW5hYmxlZBISCgpqb2ludF9uYW1lGAEgASgJEg8KB2VuYWJsZWQYAiABKAgiJgoTU2V0QWxsTW90b3JzRW5hYmxlZBIPCgdlbmFibGVkGAEgASgIIjkKElNldFZlbG9jaXR5Q29tbWFuZBIQCghsaW5lYXJfeBgBIAEoAhIRCglhbmd1bGFyX3oYAiABKAIiNgoPU2V0V2hlZWxFbmFibGVkEhIKCndoZWVsX25hbWUYASABKAkSDwoHZW5hYmxlZBgCIAEoCCImChNTZXRBbGxXaGVlbHNFbmFibGVkEg8KB2VuYWJsZWQYASABKAgiJAoOQ2FsaWJyYXRlV2hlZWwSEgoKd2hlZWxfbmFtZRgBIAEoCSIyCg1TZXRDYW1lcmFQb3NlEg8KB3Bhbl9kZWcYASABKAISEAoIdGlsdF9kZWcYAiABKAIiDwoNUmVzZXRPZG9tZXRyeSIvCgdTZXRNb2RlEiQKBG1vZGUYASABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUiHwoNRW1lcmdlbmN5U3RvcBIOCgZyZWFzb24YASABKAkiDAoKUmVzZXRFU3RvcCI6Cg5TZXRNb3RvclRhcmdldBISCgpqb2ludF9uYW1lGAEgASgJEhQKDHBvc2l0aW9uX3JhZBgCIAEoAiInChFTZXRNZWNoYW5pY2FsWmVybxISCgpqb2ludF9uYW1lGAEgASgJIhYKFFNldE1lY2hhbmljYWxaZXJvQWxsIiIKD1NldFBvbGljeURyeVJ1bhIPCgdlbmFibGVkGAEgASgIIiMKEFNldFZpc2lvbkVuYWJsZWQSDwoHZW5hYmxlZBgBIAEoCCIiCgNBY2sSCgoCb2sYASABKAgSDwoHbWVzc2FnZRgCIAEoCSIYCgVFcnJvchIPCgdtZXNzYWdlGAEgASgJIjMKC01vZGVDaGFuZ2VkEiQKBG1vZGUYASABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUiHgoMRVN0b3BMYXRjaGVkEg4KBnJlYXNvbhgBIAEoCSLOAQoISW11U3RhdHMSDwoHcHJlc2VudBgBIAEoCBIQCghyZWNlaXZlZBgKIAEoCBINCgVzdGFsZRgLIAEoCBIaChJsYXN0X3VwZGF0ZV9hZ2VfbXMYDCABKA0SFAoMcXVhdGVybmlvbl94GBQgASgCEhQKDHF1YXRlcm5pb25feRgVIAEoAhIUCgxxdWF0ZXJuaW9uX3oYFiABKAISFAoMcXVhdGVybmlvbl93GBcgASgCEhwKFGhlYWRpbmdfYWNjdXJhY3lfcmFkGBggASgCIrUCCg1Qb2xpY3lJb1N0YXRzEg8KB3ByZXNlbnQYASABKAgSDgoGYWN0aXZlGAIgASgIEhAKCGltdV9saXZlGAMgASgIEg8KB2RyeV9ydW4YBSABKAgSFgoOY2FwdHVyZV9hY3RpdmUYBiABKAgSFAoMY2FwdHVyZV9wYXRoGAcgASgJEhQKDGNhcHR1cmVfcm93cxgIIAEoBBIXCg9jYXB0dXJlX2Ryb3BwZWQYCSABKAQSEwoLb2JzZXJ2YXRpb24YCiADKAISEgoKcmF3X2FjdGlvbhgLIAMoAhIcChRwb3NpdGlvbl90YXJnZXRzX3JhZBgUIAMoAhIKCgJrcBgVIAMoAhIKCgJrZBgWIAMoAhITCgtqb2ludF9uYW1lcxgeIAMoCUoECAQQBVIJZ3lyb19saXZlIh8KDFN1YnNjcmliZU5hdhIPCgdyYXRlX2h6GAEgASgNIhAKDlVuc3Vic2NyaWJlTmF2IrABCghOYXZTdGF0ZRIPCgdwcmVzZW50GAEgASgIEhAKCHJlY2VpdmVkGAIgASgIEg8KB21hc2tfaHoYAyABKAISEAoIcHJvdmlkZXIYBCABKAkSCwoDc2VxGAogASgEEg0KBXRzX3VzGAsgASgEEhQKDGZyYWNfYmxvY2tlZBgUIAEoAhIWCg5mcmFjX25hdmlnYWJsZRgVIAEoAhIUCgxmcmFjX2NhdXRpb24YFiABKAIivgEKDE5hdk1hc2tGcmFtZRILCgNzZXEYASABKAQSDQoFdHNfdXMYAiABKAQSDQoFd2lkdGgYAyABKA0SDgoGaGVpZ2h0GAQgASgNEgwKBGdyaWQYBSABKAwSFAoMZnJhY19ibG9ja2VkGAogASgCEhYKDmZyYWNfbmF2aWdhYmxlGAsgASgCEhQKDGZyYWNfY2F1dGlvbhgMIAEoAhIPCgdtYXNrX2h6GA0gASgCEhAKCHByb3ZpZGVyGA4gASgJIhwKBFZlYzISCQoBeBgBIAEoAhIJCgF5GAIgASgCIm8KEVNldE5hdmlnYXRpb25Hb2FsEhUKC2hlYWRpbmdfcmFkGAEgASgCSAASLAoKcG9pbnRfb2RvbRgCIAEoCzIWLmJlYm9wLnJ1bnRpbWUudjEuVmVjMkgAEg0KBWNsZWFyGAMgASgIQgYKBGdvYWwicgoTTmF2aWdhdGlvbkdvYWxTdGF0ZRIOCgZhY3RpdmUYASABKAgSFQoLaGVhZGluZ19yYWQYAiABKAJIABIsCgpwb2ludF9vZG9tGAMgASgLMhYuYmVib3AucnVudGltZS52MS5WZWMySABCBgoEZ29hbCJtCgtWaXNpb25TdGF0ZRIPCgdwcmVzZW50GAEgASgIEg8KB3J1bm5pbmcYAiABKAgSDQoFc3RhdGUYAyABKAkSDgoGZGV0YWlsGAQgASgJEg8KB3NlcnZpY2UYBSABKAkSDAoEbW9kZRgGIAEoCSpSCgRNb2RlEhQKEE1PREVfVU5TUEVDSUZJRUQQABINCglNT0RFX0lETEUQARIQCgxNT0RFX0RJQUxfSU4QAhITCg9NT0RFX1JVTl9QT0xJQ1kQA2IGcHJvdG8z");
 
 /**
  * Client (operator app) -> server (bebop-linux) on the robot.
@@ -241,6 +241,19 @@ export type ClientRuntimeMessage = Message<"bebop.runtime.v1.ClientRuntimeMessag
      */
     value: SetNavigationGoal;
     case: "setNavigationGoal";
+  } | {
+    /**
+     * Start/stop the bebop-vision Python service (`bebop-vision.service`)
+     * on the robot. The firmware (root) drives systemd; the running state
+     * rides back in telemetry/snapshot as `VisionState`. `enabled = true`
+     * starts the recorder (`main.py --record-navd ... --auto`), `false`
+     * stops it. The request is asynchronous: the ack means "queued", and
+     * the new state shows up in `VisionState` within a poll interval.
+     *
+     * @generated from field: bebop.runtime.v1.SetVisionEnabled set_vision_enabled = 23;
+     */
+    value: SetVisionEnabled;
+    case: "setVisionEnabled";
   } | { case: undefined; value?: undefined };
 };
 
@@ -1012,6 +1025,15 @@ export type TelemetryFrame = Message<"bebop.runtime.v1.TelemetryFrame"> & {
    * @deprecated
    */
   nav?: NavState | undefined;
+
+  /**
+   * State of the bebop-vision service (`bebop-vision.service`). Present on
+   * both the humanoid and wheeled builds — it's a process-level service,
+   * not a motor feature.
+   *
+   * @generated from field: bebop.runtime.v1.VisionState vision = 19;
+   */
+  vision?: VisionState | undefined;
 };
 
 /**
@@ -1097,6 +1119,11 @@ export type Snapshot = Message<"bebop.runtime.v1.Snapshot"> & {
    * @deprecated
    */
   nav?: NavState | undefined;
+
+  /**
+   * @generated from field: bebop.runtime.v1.VisionState vision = 19;
+   */
+  vision?: VisionState | undefined;
 };
 
 /**
@@ -1496,6 +1523,28 @@ export const SetPolicyDryRunSchema: GenMessage<SetPolicyDryRun> = /*@__PURE__*/
   messageDesc(file_bebop_runtime, 28);
 
 /**
+ * Start/stop the bebop-vision service. See
+ * `ClientRuntimeMessage.set_vision_enabled` for semantics. The firmware
+ * forwards the request to systemd and acks immediately; the resulting
+ * state is reflected asynchronously in `VisionState`.
+ *
+ * @generated from message bebop.runtime.v1.SetVisionEnabled
+ */
+export type SetVisionEnabled = Message<"bebop.runtime.v1.SetVisionEnabled"> & {
+  /**
+   * @generated from field: bool enabled = 1;
+   */
+  enabled: boolean;
+};
+
+/**
+ * Describes the message bebop.runtime.v1.SetVisionEnabled.
+ * Use `create(SetVisionEnabledSchema)` to create a new message.
+ */
+export const SetVisionEnabledSchema: GenMessage<SetVisionEnabled> = /*@__PURE__*/
+  messageDesc(file_bebop_runtime, 29);
+
+/**
  * @generated from message bebop.runtime.v1.Ack
  */
 export type Ack = Message<"bebop.runtime.v1.Ack"> & {
@@ -1515,7 +1564,7 @@ export type Ack = Message<"bebop.runtime.v1.Ack"> & {
  * Use `create(AckSchema)` to create a new message.
  */
 export const AckSchema: GenMessage<Ack> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 29);
+  messageDesc(file_bebop_runtime, 30);
 
 /**
  * @generated from message bebop.runtime.v1.Error
@@ -1532,7 +1581,7 @@ export type Error = Message<"bebop.runtime.v1.Error"> & {
  * Use `create(ErrorSchema)` to create a new message.
  */
 export const ErrorSchema: GenMessage<Error> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 30);
+  messageDesc(file_bebop_runtime, 31);
 
 /**
  * @generated from message bebop.runtime.v1.ModeChanged
@@ -1549,7 +1598,7 @@ export type ModeChanged = Message<"bebop.runtime.v1.ModeChanged"> & {
  * Use `create(ModeChangedSchema)` to create a new message.
  */
 export const ModeChangedSchema: GenMessage<ModeChanged> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 31);
+  messageDesc(file_bebop_runtime, 32);
 
 /**
  * @generated from message bebop.runtime.v1.EStopLatched
@@ -1566,7 +1615,7 @@ export type EStopLatched = Message<"bebop.runtime.v1.EStopLatched"> & {
  * Use `create(EStopLatchedSchema)` to create a new message.
  */
 export const EStopLatchedSchema: GenMessage<EStopLatched> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 32);
+  messageDesc(file_bebop_runtime, 33);
 
 /**
  * Latest fused orientation reading from the optional BNO080/BNO085 IMU.
@@ -1664,7 +1713,7 @@ export type ImuStats = Message<"bebop.runtime.v1.ImuStats"> & {
  * Use `create(ImuStatsSchema)` to create a new message.
  */
 export const ImuStatsSchema: GenMessage<ImuStats> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 33);
+  messageDesc(file_bebop_runtime, 34);
 
 /**
  * Latest observation/action snapshot from [`PolicyRunner`]. Published at
@@ -1817,7 +1866,7 @@ export type PolicyIoStats = Message<"bebop.runtime.v1.PolicyIoStats"> & {
  * Use `create(PolicyIoStatsSchema)` to create a new message.
  */
 export const PolicyIoStatsSchema: GenMessage<PolicyIoStats> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 34);
+  messageDesc(file_bebop_runtime, 35);
 
 /**
  * Subscribe to pushed `NavMaskFrame`s. Nothing is pushed until this is
@@ -1842,7 +1891,7 @@ export type SubscribeNav = Message<"bebop.runtime.v1.SubscribeNav"> & {
  * Use `create(SubscribeNavSchema)` to create a new message.
  */
 export const SubscribeNavSchema: GenMessage<SubscribeNav> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 35);
+  messageDesc(file_bebop_runtime, 36);
 
 /**
  * @generated from message bebop.runtime.v1.UnsubscribeNav
@@ -1855,7 +1904,7 @@ export type UnsubscribeNav = Message<"bebop.runtime.v1.UnsubscribeNav"> & {
  * Use `create(UnsubscribeNavSchema)` to create a new message.
  */
 export const UnsubscribeNavSchema: GenMessage<UnsubscribeNav> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 36);
+  messageDesc(file_bebop_runtime, 37);
 
 /**
  * Navigable-path inference summary, embedded in telemetry + snapshots.
@@ -1930,7 +1979,7 @@ export type NavState = Message<"bebop.runtime.v1.NavState"> & {
  * Use `create(NavStateSchema)` to create a new message.
  */
 export const NavStateSchema: GenMessage<NavState> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 37);
+  messageDesc(file_bebop_runtime, 38);
 
 /**
  * One pushed navigable-path label grid, for the live video overlay.
@@ -2010,7 +2059,7 @@ export type NavMaskFrame = Message<"bebop.runtime.v1.NavMaskFrame"> & {
  * Use `create(NavMaskFrameSchema)` to create a new message.
  */
 export const NavMaskFrameSchema: GenMessage<NavMaskFrame> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 38);
+  messageDesc(file_bebop_runtime, 39);
 
 /**
  * 2D point in the odometry frame (metres). Odom origin is the pose at
@@ -2035,7 +2084,7 @@ export type Vec2 = Message<"bebop.runtime.v1.Vec2"> & {
  * Use `create(Vec2Schema)` to create a new message.
  */
 export const Vec2Schema: GenMessage<Vec2> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 39);
+  messageDesc(file_bebop_runtime, 40);
 
 /**
  * Operator-commanded navigation goal for the navd goal-drive pipeline.
@@ -2081,7 +2130,7 @@ export type SetNavigationGoal = Message<"bebop.runtime.v1.SetNavigationGoal"> & 
  * Use `create(SetNavigationGoalSchema)` to create a new message.
  */
 export const SetNavigationGoalSchema: GenMessage<SetNavigationGoal> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 40);
+  messageDesc(file_bebop_runtime, 41);
 
 /**
  * Server -> client push: the currently active navigation goal. Sent on
@@ -2125,7 +2174,75 @@ export type NavigationGoalState = Message<"bebop.runtime.v1.NavigationGoalState"
  * Use `create(NavigationGoalStateSchema)` to create a new message.
  */
 export const NavigationGoalStateSchema: GenMessage<NavigationGoalState> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 41);
+  messageDesc(file_bebop_runtime, 42);
+
+/**
+ * Snapshot of the `bebop-vision.service` systemd unit, embedded in
+ * telemetry/snapshot frames. The firmware polls `systemctl show` on a
+ * background thread and reflects the result here.
+ *
+ * `present = false` means the unit isn't installed on this robot; the UI
+ * should hide the vision control card. `state` is the raw systemd
+ * `ActiveState` ("active", "inactive", "activating", "failed", ...) so
+ * the app can render transitions without a separate enum. `detail`
+ * carries the systemd `SubState` (and `Result`, if not "success") for
+ * diagnosing a failed unit.
+ *
+ * @generated from message bebop.runtime.v1.VisionState
+ */
+export type VisionState = Message<"bebop.runtime.v1.VisionState"> & {
+  /**
+   * True iff the systemd unit is installed (`LoadState=loaded`).
+   *
+   * @generated from field: bool present = 1;
+   */
+  present: boolean;
+
+  /**
+   * True while the unit is `active` (the Python process is up).
+   *
+   * @generated from field: bool running = 2;
+   */
+  running: boolean;
+
+  /**
+   * Raw systemd ActiveState, e.g. "active", "inactive", "activating",
+   * "deactivating", "failed". Empty until the first poll completes.
+   *
+   * @generated from field: string state = 3;
+   */
+  state: string;
+
+  /**
+   * systemd SubState, with `Result` appended when it isn't "success"
+   * (e.g. "dead", "start (exit-code 1)"). Empty when no detail is known.
+   *
+   * @generated from field: string detail = 4;
+   */
+  detail: string;
+
+  /**
+   * Fully-qualified unit name, e.g. "bebop-vision.service".
+   *
+   * @generated from field: string service = 5;
+   */
+  service: string;
+
+  /**
+   * Human-readable run mode baked into the unit ("recorder"), so the UI
+   * can label the start button without hard-coding the command.
+   *
+   * @generated from field: string mode = 6;
+   */
+  mode: string;
+};
+
+/**
+ * Describes the message bebop.runtime.v1.VisionState.
+ * Use `create(VisionStateSchema)` to create a new message.
+ */
+export const VisionStateSchema: GenMessage<VisionState> = /*@__PURE__*/
+  messageDesc(file_bebop_runtime, 43);
 
 /**
  * @generated from enum bebop.runtime.v1.Mode

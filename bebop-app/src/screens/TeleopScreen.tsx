@@ -374,6 +374,14 @@ export function TeleopScreen({
     [refreshAfter],
   );
 
+  const toggleVision = useCallback(
+    (enabled: boolean) =>
+      refreshAfter(`vision:${enabled}`, () =>
+        transportRef.current!.setVisionEnabled(enabled),
+      ),
+    [refreshAfter],
+  );
+
   // -------------------------------------------------------------- derived
   const motors = snapshot?.motors ?? [];
   const wheels = snapshot?.wheels ?? [];
@@ -382,6 +390,7 @@ export function TeleopScreen({
   const mode = snapshot?.mode ?? "UNSPECIFIED";
   const estopLatched = snapshot?.estopLatched ?? false;
   const estopReason = snapshot?.estopReason ?? "";
+  const vision = snapshot?.vision;
   const armedWheelCount = wheels.filter((w) => w.armed).length;
   // True when driving a differential-drive chassis (no legged joints).
   const wheeled = !!drive?.present && motors.length === 0;
@@ -948,6 +957,63 @@ export function TeleopScreen({
               </div>
             </div>
           )}
+
+          {vision?.present ? (
+            <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev px-3.5 py-3 space-y-3">
+              {/* Vision card. The Python recorder runs as its own systemd
+                  unit; start/stop is a firmware call, status rides in
+                  telemetry. */}
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[11px] uppercase tracking-wider text-text-dim">
+                    Vision
+                  </div>
+                  <div className="text-[13px] text-text font-semibold mt-0.5">
+                    {vision.mode
+                      ? `${vision.mode[0].toUpperCase()}${vision.mode.slice(1)} service`
+                      : "Vision service"}
+                  </div>
+                  <div className="text-[12px] text-text-dim mt-0.5">
+                    {vision.running
+                      ? "Running — sessions follow the drive state."
+                      : "Stopped."}
+                  </div>
+                </div>
+                <Pill
+                  tone={
+                    vision.running
+                      ? "ok"
+                      : vision.state === "failed"
+                        ? "err"
+                        : "dim"
+                  }
+                  title={vision.service}
+                >
+                  {vision.running ? "running" : vision.state || "stopped"}
+                </Pill>
+              </div>
+
+              {vision.detail && !vision.running ? (
+                <div className="text-[11px] text-text-dim font-mono break-words">
+                  {vision.detail}
+                </div>
+              ) : null}
+
+              <Button
+                variant={vision.running ? "secondary" : "primary"}
+                onClick={() => toggleVision(!vision.running)}
+                loading={busy === `vision:${!vision.running}`}
+                disabled={!!busy}
+                className={
+                  vision.running
+                    ? "py-2! text-sm!"
+                    : "bg-success! text-white! hover:brightness-110! py-2! text-sm!"
+                }
+              >
+                {vision.running ? "Stop vision" : "Start vision"}
+              </Button>
+            </div>
+          ) : null}
 
           </div>
 

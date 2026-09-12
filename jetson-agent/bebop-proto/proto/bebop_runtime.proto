@@ -103,6 +103,13 @@ message ClientRuntimeMessage {
     // Handled by storing + broadcasting; the navd process consumes it
     // from the broadcast via its own WS client.
     SetNavigationGoal    set_navigation_goal   = 22;
+    // Start/stop the bebop-vision Python service (`bebop-vision.service`)
+    // on the robot. The firmware (root) drives systemd; the running state
+    // rides back in telemetry/snapshot as `VisionState`. `enabled = true`
+    // starts the recorder (`main.py --record-navd ... --auto`), `false`
+    // stops it. The request is asynchronous: the ack means "queued", and
+    // the new state shows up in `VisionState` within a poll interval.
+    SetVisionEnabled     set_vision_enabled    = 23;
   }
   reserved 12;
   reserved "set_policy_capture";
@@ -399,6 +406,10 @@ message TelemetryFrame {
   // Deprecated (plan §9): the legacy navseg runner is removed — the
   // firmware no longer populates this. Kept for wire compatibility.
   NavState nav = 18 [deprecated = true];
+  // State of the bebop-vision service (`bebop-vision.service`). Present on
+  // both the humanoid and wheeled builds — it's a process-level service,
+  // not a motor feature.
+  VisionState vision = 19;
 }
 
 // One-shot reply to GetSnapshot — same content as TelemetryFrame.
@@ -418,6 +429,7 @@ message Snapshot {
   CameraState camera = 17 [deprecated = true];
   // Deprecated (plan §9): see TelemetryFrame.nav.
   NavState nav = 18 [deprecated = true];
+  VisionState vision = 19;
 }
 
 message BusStatusUpdate {
@@ -543,6 +555,14 @@ message SetMechanicalZeroAll {}
 // for semantics. The firmware acks the request immediately; the new value
 // is honored on the next 100 Hz `PolicyRunner` tick.
 message SetPolicyDryRun {
+  bool enabled = 1;
+}
+
+// Start/stop the bebop-vision service. See
+// `ClientRuntimeMessage.set_vision_enabled` for semantics. The firmware
+// forwards the request to systemd and acks immediately; the resulting
+// state is reflected asynchronously in `VisionState`.
+message SetVisionEnabled {
   bool enabled = 1;
 }
 
@@ -823,4 +843,36 @@ message NavigationGoalState {
     float heading_rad = 2;  // body-frame offset, rad, + left
     Vec2  point_odom  = 3;  // odom-frame destination, metres
   }
+}
+
+// ---------------------------------------------------------------------------
+// bebop-vision service state
+// ---------------------------------------------------------------------------
+
+// Snapshot of the `bebop-vision.service` systemd unit, embedded in
+// telemetry/snapshot frames. The firmware polls `systemctl show` on a
+// background thread and reflects the result here.
+//
+// `present = false` means the unit isn't installed on this robot; the UI
+// should hide the vision control card. `state` is the raw systemd
+// `ActiveState` ("active", "inactive", "activating", "failed", ...) so
+// the app can render transitions without a separate enum. `detail`
+// carries the systemd `SubState` (and `Result`, if not "success") for
+// diagnosing a failed unit.
+message VisionState {
+  // True iff the systemd unit is installed (`LoadState=loaded`).
+  bool   present = 1;
+  // True while the unit is `active` (the Python process is up).
+  bool   running = 2;
+  // Raw systemd ActiveState, e.g. "active", "inactive", "activating",
+  // "deactivating", "failed". Empty until the first poll completes.
+  string state   = 3;
+  // systemd SubState, with `Result` appended when it isn't "success"
+  // (e.g. "dead", "start (exit-code 1)"). Empty when no detail is known.
+  string detail  = 4;
+  // Fully-qualified unit name, e.g. "bebop-vision.service".
+  string service = 5;
+  // Human-readable run mode baked into the unit ("recorder"), so the UI
+  // can label the start button without hard-coding the command.
+  string mode    = 6;
 }

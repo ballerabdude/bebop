@@ -12,6 +12,7 @@ use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
 use crate::safety::limits::BreachReason;
 use crate::safety::Supervisor;
+use crate::vision::{VisionShared, VISION_SERVICE};
 use bebop_proto::runtime::v1 as proto;
 use bebop_proto::Message;
 use bytes::Bytes;
@@ -42,6 +43,7 @@ pub fn handle_client_message(
     policy_io: &PolicyIoShared,
     policy_control: &PolicyControlShared,
     nav_goal: &NavGoalShared,
+    vision: &VisionShared,
     conn_id: u64,
     bytes: &[u8],
 ) -> proto::ServerRuntimeMessage {
@@ -108,7 +110,7 @@ pub fn handle_client_message(
         }
         P::UnsubscribeTelemetry(_) => ack(request_id, "telemetry unsubscribed".into()),
         P::GetSnapshot(_) => {
-            snapshot_response(request_id, sup, imu, imu_present, policy_io, conn_id)
+            snapshot_response(request_id, sup, imu, imu_present, policy_io, vision, conn_id)
         }
         P::SetMotorEnabled(req) => {
             let result = if req.enabled {
@@ -249,6 +251,27 @@ pub fn handle_client_message(
                 Err(_) => error_response(request_id, "policy_control mutex poisoned".into()),
             }
         }
+        P::SetVisionEnabled(req) => {
+            // Start/stop the Python bebop-vision service via systemd. The
+            // request is queued on a background thread (a `systemctl start`
+            // can take ~1 s), so this acks immediately; the resulting state
+            // arrives in telemetry as `VisionState`.
+            if !vision.snapshot().present {
+                error_response(
+                    request_id,
+                    format!("{VISION_SERVICE} is not installed on this robot"),
+                )
+            } else {
+                vision.request(req.enabled);
+                ack(
+                    request_id,
+                    format!(
+                        "vision {} requested",
+                        if req.enabled { "start" } else { "stop" }
+                    ),
+                )
+            }
+        }
         P::SetVelocityCommand(req) => {
             // Arbitrated drive command: the first client to send a
             // non-zero twist claims the "active operator" assignment and
@@ -356,12 +379,20 @@ pub fn snapshot_response(
     imu: &ImuShared,
     imu_present: bool,
     policy_io: &PolicyIoShared,
+    vision: &VisionShared,
     conn_id: u64,
 ) -> proto::ServerRuntimeMessage {
     proto::ServerRuntimeMessage {
         request_id,
         payload: Some(proto::server_runtime_message::Payload::Snapshot(
-            crate::server::telemetry::build_snapshot(sup, imu, imu_present, policy_io, conn_id),
+            crate::server::telemetry::build_snapshot(
+                sup,
+                imu,
+                imu_present,
+                policy_io,
+                vision,
+                conn_id,
+            ),
         )),
     }
 }

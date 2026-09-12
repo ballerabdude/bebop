@@ -23,6 +23,7 @@ use crate::policy_io::PolicyIoShared;
 use crate::safety::{Supervisor, SupervisorEvent};
 use crate::server::handlers::{encode, handle_client_message};
 use crate::server::telemetry::{build_telemetry, telemetry_envelope};
+use crate::vision::VisionShared;
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -71,6 +72,8 @@ pub struct AppState {
     /// Operator navigation goal (navd, plan §8). Written by the
     /// SetNavigationGoal handler; changes broadcast to all clients.
     pub nav_goal: Arc<NavGoalShared>,
+    /// bebop-vision service control + status (see [`crate::vision`]).
+    pub vision: VisionShared,
 }
 
 pub async fn run_server(state: AppState, bind_addr: &str) -> Result<()> {
@@ -209,6 +212,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         policy_io,
         policy_control,
         nav_goal,
+        vision,
         capture_dir: _,
     } = state;
     // Per-connection identity for operator arbitration. Monotonic so a
@@ -244,6 +248,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let sup_tele = sup.clone();
     let imu_tele = imu.clone();
     let policy_io_tele = policy_io.clone();
+    let vision_tele = vision.clone();
     let tele_state_tele = telemetry_state.clone();
     let mut client_telemetry_subscribed = false;
     let telemetry_task = tokio::spawn(async move {
@@ -259,8 +264,14 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
             }
             // conn_id rides along so the arbitration flags inside the
             // drive state are computed for *this* client ("you").
-            let frame =
-                build_telemetry(&sup_tele, &imu_tele, imu_present, &policy_io_tele, conn_id);
+            let frame = build_telemetry(
+                &sup_tele,
+                &imu_tele,
+                imu_present,
+                &policy_io_tele,
+                &vision_tele,
+                conn_id,
+            );
             let env = telemetry_envelope(frame);
             if tx_tele.send(env).await.is_err() {
                 break;
@@ -352,6 +363,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     &policy_io,
                     &policy_control,
                     &nav_goal,
+                    &vision,
                     conn_id,
                     &bytes,
                 );

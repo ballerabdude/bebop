@@ -35,6 +35,24 @@ supervisor, IMU, and the runtime WebSocket API (`:9090`) the operator app
 drives through. Runs as a native binary (`bebop-linux.service`). The vision
 stack runs from a Python venv (`bebop-vision/`) and serves MJPEG on `:9092`.
 
+The firmware also owns start/stop control of the vision stack: it drives the
+`bebop-vision.service` systemd unit (`systemctl start/stop`) and reflects the
+unit's state in telemetry (`VisionState`). The operator app's Teleop screen
+has the Start/Stop vision button. The unit is installed by
+`scripts/install-jetson.sh` but **not enabled** — it stays stopped until the
+operator starts it, and its own sandbox (venv, Orbbec `/dev` nodes, `/tmp`
+lock) is intentionally separate from `bebop-linux.service`'s.
+
+### `bebop-vision` (Python, `bebop-vision.service`)
+
+The robot vision stack: Orbbec depth/color rig, navd MCAP recorder, and the
+MJPEG operator video server (`:9092`). Runs as root from the repo venv
+(`/home/bebop/bebop/bebop-vision/.venv`) — root matches the documented manual
+recorder and is required because the shared capture dir is root-owned
+(`bebop-linux.service`'s `StateDirectory=`), the Orbbec SDK writes `Log/` and
+the recorder lock into `/tmp`, and only one process may hold the camera.
+Started/stopped from the app via the firmware; see `docs/navd.md`.
+
 ### `bebop-app` (Tauri 2 + React + TypeScript)
 
 The customer-facing companion app:
@@ -77,6 +95,7 @@ joins the saved network and drops the hotspot.
 |---------------|---------|--------------------------------------------------|
 | `bebop-agent` | root    | NetworkManager write access (`nmcli` scan/join/AP) + GPIO |
 | `bebop-linux` | root    | SocketCAN, GPIO/SPI                             |
+| `bebop-vision`| root    | shared root-owned capture dir, Orbbec `Log/`, `/tmp` recorder lock |
 | mobile app    | off-device | untrusted; reachable only on the LAN/Hosted Network |
 
 ## Hosted Network / button notes

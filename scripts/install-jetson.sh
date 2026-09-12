@@ -1010,6 +1010,31 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# bebop-vision service unit. Installed but NOT enabled: the operator starts
+# / stops the Python recorder from the app, and the firmware drives systemd
+# (`bebop-vision.service`). The unit references the robot's repo path
+# (/home/bebop/bebop) so it ships as a static file, not part of the
+# firmware bundle.
+# ---------------------------------------------------------------------------
+
+VISION_UNIT=""
+if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
+    if [[ "${LOCAL}" -eq 1 ]]; then
+        vision_unit_src="${LOCAL_REPO_ROOT}/bebop-vision/deploy/systemd/bebop-vision.service"
+        if [[ ! -f "${vision_unit_src}" ]]; then
+            echo "missing local deploy asset: ${vision_unit_src}" >&2
+            exit 1
+        fi
+        install -m 0644 "${vision_unit_src}" "${WORK_DIR}/bebop-vision.service"
+    else
+        echo "==> fetching bebop-vision.service"
+        fetch_repo_file "bebop-vision/deploy/systemd/bebop-vision.service" \
+            "${WORK_DIR}/bebop-vision.service"
+    fi
+    VISION_UNIT="${WORK_DIR}/bebop-vision.service"
+fi
+
+# ---------------------------------------------------------------------------
 # Prereqs (only what bebop-agent strictly needs; bebop-linux is pure-Rust
 # against SocketCAN and doesn't add anything new at install time).
 # ---------------------------------------------------------------------------
@@ -1076,10 +1101,11 @@ if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
 fi
 
 if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
-    # Capture dir: pre-create as the invoking user so the recorder
-    # (bebop-vision, run as the regular user) can write navd sessions
-    # next to the firmware's own policy captures. The firmware only
-    # creates the dir if missing, so ownership sticks.
+    # Capture dir: shared by the firmware (root policy captures) and
+    # bebop-vision (root navd sessions). Pre-create it so it exists before
+    # either process starts; bebop-linux.service's StateDirectory= will
+    # then (re)own it root:root 0750, which is why bebop-vision also runs
+    # as root.
     install -d -o "${SUDO_USER:-bebop}" -g "$(id -gn "${SUDO_USER:-bebop}")" \
         /var/lib/bebop-captures
     echo "==> installing bebop-linux → /usr/local/bin/bebop-linux"
@@ -1138,6 +1164,12 @@ EOF
 
     # Navigable-path model (optional, same drop-in convention as the
     install -m 0644 "${LINUX_UNIT}" /etc/systemd/system/bebop-linux.service
+
+    # bebop-vision unit: installed for the app's start/stop control, but
+    # deliberately not enabled — it stays stopped until the operator taps
+    # Start in the app (firmware calls `systemctl start bebop-vision`).
+    echo "==> installing bebop-vision.service (not enabled)"
+    install -m 0644 "${VISION_UNIT}" /etc/systemd/system/bebop-vision.service
 fi
 
 # ---------------------------------------------------------------------------

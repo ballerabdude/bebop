@@ -7,6 +7,7 @@ use crate::powerboard::describe_faults;
 use crate::safety::limits::MotorSnapshot;
 use crate::safety::power_monitor::PowerBoardSnapshot;
 use crate::safety::{bus_pool::read_can_state, Supervisor};
+use crate::vision::VisionShared;
 use bebop_proto::runtime::v1 as proto;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -266,11 +267,35 @@ fn build_policy_io_stats(policy_io: &PolicyIoShared) -> proto::PolicyIoStats {
     }
 }
 
+/// Snapshot the bebop-vision service state into the wire proto. Always
+/// returns a value; `present = false` when the unit isn't installed, which
+/// the UI uses to hide the vision control.
+fn build_vision_stats(vision: &VisionShared) -> proto::VisionState {
+    let snap = vision.snapshot();
+    // Prefer the last systemctl error over the raw systemd substate when
+    // one is set — "Unit not found" is more useful to the operator than
+    // "dead".
+    let detail = if snap.last_error.is_empty() {
+        snap.detail
+    } else {
+        snap.last_error
+    };
+    proto::VisionState {
+        present: snap.present,
+        running: snap.running,
+        state: snap.state,
+        detail,
+        service: snap.service,
+        mode: snap.mode,
+    }
+}
+
 pub fn build_snapshot(
     sup: &Arc<Supervisor>,
     imu: &ImuShared,
     imu_present: bool,
     policy_io: &PolicyIoShared,
+    vision: &VisionShared,
     conn_id: u64,
 ) -> proto::Snapshot {
     let motors = sup.snapshot_motors();
@@ -292,6 +317,7 @@ pub fn build_snapshot(
         policy_io: Some(build_policy_io_stats(policy_io)),
         wheels: wheels.iter().map(wheel_state_to_proto).collect(),
         drive: Some(build_drive_state(sup, conn_id)),
+        vision: Some(build_vision_stats(vision)),
         ..Default::default()
     }
 }
@@ -301,6 +327,7 @@ pub fn build_telemetry(
     imu: &ImuShared,
     imu_present: bool,
     policy_io: &PolicyIoShared,
+    vision: &VisionShared,
     conn_id: u64,
 ) -> proto::TelemetryFrame {
     let motors = sup.snapshot_motors();
@@ -321,6 +348,7 @@ pub fn build_telemetry(
         policy_io: Some(build_policy_io_stats(policy_io)),
         wheels: wheels.iter().map(wheel_state_to_proto).collect(),
         drive: Some(build_drive_state(sup, conn_id)),
+        vision: Some(build_vision_stats(vision)),
         ..Default::default()
     }
 }
