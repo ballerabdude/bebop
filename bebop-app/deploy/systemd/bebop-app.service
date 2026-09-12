@@ -1,0 +1,18 @@
+[Unit]
+Description=Bebop companion app (Vite dev server)
+Documentation=https://github.com/your-org/bebop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bebop
+Group=bebop
+# %h = the `bebop` user's home. The repo on the robot lives at ~/bebop/.
+WorkingDirectory=%h/bebop/bebop-app
+ExecStart=%h/bebop/bebop-app/deploy/dev-server.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
