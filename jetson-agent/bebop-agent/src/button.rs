@@ -119,33 +119,45 @@ fn button_loop(
     };
     info!(idle, "button line idle level");
 
+    // Let the line settle after the request (bias/direction take effect
+    // asynchronously) before sampling the initial level, so a startup
+    // transient isn't mistaken for a press.
+    std::thread::sleep(Duration::from_millis(300));
     let mut prev_pressed = read_pressed(&request);
     if prev_pressed {
-        info!("button line already active at startup; waiting for a new press");
+        info!("button line active at startup; waiting for a fresh press");
     }
+
     let mut pressed_since: Option<Instant> = None;
     let mut fired = false;
+    // Debounce: a new level must persist for two polls before it is accepted.
+    let mut stable = prev_pressed;
+    let mut stable_count = 0u32;
+
     loop {
         std::thread::sleep(POLL);
-        let pressed = read_pressed(&request);
-
-        // Edge-triggered: only start the hold timer on an inactive->active
-        // transition. A line that is already active when the agent starts
-        // (e.g. a switch left on) must not fire until it is released and
-        // pressed again.
-        if pressed && !prev_pressed {
-            info!("button pressed; hold to toggle");
-            pressed_since = Some(Instant::now());
-            fired = false;
-        } else if !pressed {
-            if prev_pressed {
-                info!("button released");
-            }
-            pressed_since = None;
-            fired = false;
+        let raw = read_pressed(&request);
+        if raw == stable {
+            stable_count = stable_count.saturating_add(1);
+        } else {
+            stable = raw;
+            stable_count = 1;
         }
 
-        if pressed && !fired {
+        if stable != prev_pressed && stable_count >= 2 {
+            if stable {
+                info!("button pressed; hold to toggle");
+                pressed_since = Some(Instant::now());
+                fired = false;
+            } else {
+                info!("button released");
+                pressed_since = None;
+                fired = false;
+            }
+            prev_pressed = stable;
+        }
+
+        if prev_pressed && !fired {
             if let Some(t0) = pressed_since {
                 if t0.elapsed() >= hold {
                     info!(
@@ -157,8 +169,6 @@ fn button_loop(
                 }
             }
         }
-
-        prev_pressed = pressed;
     }
 }
 
