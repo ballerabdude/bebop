@@ -96,6 +96,33 @@ hotspot, which briefly drops connected devices — reconnect with the new
 credentials. An empty `ap_password` keeps the existing passphrase, and
 responses never include it.
 
+## Bench-verifying the button
+
+The Jetson pinmux fixes each pin's idle level, and the runtime bias request
+is effectively cosmetic — so confirm the wiring matches the idle level
+before relying on the button.
+
+```sh
+# Idle level on header pin 29 (gpiochip0 line 105). With the default
+# active-high wiring (switch to 3.3 V) this should read 0.
+gpioget gpiochip0 105
+
+# Watch edges while pressing the switch. Stop the agent first so it
+# releases the line; expect a rising edge on press for active-high.
+sudo systemctl stop bebop-agent
+gpiomon gpiochip0 105          # Ctrl-C to exit; press the button
+sudo systemctl start bebop-agent
+
+# End-to-end: long-press ~5 s, then watch the toggle + hotspot come up.
+journalctl -u bebop-agent -f
+# ... press and hold ~5 s, then release ...
+# expect: "button pressed" -> "mode button toggled network mode mode=ap"
+#         -> "Hosted Network raised ssid=Bebop-XXXX"
+```
+
+To go back to Known Network, long-press again (~5 s). If the hotspot is up,
+join `Bebop-XXXX` on a phone/PC and open `http://192.168.42.1:9091`.
+
 ## Regenerating bindings
 
 The Rust types are generated at build time by `bebop-proto/build.rs` from

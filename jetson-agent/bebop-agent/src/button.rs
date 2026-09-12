@@ -123,6 +123,7 @@ fn button_loop(
         } else if let Some(t0) = press_ts.take() {
             let held = Duration::from_nanos(event.timestamp_ns.saturating_sub(t0));
             if held >= hold {
+                info!(held_ms = held.as_millis(), "button long-press detected");
                 // Fire and forget; the async side applies the toggle.
                 let _ = tx.blocking_send(());
             } else {
