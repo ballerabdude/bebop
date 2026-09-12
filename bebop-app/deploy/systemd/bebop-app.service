@@ -8,9 +8,9 @@ Wants=network-online.target
 Type=simple
 User=bebop
 Group=bebop
-# %h = the `bebop` user's home. The repo on the robot lives at ~/bebop/.
-WorkingDirectory=%h/bebop/bebop-app
-ExecStart=%h/bebop/bebop-app/deploy/dev-server.sh
+# The repo on the robot lives at /home/bebop/bebop.
+WorkingDirectory=/home/bebop/bebop/bebop-app
+ExecStart=/home/bebop/bebop/bebop-app/deploy/dev-server.sh
 Restart=on-failure
 RestartSec=5
 
