@@ -106,6 +106,15 @@
   still works, but set `iw reg set <CC>` if a channel is rejected. Creating
   the profile (`con add`) does not disrupt the current Wi-Fi link; only
   `con up` does — safe to validate command syntax read-only.
+- Jetson header GPIO bias lives in the **pinmux**, not in the runtime line
+  request: `libgpiod`/`gpiocdev` bias flags are effectively a no-op here, so
+  an input with `PULL=NONE` floats. Read the pin's pinmux register with
+  `sudo busybox devmem <addr>` (address per pin is in NVIDIA's `jetson-gpio`
+  `gpio_pin_data.py`; e.g. pin 29 = `0x2430068`); pull is bits [11:10]
+  (0=none, 1=down, 2=up). On this Orin Nano: pin 29 = `PULL_NONE` (floats),
+  pin 32 = pull-down. Wire a button to the **opposite** rail of the pin's
+  built-in pull — then no external resistor is needed (button on pin 32 to
+  3.3 V, active-high).
 - Protobuf: three binding sets (Rust prost auto via build.rs, app TS via
   `npm run gen-proto` in bebop-app/, Python pb2 checked in at
   `bebop-vision/bebop_vision/proto/bebop/runtime/v1/`). The Python pb2
