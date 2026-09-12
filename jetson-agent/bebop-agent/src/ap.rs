@@ -40,9 +40,25 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
     loop {
         let cfg = state.config().await;
         let network = cfg.network.clone();
-        let ap = state.ap_status().await;
+        let mut ap = state.ap_status().await;
         let desired = network.hosts_ap();
         let fingerprint = network.ap_fingerprint();
+
+        // Detect an AP that was externally deactivated (NetworkManager
+        // restart, an admin `nmcli con down`, a stale profile delete). Without
+        // this the supervisor would keep believing it is hosting and never
+        // re-raise. A failed query is treated as "still active" so a transient
+        // nmcli error can't cause thrash.
+        if ap.active && profile_active().await == Some(false) {
+            warn!("setup AP is no longer active; re-raising");
+            state
+                .update_ap_status(|s| {
+                    s.active = false;
+                    s.fingerprint.clear();
+                })
+                .await;
+            ap = state.ap_status().await;
+        }
 
         if desired && (!ap.active || ap.fingerprint != fingerprint) {
             match raise(&state, &network).await {
@@ -94,9 +110,14 @@ async fn raise(state: &AppState, cfg: &NetworkConfig) -> anyhow::Result<()> {
     }
     let band = cfg.nm_band();
 
-    // Recreate the profile each time so config edits (ssid/password/band)
-    // apply cleanly.
+    // Start from a clean radio state: drop any client association and the
+    // previous AP profile before recreating, so NetworkManager doesn't leave
+    // the interface half-switched (which can yield a beaconing AP that
+    // clients cannot complete the handshake with).
+    let _ = nmcli(&["device", "disconnect", &iface]).await;
     let _ = nmcli(&["con", "delete", AP_CON_NAME]).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     nmcli(&[
         "con",
         "add",
@@ -127,6 +148,9 @@ async fn raise(state: &AppState, cfg: &NetworkConfig) -> anyhow::Result<()> {
     nmcli(&["con", "up", AP_CON_NAME])
         .await
         .context("activating AP profile; is the radio free?")?;
+    // Give the driver a beat to finish entering AP mode before we read the
+    // assigned address or report success.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Ask NM for the address it actually assigned; fall back to the
     // configured gateway if the query is unavailable.
@@ -164,6 +188,15 @@ async fn lower(state: &AppState) -> anyhow::Result<()> {
         })
         .await;
     Ok(())
+}
+
+/// True if the agent's AP profile is an active NetworkManager connection.
+/// `None` when the query fails (treated as "unknown" by the caller).
+async fn profile_active() -> Option<bool> {
+    let out = nmcli(&["-t", "-f", "NAME", "con", "show", "--active"])
+        .await
+        .ok()?;
+    Some(out.lines().any(|l| l.trim() == AP_CON_NAME))
 }
 
 async fn query_gateway(iface: &str) -> Option<String> {
