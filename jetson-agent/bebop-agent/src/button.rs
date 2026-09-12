@@ -1,23 +1,30 @@
 //! Physical mode-toggle button.
 //!
-//! A momentary switch wired between a GPIO header pin (default: Orin Nano
-//! pin 29 → `gpiochip0` line 105, which idles low) and 3.3 V. A **long press** (default 5 s,
-//! fired on release) toggles the robot between the two network modes:
-//! `client` ("Known Network") and `ap` ("Hosted Network").
+//! A switch wired between a GPIO header pin (default: Orin Nano pin 29 →
+//! `gpiochip0` line 105, which idles low) and 3.3 V. Holding the line in its
+//! active state for `button_hold_secs` (default 5 s) toggles the robot
+//! between the two network modes: `client` ("Known Network") and `ap`
+//! ("Hosted Network").
+//!
+//! The hold is measured by **polling the line level**, not by timing edges,
+//! so it works with both momentary push-buttons and latching switches, and
+//! does not depend on a release edge arriving.
 //!
 //! Implemented with the pure-Rust [`gpiocdev`] crate (GPIO uAPI v2), so it
-//! needs no `libgpiod` build dependency and can set the line's internal
-//! pull-up/pull-down bias.
+//! needs no `libgpiod` build dependency and can request a line bias.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use gpiocdev::line::{Bias, EdgeDetection, EdgeKind};
+use gpiocdev::line::{Bias, Value};
 use gpiocdev::Request;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::ap;
 use crate::state::AppState;
+
+/// How often the button thread samples the line.
+const POLL: Duration = Duration::from_millis(100);
 
 /// Entry point. Never returns while enabled; parks if the button is
 /// disabled or the line cannot be requested, so it can't take the agent down.
@@ -45,7 +52,7 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
             chip = %cfg.button_chip,
             line = cfg.button_line,
             hold_secs = hold.as_secs(),
-            "mode button armed (long-press to toggle Known/Hosted)"
+            "mode button armed (hold to toggle Known/Hosted)"
         ),
         Err(e) => {
             warn!(error = %e, "failed to spawn button thread; button unavailable");
@@ -65,7 +72,7 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Blocking edge-event loop, runs on a dedicated thread.
+/// Blocking level-polling loop, runs on a dedicated thread.
 fn button_loop(
     chip: &str,
     line: u32,
@@ -86,9 +93,7 @@ fn button_loop(
         .on_chip(&chip_path)
         .with_consumer("bebop-agent")
         .with_line(line)
-        .with_edge_detection(EdgeDetection::BothEdges)
         .with_bias(bias)
-        .with_debounce_period(Duration::from_millis(50))
         .request();
     let request = match request {
         Ok(r) => r,
@@ -98,38 +103,50 @@ fn button_loop(
         }
     };
 
-    // Diagnostic: idle level with the configured bias. A pull-up should
-    // read Active (high) while the switch is open.
-    match request.value(line) {
-        Ok(v) => info!(?v, "button line idle level"),
-        Err(e) => warn!(error = %e, "failed to read button idle level"),
-    }
-
-    let mut press_ts: Option<u64> = None;
-    for event in request.edge_events() {
-        let event = match event {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(error = %e, "button GPIO event error");
-                return;
-            }
-        };
-        let pressed = match event.kind {
-            EdgeKind::Falling => active_low,
-            EdgeKind::Rising => !active_low,
-        };
-        if pressed {
-            press_ts = Some(event.timestamp_ns);
-        } else if let Some(t0) = press_ts.take() {
-            let held = Duration::from_nanos(event.timestamp_ns.saturating_sub(t0));
-            if held >= hold {
-                info!(held_ms = held.as_millis(), "button long-press detected");
-                // Fire and forget; the async side applies the toggle.
-                let _ = tx.blocking_send(());
-            } else {
-                info!(held_ms = held.as_millis(), "button short tap ignored");
-            }
+    let read_pressed = |r: &Request| -> bool {
+        match r.value(line) {
+            Ok(Value::Active) => !active_low,
+            Ok(Value::Inactive) => active_low,
+            Err(_) => false,
         }
+    };
+
+    let idle = if read_pressed(&request) {
+        "active"
+    } else {
+        "inactive"
+    };
+    info!(idle, "button line idle level");
+
+    let mut pressed_since: Option<Instant> = None;
+    let mut fired = false;
+    loop {
+        let pressed = read_pressed(&request);
+        if pressed {
+            if pressed_since.is_none() {
+                pressed_since = Some(Instant::now());
+                fired = false;
+            }
+            if !fired {
+                if let Some(t0) = pressed_since {
+                    if t0.elapsed() >= hold {
+                        info!(
+                            held_ms = t0.elapsed().as_millis(),
+                            "button long-press detected"
+                        );
+                        fired = true;
+                        let _ = tx.blocking_send(());
+                    }
+                }
+            }
+        } else {
+            if fired {
+                info!("button released");
+            }
+            pressed_since = None;
+            fired = false;
+        }
+        std::thread::sleep(POLL);
     }
 }
 
