@@ -23,10 +23,12 @@ A momentary switch from a GPIO header pin to GND. A **long press** (default
 5 s, fired on release) toggles the mode and persists it to
 `/etc/bebop/agent.toml`. Short taps are ignored.
 
-- Default pin: Orin Nano header **pin 29** = `gpiochip0` line **105**
-  (`PQ.05`). Avoid pins 7 and 15 (IMU INT/RST).
-- Active-low with an internal pull-up; the agent requests the line via the
-  pure-Rust `gpiocdev` crate (GPIO uAPI v2).
+- Default pin: Orin Nano header **pin 32** = `gpiochip0` line **41**
+  (`GPIO07`). This pin idles high, so a switch to GND reads active-low.
+  Avoid pins 7 and 15 (IMU INT/RST). (Pin 29 idles low on this board.)
+- The agent requests the line via the pure-Rust `gpiocdev` crate (GPIO
+  uAPI v2). Note the Jetson pinmux fixes each pin's bias, so the runtime
+  bias request is effectively cosmetic — pick a pin that idles the right way.
 - Wire the switch between the pin and any GND pin.
 
 ## Transport

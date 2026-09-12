@@ -68,7 +68,9 @@ pub struct NetworkConfig {
     #[serde(default = "default_button_chip")]
     pub button_chip: String,
 
-    /// GPIO line offset on `button_chip`. Default 105 = header **pin 29**.
+    /// GPIO line offset on `button_chip`. Default 41 = header **pin 32**
+    /// (`GPIO07`); this pin idles high on the Orin Nano so a button to GND
+    /// works as active-low. (Pin 29 / line 105 idles low on this board.)
     #[serde(default = "default_button_line")]
     pub button_line: u32,
 
@@ -233,7 +235,7 @@ fn default_button_chip() -> String {
 }
 
 fn default_button_line() -> u32 {
-    105 // Orin Nano 40-pin header pin 29 (PQ.05)
+    41 // Orin Nano 40-pin header pin 32 (GPIO07)
 }
 
 fn default_button_bias() -> String {
@@ -284,7 +286,7 @@ mod tests {
         assert!(cfg.hosts_ap());
         assert!(cfg.ap_password.len() >= 8);
         assert_eq!(cfg.nm_band(), "bg");
-        assert_eq!(cfg.button_line, 105);
+        assert_eq!(cfg.button_line, 41);
     }
 
     #[test]

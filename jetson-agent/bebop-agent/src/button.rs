@@ -1,7 +1,7 @@
 //! Physical mode-toggle button.
 //!
 //! A momentary switch wired between a GPIO header pin (default: Orin Nano
-//! pin 29 → `gpiochip0` line 105) and GND. A **long press** (default 5 s,
+//! pin 32 → `gpiochip0` line 41, which idles high) and GND. A **long press** (default 5 s,
 //! fired on release) toggles the robot between the two network modes:
 //! `client` ("Known Network") and `ap` ("Hosted Network").
 //!

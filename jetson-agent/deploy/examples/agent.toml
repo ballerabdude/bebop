@@ -57,12 +57,13 @@
 # --- mode button ----------------------------------------------------------
 # A momentary switch between the GPIO pin and GND. A long press toggles
 # between Hosted Network (ap) and Known Network (client). On the Orin Nano
-# 40-pin header, pin 29 is gpiochip0 line 105 (avoid pins 7 and 15, which
-# the IMU uses).
+# 40-pin header, pin 32 is gpiochip0 line 41 and idles high, so a switch to
+# GND reads as active-low (avoid pins 7 and 15, which the IMU uses; pin 29
+# idles low on this board and would need 3V3 wiring).
 #
 # button_enabled = true
 # button_chip = "gpiochip0"
-# button_line = 105          # header pin 29 (PQ.05)
+# button_line = 41           # header pin 32 (GPIO07)
 # button_active_low = true   # switch shorts the line to GND when pressed
 # button_bias = "pull-up"    # pull-up | pull-down | none
 # button_hold_secs = 5       # long-press duration
