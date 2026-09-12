@@ -35,6 +35,18 @@ const TICK: Duration = Duration::from_secs(1);
 /// Long-running supervisor.
 pub async fn run(state: AppState) -> anyhow::Result<()> {
     info!("network supervisor online");
+
+    // Startup reconciliation: a previous process (or a crash while hosting)
+    // may have left the AP profile active while the configured mode is now
+    // `client`. Tear it down so the radio can rejoin a known network.
+    {
+        let cfg = state.config().await;
+        if !cfg.network.hosts_ap() && profile_active().await == Some(true) {
+            info!("lowering leftover Hosted Network from a previous run");
+            let _ = lower(&state).await;
+        }
+    }
+
     let mut last_mode_logged: Option<String> = None;
 
     loop {
