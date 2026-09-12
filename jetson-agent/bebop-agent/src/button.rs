@@ -15,7 +15,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpiocdev::line::{Bias, Value};
+use gpiocdev::line::{Bias, Direction, Value};
 use gpiocdev::Request;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -93,6 +93,7 @@ fn button_loop(
         .on_chip(&chip_path)
         .with_consumer("bebop-agent")
         .with_line(line)
+        .with_direction(Direction::Input)
         .with_bias(bias)
         .request();
     let request = match request {
