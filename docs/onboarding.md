@@ -20,7 +20,7 @@
 
 - JetPack ≥ 6.x (L4T r36.x) recommended
 - NetworkManager (usually default) — the agent uses `nmcli` to scan/join
-  Wi-Fi and to raise the setup SoftAP
+  Wi-Fi and to raise the Hosted Network
 - A Wi-Fi module that supports AP mode (the Orin Nano devkit's Realtek
   RTL8822CE does; verify with `iw list` showing `* AP`)
 
@@ -99,4 +99,4 @@ app-dev` and `just app-web` wrap these.
 
 - Read [`architecture.md`](architecture.md) to see how the pieces connect.
 - Read [`setup-protocol.md`](setup-protocol.md) for the provisioning wire
-  format and SoftAP flow.
+  format and Hosted Network flow.

@@ -114,6 +114,54 @@ pub async fn connect(
     Ok(status)
 }
 
+/// Persist a Wi-Fi profile **without activating it**, so the caller can stay
+/// in Hosted Network mode. NetworkManager autoconnects it once the radio is
+/// freed (i.e. when the mode switches to `client` and the hotspot drops).
+pub async fn save_credentials(
+    state: &AppState,
+    ssid: &str,
+    password: &str,
+    hidden: bool,
+) -> Result<WifiRuntimeStatus, AgentError> {
+    if ssid.trim().is_empty() {
+        return Err(AgentError::Wifi("empty ssid".into()));
+    }
+    // Replace any existing profile with this name for a clean update.
+    let _ = nmcli(&["con", "delete", ssid]).await;
+
+    let mut args: Vec<&str> = vec![
+        "con",
+        "add",
+        "type",
+        "wifi",
+        "con-name",
+        ssid,
+        "ssid",
+        ssid,
+        "connection.autoconnect",
+        "yes",
+    ];
+    if hidden {
+        args.push("802-11-wireless.hidden");
+        args.push("yes");
+    }
+    if !password.is_empty() {
+        args.push("wifi-sec.key-mgmt");
+        args.push("wpa-psk");
+        args.push("wifi-sec.psk");
+        args.push(password);
+    }
+
+    nmcli(&args)
+        .await
+        .map_err(|e| AgentError::Wifi(e.to_string()))?;
+
+    // Status is unchanged (we didn't activate); report the current link.
+    let status = query_status().await.unwrap_or_default();
+    state.set_wifi_status(status.clone()).await;
+    Ok(status)
+}
+
 /// Read current Wi-Fi status from NetworkManager.
 pub async fn query_status() -> Result<WifiRuntimeStatus> {
     let out = nmcli(&["-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device"]).await?;

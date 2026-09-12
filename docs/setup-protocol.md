@@ -1,7 +1,33 @@
 # Setup Protocol
 
 How the companion app (`bebop-app`) provisions a robot via `bebop-agent`'s
-setup server.
+setup server, and how the physical mode button works.
+
+## Network modes
+
+The robot has exactly two network modes, switched **only** by the physical
+button long-press. There is no automatic fallback.
+
+| Mode     | Name           | Behaviour                                                           |
+|----------|----------------|---------------------------------------------------------------------|
+| `ap`     | Hosted Network | Hosts the `Bebop-XXXX` hotspot continuously (boot default).         |
+| `client` | Known Network  | Joins a saved Wi-Fi network; never hosts.                           |
+
+Because the Wi-Fi radio is single-ended, switching modes drops the previous
+link. A fresh robot boots into Hosted Network so it is reachable at
+`192.168.42.1:9091` out of the box.
+
+## Mode button
+
+A momentary switch from a GPIO header pin to GND. A **long press** (default
+5 s, fired on release) toggles the mode and persists it to
+`/etc/bebop/agent.toml`. Short taps are ignored.
+
+- Default pin: Orin Nano header **pin 29** = `gpiochip0` line **105**
+  (`PQ.05`). Avoid pins 7 and 15 (IMU INT/RST).
+- Active-low with an internal pull-up; the agent requests the line via the
+  pure-Rust `gpiocdev` crate (GPIO uAPI v2).
+- Wire the switch between the pin and any GND pin.
 
 ## Transport
 
@@ -9,10 +35,11 @@ The agent serves a binary WebSocket on the configured setup address
 (`network.setup_bind_addr`, default `0.0.0.0:9091`). The same server is
 reachable two ways:
 
-- **Over the robot's setup SoftAP** during first-time provisioning. Join the
-  `Bebop-XXXX` Wi-Fi network (WPA2, default passphrase `bebopbebop`), then
+- **Over the Hosted Network** — join the `Bebop-XXXX` hotspot (WPA2), then
   connect to the gateway (`192.168.42.1:9091` by default).
-- **Over the LAN** once the robot is on Wi-Fi, using its normal address.
+- **Over the LAN** — once the robot is on Wi-Fi in Known Network mode, use
+  its normal address (`bebop.local` resolves via mDNS/avahi on most
+  networks).
 
 Endpoints:
 
@@ -20,19 +47,14 @@ Endpoints:
 |-------------|----------------------------------------------------------------|
 | `/healthz`  | Liveness probe; returns `ok`. Used by the app's pre-flight.    |
 | `/ws`       | WebSocket upgrade; one `ClientRequest` per binary frame.       |
-| `/`         | Minimal status page (robot name, Wi-Fi/hotspot state).         |
-
-There is no BLE/GATT surface anymore — tests confirmed the Jetson's Wi-Fi
-module supports AP mode, and the SoftAP + setup server replaces Bluetooth.
+| `/`         | Status page (robot name, mode, Wi-Fi/Hosted state).            |
 
 ## Framing
 
 Each WebSocket binary frame carries exactly one `bebop.v1.ClientRequest`
 (agent-bound) or `bebop.v1.AgentResponse` (app-bound), encoded with `prost`
 on the agent side and `@bufbuild/protobuf` on the app side. There is no
-additional length prefix — the WebSocket frame boundary is the message
-boundary — so the ATT-MTU fragmentation scheme from the old BLE transport is
-gone.
+extra length prefix — the WebSocket frame boundary is the message boundary.
 
 ## Messages
 
@@ -44,30 +66,31 @@ gone.
 - `SetWifiCredentials` / `WifiStatus` — join a network.
 - `GetWifiStatus` / `WifiStatus` — current link.
 - `GetRobotConfig` / `SetRobotConfig` / `RobotConfig` — robot name.
-- `GetNetworkConfig` / `SetNetworkConfig` / `NetworkConfig` — provisioning
-  mode (`auto` / `client` / `ap`) plus the SoftAP SSID + setup address.
+- `GetNetworkConfig` / `SetNetworkConfig` / `NetworkConfig` — the Hosted
+  Network settings (`ap_ssid`, `ap_password`, `ap_band`) plus the read-only
+  `mode` and `ap_address`.
 
-## Joining Wi-Fi
+## Provisioning Wi-Fi
 
-`SetWifiCredentials` is fire-and-forget by design. The agent replies
-immediately, then drops the SoftAP and switches the Wi-Fi radio to client
-mode. The app is reachable over that SoftAP, so the reply must be sent
-before the radio switches. After the robot joins, the app loses the setup
-link and the user reconnects to their own network, then points the app at
-the robot's new address.
+`SetWifiCredentials` behaves differently per mode:
 
-While a join is in flight the agent suppresses its SoftAP supervisor so the
-hotspot isn't re-raised mid-connection.
+- **Known Network (`client`)** — the robot joins immediately.
+- **Hosted Network (`ap`)** — the profile is **saved but not applied**; the
+  hotspot stays up so the current session isn't killed. The robot joins the
+  saved network only when the button switches it to Known Network, at which
+  point the profile autoconnects.
 
-## Networking modes
+The app's Wi-Fi screen shows a "saved — long-press to switch" confirmation
+when provisioning while Hosted.
 
-`[network] mode` in `/etc/bebop/agent.toml`:
+## Editing the Hosted Network
 
-| Mode     | Behaviour                                                        |
-|----------|------------------------------------------------------------------|
-| `auto`   | Join a known network; raise the SoftAP if none connects within `ap_auto_after_secs` (default 25 s). |
-| `client` | Only ever act as a Wi-Fi client (never raise the SoftAP).        |
-| `ap`     | Always host the setup SoftAP.                                    |
+The app's dashboard exposes the Hosted Network settings (SSID, password,
+band 2.4/5 GHz) via `SetNetworkConfig`. `mode` is **read-only** in the API.
+Changing the SSID/password/band while hosting recreates and re-raises the
+hotspot, which briefly drops connected devices — reconnect with the new
+credentials. An empty `ap_password` keeps the existing passphrase, and
+responses never include it.
 
 ## Regenerating bindings
 

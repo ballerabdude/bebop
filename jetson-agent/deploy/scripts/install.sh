@@ -12,7 +12,7 @@
 #
 # Unless `--skip-prereqs` is passed, the script will also (idempotently)
 # install and enable network-manager and dbus (the agent uses `nmcli` and
-# raises the setup SoftAP via NetworkManager).
+# raises the Hosted Network via NetworkManager).
 
 set -euo pipefail
 

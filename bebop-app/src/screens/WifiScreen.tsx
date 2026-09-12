@@ -3,8 +3,6 @@ import { useEffect, useState } from "react";
 import type { BebopTransport, WifiNetwork, WifiStatus } from "../ble";
 import { Banner, Button, Card, Field, Spinner } from "../components/ui";
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 export function WifiScreen({
   transport,
   onDone,
@@ -23,6 +21,8 @@ export function WifiScreen({
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [scanNote, setScanNote] = useState<string | null>(null);
+  // Set when credentials were saved but not applied (Hosted Network mode).
+  const [savedMessage, setSavedMessage] = useState<string | null>(null);
 
   async function fetchStatus() {
     try {
@@ -78,32 +78,53 @@ export function WifiScreen({
     setError(null);
     setJoining(true);
     try {
-      await transport.setWifiCredentials(ssid, password, false);
-      // The robot drops the setup hotspot to switch the radio, so the poll
-      // below usually fails. If we're reconfiguring over the LAN it may
-      // succeed — either way, hand the outcome back to the caller.
-      for (let i = 0; i < 6; i++) {
-        await sleep(1_000);
-        try {
-          const status = await transport.getWifiStatus();
-          if (status.connected) {
-            onDone(status);
-            return;
-          }
-        } catch {
-          break; // link dropped — expected on the hotspot path
-        }
-      }
-      onDone({
-        connected: false,
+      const { status, message } = await transport.setWifiCredentials(
         ssid,
-        ipAddress: "",
-        signalDbm: 0,
-      });
+        password,
+        false,
+      );
+      if (status.connected) {
+        onDone(status);
+        return;
+      }
+      if (message) {
+        // Hosted Network mode: saved, not applied (the hotspot stays up).
+        setSavedMessage(message);
+        setJoining(false);
+        return;
+      }
+      setError(
+        `Could not join ${ssid}. Check the password and try again.`,
+      );
+      setJoining(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setJoining(false);
     }
+  }
+
+  // Saved-but-not-applied panel (Hosted Network provisioning).
+  if (savedMessage) {
+    return (
+      <div className="flex flex-col flex-1 gap-4">
+        <h2 className="text-2xl font-bold mt-2">Wi-Fi saved</h2>
+        <Banner tone="info">{savedMessage}</Banner>
+        <p className="text-text-dim leading-relaxed">
+          The robot keeps hosting its network until you long-press the mode
+          button. It will join the saved network when it switches to Known
+          Network.
+        </p>
+        <div className="mt-auto pt-4">
+          <Button
+            onClick={() =>
+              onDone({ connected: false, ssid: "", ipAddress: "", signalDbm: 0 })
+            }
+          >
+            Done
+          </Button>
+        </div>
+      </div>
+    );
   }
 
   if (selected) {

@@ -30,17 +30,25 @@ export interface RobotConfig {
   extra: Record<string, string>;
 }
 
-/// Wi-Fi provisioning mode for the robot.
+/// Network mode. A two-way switch with no automatic fallback, changed only
+/// by the physical button long-press.
 ///
-/// - `auto`   — join a known network; fall back to the setup hotspot.
-/// - `client` — only ever act as a Wi-Fi client.
-/// - `ap`     — always host the setup hotspot.
-export type NetworkMode = "auto" | "client" | "ap";
+/// - `client` — join a saved network ("Known Network").
+/// - `ap`     — host the setup hotspot ("Hosted Network").
+export type NetworkMode = "client" | "ap";
+
+export type ApBand = "2.4" | "5";
 
 export interface NetworkConfig {
+  /// Read-only: owned by the physical button.
   mode: NetworkMode;
-  /// SSID of the robot's setup hotspot (read-only).
+  /// SSID of the robot's Hosted Network hotspot.
   apSsid: string;
-  /// `host:port` to reach the setup server while the hotspot is up.
+  /// Write-only: always empty in responses. Leave empty when saving to keep
+  /// the existing passphrase.
+  apPassword: string;
+  /// Hotspot band.
+  apBand: ApBand;
+  /// `host:port` to reach the setup server while hosting (read-only).
   apAddress: string;
 }

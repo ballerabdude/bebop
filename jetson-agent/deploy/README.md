@@ -42,7 +42,7 @@ SSH.
 distro repos:
 
 - `network-manager` (the agent uses `nmcli` to scan/join Wi-Fi and to raise
-  the setup SoftAP)
+  the Hosted Network)
 - `dbus`
 
 If your base image already has everything baked in, pass

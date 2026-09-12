@@ -4,7 +4,7 @@ Everything that runs **on the Jetson** in support of provisioning.
 
 | Path            | What it is                                                                  |
 |-----------------|-----------------------------------------------------------------------------|
-| `bebop-agent/`  | The Rust provisioning daemon (systemd service). Owns Wi-Fi setup + SoftAP.  |
+| `bebop-agent/`  | The Rust provisioning daemon (systemd service). Owns Wi-Fi setup + Hosted Network.  |
 | `bebop-proto/`  | Shared protobuf schema for the setup wire protocol (WS on `:9091`).         |
 | `deploy/`       | Systemd unit, install/uninstall scripts, example `agent.toml`.              |
 | `Cargo.toml`    | Workspace root (`bebop-agent` + `bebop-proto`).                             |
@@ -45,6 +45,6 @@ runs off-device and has its own build toolchain. See `../bebop-app/`.
 ## Provisioning flow
 
 The agent serves a protobuf-over-WebSocket setup server on `:9091`. When the
-robot has no usable Wi-Fi it also hosts a `Bebop-XXXX` SoftAP so a phone can
+robot has no usable Wi-Fi it also hosts a `Bebop-XXXX` hotspot so a phone can
 join and reach that server at `192.168.42.1:9091`. See
 [`../docs/setup-protocol.md`](../docs/setup-protocol.md).

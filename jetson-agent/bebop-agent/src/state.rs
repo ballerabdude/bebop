@@ -28,7 +28,7 @@ pub struct WifiRuntimeStatus {
     pub signal_dbm: i32,
 }
 
-/// Live state of the setup SoftAP.
+/// Live state of the Hosted Network hotspot.
 #[derive(Debug, Clone, Default)]
 pub struct ApRuntimeStatus {
     pub active: bool,
@@ -36,9 +36,9 @@ pub struct ApRuntimeStatus {
     /// `host:port` the app should use to reach the setup server while the
     /// AP is up (e.g. `192.168.42.1:9091`).
     pub address: String,
-    /// True while a Wi-Fi join triggered from the setup UI is in flight.
-    /// Suppresses the AP supervisor so it doesn't race the connection.
-    pub connecting: bool,
+    /// Fingerprint of the settings the active profile was built from.
+    /// Lets the supervisor notice SSID/password/band edits and re-raise.
+    pub fingerprint: String,
     pub last_error: Option<String>,
 }
 
@@ -63,6 +63,14 @@ impl AppState {
     {
         let mut g = self.inner.config.write().await;
         f(&mut g);
+    }
+
+    /// Persist the current in-memory config to disk. Call after
+    /// [`update_config`] so the running copy and the file stay in lockstep.
+    pub async fn persist_config(&self) -> anyhow::Result<()> {
+        let cfg = self.config().await;
+        let path = crate::config::config_path();
+        crate::config::save(&cfg, &path)
     }
 
     pub async fn wifi_status(&self) -> WifiRuntimeStatus {

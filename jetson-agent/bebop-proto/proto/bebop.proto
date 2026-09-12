@@ -7,7 +7,7 @@ package bebop.v1;
 //
 // Carried over a binary WebSocket by `bebop-agent`'s setup server (see
 // `bebop-agent/src/server.rs`). The `bebop-app` connects to the robot over
-// the LAN once it is on Wi-Fi, or directly to the robot's SoftAP during
+// the LAN once it is on Wi-Fi, or directly to the robot's Hosted Network during
 // first-time provisioning.
 // ---------------------------------------------------------------------------
 
@@ -110,22 +110,26 @@ message SetRobotConfigRequest {
 message GetRobotConfigRequest {}
 
 // ---------------------------------------------------------------------------
-// Network mode
+// Network configuration / Hosted Network settings
 //
-// `mode` is one of:
-//   * "auto"   — join a known network; fall back to the SoftAP if none
-//                connects within the configured timeout.
-//   * "client" — only ever act as a Wi-Fi client (no SoftAP).
-//   * "ap"     — always host the SoftAP.
+// `mode` is a read-only, two-way switch with no fallback:
+//   * "client" — join a saved network ("Known Network").
+//   * "ap"     — host the setup hotspot ("Hosted Network").
 //
-// `ap_ssid` and `ap_address` are read-only snapshots filled in by the
-// agent so the app can render/join the setup network.
+// The mode is changed by the physical button long-press, not by the app.
+//
+// `ap_ssid`, `ap_password` and `ap_band` are editable Hosted Network
+// settings. In `SetNetworkConfigRequest`, an empty `ap_password` keeps the
+// existing passphrase; responses never include the password.
+// `ap_address` is the read-only `host:port` clients use while hosting.
 // ---------------------------------------------------------------------------
 
 message NetworkConfig {
-  string mode = 1;
-  string ap_ssid = 2;
-  string ap_address = 3;
+  string mode = 1;        // read-only: "client" | "ap"
+  string ap_ssid = 2;     // read/write
+  string ap_password = 3; // write-only; always empty in responses
+  string ap_band = 4;     // read/write: "2.4" | "5"
+  string ap_address = 5;  // read-only host:port
 }
 
 message GetNetworkConfigRequest {}

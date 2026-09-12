@@ -1,21 +1,19 @@
-//! SoftAP provisioning fallback.
+//! Hosted Network ("SoftAP") supervisor.
 //!
-//! The robot normally joins a known Wi-Fi network as a client. When none is
-//! available (first boot, new venue, wrong credentials) this module raises a
-//! WPA2 hotspot named `Bebop-<id>` so a phone can join it and reach the setup
-//! server on a fixed gateway address.
+//! Network mode is a two-way switch with no automatic fallback:
+//!   * `mode = "ap"`     — host the `Bebop-XXXX` hotspot continuously.
+//!   * `mode = "client"` — join a saved network; never host.
 //!
-//! Mode is driven by `[network] mode` in `agent.toml`:
-//!   * `auto`   — client first, AP after `ap_auto_after_secs` if still offline.
-//!   * `client` — never raise the AP.
-//!   * `ap`     — always raise the AP.
+//! The physical button long-press toggles the mode; this module reconciles
+//! the running hotspot with whichever mode is configured. The Wi-Fi radio is
+//! single-ended, so hosting the AP necessarily drops any client link.
 //!
-//! Bring-up uses NetworkManager (`nmcli`) in shared IPv4 mode, which also
-//! provides DHCP/DNS to the phone. The Wi-Fi hardware is a single radio, so
-//! client and AP are mutually exclusive — hence the "fallback" design.
+//! Bring-up uses NetworkManager shared IPv4 mode, which also provides DHCP
+//! and DNS to connected devices.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use anyhow::Context;
 use tracing::{info, warn};
 
 use crate::config::NetworkConfig;
@@ -32,39 +30,28 @@ pub const AP_CON_NAME: &str = "bebop-setup";
 const AP_GATEWAY: &str = "192.168.42.1";
 
 /// How often the supervisor re-evaluates the desired state.
-const TICK: Duration = Duration::from_secs(5);
+const TICK: Duration = Duration::from_secs(1);
 
-/// Long-running supervisor. Mirrors the shape of the other subsystems:
-/// reconcile desired vs actual state each tick, log transitions once.
+/// Long-running supervisor.
 pub async fn run(state: AppState) -> anyhow::Result<()> {
     info!("network supervisor online");
-    let started = Instant::now();
     let mut last_mode_logged: Option<String> = None;
 
     loop {
         let cfg = state.config().await;
-        let wifi_status = state.wifi_status().await;
-        let ap_status = state.ap_status().await;
+        let network = cfg.network.clone();
+        let ap = state.ap_status().await;
+        let desired = network.hosts_ap();
+        let fingerprint = network.ap_fingerprint();
 
-        let mode = cfg.network.mode.to_ascii_lowercase();
-        let should_host = match mode.as_str() {
-            "ap" => true,
-            "client" => false,
-            // Auto: host only once we've given the client path a fair chance.
-            _ => {
-                !wifi_status.connected
-                    && started.elapsed().as_secs() >= cfg.network.ap_auto_after_secs
-            }
-        } && !ap_status.connecting;
-
-        if should_host && !ap_status.active {
-            match raise(&state, &cfg.network).await {
+        if desired && (!ap.active || ap.fingerprint != fingerprint) {
+            match raise(&state, &network).await {
                 Ok(()) => {
                     let ssid = state.ap_status().await.ssid;
-                    info!(ssid = %ssid, "setup SoftAP raised");
+                    info!(ssid = %ssid, %fingerprint, "Hosted Network raised");
                 }
                 Err(e) => {
-                    warn!(error = %e, "failed to raise setup SoftAP; will retry");
+                    warn!(error = %e, "failed to raise Hosted Network; will retry");
                     state
                         .update_ap_status(|s| {
                             s.active = false;
@@ -73,42 +60,42 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
                         .await;
                 }
             }
-        } else if !should_host && ap_status.active {
+        } else if !desired && ap.active {
             if let Err(e) = lower(&state).await {
-                warn!(error = %e, "failed to lower setup SoftAP");
+                warn!(error = %e, "failed to lower Hosted Network");
             } else {
-                info!("setup SoftAP lowered");
+                info!("Hosted Network lowered");
             }
         }
 
-        if last_mode_logged.as_deref() != Some(mode.as_str()) {
-            info!(
-                mode = %mode,
-                wifi_connected = wifi_status.connected,
-                "network mode active"
-            );
-            last_mode_logged = Some(mode);
+        if last_mode_logged.as_deref() != Some(network.mode.as_str()) {
+            info!(mode = %network.mode, "network mode active");
+            last_mode_logged = Some(network.mode.clone());
         }
 
         tokio::time::sleep(TICK).await;
     }
 }
 
-/// Create + activate the AP profile. Idempotent: safe to call when already up.
+/// Create + activate the AP profile from `cfg`. Idempotent.
 async fn raise(state: &AppState, cfg: &NetworkConfig) -> anyhow::Result<()> {
     let iface = wifi::wifi_device()
         .await
         .map_err(|e| anyhow::anyhow!("no wifi interface: {e}"))?;
-    let ssid = cfg.ap_ssid();
-
+    let ssid = cfg.ap_ssid.trim();
+    if ssid.is_empty() {
+        anyhow::bail!("network.ap_ssid must not be empty");
+    }
     if cfg.ap_password.len() < 8 {
         anyhow::bail!(
             "network.ap_password must be 8..=63 chars for WPA2 (got {})",
             cfg.ap_password.len()
         );
     }
+    let band = cfg.nm_band();
 
-    // Recreate the profile each time so config edits (ssid/password) apply.
+    // Recreate the profile each time so config edits (ssid/password/band)
+    // apply cleanly.
     let _ = nmcli(&["con", "delete", AP_CON_NAME]).await;
     nmcli(&[
         "con",
@@ -122,11 +109,11 @@ async fn raise(state: &AppState, cfg: &NetworkConfig) -> anyhow::Result<()> {
         "autoconnect",
         "no",
         "ssid",
-        &ssid,
+        ssid,
         "802-11-wireless.mode",
         "ap",
         "802-11-wireless.band",
-        "bg",
+        band,
         "wifi-sec.key-mgmt",
         "wpa-psk",
         "wifi-sec.psk",
@@ -137,7 +124,9 @@ async fn raise(state: &AppState, cfg: &NetworkConfig) -> anyhow::Result<()> {
         &format!("{AP_GATEWAY}/24"),
     ])
     .await?;
-    nmcli(&["con", "up", AP_CON_NAME]).await?;
+    nmcli(&["con", "up", AP_CON_NAME])
+        .await
+        .context("activating AP profile; is the radio free?")?;
 
     // Ask NM for the address it actually assigned; fall back to the
     // configured gateway if the query is unavailable.
@@ -145,15 +134,23 @@ async fn raise(state: &AppState, cfg: &NetworkConfig) -> anyhow::Result<()> {
         .await
         .unwrap_or_else(|| AP_GATEWAY.into());
     let port = setup_port(&cfg.setup_bind_addr);
+    let fingerprint = cfg.ap_fingerprint();
     state
         .update_ap_status(|s| {
             s.active = true;
-            s.ssid = ssid.clone();
+            s.ssid = ssid.to_owned();
             s.address = format!("{gateway}:{port}");
+            s.fingerprint = fingerprint;
             s.last_error = None;
         })
         .await;
     Ok(())
+}
+
+/// Force a lower + raise on the next supervisor pass, e.g. after the app
+/// edits the hosted SSID/password. Safe to call when not hosting.
+pub async fn reconfigure(state: &AppState) {
+    let _ = lower(state).await;
 }
 
 /// Deactivate the AP profile (if present). Idempotent.
@@ -162,16 +159,11 @@ async fn lower(state: &AppState) -> anyhow::Result<()> {
     state
         .update_ap_status(|s| {
             s.active = false;
+            s.fingerprint.clear();
             s.last_error = None;
         })
         .await;
     Ok(())
-}
-
-/// Public wrapper for the Wi-Fi-join path: drop the AP before the radio
-/// switches to client mode. Does not set `connecting` (the caller owns it).
-pub async fn lower_now(state: &AppState) -> anyhow::Result<()> {
-    lower(state).await
 }
 
 async fn query_gateway(iface: &str) -> Option<String> {

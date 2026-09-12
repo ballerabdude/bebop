@@ -6,7 +6,7 @@ use bebop_proto::v1::{
     ResponseStatus, RobotConfig, WifiScanResult, WifiStatus,
 };
 
-use crate::config::{self, AgentConfig};
+use crate::config::AgentConfig;
 use crate::error::AgentError;
 use crate::state::AppState;
 use crate::{ap, wifi, AGENT_VERSION};
@@ -60,13 +60,12 @@ async fn scan_wifi(state: &AppState, request_id: u32) -> AgentResponse {
     }
 }
 
-/// Persist the requested credentials, reply immediately, then (in the
-/// background) drop the SoftAP and join the target network.
+/// Wi-Fi join.
 ///
-/// The reply must be sent *before* the radio switches — the app is reachable
-/// over the SoftAP, which has to come down for the client join to succeed.
-/// The app polls `getWifiStatus` after the user reconnects to their own
-/// network.
+/// In Hosted Network mode (`ap`) the credentials are **saved but not
+/// applied** — the hotspot stays up. The robot joins the network only after
+/// the button switches it to Known Network (`client`), which is also when
+/// the saved profile autoconnects. In `client` mode we join immediately.
 async fn set_wifi(
     state: &AppState,
     request_id: u32,
@@ -77,41 +76,26 @@ async fn set_wifi(
     if ssid.trim().is_empty() {
         return err_response(request_id, ResponseStatus::Error, "missing ssid");
     }
+    let hosts_ap = state.config().await.network.hosts_ap();
 
-    // Suppress the AP supervisor while the join is in flight so it doesn't
-    // race the connection by re-raising the hotspot.
-    state
-        .update_ap_status(|s| {
-            s.connecting = true;
-            s.last_error = None;
-        })
-        .await;
-
-    let task_state = state.clone();
-    let ssid_task = ssid.clone();
-    tokio::spawn(async move {
-        let _ = ap::lower_now(&task_state).await;
-        // Give the single radio a moment to leave AP mode before the client
-        // join; the AP profile is inactive but the driver still transitions.
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-        match wifi::connect(&task_state, &ssid_task, &password, hidden).await {
-            Ok(status) => {
-                tracing::info!(ssid = %ssid_task, connected = status.connected, "wifi join finished");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, ssid = %ssid_task, "wifi join failed");
-                task_state
-                    .update_ap_status(|s| s.last_error = Some(e.to_string()))
-                    .await;
-            }
+    if hosts_ap {
+        match wifi::save_credentials(state, &ssid, &password, hidden).await {
+            Ok(status) => ok_response_with_message(
+                request_id,
+                &format!("Saved {ssid}. Long-press the button to switch to Known Network."),
+                agent_response::Payload::WifiStatus(status.into()),
+            ),
+            Err(e) => err_response(request_id, ResponseStatus::Error, &e.to_string()),
         }
-        task_state.update_ap_status(|s| s.connecting = false).await;
-    });
-
-    ok_response_with_message(
-        request_id,
-        &format!("connecting to {ssid}; robot will drop the setup network"),
-    )
+    } else {
+        match wifi::connect(state, &ssid, &password, hidden).await {
+            Ok(status) => ok_response(
+                request_id,
+                agent_response::Payload::WifiStatus(status.into()),
+            ),
+            Err(e) => err_response(request_id, ResponseStatus::Error, &e.to_string()),
+        }
+    }
 }
 
 async fn wifi_status(state: &AppState, request_id: u32) -> AgentResponse {
@@ -162,17 +146,21 @@ async fn get_robot_config(state: &AppState, request_id: u32) -> AgentResponse {
 async fn get_network_config(state: &AppState, request_id: u32) -> AgentResponse {
     let cfg = state.config().await;
     let ap_status = state.ap_status().await;
-    let ap_ssid = cfg.network.ap_ssid();
     ok_response(
         request_id,
         agent_response::Payload::NetworkConfig(NetworkConfig {
             mode: cfg.network.mode,
-            ap_ssid,
+            ap_ssid: cfg.network.ap_ssid,
+            // Never leak the passphrase; empty means "unchanged" on write.
+            ap_password: String::new(),
+            ap_band: cfg.network.ap_band,
             ap_address: ap_status.address,
         }),
     )
 }
 
+/// Update Hosted Network settings. `mode` is **ignored** — it is owned by
+/// the physical button. An empty `ap_password` keeps the existing one.
 async fn set_network_config(
     state: &AppState,
     request_id: u32,
@@ -181,21 +169,41 @@ async fn set_network_config(
     let Some(cfg) = cfg else {
         return err_response(request_id, ResponseStatus::Error, "missing config");
     };
-    let mode = cfg.mode.to_ascii_lowercase();
-    if !matches!(mode.as_str(), "auto" | "client" | "ap") {
+    let band = cfg.ap_band.trim().to_owned();
+    if !band.is_empty() && band != "2.4" && band != "5" {
         return err_response(
             request_id,
             ResponseStatus::Error,
-            "mode must be one of auto|client|ap",
+            "ap_band must be \"2.4\" or \"5\"",
         );
     }
+
+    let mut ap_changed = false;
     if let Err(e) = mutate_and_persist(state, |c| {
-        c.network.mode = mode.clone();
+        if !cfg.ap_ssid.trim().is_empty() && cfg.ap_ssid != c.network.ap_ssid {
+            c.network.ap_ssid = cfg.ap_ssid.clone();
+            ap_changed = true;
+        }
+        if !band.is_empty() && band != c.network.ap_band {
+            c.network.ap_band = band.clone();
+            ap_changed = true;
+        }
+        if !cfg.ap_password.is_empty() {
+            c.network.ap_password = cfg.ap_password.clone();
+            ap_changed = true;
+        }
     })
     .await
     {
         return err_response(request_id, ResponseStatus::Error, &e.to_string());
     }
+
+    // Re-raise the hotspot so new settings take effect promptly. This drops
+    // any connected client briefly (single radio).
+    if ap_changed && state.config().await.network.hosts_ap() {
+        ap::reconfigure(state).await;
+    }
+
     get_network_config(state, request_id).await
 }
 
@@ -211,12 +219,16 @@ fn ok_response(request_id: u32, payload: agent_response::Payload) -> AgentRespon
     }
 }
 
-fn ok_response_with_message(request_id: u32, msg: &str) -> AgentResponse {
+fn ok_response_with_message(
+    request_id: u32,
+    msg: &str,
+    payload: agent_response::Payload,
+) -> AgentResponse {
     AgentResponse {
         request_id,
         status: ResponseStatus::Ok as i32,
         message: msg.into(),
-        payload: None,
+        payload: Some(payload),
     }
 }
 
@@ -249,12 +261,11 @@ async fn mutate_and_persist<F>(state: &AppState, f: F) -> Result<(), AgentError>
 where
     F: FnOnce(&mut AgentConfig),
 {
-    let mut next = state.config().await;
-    f(&mut next);
-    let path = config::config_path();
-    config::save(&next, &path).map_err(|e| AgentError::Config(e.to_string()))?;
-    state.update_config(|c| *c = next).await;
-    Ok(())
+    state.update_config(f).await;
+    state
+        .persist_config()
+        .await
+        .map_err(|e| AgentError::Config(e.to_string()))
 }
 
 #[cfg(test)]
@@ -262,14 +273,14 @@ mod tests {
     use super::*;
     use bebop_proto::v1::{client_request, GetDeviceInfoRequest};
 
+    async fn test_state() -> AppState {
+        let cfg: AgentConfig = toml::from_str("robot_name = \"test\"").unwrap();
+        AppState::new(cfg).await.unwrap()
+    }
+
     #[tokio::test]
     async fn device_info_round_trips() {
-        let state = AppState::new(
-            AgentConfig::load()
-                .unwrap_or_else(|_| toml::from_str("robot_name = \"test\"").unwrap()),
-        )
-        .await
-        .unwrap();
+        let state = test_state().await;
         let req = ClientRequest {
             request_id: 7,
             payload: Some(client_request::Payload::GetDeviceInfo(
@@ -282,16 +293,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_network_mode_rejected() {
-        let state = AppState::new(toml::from_str("robot_name = \"test\"").unwrap())
-            .await
-            .unwrap();
+    async fn invalid_band_rejected() {
+        let state = test_state().await;
         let req = ClientRequest {
             request_id: 1,
             payload: Some(client_request::Payload::SetNetworkConfig(
                 bebop_proto::v1::SetNetworkConfigRequest {
                     config: Some(NetworkConfig {
-                        mode: "bogus".into(),
+                        ap_band: "6".into(),
                         ..Default::default()
                     }),
                 },

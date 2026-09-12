@@ -1,5 +1,5 @@
 [Unit]
-Description=Bebop on-device provisioning agent (Wi-Fi setup + SoftAP)
+Description=Bebop on-device provisioning agent (Wi-Fi setup + Hosted Network)
 Documentation=https://github.com/your-org/bebop
 After=network-online.target NetworkManager.service
 Wants=network-online.target NetworkManager.service
@@ -7,7 +7,7 @@ Wants=network-online.target NetworkManager.service
 [Service]
 Type=simple
 # The setup agent runs as root because it needs NetworkManager write access
-# to scan/join Wi-Fi and to raise the setup SoftAP (`nmcli`).
+# to scan/join Wi-Fi and to raise the Hosted Network (`nmcli`).
 User=root
 Group=root
 

@@ -2,7 +2,8 @@
 //!
 //! Provisioning-only daemon:
 //!   * Wi-Fi status poller (wraps NetworkManager)
-//!   * SoftAP fallback supervisor (`auto` / `client` / `ap` modes)
+//!   * Hosted Network supervisor (`ap` / `client` modes)
+//!   * GPIO mode button (long-press toggles Known/Hosted)
 //!   * Setup server (protobuf-over-WebSocket + a status page), reachable on
 //!     the LAN or directly over the robot's setup hotspot.
 //!
@@ -10,6 +11,7 @@
 //! shared [`AppState`].
 
 mod ap;
+mod button;
 mod config;
 mod dispatcher;
 mod error;
@@ -51,6 +53,15 @@ async fn main() -> anyhow::Result<()> {
         tasks.spawn(async move {
             if let Err(e) = ap::run(s).await {
                 error!(error = ?e, "network supervisor exited");
+            }
+        });
+    }
+
+    {
+        let s = state.clone();
+        tasks.spawn(async move {
+            if let Err(e) = button::run(s).await {
+                error!(error = ?e, "mode button exited");
             }
         });
     }

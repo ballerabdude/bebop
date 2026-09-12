@@ -27,8 +27,9 @@ import {
   type ClientRequest,
   type NetworkConfig as ProtoNetworkConfig,
 } from "../proto/bebop_pb";
-import type { BebopTransport } from "./transport";
+import type { BebopTransport, WifiJoinResult } from "./transport";
 import type {
+  ApBand,
   DeviceInfo,
   NetworkConfig,
   NetworkMode,
@@ -229,10 +230,9 @@ export class SetupTransport implements BebopTransport {
     ssid: string,
     password: string,
     hidden: boolean,
-  ): Promise<WifiStatus> {
-    // The agent replies immediately (before dropping the setup hotspot and
-    // switching the radio), so the response usually has no payload. The
-    // caller should treat success as "join started".
+  ): Promise<WifiJoinResult> {
+    // In Hosted Network mode the agent saves the profile without applying
+    // it (so the hotspot stays up); in Known Network mode it joins now.
     const reply = await this.requestRaw({
       case: "setWifiCredentials",
       value: create(SetWifiCredentialsRequestSchema, {
@@ -244,7 +244,16 @@ export class SetupTransport implements BebopTransport {
     if (reply.status !== ResponseStatus.OK) {
       throw new Error(reply.message || "agent rejected Wi-Fi credentials");
     }
-    return { connected: false, ssid, ipAddress: "", signalDbm: 0 };
+    const status: WifiStatus =
+      reply.payload?.case === "wifiStatus"
+        ? {
+            connected: reply.payload.value.connected,
+            ssid: reply.payload.value.ssid,
+            ipAddress: reply.payload.value.ipAddress,
+            signalDbm: reply.payload.value.signalDbm,
+          }
+        : { connected: false, ssid, ipAddress: "", signalDbm: 0 };
+    return { status, message: reply.message };
   }
 
   async getWifiStatus(): Promise<WifiStatus> {
@@ -307,10 +316,16 @@ export class SetupTransport implements BebopTransport {
   }
 
   async setNetworkConfig(config: NetworkConfig): Promise<NetworkConfig> {
+    // `mode` is button-owned and ignored by the agent; send only the
+    // Hosted Network settings.
     const payload = await this.request({
       case: "setNetworkConfig",
       value: create(SetNetworkConfigRequestSchema, {
-        config: { mode: config.mode },
+        config: {
+          apSsid: config.apSsid,
+          apPassword: config.apPassword,
+          apBand: config.apBand,
+        },
       }),
     });
     if (payload.case !== "networkConfig") {
@@ -322,9 +337,12 @@ export class SetupTransport implements BebopTransport {
 
 function networkFromProto(c: ProtoNetworkConfig): NetworkConfig {
   const mode = c.mode as NetworkMode;
+  const apBand = c.apBand === "5" ? "5" : "2.4";
   return {
-    mode: mode === "client" || mode === "ap" ? mode : "auto",
+    mode: mode === "client" ? "client" : "ap",
     apSsid: c.apSsid,
+    apPassword: "",
+    apBand: apBand as ApBand,
     apAddress: c.apAddress,
   };
 }

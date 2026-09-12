@@ -20,33 +20,49 @@
 # Default: "/var/lib/bebop"
 # state_dir = "/var/lib/bebop"
 
-# --- network / provisioning ----------------------------------------------
+# --- network --------------------------------------------------------------
 # [network]
 #
-# How the robot obtains connectivity:
-#   "auto"   — join a known Wi-Fi network; fall back to the setup hotspot
-#              if none connects within `ap_auto_after_secs`.
-#   "client" — only ever act as a Wi-Fi client (never raise the hotspot).
-#   "ap"     — always host the setup hotspot.
-# Default: "auto"
-# mode = "auto"
-#
-# SSID prefix for the setup hotspot. A short device id is appended, e.g.
-# "Bebop-1a2b3c".
-# Default: "Bebop"
-# ap_ssid_prefix = "Bebop"
-#
-# WPA2 passphrase for the setup hotspot. Must be 8..=63 characters.
+# Network mode, a two-way switch with NO automatic fallback:
+#   "ap"     — Hosted Network: the robot hosts its own hotspot and waits
+#              for a device to connect. This is the boot default so a
+#              fresh robot is reachable at 192.168.42.1:9091.
+#   "client" — Known Network: the robot joins a saved Wi-Fi network and
+#              never hosts.
+# Changed by the physical button long-press (see [button] below), not by
+# the app.
+# Default: "ap"
+# mode = "ap"
+
+# SSID broadcast by the Hosted Network hotspot. Also editable from the app.
+# Default: "Bebop-<first 6 chars of /etc/machine-id>"
+# ap_ssid = "Bebop-lab"
+
+# WPA2 passphrase for the hotspot (must be 8..=63 chars). Also editable
+# from the app (leave the app field blank to keep the current value).
 # Default: "bebopbebop"
 # TODO: replace with a per-device derived code before shipping to customers.
 # ap_password = "bebopbebop"
-#
-# In "auto" mode, how long to wait for a known network before raising the
-# setup hotspot (seconds).
-# Default: 25
-# ap_auto_after_secs = 25
-#
-# Address the setup server binds. "0.0.0.0" listens on the LAN and the
-# setup hotspot; "127.0.0.1:9091" restricts it to the robot itself.
+
+# Hotspot band: "2.4" or "5". 2.4 GHz is the safe default; 5 GHz may need a
+# regulatory domain (`iw reg set <CC>`) and can be blocked on DFS channels.
+# Default: "2.4"
+# ap_band = "2.4"
+
+# Address the setup server binds. "0.0.0.0" listens on the Hosted Network
+# and the LAN; "127.0.0.1:9091" restricts it to the robot itself.
 # Default: "0.0.0.0:9091"
 # setup_bind_addr = "0.0.0.0:9091"
+
+# --- mode button ----------------------------------------------------------
+# A momentary switch between the GPIO pin and GND. A long press toggles
+# between Hosted Network (ap) and Known Network (client). On the Orin Nano
+# 40-pin header, pin 29 is gpiochip0 line 105 (avoid pins 7 and 15, which
+# the IMU uses).
+#
+# button_enabled = true
+# button_chip = "gpiochip0"
+# button_line = 105          # header pin 29 (PQ.05)
+# button_active_low = true   # switch shorts the line to GND when pressed
+# button_bias = "pull-up"    # pull-up | pull-down | none
+# button_hold_secs = 5       # long-press duration

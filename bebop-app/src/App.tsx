@@ -131,15 +131,8 @@ function App() {
           <WifiScreen
             transport={transport}
             onDone={(status) => {
-              setRobotIp(status.ipAddress || "");
-              if (status.connected && status.ipAddress) {
-                setStep("config");
-              } else {
-                // The setup hotspot dropped while the robot joined the new
-                // network. Send the user to the operator connect screen so
-                // they can reach the robot at its new address.
-                setStep("connect-ip");
-              }
+              if (status.ipAddress) setRobotIp(status.ipAddress);
+              setStep("config");
             }}
           />
         ) : null}

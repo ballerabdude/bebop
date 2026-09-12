@@ -6,6 +6,14 @@ import type {
   WifiStatus,
 } from "./types";
 
+/// Result of a Wi-Fi join request. In Hosted Network mode the credentials
+/// are saved but not applied, so `status.connected` stays false and
+/// `message` explains how to apply them.
+export interface WifiJoinResult {
+  status: WifiStatus;
+  message: string;
+}
+
 /// Transport used by the setup wizard to talk to a robot's provisioning
 /// server. The only implementation is `SetupTransport`, which speaks
 /// protobuf over a binary WebSocket to `bebop-agent` on port 9091 — over
@@ -24,7 +32,7 @@ export interface BebopTransport {
     ssid: string,
     password: string,
     hidden: boolean,
-  ): Promise<WifiStatus>;
+  ): Promise<WifiJoinResult>;
   getWifiStatus(): Promise<WifiStatus>;
 
   getRobotConfig(): Promise<RobotConfig>;

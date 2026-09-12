@@ -3,7 +3,7 @@
 //! Exposes the same `bebop.v1.ClientRequest` / `AgentResponse` envelope as
 //! the (retired) BLE GATT server over a binary WebSocket, so the companion
 //! app can scan/join Wi-Fi and set the robot name on the LAN or directly
-//! over the robot's SoftAP.
+//! over the robot's Hosted Network.
 //!
 //! Endpoints:
 //! - `GET /healthz` — returns "ok"; used by the app's pre-flight probe.
@@ -84,12 +84,17 @@ async fn status_page(State(state): State<ServerState>) -> impl IntoResponse {
     };
     let ap_line = if ap.active {
         format!(
-            "Setup hotspot <b>{}</b> is active at <code>{}</code>",
+            "Hosted Network <b>{}</b> is active at <code>{}</code>",
             html_escape(&ap.ssid),
             html_escape(&ap.address)
         )
     } else {
-        "Setup hotspot is not active".to_owned()
+        "Hosted Network is not active".to_owned()
+    };
+    let mode = if cfg.network.hosts_ap() {
+        "Hosted Network"
+    } else {
+        "Known Network"
     };
     let body = format!(
         "<!doctype html><html><head><meta charset=utf-8>\
@@ -97,10 +102,12 @@ async fn status_page(State(state): State<ServerState>) -> impl IntoResponse {
 <title>Bebop {name}</title>\
 <style>body{{font-family:system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem;line-height:1.5}}\
 code{{background:#eee;padding:.1rem .3rem;border-radius:.25rem}}</style></head><body>\
-<h1>Bebop robot</h1><p>Name: <b>{name}</b></p><p>{wifi}</p><p>{ap}</p>\
-<p>Use the Bebop app to finish Wi-Fi setup, or POST to the protobuf WebSocket at <code>/ws</code>.</p>\
+<h1>Bebop robot</h1><p>Name: <b>{name}</b></p><p>Mode: <b>{mode}</b></p>\
+<p>{wifi}</p><p>{ap}</p>\
+<p>Long-press the mode button to switch between Known and Hosted Network.</p>\
 </body></html>",
         name = html_escape(&cfg.robot_name),
+        mode = mode,
         wifi = wifi_line,
         ap = ap_line,
     );

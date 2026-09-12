@@ -4,12 +4,15 @@ On-device provisioning daemon that runs on every Bebop robot. Responsibilities:
 
 - **Wi-Fi provisioning** (`src/wifi/`) — wraps `nmcli` / NetworkManager to
   scan, join, and report link status.
-- **SoftAP fallback** (`src/ap.rs`) — raises a `Bebop-XXXX` WPA2 hotspot when
-  no known network is available (`auto` mode) or always (`ap` mode), and
-  tears it down once a client network connects.
+- **Hosted Network** (`src/ap.rs`) — hosts the `Bebop-XXXX` WPA2 hotspot
+  while `mode = "ap"` (boot default) and tears it down for `mode = "client"`.
+  No automatic fallback.
+- **Mode button** (`src/button.rs`) — a GPIO long-press toggles the mode
+  between Hosted (`ap`) and Known (`client`) and persists it. Edit the
+  Hosted SSID/password/band from the app.
 - **Setup server** (`src/server.rs`) — protobuf-over-WebSocket on `:9091`
-  (plus a status page) so the companion app can provision over the SoftAP or
-  the LAN.
+  (plus a status page) so the companion app can provision over the Hosted
+  Network or the LAN.
 - **Shared state** (`src/state.rs`) — cheap-to-clone handle passed between
   subsystems.
 
@@ -36,13 +39,14 @@ cargo run -p bebop-agent
 ```
 
 The agent expects NetworkManager (`nmcli`) to be available. Raising the
-SoftAP requires root.
+Hosting the network requires root.
 
 ## Configuration
 
 See [`../deploy/examples/agent.toml`](../deploy/examples/agent.toml). The
-key knob is `[network] mode` (`auto` / `client` / `ap`) and
-`ap_password` (WPA2, 8..=63 chars).
+key knobs are `[network] mode` (`ap` / `client`, button-owned) and
+`ap_ssid` / `ap_password` / `ap_band` for the Hosted Network. The mode
+button is under `[network] button_*` (default pin 29 / `gpiochip0` line 105).
 
 ## Packaging / Install
 

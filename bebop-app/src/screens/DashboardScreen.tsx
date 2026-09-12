@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 
 import type {
+  ApBand,
   BebopTransport,
   DeviceInfo,
   NetworkConfig,
-  NetworkMode,
   WifiStatus,
 } from "../ble";
-import { Banner, Button, Card, Spinner } from "../components/ui";
+import { Banner, Button, Card, Field } from "../components/ui";
 
 interface DashboardProps {
   transport: BebopTransport;
@@ -20,14 +20,8 @@ interface DashboardProps {
   onOpenTeleop: () => void;
 }
 
-const MODE_OPTIONS: { id: NetworkMode; label: string; hint: string }[] = [
-  { id: "auto", label: "Auto", hint: "Join a known network; hotspot fallback." },
-  { id: "client", label: "Client", hint: "Wi-Fi client only; never host a hotspot." },
-  { id: "ap", label: "Hotspot", hint: "Always host the setup hotspot." },
-];
-
 /// Live dashboard shown after setup. Stays connected to the provisioning
-/// server so the user can monitor Wi-Fi and change the network mode.
+/// server so the user can monitor Wi-Fi and edit the Hosted Network.
 export function DashboardScreen({
   transport,
   onIp,
@@ -40,7 +34,12 @@ export function DashboardScreen({
   const [wifi, setWifi] = useState<WifiStatus | null>(null);
   const [net, setNet] = useState<NetworkConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busyMode, setBusyMode] = useState<NetworkMode | null>(null);
+  const [savingAp, setSavingAp] = useState(false);
+
+  // Hosted Network edit draft.
+  const [apSsid, setApSsid] = useState("");
+  const [apPassword, setApPassword] = useState("");
+  const [apBand, setApBand] = useState<ApBand>("2.4");
 
   const refresh = useCallback(async () => {
     try {
@@ -50,6 +49,8 @@ export function DashboardScreen({
       ]);
       setWifi(w);
       setNet(n);
+      setApSsid((prev) => (prev === "" ? n.apSsid : prev));
+      setApBand(n.apBand);
       if (w.ipAddress) onIp(w.ipAddress);
       setError(null);
     } catch (e) {
@@ -70,18 +71,27 @@ export function DashboardScreen({
     return () => clearInterval(id);
   }, [refresh]);
 
-  async function chooseMode(mode: NetworkMode) {
+  async function saveHosted() {
     setError(null);
-    setBusyMode(mode);
+    setSavingAp(true);
     try {
-      setNet(await transport.setNetworkConfig({ mode, apSsid: "", apAddress: "" }));
+      const next = await transport.setNetworkConfig({
+        mode: net?.mode ?? "ap",
+        apSsid: apSsid.trim(),
+        apPassword,
+        apBand,
+        apAddress: net?.apAddress ?? "",
+      });
+      setNet(next);
+      setApPassword("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusyMode(null);
+      setSavingAp(false);
     }
   }
 
+  const hosting = net?.mode === "ap";
   const reachable = wifi?.connected && wifi.ipAddress;
 
   return (
@@ -130,21 +140,14 @@ export function DashboardScreen({
         <Card>
           <div className="py-1">
             <div className="text-xs text-text-dim uppercase tracking-wider mb-1">
-              Device
+              Mode
             </div>
-            {info ? (
-              <div className="text-[13px] text-text-dim">
-                <div className="font-mono truncate" title={info.serialNumber}>
-                  SN {info.serialNumber}
-                </div>
-                <div className="font-mono truncate">host: {info.hostname}</div>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2 text-text-dim text-sm">
-                <Spinner />
-                Loading…
-              </div>
-            )}
+            <div className="font-semibold">
+              {net ? (hosting ? "Hosted Network" : "Known Network") : "—"}
+            </div>
+            <div className="text-text-dim text-[12px] mt-0.5">
+              Long-press the mode button to switch.
+            </div>
           </div>
         </Card>
       </div>
@@ -152,39 +155,66 @@ export function DashboardScreen({
       <Card>
         <div className="py-2 flex flex-col gap-3">
           <div className="text-xs text-text-dim uppercase tracking-wider">
-            Network mode
+            Hosted Network
           </div>
-          <div className="grid grid-cols-3 gap-2">
-            {MODE_OPTIONS.map((o) => (
-              <button
-                key={o.id}
-                type="button"
-                title={o.hint}
-                disabled={busyMode !== null}
-                onClick={() => chooseMode(o.id)}
-                className={`rounded-[var(--radius-card)] border px-3 py-2 text-sm font-semibold transition-colors disabled:opacity-50 ${
-                  net?.mode === o.id
-                    ? "border-accent bg-accent/15 text-accent"
-                    : "border-border bg-bg-elev text-text-dim hover:text-text"
-                }`}
-              >
-                {busyMode === o.id ? "…" : o.label}
-              </button>
-            ))}
-          </div>
-          {net && net.mode !== "client" ? (
-            <div className="text-[12px] text-text-dim">
-              Setup hotspot:{" "}
-              <span className="font-mono text-text">{net.apSsid}</span>
-              {net.apAddress ? (
-                <>
-                  {" "}
-                  at <span className="font-mono text-text">{net.apAddress}</span>
-                </>
-              ) : null}
-              . Password: <span className="font-mono text-text">bebopbebop</span>
+          <Field label="Network name (SSID)">
+            <input
+              type="text"
+              autoComplete="off"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              value={apSsid}
+              onChange={(e) => setApSsid(e.currentTarget.value)}
+              placeholder="Bebop-XXXX"
+              className="w-full bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-2.5 text-text outline-none focus:border-accent"
+            />
+          </Field>
+          <Field
+            label="Password"
+            hint="Leave blank to keep the current password (min 8 characters)."
+          >
+            <input
+              type="password"
+              autoComplete="off"
+              value={apPassword}
+              onChange={(e) => setApPassword(e.currentTarget.value)}
+              placeholder="••••••••"
+              className="w-full bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-2.5 text-text outline-none focus:border-accent"
+            />
+          </Field>
+          <Field label="Band">
+            <div className="flex gap-2">
+              {(["2.4", "5"] as ApBand[]).map((b) => (
+                <button
+                  key={b}
+                  type="button"
+                  onClick={() => setApBand(b)}
+                  className={`flex-1 rounded-[var(--radius-card)] border px-3 py-2 text-sm font-semibold transition-colors ${
+                    apBand === b
+                      ? "border-accent bg-accent/15 text-accent"
+                      : "border-border bg-bg-elev text-text-dim hover:text-text"
+                  }`}
+                >
+                  {b} GHz
+                </button>
+              ))}
             </div>
+          </Field>
+          {hosting ? (
+            <p className="text-[12px] text-text-dim leading-relaxed">
+              Saving while hosting briefly drops connected devices; reconnect
+              with the new credentials.
+            </p>
           ) : null}
+          <Button
+            variant="secondary"
+            onClick={saveHosted}
+            loading={savingAp}
+            disabled={apSsid.trim().length === 0 || (apPassword !== "" && apPassword.length < 8)}
+          >
+            Save Hosted Network
+          </Button>
         </div>
       </Card>
 

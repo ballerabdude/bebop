@@ -13,14 +13,18 @@
 - Other services: `bebop-agent` owns port 9091 (its `/healthz` + setup
   WebSocket) — do NOT use 9091 for anything new. Firmware WS/HTTP is 9090,
   the bebop-vision videoserver is 9092.
-- `bebop-agent` is provisioning-only: Wi-Fi (nmcli) + a SoftAP fallback
-  (`Bebop-<machine-id>`, WPA2 passphrase `bebopbebop`, gateway
+- `bebop-agent` is provisioning-only: Wi-Fi (nmcli) + a Hosted Network
+  hotspot (`Bebop-<machine-id>`, WPA2 passphrase `bebopbebop`, gateway
   `192.168.42.1:9091`) + the setup server. It no longer does BLE,
   containers, OTA, or controller pairing.
+- Network mode is a two-way switch with **no fallback**: `ap` (Hosted
+  Network, boot default) or `client` (Known Network). The **physical button
+  long-press (~5 s)** toggles it; the app cannot. Button default = Orin Nano
+  header **pin 29** (`gpiochip0` line 105); avoid pins 7/15 (IMU).
 - AP capability on this robot is confirmed (`nmcli -f WIFI-PROPERTIES.AP
   dev show wlP1p1s0` → yes; `iw list` shows `* AP`). It is a single radio,
   so the hotspot and a client Wi-Fi connection are mutually exclusive —
-  expect the SSH link to drop if you bring the AP up over Wi-Fi. Prefer
+  expect the SSH link to drop if you switch to Hosted over Wi-Fi. Prefer
   read-only checks (`iw list`, `nmcli ... dev show`) while connected.
 
 ## Deployment process (what actually works)
@@ -94,7 +98,7 @@
   as root — and the bracket trick in a separate ssh command.
 - `install-jetson.sh` prereqs: don't add flags without initializing the
   variable in the defaults block (`set -u` will kill the script).
-- SoftAP bring-up uses NetworkManager shared mode
+- Hosted Network bring-up uses NetworkManager shared mode
   (`nmcli con add ... 802-11-wireless.mode ap ipv4.method shared`). The
   regulatory domain is unset (`country 00`) on this robot; AP on 2.4 GHz
   still works, but set `iw reg set <CC>` if a channel is rejected. Creating
