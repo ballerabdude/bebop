@@ -141,12 +141,34 @@ def _sdk():
     return ob
 
 
-def _set_depth_filters(ob):
-    # Filter set proven in OrbbecViewer bring-up (plan Section 3.3).
-    spatial = ob.SpatialModerateFilter()
-    temporal = ob.TemporalFilter()
-    hole = ob.HoleFillingFilter()
-    return [spatial, temporal, hole]
+_FILTER_NAMES = {"spatial": "SpatialModerateFilter",
+                 "temporal": "TemporalFilter",
+                 "hole": "HoleFillingFilter"}
+
+
+def _set_depth_filters(ob, names=("temporal", "hole")):
+    """Build the OrbbecSDK depth post-filters for one camera.
+
+    Measured on the Thor (2026-09-26, both cameras, 848x480@15): the
+    `SpatialModerateFilter` alone costs ~60% of one core and does *not*
+    raise valid-pixel coverage, so it is off by default. `HoleFilling`
+    carries the coverage (far ~88% -> ~97% valid) and `Temporal` smooths
+    frame-to-frame noise; together they run at ~23% of a core vs ~86% for
+    the old spatial+temporal+hole set. Override per camera with
+    `depth_filters:` in orbbec_rig.yaml, e.g. `[temporal, hole]`,
+    `[hole]`, `[spatial, temporal, hole]`, or `[]`.
+    """
+    filters = []
+    for name in names:
+        cls = _FILTER_NAMES.get(name)
+        if cls is None:
+            print(f"[orbbec] unknown depth filter {name!r}; ignoring")
+            continue
+        try:
+            filters.append(getattr(ob, cls)())
+        except Exception as exc:
+            print(f"[orbbec] depth filter {name} unavailable: {exc}")
+    return filters
 
 
 def _negotiate_depth_profile(sensor, ob, preferred):
@@ -273,12 +295,17 @@ class OrbbecCamera:
     def __init__(self, serial, role, depth_profile=(848, 480, 30),
                  color_profile=None, config_dir=None, mask_rects=None,
                  color_format="rgb", depth_work_mode=None, depth_preset=None,
-                 mask_polys=None):
+                 mask_polys=None, depth_filters=None):
         self.serial = serial
         self.role = role
         self.depth_profile = tuple(depth_profile)
         self.depth_work_mode = depth_work_mode
         self.depth_preset = depth_preset
+        # SDK depth post-filter names (see _set_depth_filters). None uses
+        # the measured-cheapest default; [] disables all host filtering.
+        self.depth_filter_names = (tuple(depth_filters)
+                                   if depth_filters is not None
+                                   else ("temporal", "hole"))
         self.color_profile = tuple(color_profile) if color_profile else None
         self.color_format = None
         self.color_format_want = color_format
@@ -410,7 +437,7 @@ class OrbbecCamera:
         self._pipeline = ob.Pipeline(dev)
         self._pipeline.enable_frame_sync()
         self._pipeline.start(config)
-        self._filters = _set_depth_filters(ob)
+        self._filters = _set_depth_filters(ob, self.depth_filter_names)
 
         if not intrinsics_path(self.serial, self.config_dir).exists():
             try:
@@ -532,7 +559,8 @@ class OrbbecRig:
                 mask_polys=polys,
                 color_format=c.get("color_format", "rgb"),
                 depth_work_mode=c.get("depth_work_mode"),
-                depth_preset=c.get("depth_preset"))
+                depth_preset=c.get("depth_preset"),
+                depth_filters=c.get("depth_filters"))
 
     def get(self, role):
         return self.cameras[role]

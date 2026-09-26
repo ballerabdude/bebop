@@ -29,12 +29,44 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("pip install mcap") from exc
 
 
+def _decode_video(aus_by_role):
+    """Decode hardware H.264/H.265 access units to per-log_time BGR frames.
+
+    AUs are fed to PyAV (software decode) in log_time order; a decoder
+    emits frames in display order, so the i-th decoded frame is paired with
+    the i-th AU (the recorder emits one AU per recorded tick). Returns
+    {role: {log_time: BGR ndarray}}.
+    """
+    import av
+    decoded = {}
+    for role, items in aus_by_role.items():
+        if not items:
+            continue
+        items = sorted(items, key=lambda x: x[0])
+        # Foxglove/FFmpeg naming: the H.265 bitstream is format "h265" but
+        # PyAV's decoder is "hevc".
+        codec = {"h265": "hevc", "h264": "h264"}[items[0][1]]
+        cc = av.CodecContext.create(codec, "r")
+        frames = []
+        for _, _, au in items:
+            for fr in cc.decode(av.Packet(au)):
+                frames.append(fr.to_ndarray(format="bgr24"))
+        for fr in cc.decode(None):
+            frames.append(fr.to_ndarray(format="bgr24"))
+        n = min(len(frames), len(items))
+        decoded[role] = {items[i][0]: frames[i] for i in range(n)}
+    return decoded
+
+
 def extract(mcap_path, out_dir, tol_us=15_000):
     out = Path(out_dir)
     for sub in ("color", "color_far", "depth", "labels"):
         (out / sub).mkdir(parents=True, exist_ok=True)
     IMAGE_TOPICS = ("/color_near", "/color_far", "/depth_near", "/depth_far")
+    COLOR_ROLE = {"/color_near": "near", "/color_far": "far"}
+    VIDEO_FORMATS = ("h264", "h265")
     ticks = {}  # log_us -> {topic: decoded payload}
+    video_aus = {"near": [], "far": []}  # role -> [(log_time, codec, bytes)]
     with open(mcap_path, "rb") as f:
         for schema, channel, message in make_reader(f).iter_messages():
             topic = channel.topic
@@ -42,10 +74,21 @@ def extract(mcap_path, out_dir, tol_us=15_000):
                 ticks.setdefault(message.log_time, {})[topic] = message.data
             else:
                 payload = json.loads(message.data)
-                # Foxglove CompressedImage -> raw codec bytes for storage
+                # Foxglove CompressedImage/Video -> raw codec bytes
                 if topic in IMAGE_TOPICS and isinstance(payload, dict):
-                    payload = base64.b64decode(payload["data"])
+                    raw = base64.b64decode(payload["data"])
+                    if payload.get("format") in VIDEO_FORMATS and topic in COLOR_ROLE:
+                        video_aus[COLOR_ROLE[topic]].append(
+                            (message.log_time, payload["format"], raw))
+                    payload = raw
                 ticks.setdefault(message.log_time, {})[topic] = payload
+
+    # Hardware-encoded color (H.265/H.264, CompressedVideo): decode the AU
+    # stream in order and align each decoded frame with the log_time of the
+    # AU that produced it. The recorder tags every AU with its source tick,
+    # so this reproduces the exact per-tick color frame.
+    decoded_color = _decode_video(aus_by_role=video_aus) \
+        if any(video_aus.values()) else {}
 
     stamps = sorted(t for t, chans in ticks.items() if "/depth_near" in chans)
     manifest = []
@@ -64,10 +107,18 @@ def extract(mcap_path, out_dir, tol_us=15_000):
         bev = nearest("/bev_teacher") or {}
         calib = next((c["/calib"] for c in ticks.values() if "/calib" in c), {})
         stamp_s = f"{stamp:020d}"
-        (out / "color" / f"{stamp_s}.jpg").write_bytes(
-            chans.get("/color_near", b""))
-        (out / "color_far" / f"{stamp_s}.jpg").write_bytes(
-            chans.get("/color_far", b""))
+        cv2 = __import__("cv2")
+        for role, sub in (("near", "color"), ("far", "color_far")):
+            bgr = decoded_color.get(role, {}).get(stamp)
+            if bgr is not None:
+                ok, jpg = cv2.imencode(
+                    ".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+                (out / sub / f"{stamp_s}.jpg").write_bytes(
+                    jpg.tobytes() if ok else b"")
+            elif not video_aus[role]:
+                # legacy path: already JPEG bytes
+                (out / sub / f"{stamp_s}.jpg").write_bytes(
+                    chans.get(f"/color_{role}", b""))
         depth = {}
         for role in ("near", "far"):
             data = chans.get(f"/depth_{role}")

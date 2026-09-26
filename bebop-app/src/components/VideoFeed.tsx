@@ -20,6 +20,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
+import { EncodedVideoFeed, encodedVideoSupported } from "./EncodedVideoFeed";
 import { Button, Spinner } from "./ui";
 export type VideoStreamState = "loading" | "live" | "error";
 
@@ -36,6 +37,10 @@ interface VideoFeedProps {
   /// color_far | depth_near | depth_far | bev. Appended as ?stream= to
   /// the URL.
   stream?: string;
+  /// Request the hardware-encoded stream (`&codec=h265|h264`) for color
+  /// streams. The tile uses a `<video>` (fragmented MP4) when the webview
+  /// can decode it and silently falls back to MJPEG otherwise.
+  codec?: "h264" | "h265";
   /// Bump to tear the multipart stream down and reconnect.
   reconnectKey: number;
   /// Self-healing reconnects. When the request errors (robot down, 503)
@@ -74,7 +79,25 @@ interface VideoFeedProps {
   children?: ReactNode;
 }
 
-export function VideoFeed({
+export function VideoFeed(props: VideoFeedProps) {
+  // Prefer the hardware-encoded `<video>` path for color streams; if the
+  // webview rejects the codec (MEDIA_ERR_SRC_NOT_SUPPORTED), fall back to
+  // the MJPEG `<img>` implementation below for the rest of the session.
+  const [codecSupported, setCodecSupported] = useState(true);
+  const wantsCodec = props.codec === "h264" || props.codec === "h265";
+  if (wantsCodec && codecSupported && encodedVideoSupported()) {
+    return (
+      <EncodedVideoFeed
+        {...props}
+        codec={props.codec as string}
+        onUnsupported={() => setCodecSupported(false)}
+      />
+    );
+  }
+  return <MjpegVideoFeed {...props} />;
+}
+
+function MjpegVideoFeed({
   baseUrl,
   videoUrl,
   stream,

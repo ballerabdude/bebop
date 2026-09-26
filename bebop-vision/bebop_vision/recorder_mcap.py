@@ -7,9 +7,11 @@ and seekable, opens in Foxglove for review, and `tools/mcap_extract.py`
 unpacks it into the `datasets/navd-v0/` training layout.
 
 Channels:
-  /color_near   foxglove.CompressedImage (JSON: {format: "jpeg", data: b64})
-  /color_far    foxglove.CompressedImage (same encoding; both cameras stream
-                RGB since the far camera's USB 3 cable swap)
+  /color_near   foxglove.CompressedVideo (H.265 access units, hardware
+                NVENC; falls back to CompressedImage JPEG when no encoder)
+  /color_far    same encoding (both cameras stream MJPEG, re-encoded to
+                H.265 for storage; the camera's own JPEG is only kept on
+                the fallback path)
   /depth_near   raw PNG bytes (schemaless; uint16 mm, lossless — training data)
   /depth_far    raw PNG bytes (schemaless)
   /depth_near_preview  foxglove.RawImage (JSON; 106x60 16uc1 — dashboard only)
@@ -94,6 +96,48 @@ _FOXGLOVE_COMPRESSED_IMAGE_SCHEMA = json.dumps({
     "format"
   ]
 })
+_FOXGLOVE_COMPRESSED_VIDEO_SCHEMA = json.dumps({
+  "title": "foxglove.CompressedVideo",
+  "description": "A compressed video frame",
+  "type": "object",
+  "properties": {
+    "timestamp": {
+      "type": "object",
+      "title": "time",
+      "properties": {
+        "sec": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nsec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999999
+        }
+      },
+      "description": "Timestamp of video frame"
+    },
+    "frame_id": {
+      "type": "string",
+      "description": "Frame of reference for the image."
+    },
+    "data": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "Compressed video frame data"
+    },
+    "format": {
+      "type": "string",
+      "description": "Video format. Supported: h264, h265"
+    }
+  },
+  "required": [
+    "timestamp",
+    "frame_id",
+    "data",
+    "format"
+  ]
+})
 _FOXGLOVE_RAW_IMAGE_SCHEMA = json.dumps({
   "title": "foxglove.RawImage",
   "description": "A raw image",
@@ -169,12 +213,27 @@ class NavdRecorder:
 
     def __init__(self, rig, robot, out_path,
                  rate_hz=10.0, jpeg_quality=85, workers=6,
-                 max_frame_age_s=0.3):
+                 max_frame_age_s=0.3, color_codec="h265"):
         self.rig = rig
         self.robot = robot
         self.rate_hz = rate_hz
         self.jpeg_quality = jpeg_quality
         self.max_frame_age_s = max_frame_age_s
+        # Hardware (NVENC) color video: store H.265/H.264 access units in
+        # the MCAP instead of per-tick JPEG (docs/navd.md §3.2 — the Thor
+        # finally has an encoder; the Orin Nano did not). Falls back to
+        # JPEG (camera MJPEG passthrough) when no encoder is available, so
+        # workstation tests and non-Jetson hosts keep the old path.
+        self._HwVideoEncoder = None
+        self._video_codec = None
+        self._encoders = {}
+        try:
+            from .hw_video import HwVideoEncoder, encoder_available
+            if color_codec and encoder_available(color_codec):
+                self._HwVideoEncoder = HwVideoEncoder
+                self._video_codec = color_codec
+        except Exception:
+            pass
         self.bytes_written = 0
         self.frames = 0
         self._lock = threading.Lock()
@@ -209,9 +268,16 @@ class NavdRecorder:
         self._sch_compressed_image = self._writer.register_schema(
             "foxglove.CompressedImage", "jsonschema",
             _FOXGLOVE_COMPRESSED_IMAGE_SCHEMA.encode())
+        self._sch_compressed_video = self._writer.register_schema(
+            "foxglove.CompressedVideo", "jsonschema",
+            _FOXGLOVE_COMPRESSED_VIDEO_SCHEMA.encode())
         self._sch_raw_image = self._writer.register_schema(
             "foxglove.RawImage", "jsonschema",
             _FOXGLOVE_RAW_IMAGE_SCHEMA.encode())
+        # Color is CompressedVideo (H.265/H.264) when a hardware encoder is
+        # available, else the legacy per-tick CompressedImage JPEG.
+        color_schema = (self._sch_compressed_video if self._video_codec
+                        else self._sch_compressed_image)
         self._ch = {
             "cmd_vel": self._writer.register_channel(
                 "/cmd_vel", "json", self._sch_state),
@@ -220,9 +286,9 @@ class NavdRecorder:
             "calib": self._writer.register_channel(
                 "/calib", "json", self._sch_calib),
             "color_near": self._writer.register_channel(
-                "/color_near", "json", self._sch_compressed_image),
+                "/color_near", "json", color_schema),
             "color_far": self._writer.register_channel(
-                "/color_far", "json", self._sch_compressed_image),
+                "/color_far", "json", color_schema),
             "depth_near_preview": self._writer.register_channel(
                 "/depth_near_preview", "json", self._sch_raw_image),
             "depth_far_preview": self._writer.register_channel(
@@ -397,42 +463,110 @@ class NavdRecorder:
             if cached is not None and cached[0] == f.stamp_us:
                 jobs[role] = cached[1]
                 continue
-            jobs[role] = {"fut": {
-                "png": self._pool.submit(self._encode_png16, f.depth),
+            job = {"png": self._pool.submit(self._encode_png16, f.depth)}
+            if self._video_codec:
+                # Camera MJPEG goes straight to the hardware nvjpegdec ->
+                # NVENC chain (zero CPU pixels). Only a raw-RGB rig needs
+                # the pool decode to BGR.
+                if f.color_jpeg is not None:
+                    job["color"] = f.color_jpeg
+                    job["color_kind"] = "jpeg"
+                else:
+                    job["color"] = self._pool.submit(self._decode_bgr, f)
+                    job["color_kind"] = "bgr"
+            else:
                 # Camera-MJPEG frames arrive pre-encoded (rig color_format:
                 # mjpg) — the bytes go into the MCAP verbatim, no CPU encode.
-                "jpg": (f.color_jpeg if f.color_jpeg is not None else
-                        (self._pool.submit(self._encode_jpeg, f.color,
-                                           self.jpeg_quality)
-                         if f.color is not None else None)),
-            }}
+                job["jpg"] = (f.color_jpeg if f.color_jpeg is not None else
+                              (self._pool.submit(self._encode_jpeg, f.color,
+                                                 self.jpeg_quality)
+                               if f.color is not None else None))
+            jobs[role] = {"fut": job}
         for role, f in frames.items():
             job = jobs[role]
             if "fut" in job:
                 fut = job["fut"]
                 png = fut["png"].result()
-                jpg = fut["jpg"]
-                if jpg is not None and hasattr(jpg, "result"):
-                    jpg = jpg.result()
-                job = {"png": png, "jpg": jpg}
+                job = {"png": png}
+                if self._video_codec:
+                    color = fut["color"]
+                    if hasattr(color, "result"):
+                        color = color.result()
+                    job["color"] = color
+                    job["color_kind"] = fut["color_kind"]
+                else:
+                    jpg = fut["jpg"]
+                    if jpg is not None and hasattr(jpg, "result"):
+                        jpg = jpg.result()
+                    job["jpg"] = jpg
                 jobs[role] = job
                 self._cache[role] = (f.stamp_us, job)
-            png, jpg = job["png"], job["jpg"]
             meta = {"stamp_us": f.stamp_us, "pair_ms": pair_ms.get(role)}
             self._add(self._ch[self._depth_topic(role)],
-                      self._compressed_image_msg(f"depth_{role}", "png", png,
-                                                 log_ns, **meta),
+                      self._compressed_image_msg(f"depth_{role}", "png",
+                                                 job["png"], log_ns, **meta),
                       log_ns)
-            if jpg is not None:
+            if self._video_codec:
+                self._write_video_color(role, job.get("color"),
+                                        job.get("color_kind"), log_ns, meta)
+            elif job.get("jpg") is not None:
                 self._add(self._ch[f"color_{role}"],
                           self._compressed_image_msg(f"{role}_color", "jpeg",
-                                                     jpg, log_ns, **meta),
+                                                     job["jpg"], log_ns, **meta),
                           log_ns)
             if role in ("near", "far"):
                 self._add(self._ch[f"depth_{role}_preview"],
                           self._depth_preview(f.depth, log_ns,
                                               frame_id=f"{role}_depth_preview"),
                           log_ns)
+
+    def _write_video_color(self, role, payload, kind, log_ns, meta):
+        """Push one color frame through this role's NVENC and write the AUs.
+
+        The encoder runs ~1 frame behind, so each AU is tagged with the
+        tick that produced it (passed through the encoder FIFO) and written
+        at that tick's log_time — keeping it grouped with the same tick's
+        depth/cmd in the extractor. A fresh encoder is built lazily from
+        the first frame; `payload` is camera MJPEG bytes (`kind="jpeg"`) or
+        a BGR ndarray (`kind="bgr"`).
+        """
+        if payload is None:
+            return
+        enc = self._encoders.get(role)
+        if enc is None:
+            try:
+                if kind == "jpeg":
+                    w = h = 0  # nvjpegdec supplies its own dimensions
+                else:
+                    h, w = payload.shape[0], payload.shape[1]
+                enc = self._HwVideoEncoder(
+                    w, h, fps=self.rate_hz, codec=self._video_codec,
+                    input_kind=kind)
+            except Exception as exc:
+                print(f"[recorder] hw encoder {role} unavailable: {exc}; "
+                      f"falling back to JPEG")
+                self._video_codec = None
+                return
+            self._encoders[role] = enc
+        tag = (log_ns, meta.get("stamp_us"), meta.get("pair_ms"))
+        for au, out_tag in enc.push(payload, tag):
+            t_log, t_stamp, t_pair = out_tag if out_tag else tag
+            self._add(self._ch[f"color_{role}"],
+                      self._compressed_image_msg(
+                          f"{role}_color", self._video_codec, au, t_log,
+                          stamp_us=t_stamp, pair_ms=t_pair),
+                      t_log)
+
+    @staticmethod
+    def _decode_bgr(f):
+        """BGR ndarray for the hardware encoder, from RGB or camera MJPEG."""
+        if f.color is not None:
+            return cv2.cvtColor(f.color, cv2.COLOR_RGB2BGR)
+        if f.color_jpeg is not None:
+            bgr = cv2.imdecode(np.frombuffer(f.color_jpeg, np.uint8),
+                               cv2.IMREAD_COLOR)
+            return bgr
+        return None
 
     @staticmethod
     def _encode_jpeg(color, quality):
@@ -467,6 +601,23 @@ class NavdRecorder:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
         self._pool.shutdown(wait=True)
+        # Drain each hardware encoder's tail (the last GOP-buffered AUs)
+        # and write them at their original tick log_time.
+        for role, enc in self._encoders.items():
+            try:
+                for au, tag in enc.flush():
+                    t_log, t_stamp, t_pair = tag if tag else (
+                        time.time_ns(), None, None)
+                    self._add(self._ch[f"color_{role}"],
+                              self._compressed_image_msg(
+                                  f"{role}_color", self._video_codec, au,
+                                  t_log, stamp_us=t_stamp, pair_ms=t_pair),
+                              t_log)
+            except Exception as exc:
+                print(f"[recorder] hw encoder {role} flush failed: {exc}")
+            finally:
+                enc.close()
+        self._encoders = {}
         with self._lock:
             self._writer.finish()
             self._file.close()

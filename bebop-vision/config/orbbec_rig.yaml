@@ -34,6 +34,13 @@ robots:
         # recorder stores it verbatim (saves ~65 ms/tick of CPU encode vs
         # RGB + re-encode; the capture threads also shed their decode work).
         color_format: mjpg
+        # Host-side SDK depth post-filters (run on the Jetson, not the
+        # camera). [temporal, hole] is the measured-cheapest useful set on
+        # the Thor: ~23% of one core vs ~86% for the old
+        # [spatial, temporal, hole], with identical valid-pixel coverage —
+        # SpatialModerateFilter cost ~60% for no validity gain. `[]`
+        # disables all host filtering.
+        depth_filters: [temporal, hole]
         # Self-view mask shapes in DEPTH coordinates (848x480) — orbbec.py
         # zeroes these pixels before the frame is published. Two forms per
         # entry, mix freely:
@@ -69,6 +76,7 @@ robots:
         depth_profile: [848, 480, 15]
         depth_preset: High Accuracy
         color_format: mjpg
+        depth_filters: [temporal, hole]
     bev:
       range_m: 3.0        # forward horizon
       width_m: 3.0        # lateral span (-1.5..+1.5)

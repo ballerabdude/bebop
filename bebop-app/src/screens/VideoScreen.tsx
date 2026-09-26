@@ -98,6 +98,7 @@ export function VideoScreen({
             baseUrl={`http://${robotIp}:${runtimePort}`}
             videoUrl={url}
             stream={id}
+            codec={id.startsWith("color") ? "h265" : undefined}
             reconnectKey={reconnectKey}
             onStreamState={setStreamState}
             className="w-full -mx-4 sm:mx-0 sm:rounded-[var(--radius-card)] sm:border sm:border-border"

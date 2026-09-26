@@ -611,6 +611,7 @@ export function TeleopScreen({
           baseUrl={`http://${robotIp}:${runtimePort}`}
           videoUrl={`http://${robotIp}:9092/video`}
           stream={id}
+          codec={id.startsWith("color") ? "h265" : undefined}
           reconnectKey={reconnectKey}
           className="h-full w-full"
         >
@@ -813,6 +814,9 @@ export function TeleopScreen({
                 baseUrl={`http://${robotIp}:${runtimePort}`}
                 videoUrl={`http://${robotIp}:9092/video`}
                 stream={primaryStream}
+                codec={
+                  primaryStream.startsWith("color") ? "h265" : undefined
+                }
                 reconnectKey={reconnectKey}
                 onStreamState={setStreamState}
                 className="h-full w-full"
@@ -848,6 +852,7 @@ export function TeleopScreen({
               baseUrl={`http://${robotIp}:${runtimePort}`}
               videoUrl={`http://${robotIp}:9092/video`}
               stream={primaryStream}
+              codec={primaryStream.startsWith("color") ? "h265" : undefined}
               reconnectKey={reconnectKey}
               onStreamState={setStreamState}
               className="w-full -mx-4 sm:mx-0 sm:rounded-[var(--radius-card)] sm:border sm:border-border"

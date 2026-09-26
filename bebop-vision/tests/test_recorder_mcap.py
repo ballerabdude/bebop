@@ -95,7 +95,7 @@ def test_mcap_roundtrip(tmp_path):
     rig, robot = FakeRig(), FakeRobot()
     path = tmp_path / "session.mcap"
     rec = NavdRecorder(rig, robot, path, rate_hz=20.0,
-                       jpeg_quality=80)
+                       jpeg_quality=80, color_codec=None)
     rec.start()
     time.sleep(0.8)
     rec.stop()
@@ -194,6 +194,43 @@ def test_extractor_layout(tmp_path):
     for sub in ("color", "color_far"):
         img = cv2.imread(str(out / sub / f"{row['stamp_ns']:020d}.jpg"))
         assert img is not None and img.shape == (800, 1280, 3), sub
+
+
+def test_mcap_h265_hardware(tmp_path):
+    """Hardware NVENC color path: MCAP carries CompressedVideo H.265 and the
+    extractor decodes it back to per-tick training JPEGs. Skipped off-Thor."""
+    pytest.importorskip("bebop_vision.hw_video")
+    from bebop_vision.hw_video import encoder_available
+    if not encoder_available("h265"):
+        pytest.skip("no nvv4l2h265enc on this host")
+
+    rig, robot = FakeRig(), FakeRobot()
+    path = tmp_path / "session.mcap"
+    rec = NavdRecorder(rig, robot, path, rate_hz=20.0, color_codec="h265")
+    assert rec._video_codec == "h265"
+    rec.start()
+    time.sleep(0.8)
+    rec.stop()
+
+    from mcap.reader import make_reader
+    with open(path, "rb") as f:
+        color = [json.loads(m.data) for s, c, m in make_reader(f).iter_messages()
+                 if c.topic == "/color_near"]
+    assert color and color[0]["format"] == "h265"
+    # H.265 access units are start-code prefixed (00 00 00 01 / 00 00 01)
+    au = base64.b64decode(color[0]["data"])
+    assert au[:4] == b"\x00\x00\x00\x01" or au[:3] == b"\x00\x00\x01"
+
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+    from tools.mcap_extract import extract
+    out = tmp_path / "navd-v0" / "s01"
+    rows = extract(str(path), str(out))
+    assert len(rows) >= 5
+    import cv2
+    for row in rows[:5]:
+        img = cv2.imread(str(out / "color" / f"{row['stamp_ns']:020d}.jpg"))
+        assert img is not None and img.shape == (800, 1280, 3)
 
 
 def test_prune_sessions(tmp_path):

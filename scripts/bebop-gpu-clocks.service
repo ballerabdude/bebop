@@ -10,9 +10,10 @@ After=multi-user.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Devfreq node names vary across SoC generations (17000000.gpu on this
-# Orin), so match any *gpu node and set it if present.
-ExecStart=/bin/sh -c 'for g in /sys/class/devfreq/*gpu; do [ -e "$g/governor" ] && echo performance > "$g/governor" || true; done'
+# Devfreq node names vary across SoC generations: Orin exposes
+# `17000000.gpu` (ends in `gpu`), while Thor exposes `gpu-gpc-0` /
+# `gpu-nvd-0` (start with `gpu-`). Match `*gpu*` so both generations pin.
+ExecStart=/bin/sh -c 'for g in /sys/class/devfreq/*gpu*; do [ -e "$g/governor" ] && echo performance > "$g/governor" || true; done'
 
 [Install]
 WantedBy=multi-user.target
