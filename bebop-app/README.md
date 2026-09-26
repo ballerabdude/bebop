@@ -18,8 +18,8 @@ Runs on desktop today and targets iOS and Android.
   already on the network.
 * **Motor bench** — live per-joint telemetry, dial-in slider with re-zero
   affordance, power-board card, sticky toolbar with E-STOP.
-* **Live video** — the bebop-vision process's MJPEG streams
-  (`:9092/video?stream=...`): color + depth for both Orbbec cameras, each a
+* **Live video** — the bebop-vision process's WebRTC (WHEP) streams
+  (`:9092/whep?stream=...`): color + depth for both Orbbec cameras, each a
   toggleable tile (`VideoScreen`).
 * **Teleop** — live video and driving in one screen (`TeleopScreen`): the
   primary stream front and center with other open streams docked as
@@ -197,7 +197,7 @@ bebop-app/
 │   │   ├── bebop_pb.ts            # Setup envelope
 │   │   └── bebop_runtime_pb.ts    # bebop-linux runtime envelope
 │   ├── components/       # Shared UI primitives + input bridges
-│   │   ├── VideoFeed.tsx          # MJPEG feed tile (video/teleop)
+│   │   ├── VideoFeed.tsx          # WebRTC feed tile (video/teleop)
 │   │   ├── DriveJoystick.tsx      # Differential-drive pad (bench/teleop)
 │   │   └── GamepadDriver/Drive    # Web-gamepad → dial-in / drive bridges
 │   └── screens/          # Welcome, ConnectByIp, Wifi, Config, Dashboard,

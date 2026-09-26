@@ -63,7 +63,8 @@ def _appsrc_prefix(kind, width, height, fps, out_width, out_height):
     if kind == "jpeg":
         return (
             "appsrc name=src is-live=true format=time block=true "
-            "max-buffers=4 leaky-type=downstream caps=image/jpeg ! "
+            "max-buffers=4 leaky-type=downstream "
+            f"caps=image/jpeg,framerate={max(1, int(round(fps)))}/1 ! "
             "nvjpegdec ! nvvidconv ! " + scale
         )
     return (
@@ -216,93 +217,6 @@ class HwVideoEncoder:
             time.sleep(0.01)
         out.extend(self._drain())
         return out
-
-    def close(self):
-        try:
-            self._pipeline.set_state(self._Gst.State.NULL)
-        except Exception:
-            pass
-        self._pipeline = None
-
-
-class HwMp4Streamer:
-    """Fragmented-MP4 hardware live muxer for the operator stream.
-
-    Same NVENC encode chain as HwVideoEncoder, but ending in `mp4mux`
-    fragmented mode so the bytes are directly MSE-consumable as
-    `video/mp4` (a moov init segment followed by media fragments). One
-    instance per client connection — the operator stream is only a couple
-    of Mbps and NVENC has headroom for a handful of viewers.
-    """
-
-    def __init__(self, width, height, fps=15.0, codec="h265",
-                 bitrate=2_000_000, fragment_ms=40,
-                 out_width=None, out_height=None, input_kind="bgr"):
-        if codec not in _ENCODERS:
-            raise HwEncodeUnavailable(f"unsupported codec {codec!r}")
-        Gst, _ = _load_gst()
-        enc, parse = _ENCODERS[codec]
-        if not Gst.ElementFactory.find(enc):
-            raise HwEncodeUnavailable(f"{enc} not present")
-        self.width = int(width)
-        self.height = int(height)
-        self.input_kind = input_kind
-        # Encode size may differ from the source (nvvidconv scales); even
-        # dimensions are required by the encoder.
-        ow = int(out_width or width)
-        oh = int(out_height or height)
-        self.out_width = ow - (ow % 2)
-        self.out_height = oh - (oh % 2)
-        self.fps = float(fps)
-        self.codec = codec
-        self._dur_ns = int(round(Gst.SECOND / self.fps)) if self.fps else 0
-        gop = max(1, round(self.fps))
-        desc = (
-            _appsrc_prefix(input_kind, self.width, self.height, self.fps,
-                           self.out_width, self.out_height)
-            + f"{enc} bitrate={int(bitrate)} control-rate=constant_bitrate "
-            f"iframeinterval={gop} ! "
-            f"{parse} ! mp4mux fragment-duration={int(fragment_ms)} ! "
-            "appsink name=sink sync=false emit-signals=false max-buffers=8"
-        )
-        self._pipeline = Gst.parse_launch(desc)
-        self._src = self._pipeline.get_by_name("src")
-        self._sink = self._pipeline.get_by_name("sink")
-        self._pts = 0
-        self._Gst = Gst
-        self._pipeline.set_state(Gst.State.PLAYING)
-
-    def push(self, data):
-        """Push one frame; return any muxed MP4 bytes now available.
-
-        `data` is camera MJPEG bytes when `input_kind == "jpeg"`, else a
-        BGR ndarray.
-        """
-        Gst = self._Gst
-        if self.input_kind == "jpeg":
-            blob = data if isinstance(data, (bytes, bytearray)) else bytes(data)
-            nbytes = len(blob)
-        else:
-            arr = np.ascontiguousarray(data)
-            blob = arr.tobytes()
-            nbytes = arr.nbytes
-        buf = Gst.Buffer.new_allocate(None, nbytes, None)
-        buf.fill(0, blob)
-        buf.pts = self._pts
-        buf.duration = self._dur_ns
-        self._pts += self._dur_ns
-        self._src.emit("push-buffer", buf)
-        return self.drain()
-
-    def drain(self):
-        out = bytearray()
-        while True:
-            s = self._sink.try_pull_sample(0)
-            if s is None:
-                break
-            b = s.get_buffer()
-            out += b.extract_dup(0, b.get_size())
-        return bytes(out)
 
     def close(self):
         try:

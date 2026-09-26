@@ -1,25 +1,23 @@
-"""Stage-1 OBSBOT replacement (plan §9.2): serve the near camera's stream.
+"""Operator video for the Orbbec rig — WebRTC (WHEP) only.
 
 Lives INSIDE the bebop-vision process that owns the cameras (camera
 exclusivity, docs §2.7) — main.py --goal-drive / --record-navd start it
 after the rig opens.
 
 Routes:
-  /video?stream=<name>   multipart/x-mixed-replace MJPEG
+  POST /whep?stream=<name>   WebRTC (WHEP): SDP offer in, answer out.
        streams: color_near (default) | color_far | depth_near | depth_far
-       color streams pass the camera hardware-encoded JPEG through untouched
-       (zero CPU); depth streams render a turbo-colormapped 424x240 view
-       (0-4 m, invalid = black) per frame (~3 ms).
-  /video?stream=color_near&codec=h265   fragmented MP4 (video/mp4)
-       Hardware NVENC H.264/H.265 operator stream (MSE-consumable). Only
-       color streams; falls back to MJPEG when no encoder is present.
-  /snapshot?stream=...   single JPEG of the latest frame
-  /healthz               liveness
+       Every stream is H.264 over SRTP/UDP (~150 ms, loss-tolerant). Color
+       hands the camera's hardware JPEG to `nvjpegdec` (zero CPU pixels);
+       depth renders a turbo-colormapped 424x240 BGR view server-side.
+  GET  /snapshot?stream=...  single JPEG of the latest frame (tools/tests)
+  GET  /healthz              liveness
+
+The old MJPEG (`/video`) and fragmented-MP4 (`codec=h264|h265`) operator
+paths were removed once every client moved to WebRTC.
 """
 
-import math
 import time
-from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -28,6 +26,8 @@ import numpy as np
 
 PACING_S = 1.0 / 20.0      # serve at most 20 fps; frames arrive at 15
 STREAMS = ("color_near", "color_far", "depth_near", "depth_far")
+DEPTH_VIEW = (424, 240)    # rendered depth size (matches render_depth)
+
 
 def render_depth(depth_mm):
     """uint16 (480, 848) mm -> half-res BGR turbo view, 0-4 m, invalid=black."""
@@ -35,19 +35,26 @@ def render_depth(depth_mm):
     v = np.clip(depth_mm.astype(np.float32) / 4000.0, 0, 1) * 255
     vis = cv2.applyColorMap(v.astype(np.uint8), cv2.COLORMAP_TURBO)
     vis[~m] = 0
-    return cv2.resize(vis, (424, 240), interpolation=cv2.INTER_AREA)
+    return cv2.resize(vis, DEPTH_VIEW, interpolation=cv2.INTER_AREA)
 
 
-def _to_bgr(fr):
-    """BGR ndarray for the hardware encoder from a StampedFrame (RGB or MJPEG)."""
-    if fr is None:
-        return None
-    if getattr(fr, "color", None) is not None:
-        return cv2.cvtColor(fr.color, cv2.COLOR_RGB2BGR)
-    if getattr(fr, "color_jpeg", None) is not None:
-        return cv2.imdecode(np.frombuffer(fr.color_jpeg, np.uint8),
-                            cv2.IMREAD_COLOR)
-    return None
+def _whep_feed(session, cam, kind):
+    """Push frames into a WHEP session until it or the peer ends."""
+    last = None
+    while not session.closed:
+        if session.failed():
+            break
+        fr = cam.read() if cam else None
+        if fr is not None and fr is not last:
+            last = fr
+            if kind == "color":
+                data = getattr(fr, "color_jpeg", None)
+            else:
+                data = render_depth(fr.depth) if fr.depth is not None else None
+            if data is not None:
+                session.push(data)
+        time.sleep(PACING_S)
+    session.close()
 
 
 class VideoServer:
@@ -60,8 +67,6 @@ class VideoServer:
     def start(self):
         import threading
         server = self
-        # video is operator-critical but must never take down the control
-        # or recording process: bind failures degrade to a logged warning
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -115,55 +120,40 @@ class VideoServer:
                     self.send_header("Content-Length", "2")
                     self.end_headers()
                     self.wfile.write(b"ok")
-                elif self.path.startswith("/video"):
-                    name, role, kind = self._pick()
-                    codec = self._codec()
-                    if kind == "color" and codec in ("h264", "h265"):
-                        self._stream_mp4(role, codec)
-                    else:
-                        self._stream_mjpeg(role, kind)
                 else:
                     self.send_error(404)
 
-            def _stream_mjpeg(self, role, kind):
-                self.send_response(200)
-                self.send_header("Content-Type",
-                                 "multipart/x-mixed-replace; "
-                                 "boundary=frame")
+            def do_OPTIONS(self):
+                # WHEP POSTs carry `Content-Type: application/sdp`, which
+                # makes them non-simple, so browsers preflight them.
+                self.send_response(204)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods",
+                                 "POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers",
+                                 "Content-Type")
+                self.send_header("Content-Length", "0")
                 self.end_headers()
-                last = None
-                try:
-                    while True:
-                        fr = self._frame(role, kind)
-                        if fr is not None and fr is not last:
-                            last = fr
-                            body = self._body(fr, kind)
-                            if body:
-                                self.wfile.write(
-                                    b"--frame\r\nContent-Type: "
-                                    b"image/jpeg\r\nX-Timestamp-Us: "
-                                    + str(fr.stamp_us).encode()
-                                    + b"\r\nContent-Length: "
-                                    + str(len(body)).encode()
-                                    + b"\r\n\r\n" + body + b"\r\n")
-                                self.wfile.flush()
-                        time.sleep(PACING_S)
-                except (BrokenPipeError, ConnectionResetError,
-                        ConnectionAbortedError, OSError):
-                    pass
 
-            def _codec(self):
-                q = parse_qs(urlparse(self.path).query)
-                return (q.get("codec") or [None])[0]
+            def do_POST(self):
+                if self.path.startswith("/whep"):
+                    self._whep()
+                else:
+                    self.send_error(404)
 
-            def _stream_mp4(self, role, codec):
-                """Hardware NVENC H.264/H.265 operator stream as fragmented
-                MP4 (`video/mp4`, MSE-consumable). Falls back to a 503 if
-                the encoder is unavailable; clients can retry MJPEG."""
-                from .hw_video import HwMp4Streamer, encoder_available
-                if not encoder_available(codec):
-                    self.send_error(503, f"no {codec} hardware encoder")
+            def _whep(self):
+                """WebRTC color/depth stream: offer in, answer out, then the
+                frame feeder runs until the peer disconnects."""
+                from .whep import WhepSession, webrtc_available
+                name, role, kind = self._pick()
+                if not webrtc_available():
+                    self.send_error(503, "webrtc unavailable")
                     return
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = 0
+                offer = self.rfile.read(length).decode("utf-8", "replace")
                 cam = server.rig.cameras.get(role)
                 fr = None
                 deadline = time.monotonic() + 5.0
@@ -174,68 +164,30 @@ class VideoServer:
                 if fr is None:
                     self.send_error(503, "no frame")
                     return
-                # Rig default is camera MJPEG: hand the bytes to nvjpegdec
-                # (zero CPU pixels). Raw-RGB configs fall back to BGR.
-                jpeg_input = getattr(fr, "color_jpeg", None) is not None
-                bgr0 = None if jpeg_input else _to_bgr(fr)
-                if not jpeg_input and bgr0 is None:
-                    self.send_error(503, "no frame")
-                    return
-                src_w = 0 if jpeg_input else bgr0.shape[1]
-                src_h = 0 if jpeg_input else bgr0.shape[0]
-
-                q = parse_qs(urlparse(self.path).query)
-
-                def _int(name, default, lo, hi):
-                    try:
-                        return max(lo, min(hi, int(q[name][0])))
-                    except (KeyError, ValueError, IndexError):
-                        return default
-
-                bitrate = _int("bitrate", 2_000_000, 200_000, 12_000_000)
-                # Optional client-chosen size (scale on the GPU); omit for
-                # native passthrough.
-                out_w = _int("width", None, 320, 1920)
-                out_h = _int("height", None, 240, 1200)
-                if out_w is None or out_h is None:
-                    out_w = out_h = None
+                fps = float(getattr(fr, "fps", 0) or 0) or 15.0
+                if kind == "color":
+                    session_kwargs = dict(input_kind="jpeg", fps=fps)
+                else:
+                    session_kwargs = dict(input_kind="bgr", fps=fps,
+                                          width=DEPTH_VIEW[0],
+                                          height=DEPTH_VIEW[1])
                 try:
-                    streamer = HwMp4Streamer(
-                        src_w, src_h, fps=1.0 / PACING_S, codec=codec,
-                        bitrate=bitrate, out_width=out_w, out_height=out_h,
-                        input_kind="jpeg" if jpeg_input else "bgr")
-                except Exception as exc:
-                    self.send_error(503, f"encoder init failed: {exc}")
+                    session = WhepSession(bitrate=4_000_000, **session_kwargs)
+                    answer = session.negotiate(offer)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[videoserver] whep failed: {exc}")
+                    self.send_error(503, f"webrtc failed: {exc}")
                     return
-                self.send_response(200)
-                self.send_header("Content-Type", "video/mp4")
-                self.send_header("Transfer-Encoding", "chunked")
-                self.send_header("Cache-Control", "no-store")
+                body = answer.encode()
+                self.send_response(201)
+                self.send_header("Content-Type", "application/sdp")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                try:
-                    while True:
-                        fr = cam.read() if cam else None
-                        if jpeg_input:
-                            payload = getattr(fr, "color_jpeg", None) if fr else None
-                        else:
-                            payload = _to_bgr(fr)
-                        if payload is not None:
-                            data = streamer.push(payload)
-                            if data:
-                                # Manual HTTP/1.1 chunk framing: without
-                                # Content-Length or chunked, a browser sees
-                                # a close-delimited body and mobile media
-                                # stacks stop after the initial buffer.
-                                self.wfile.write(
-                                    f"{len(data):X}\r\n".encode() + data
-                                    + b"\r\n")
-                                self.wfile.flush()
-                        time.sleep(PACING_S)
-                except (BrokenPipeError, ConnectionResetError,
-                        ConnectionAbortedError, OSError):
-                    pass
-                finally:
-                    streamer.close()
+                self.wfile.write(body)
+                threading.Thread(
+                    target=_whep_feed, args=(session, cam, kind), daemon=True,
+                    name="whep-feed").start()
 
         try:
             self._httpd = ThreadingHTTPServer(("0.0.0.0", self.port), Handler)
@@ -248,7 +200,8 @@ class VideoServer:
             target=self._httpd.serve_forever, kwargs={"poll_interval": 0.25},
             daemon=True, name="videoserver")
         self._thread.start()
-        print(f"[videoserver] serving streams {STREAMS} on :{self.port}/video")
+        print(f"[videoserver] serving WebRTC (WHEP) streams {STREAMS} "
+              f"on :{self.port}/whep")
 
     def stop(self):
         if self._httpd is not None:

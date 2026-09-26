@@ -7,11 +7,11 @@
 // (`VideoFeed`, `DriveJoystick`, `PtzJoystick` + `useCameraPtz`,
 // `GamepadDrive`) into a single operator surface:
 //
-//   * the MJPEG feed front and center, with the optional navigable-path
+//   * the WebRTC feed front and center, with the optional navigable-path
 //     overlay and a one-tap "Labels" toggle,
 //   * a toolbar video on/off toggle: playback is a purely client-side
 //     concern, so turning it off (persisted across visits) drops the
-//     MJPEG connection while the robot keeps recording via bebop-vision
+//     peer connection while the robot keeps recording via bebop-vision
 //     and the drive link stays live — teleop with no video,
 //   * a sticky HUD (connection, mode, wheels armed, battery, camera
 //     pose) with E-STOP always in reach,
@@ -109,10 +109,9 @@ export function TeleopScreen({
   // loading / error placeholders while the WS connects in the
   // background.
   const [reconnectKey, setReconnectKey] = useState(0);
-  // Concurrent operator streams: each toggle opens/closes its own MJPEG
-  // connection to the bebop-vision server (:9092). Color streams are
-  // camera-encoded passthrough; depth and BEV streams are rendered
-  // server-side.
+  // Concurrent operator streams: each toggle opens/closes its own WebRTC
+  // (WHEP) peer connection to the bebop-vision server (:9092). Color is
+  // the camera's H.264 track; depth is rendered server-side.
   const [videoStreams, setVideoStreams] = useState<string[]>(["color_near"]);
   // Primary (full-size) view; every other open stream docks as a
   // filmstrip thumbnail. Clicking a thumbnail promotes it to primary.
@@ -140,7 +139,7 @@ export function TeleopScreen({
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Video playback on/off. This only controls the app's MJPEG playback:
+  // Video playback on/off. This only controls the app's video playback:
   // the robot's recording (bebop-vision) and the drive link are
   // unaffected, so an operator can teleop with video off to save
   // bandwidth. Persisted across visits; see `VIDEO_ENABLED_KEY`.
@@ -609,9 +608,8 @@ export function TeleopScreen({
       >
         <VideoFeed
           baseUrl={`http://${robotIp}:${runtimePort}`}
-          videoUrl={`http://${robotIp}:9092/video`}
+          videoUrl={`http://${robotIp}:9092/whep`}
           stream={id}
-          codec={id.startsWith("color") ? "h265" : undefined}
           reconnectKey={reconnectKey}
           className="h-full w-full"
         >
@@ -812,11 +810,8 @@ export function TeleopScreen({
             <div className="relative min-h-0 min-w-0 flex-1">
               <VideoFeed
                 baseUrl={`http://${robotIp}:${runtimePort}`}
-                videoUrl={`http://${robotIp}:9092/video`}
+                videoUrl={`http://${robotIp}:9092/whep`}
                 stream={primaryStream}
-                codec={
-                  primaryStream.startsWith("color") ? "h265" : undefined
-                }
                 reconnectKey={reconnectKey}
                 onStreamState={setStreamState}
                 className="h-full w-full"
@@ -850,9 +845,8 @@ export function TeleopScreen({
           <>
             <VideoFeed
               baseUrl={`http://${robotIp}:${runtimePort}`}
-              videoUrl={`http://${robotIp}:9092/video`}
+              videoUrl={`http://${robotIp}:9092/whep`}
               stream={primaryStream}
-              codec={primaryStream.startsWith("color") ? "h265" : undefined}
               reconnectKey={reconnectKey}
               onStreamState={setStreamState}
               className="w-full -mx-4 sm:mx-0 sm:rounded-[var(--radius-card)] sm:border sm:border-border"

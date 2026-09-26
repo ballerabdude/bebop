@@ -47,7 +47,8 @@ from SAM × measured depth.)
 | `bebop_vision/orbbec.py` | Orbbec rig: cameras, sync, intrinsics, rig YAML |
 | `bebop_vision/camera.py` | Threaded MJPEG/RTSP/file consumer with reconnect |
 | `bebop_vision/robot.py` | Protobuf-over-WS runtime client (telemetry, goals) |
-| `bebop_vision/videoserver.py` | Operator MJPEG streams (`:9092/video?stream=...`) |
+| `bebop_vision/videoserver.py` | Operator WebRTC (WHEP) streams (`:9092/whep?stream=...`) |
+| `bebop_vision/whep.py` | webrtcbin H.264 pipeline + offer/answer per client |
 | `bebop_vision/recorder_mcap.py` | navd MCAP writer (10 Hz ticks, shared log_time) |
 | `bebop_vision/sam3_concepts.py` | SAM 3.1 text-prompted concept segmenter (teacher) |
 | `bebop_vision/goals.py` | Navigation-goal slot (heading / odom point) |

@@ -68,10 +68,13 @@
   (`--record-navd`) and goal-drive (`--goal-drive`) each open the rig;
   OrbbecViewer or a stray test process holding a camera surfaces as
   `uvc_open failed: -6` / missing device.
-- Operator video: the bebop-vision process serves MJPEG on
-  `:9092/video?stream=color_near|color_far|depth_near|depth_far`
-  (`/snapshot?stream=...` for stills). The firmware `/video` is removed
-  (OBSBOT retired, plan §9).
+- Operator video: the bebop-vision process serves every stream over
+  WebRTC (WHEP) on `:9092/whep?stream=color_near|color_far|depth_near|
+  depth_far` — H.264 over SRTP/UDP, ~150 ms; the app is WebRTC-only (no
+  MJPEG/fMP4/MSE). `/snapshot?stream=...` still returns a JPEG (tools,
+  tests). Needs the `gstreamer1.0-nice` apt plugin or `webrtcbin` stays
+  in NULL — `install-jetson.sh` installs it. The firmware `/video` is
+  removed (OBSBOT retired, plan §9).
 - Live state checks: `journalctl -u bebop-linux -n 5 --no-pager`,
   `systemctl is-active bebop-linux`, `curl http://127.0.0.1:9090/healthz`.
 

@@ -16,16 +16,14 @@ interface VideoScreenProps {
 }
 
 /** Live multi-stream viewer served by the bebop-vision process
- * (`:9092/video`, selectable color/depth near+far plus the BEV
- * planner view via the stream picker on each tile).
+ * (`:9092/whep`, selectable color/depth near+far via the stream picker
+ * on each tile).
  *
- * `multipart/x-mixed-replace` renders natively in an `<img>` tag, so the
- * stream needs no JavaScript decode loop — the browser paints each JPEG
- * part as it arrives. The streams come from the robot's Orbbec rig (the
- * same process that runs autonomy and recording, which owns the cameras);
- * tiles are independent MJPEG connections and can be toggled
- * concurrently. Stream state placeholders live in `VideoFeed` (shared
- * with the teleop screen).
+ * Each tile is an independent WebRTC (WHEP) peer connection playing an
+ * H.264 track over SRTP/UDP — low latency and loss-tolerant. The streams
+ * come from the robot's Orbbec rig (the same process that runs autonomy
+ * and recording, which owns the cameras). Stream state placeholders live
+ * in `VideoFeed` (shared with the teleop screen).
  */
 export function VideoScreen({
   robotIp,
@@ -54,7 +52,6 @@ export function VideoScreen({
     "depth_near",
     "color_far",
     "depth_far",
-    "bev",
   ]);
   const toggleStream = (id: string) =>
     setVideoStreams((cur) =>
@@ -66,7 +63,7 @@ export function VideoScreen({
     );
 
   const transport = getOrCreateRuntimeTransport(robotIp, runtimePort);
-  const url = `http://${robotIp}:9092/video`;
+  const url = `http://${robotIp}:9092/whep`;
 
   useEffect(() => {
     const offs = [transport.onConnectionStateChange(setConn)];
@@ -98,7 +95,6 @@ export function VideoScreen({
             baseUrl={`http://${robotIp}:${runtimePort}`}
             videoUrl={url}
             stream={id}
-            codec={id.startsWith("color") ? "h265" : undefined}
             reconnectKey={reconnectKey}
             onStreamState={setStreamState}
             className="w-full -mx-4 sm:mx-0 sm:rounded-[var(--radius-card)] sm:border sm:border-border"
@@ -151,5 +147,4 @@ const VIDEO_STREAM_OPTIONS: { id: string; label: string }[] = [
   { id: "depth_near", label: "Depth" },
   { id: "color_far", label: "Far" },
   { id: "depth_far", label: "Far depth" },
-  { id: "bev", label: "BEV" },
 ];

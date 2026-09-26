@@ -1,103 +1,84 @@
-// Live MJPEG stream tile shared by the video screen and the teleop
-// screen. Renders a bebop-vision `:9092/video` multipart stream in an
-// `<img>` (the browser paints each JPEG part as it arrives — no
-// JavaScript decode loop) with:
+// Live operator video tile, WebRTC-only.
 //
-//   * loading / error placeholder states,
-//   * automatic reconnection: an errored or stalled stream is
-//     re-requested with exponential backoff (see `autoReconnect`), so
-//     the feed comes back on its own after a robot reboot or a
-//     bebop-vision restart,
-//   * a parent-driven reconnect: bump `reconnectKey` to tear the
-//     multipart stream down and re-request it right away.
-//
-// The stream is served by the bebop-vision process, which owns the
-// Orbbec cameras exclusively; this component is just another HTTP
-// subscriber. (The legacy nav-mask overlay was removed with the
-// OBSBOT pipeline, plan §9 Stage 3 — the BEV is now its own `bev`
-// stream, the planner's fused occupancy grid rendered server-side.)
+// Every stream (color and depth) is served by the bebop-vision process as
+// a WHEP endpoint on `:9092/whep`. We create a recvonly peer connection,
+// POST the offer, apply the answer, and play the incoming track. Media
+// rides SRTP/UDP, so latency is ~150 ms and packet loss doesn't
+// head-of-line-block the way the old TCP MJPEG / fragmented-MP4 paths
+// did. There is no MSE/progressive/MJPEG fallback any more — if the
+// peer connection cannot be established the tile shows an error and
+// retries with exponential backoff.
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import { EncodedVideoFeed, encodedVideoSupported } from "./EncodedVideoFeed";
 import { Button, Spinner } from "./ui";
+
 export type VideoStreamState = "loading" | "live" | "error";
 
 interface VideoFeedProps {
-  /// Runtime base URL (`http://<ip>:<port>`); the stream itself is
-  /// `<baseUrl>/video`.
+  /// Runtime base URL (`http://<ip>:<port>`); used only when `videoUrl`
+  /// is omitted, defaulting to `<baseUrl>/whep`.
   baseUrl: string;
-  /// Override for the video stream URL. The operator stream is served by
-  /// the bebop-vision process on its own port (9092), separate from the
-  /// firmware runtime port — pass `http://<ip>:9092/video` here. When
-  /// omitted, falls back to `<baseUrl>/video` (legacy firmware stream).
+  /// WebRTC (WHEP) endpoint base, e.g. `http://<ip>:9092/whep`. The
+  /// stream selector and cache-buster are appended as query params.
   videoUrl?: string;
-  /// Stream selector understood by the bebop-vision server: color_near |
-  /// color_far | depth_near | depth_far | bev. Appended as ?stream= to
-  /// the URL.
+  /// Stream selector understood by the server: color_near | color_far |
+  /// depth_near | depth_far.
   stream?: string;
-  /// Request the hardware-encoded stream (`&codec=h265|h264`) for color
-  /// streams. The tile uses a `<video>` (fragmented MP4) when the webview
-  /// can decode it and silently falls back to MJPEG otherwise.
-  codec?: "h264" | "h265";
-  /// Bump to tear the multipart stream down and reconnect.
+  /// Bump to tear the peer connection down and reconnect.
   reconnectKey: number;
-  /// Self-healing reconnects. When the request errors (robot down, 503)
-  /// or goes silent (no frame event for `stallTimeoutMs` — covers
-  /// connections that die mid-stream without an error event and loads
-  /// that hang on an unreachable host), the stream is re-requested
-  /// automatically with exponential backoff. Default true.
+  /// Self-healing reconnects. When negotiation fails or the connection
+  /// stalls (no `currentTime` advance for `stallTimeoutMs`), the stream
+  /// is re-requested automatically with exponential backoff. Default true.
   autoReconnect?: boolean;
   /// First reconnect delay (ms); doubles per consecutive failure.
-  /// Default 1000.
   reconnectBaseDelayMs?: number;
   /// Backoff ceiling (ms). Default 15000.
   reconnectMaxDelayMs?: number;
-  /// Silence threshold (ms): no frame event for this long counts as a
-  /// stalled stream and triggers a reconnect. Default 12000 (streams
-  /// run at 15 fps; anything past ~10s of nothing is dead). 0 disables
-  /// the stall watchdog (error-triggered reconnects still apply).
+  /// Silence threshold (ms): no playback advance for this long counts as
+  /// a stalled stream and triggers a reconnect. Default 6000. 0 disables
+  /// the watchdog (negotiation-failure reconnects still apply).
   stallTimeoutMs?: number;
   /// Stream lifecycle reports for the parent (retry buttons, etc.).
   onStreamState?: (state: VideoStreamState) => void;
   /// Classes for the outer container — sizing (width / h-full) and
-  /// decoration (rounded / border / negative margins for mobile
-  /// full-bleed). The element is the black letterbox surface; its
-  /// *aspect* is owned by the feed (see below), so don't pass
-  /// `aspect-*` utilities.
+  /// decoration. The element is the black letterbox surface; its aspect
+  /// is owned by the feed, so don't pass `aspect-*` utilities.
   className?: string;
-  /// Cap the container height (CSS length, e.g. "72dvh") so a wide
-  /// stream on a landscape phone / short window doesn't overflow the
-  /// viewport. The video object-contains inside; the overlay fits the
-  /// real video rect either way. Do NOT pass this when the parent
-  /// controls the height (fullscreen-style layouts).
+  /// Cap the container height (CSS length, e.g. "72dvh") so a wide stream
+  /// on a landscape phone / short window doesn't overflow the viewport.
   maxHeight?: string;
-  /// Optional extra chrome layered on top of the video (badges, PTZ
-  /// hints). Rendered above the overlay canvas, below nothing —
-  /// pointer events pass through unless the node opts in.
+  /// Optional extra chrome layered on top of the video (badges, pickers).
   children?: ReactNode;
 }
 
-export function VideoFeed(props: VideoFeedProps) {
-  // Prefer the hardware-encoded `<video>` path for color streams; if the
-  // webview rejects the codec (MEDIA_ERR_SRC_NOT_SUPPORTED), fall back to
-  // the MJPEG `<img>` implementation below for the rest of the session.
-  const [codecSupported, setCodecSupported] = useState(true);
-  const wantsCodec = props.codec === "h264" || props.codec === "h265";
-  if (wantsCodec && codecSupported && encodedVideoSupported()) {
-    return (
-      <EncodedVideoFeed
-        {...props}
-        codec={props.codec as string}
-        onUnsupported={() => setCodecSupported(false)}
-      />
-    );
-  }
-  return <MjpegVideoFeed {...props} />;
+/// Non-trickle WHEP: gather ICE candidates before POSTing the offer.
+function waitForIceGathering(
+  pc: RTCPeerConnection,
+  timeoutMs = 3000,
+): Promise<void> {
+  return new Promise((resolve) => {
+    if (pc.iceGatheringState === "complete") {
+      resolve();
+      return;
+    }
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      pc.removeEventListener("icegatheringstatechange", check);
+      resolve();
+    };
+    const check = () => {
+      if (pc.iceGatheringState === "complete") done();
+    };
+    pc.addEventListener("icegatheringstatechange", check);
+    window.setTimeout(done, timeoutMs);
+  });
 }
 
-function MjpegVideoFeed({
+export function VideoFeed({
   baseUrl,
   videoUrl,
   stream,
@@ -105,54 +86,34 @@ function MjpegVideoFeed({
   autoReconnect = true,
   reconnectBaseDelayMs = 1000,
   reconnectMaxDelayMs = 15000,
-  stallTimeoutMs = 12000,
+  stallTimeoutMs = 6000,
   onStreamState,
   className = "",
   maxHeight,
   children,
 }: VideoFeedProps) {
-  // "loading" until the first frame paints, "live" while streaming,
-  // "error" when the endpoint is unreachable or answers 503.
   const [state, setState] = useState<VideoStreamState>("loading");
-  // Natural size of the decoded stream, measured off the first frame.
-  // The container adopts this aspect so the video is never letterboxed
-  // inside a hard-coded box: the YAML *requests* 1280x720 but the UVC
-  // driver negotiates the nearest mode the camera offers, which may
-  // not be 16:9 — and a mismatched box is exactly how the nav overlay
-  // ends up painted on the pillarbox bars instead of the video. Until
-  // the first frame decodes we assume 16:9 (the loading placeholder is
-  // in there anyway) and re-measure on every reconnect.
   const [frameSize, setFrameSize] = useState<{ w: number; h: number } | null>(
     null,
   );
-
-  // ------------------------------------------------------ auto reconnect
-  // The manual path is `reconnectKey` (parent-driven); the automatic
-  // path is an internal nonce bumped by the backoff timer. Both feed
-  // one composite key that (a) remounts the <img>, tearing the
-  // multipart stream down, and (b) cache-busts the URL.
   const [autoRetry, setAutoRetry] = useState(0);
-  // Consecutive failed attempts — drives the exponential backoff. Only
-  // a painted frame resets it, so a down robot backs off to the cap
-  // instead of hammering the server every second.
   const attemptsRef = useRef(0);
-  // Last sign of life (request start or a decoded frame). The stall
-  // watchdog compares this against `stallTimeoutMs`.
   const lastFrameAtRef = useRef(Date.now());
-  // Pending backoff timer + its ETA (for the countdown in the error
-  // placeholder). Ref mirrors the state so the watchdog interval can
-  // read it without re-subscribing.
   const retryTimerRef = useRef<number | null>(null);
   const retryAtRef = useRef<number | null>(null);
   const [retryAt, setRetryAt] = useState<number | null>(null);
-  // Ticks once per second while a retry is pending, so the countdown
-  // renders. (The watchdog interval owns the ticking.)
   const [tick, setTick] = useState(() => Date.now());
+  const videoRef = useRef<HTMLVideoElement>(null);
+  // Last observed playback position — the liveness signal. Relying on
+  // `timeupdate` events is unreliable in some webviews for live streams;
+  // sampling `currentTime` works everywhere.
+  const lastTimeRef = useRef(0);
 
-  const base = videoUrl ?? `${baseUrl}/video`;
-  const url = stream ? `${base}?stream=${stream}` : base;
+  const whepBase = videoUrl ?? `${baseUrl}/whep`;
   const streamKey = `${reconnectKey}.${autoRetry}`;
-  const streamSrc = reconnectKey || autoRetry ? `${url}&r=${streamKey}` : url;
+  const whepUrl =
+    `${whepBase}?stream=${encodeURIComponent(stream ?? "color_near")}` +
+    `&r=${streamKey}`;
 
   const report = (s: VideoStreamState) => {
     setState(s);
@@ -168,9 +129,6 @@ function MjpegVideoFeed({
     setRetryAt(null);
   };
 
-  // Error / stall → schedule the next attempt. Backoff doubles per
-  // consecutive failure up to the cap; the timer bumps `autoRetry`,
-  // which remounts the <img> and starts a fresh loading window.
   const scheduleRetry = () => {
     if (retryTimerRef.current !== null) return;
     const delay = Math.min(
@@ -191,8 +149,6 @@ function MjpegVideoFeed({
     }, delay);
   };
 
-  // Immediate retry (the "Retry now" button): drop the pending backoff
-  // and remount right away.
   const retryNow = () => {
     clearPendingRetry();
     lastFrameAtRef.current = Date.now();
@@ -202,12 +158,6 @@ function MjpegVideoFeed({
   const secondsLeft =
     retryAt !== null ? Math.max(0, Math.ceil((retryAt - tick) / 1000)) : null;
 
-  // A reconnect request resets to "loading" (the remounted <img> fires
-  // onLoad / onError to move on from there) and drops the measured
-  // frame size — the new stream may negotiate a different mode. A
-  // *manual* (parent) bump also resets the backoff ladder: the operator
-  // asked for a fresh start. Cancels any pending auto-retry so a late
-  // timer can't double-remount after the parent already reconnected.
   const prevParentKeyRef = useRef(reconnectKey);
   useEffect(() => {
     if (prevParentKeyRef.current !== reconnectKey) {
@@ -222,49 +172,83 @@ function MjpegVideoFeed({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamKey]);
 
-  // WebKit (Tauri's engine on Linux) keeps MJPEG `<img>` downloads
-  // running even after the element leaves the DOM — the classic
-  // "closed the screen but the connection never stops" leak. Removing
-  // `src` forces the engine to abort the request.
-  //
-  // Two React details make this cleanup subtle:
-  //   1. On unmount React nulls `ref.current` before the `useEffect`
-  //      cleanup runs, so the ref is useless there — capture the
-  //      element in the closure instead.
-  //   2. StrictMode (dev only) runs setup → cleanup → setup without
-  //      re-rendering, so the cleanup would abort the stream it just
-  //      started; setup restores the attribute to restart it.
-  const imgRef = useRef<HTMLImageElement>(null);
+  // WebRTC peer connection.
   useEffect(() => {
-    // New request in flight: open a fresh stall window.
     lastFrameAtRef.current = Date.now();
-    const img = imgRef.current;
-    if (img && img.getAttribute("src") !== streamSrc) {
-      img.src = streamSrc;
+    const video = videoRef.current;
+    if (!video) return;
+    if (typeof RTCPeerConnection === "undefined") {
+      report("error");
+      return;
     }
-    return () => {
-      img?.removeAttribute("src");
-    };
-  }, [streamSrc]);
 
-  // Kill a still-pending retry on unmount (the remount path needs it
-  // alive — it *is* the reconnect mechanism).
-  useEffect(() => {
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    let disposed = false;
+    const fail = () => {
+      if (disposed) return;
+      report("error");
+      if (autoReconnect) scheduleRetry();
+    };
+
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.ontrack = (ev) => {
+      video.srcObject = ev.streams[0] ?? new MediaStream([ev.track]);
+      void video.play().catch(() => {
+        /* muted autoplay; rejection is not fatal */
+      });
+    };
+    pc.onconnectionstatechange = () => {
+      if (disposed) return;
+      if (pc.connectionState === "failed") fail();
+    };
+
+    void (async () => {
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await waitForIceGathering(pc);
+        const res = await fetch(whepUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/sdp" },
+          body: pc.localDescription?.sdp ?? offer.sdp ?? "",
+        });
+        if (!res.ok) throw new Error(`WHEP HTTP ${res.status}`);
+        const answer = await res.text();
+        if (disposed) return;
+        await pc.setRemoteDescription({ type: "answer", sdp: answer });
+      } catch {
+        fail();
+      }
+    })();
+
     return () => {
-      if (retryTimerRef.current !== null) {
-        window.clearTimeout(retryTimerRef.current);
+      disposed = true;
+      pc.ontrack = null;
+      pc.onconnectionstatechange = null;
+      try {
+        pc.close();
+      } catch {
+        /* already closed */
+      }
+      try {
+        video.srcObject = null;
+      } catch {
+        /* ignore */
       }
     };
+    // report/scheduleRetry close over refs and stable setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [whepUrl]);
+
+  useEffect(() => () => {
+    if (retryTimerRef.current !== null) {
+      window.clearTimeout(retryTimerRef.current);
+    }
   }, []);
 
-  // Stall watchdog: once per second, reconnect if nothing has arrived
-  // for `stallTimeoutMs`. This is what catches the ugly failure modes
-  // onError misses — a multipart connection dying mid-stream (the img
-  // just goes silent, no error event) and a TCP connect hanging on an
-  // unreachable host. Skipped while the tab is hidden (background
-  // throttling stalls decodes too); returning to the tab re-arms the
-  // window instead of punishing the stream for the pause. Also ticks
-  // the reconnect countdown.
+  // Stall watchdog: once per second, reconnect if playback hasn't advanced
+  // for `stallTimeoutMs`. Catches a peer connection that dies without a
+  // clean state transition. Skipped while the tab is hidden.
   useEffect(() => {
     if (!autoReconnect || stallTimeoutMs <= 0) return;
     const onVisibility = () => {
@@ -274,6 +258,12 @@ function MjpegVideoFeed({
     const interval = window.setInterval(() => {
       if (retryAtRef.current !== null) setTick(Date.now());
       if (document.hidden) return;
+      const v = videoRef.current;
+      if (v && v.currentTime !== lastTimeRef.current) {
+        lastTimeRef.current = v.currentTime;
+        lastFrameAtRef.current = Date.now();
+        attemptsRef.current = 0;
+      }
       if (
         retryTimerRef.current === null &&
         Date.now() - lastFrameAtRef.current > stallTimeoutMs
@@ -286,8 +276,6 @@ function MjpegVideoFeed({
       document.removeEventListener("visibilitychange", onVisibility);
       window.clearInterval(interval);
     };
-    // report / scheduleRetry close over stable setters and config
-    // props; re-subscribing the interval each render would be worse.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoReconnect, stallTimeoutMs]);
 
@@ -295,14 +283,7 @@ function MjpegVideoFeed({
     <div
       className={`relative overflow-hidden bg-black ${className}`}
       style={{
-        // Container aspect follows the decoded frame (16:9 until the
-        // first frame measures otherwise). An explicit height from the
-        // parent (h-full fullscreen layouts) overrides this; a
-        // maxHeight cap leaves the box wider than the video, and the
-        // overlay's rect math handles the resulting letterbox.
-        aspectRatio: frameSize
-          ? `${frameSize.w} / ${frameSize.h}`
-          : "16 / 9",
+        aspectRatio: frameSize ? `${frameSize.w} / ${frameSize.h}` : "16 / 9",
         ...(maxHeight ? { maxHeight } : {}),
       }}
     >
@@ -333,54 +314,37 @@ function MjpegVideoFeed({
             </>
           ) : (
             <span className="text-text-dim text-sm">
-              No video stream available. Either the firmware is not
-              reachable, or the robot has no{" "}
-              <code>video:</code> section in its YAML (the endpoint
-              answers 503 then).
+              No video stream available.
             </span>
           )}
         </div>
       ) : null}
-      {/* The img stays mounted in every state: during "error" it has
-          no visible frames anyway, and keeping one element lets the
-          retry reassignment reuse the same DOM node. `key` forces a
-          fresh element on retry so a failed request can't serve a
-          cached state. */}
-      <img
+      <video
         key={streamKey}
-        ref={imgRef}
-        src={streamSrc}
-        alt="Robot live camera feed"
+        ref={videoRef}
+        autoPlay
+        muted
+        playsInline
         className="w-full h-full object-contain"
-        onLoad={(e) => {
-          // A frame arrived — the connection is alive. Re-arm the
-          // stall watchdog, reset the backoff ladder, and cancel any
-          // pending reconnect (a late frame beat the retry timer).
+        onLoadedData={(e) => {
           lastFrameAtRef.current = Date.now();
           attemptsRef.current = 0;
-          if (retryTimerRef.current !== null) {
-            clearPendingRetry();
-          }
-          // Measure the negotiated stream mode off the first decoded
-          // frame so the container can adopt its exact aspect (see
-          // frameSize). naturalWidth/Height are stable for MJPEG (the
-          // decoder reuses one frame size), so the memo check keeps
-          // re-loads from re-rendering the layout.
+          if (retryTimerRef.current !== null) clearPendingRetry();
           const el = e.currentTarget;
-          if (el.naturalWidth > 0 && el.naturalHeight > 0) {
+          if (el.videoWidth > 0 && el.videoHeight > 0) {
             setFrameSize((prev) =>
-              prev &&
-              prev.w === el.naturalWidth &&
-              prev.h === el.naturalHeight
+              prev && prev.w === el.videoWidth && prev.h === el.videoHeight
                 ? prev
-                : { w: el.naturalWidth, h: el.naturalHeight },
+                : { w: el.videoWidth, h: el.videoHeight },
             );
           }
+          void el.play().catch(() => {
+            /* muted autoplay; rejection is not fatal */
+          });
           report("live");
         }}
-        onError={() => {
-          report("error");
-          if (autoReconnect) scheduleRetry();
+        onTimeUpdate={() => {
+          lastFrameAtRef.current = Date.now();
         }}
       />
       {children}

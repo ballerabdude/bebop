@@ -1168,6 +1168,13 @@ EOF
     # bebop-vision unit: installed for the app's start/stop control, but
     # deliberately not enabled — it stays stopped until the operator taps
     # Start in the app (firmware calls `systemctl start bebop-vision`).
+    #
+    # The videoserver's WebRTC (WHEP) operator stream needs webrtcbin's
+    # ICE elements from gstreamer1.0-nice; without the plugin webrtcbin
+    # refuses to leave NULL ("libnice elements are not available").
+    if [[ "${SKIP_PREREQS}" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
+        apt_install_if_missing gstreamer1.0-nice
+    fi
     echo "==> installing bebop-vision.service (not enabled)"
     install -m 0644 "${VISION_UNIT}" /etc/systemd/system/bebop-vision.service
 fi
