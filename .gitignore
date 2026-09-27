@@ -77,3 +77,4 @@ jetson-flash/*.tar.bz2
 .sidecar-start.sh
 .sidecar-base
 .td-root
+.scratch
