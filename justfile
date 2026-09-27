@@ -379,3 +379,23 @@ fw-build TARGET="bebop-locomotion":
 # Flash the locomotion firmware over USB.
 fw-flash TARGET="bebop-locomotion":
     cd firmware/{{TARGET}} && pio run --target upload
+
+# --- Thor on-device training (aarch64) -------------------------------------
+#
+# Thor is aarch64, so the x86 Isaac containers in docker-compose.yml do NOT
+# apply, and NVIDIA ships no official aarch64 Isaac Sim image. The on-device
+# environment is therefore a pinned native venv; GR00T uses NVIDIA's upstream
+# Thor installer. See sim/setup/thor/README.md for pins and gotchas.
+
+# Install/refresh the pinned Isaac Sim + Isaac Lab env on the Thor (native).
+thor-isaaclab:
+    ssh -t {{JETSON}} 'cd ~/bebop && bash sim/setup/thor/install_isaaclab.sh'
+
+# Headless-train an Isaac Lab task on the Thor.
+# Example: just thor-train --task Isaac-Ant --num_envs 256
+thor-train *ARGS:
+    ssh -t {{JETSON}} 'cd ~/bebop && source sim/setup/thor/env.sh && cd "$ISAACLAB_THOR_DIR/IsaacLab" && python scripts/reinforcement_learning/train.py --rl_library rsl_rl --viz none {{ARGS}}'
+
+# Install/refresh the NVIDIA GR00T N1.7 env on the Thor (wraps upstream Thor installer).
+thor-groot:
+    ssh -t {{JETSON}} 'cd ~/bebop && bash sim/setup/thor/install_groot.sh'

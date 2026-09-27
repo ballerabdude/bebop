@@ -4,7 +4,14 @@
 
 - SSH: `ssh bebop@bebop.local`, password `bebop` (non-interactive: use
   `sshpass -p bebop ssh ...`).
-- Repo on the Jetson: `~/bebop` (same monorepo layout as here).
+- **Hardware (as of 2026-09): Jetson AGX Thor Developer Kit** — SoC tegra264
+  (`cat /proc/device-tree/model` → `NVIDIA Jetson AGX Thor Developer Kit`),
+  JetPack **7.2 GA / L4T R39.2.1**, CUDA **13.2**, Python **3.12**, GPU reports
+  as `NVIDIA Thor` with compute cap **sm_110**. Earlier revisions of this file
+  said "Orin Nano" — that is stale; anything derived for tegra234 GPIO/line
+  numbering does **not** carry over (see the GPIO gotcha below). On-device
+  training env for this box lives in `sim/setup/thor/`.
+- Repo on the robot: `~/bebop` (same monorepo layout as here).
 - Python env: `~/bebop/bebop-vision/.venv` — run as
   `/home/bebop/bebop/bebop-vision/.venv/bin/python`. numpy is pinned to
   1.26.4 (numpy 2.x breaks pyorbbecsdk) — never upgrade it.
@@ -22,10 +29,15 @@
   containers, OTA, or controller pairing.
 - Network mode is a two-way switch with **no fallback**: `ap` (Hosted
   Network, boot default) or `client` (Known Network). The **physical button
-  press** toggles it; the app cannot. Button default = Orin Nano
-  header **pin 32** (`gpiochip0` line 41, internal pull-down; wire the
-  switch to 3.3 V, active-high, no resistor). Avoid pins 7/15 (IMU) and
-  pin 29 (no internal pull).
+  press** toggles it; the app cannot. The code default is Orin Nano-derived:
+  `[network] button_chip=gpiochip0`, `button_line=41`, `button_bias=none`
+  (`jetson-agent/bebop-agent/src/config/mod.rs`) — Orin header **pin 32**
+  (`GPIO07`, internal pull-down; wire the switch to 3.3 V, active-high, no
+  resistor). **On Thor these do not carry over:** header pin 32 is `PDD.04`
+  (`GPIO09`) on the **AON** controller (`tegra264-gpio-aon`, a separate
+  gpiochip), so verify with `gpioinfo` and override `button_chip`/`button_line`
+  before trusting the button. Avoid pins 7/15 (IMU) and, for a resistorless
+  button, pins with no internal pull.
 - AP capability on this robot is confirmed (`nmcli -f WIFI-PROPERTIES.AP
   dev show wlP1p1s0` → yes; `iw list` shows `* AP`). It is a single radio,
   so the hotspot and a client Wi-Fi connection are mutually exclusive —
@@ -113,14 +125,20 @@
   the profile (`con add`) does not disrupt the current Wi-Fi link; only
   `con up` does — safe to validate command syntax read-only.
 - Jetson header GPIO bias lives in the **pinmux**, not in the runtime line
-  request: `libgpiod`/`gpiocdev` bias flags are effectively a no-op here, so
-  an input with `PULL=NONE` floats. Read the pin's pinmux register with
-  `sudo busybox devmem <addr>` (address per pin is in NVIDIA's `jetson-gpio`
-  `gpio_pin_data.py`; e.g. pin 29 = `0x2430068`); pull is bits [11:10]
-  (0=none, 1=down, 2=up). On this Orin Nano: pin 29 = `PULL_NONE` (floats),
-  pin 32 = pull-down. Wire a button to the **opposite** rail of the pin's
-  built-in pull — then no external resistor is needed (button on pin 32 to
-  3.3 V, active-high).
+  request: `libgpiod`/`gpiocdev` bias flags are effectively a no-op, so an
+  input with `PULL=NONE` floats. On Orin (tegra234) you can read a pin's
+  pinmux register with `sudo busybox devmem <addr>` (address per pin in NVIDIA's
+  `jetson-gpio` `gpio_pin_data.py`; e.g. Orin pin 29 = `0x2430068`), pull is
+  bits [11:10] (0=none, 1=down, 2=up). **Those addresses are tegra234-specific
+  and do not apply to Thor (tegra264)** — the Thor pin table in the same file
+  exposes no pinmux addresses, so re-derive on this robot before relying on it.
+  Wire a button to the **opposite** rail of the pin's built-in pull so no
+  external resistor is needed.
+- IMU SPI GPIO defaults are likewise Orin Nano: `firmware/bebop-linux/config/bebop_v2.yaml`
+  and `src/bin/imu_probe.rs` use `gpiochip0:144` (header pin 7, INT) and
+  `gpiochip0:85` (header pin 15, RST). On Thor the header lines map to tegra264
+  controllers and differ — override `int_chip`/`int_line`/`rst_chip`/`rst_line`
+  for the actual wiring.
 - Protobuf: three binding sets (Rust prost auto via build.rs, app TS via
   `npm run gen-proto` in bebop-app/, Python pb2 checked in at
   `bebop-vision/bebop_vision/proto/bebop/runtime/v1/`). The Python pb2

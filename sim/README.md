@@ -13,6 +13,7 @@ Simulation, RL training, and 3D assets for Bebop. Everything in here runs
 | `scripts/`         | One-shot Isaac Sim utility scripts (run from the Script Editor).          |
 | `docker/`          | Isaac Sim / Isaac Lab container image (single Dockerfile, two BASE_IMAGEs). |
 | `logs/`            | Training logs (gitignored). Bind-mounted into the Isaac Lab container.    |
+| `setup/thor/`      | On-device Jetson AGX Thor (aarch64) training env: pinned native Isaac Lab + GR00T installers. See [`setup/thor/README.md`](setup/thor/README.md). |
 
 ## Containers
 
@@ -23,6 +24,22 @@ recipe is reused with two different `BASE_IMAGE` args).
 When the container starts, `sim/docker/entrypoint.sh` pip-installs the
 `bebop_training` package in editable mode from `/workspace/bebop_bot/sim`,
 which is the bind-mounted host path of this folder.
+
+## Thor (aarch64) on-device training
+
+The containers above are x86_64. To train **on the robot** (Jetson AGX Thor),
+use the pinned native environment under [`setup/thor/`](setup/thor/README.md):
+
+```sh
+just thor-isaaclab          # install/refresh Isaac Sim + Isaac Lab on the Thor
+just thor-train --task Isaac-Ant --num_envs 256
+just thor-groot             # install/refresh the GR00T N1.7 VLA stack
+```
+
+There is no official aarch64 Isaac Sim container, so Thor uses a venv instead
+of `sim/docker`; GR00T uses NVIDIA's upstream Thor installer. See
+[`setup/thor/README.md`](setup/thor/README.md) for version pins, the verified
+results on this robot, and the known Thor gotchas.
 
 ## Common commands
 
