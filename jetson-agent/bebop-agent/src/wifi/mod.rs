@@ -162,6 +162,43 @@ pub async fn save_credentials(
     Ok(status)
 }
 
+/// Re-activate a saved client network after NetworkManager has been left in
+/// a user-disconnected state (e.g. when the Hosted Network profile is
+/// lowered). `con down` suppresses NM's own autoconnect, and
+/// `nmcli device connect` may re-select the AP profile (it ignores the AP
+/// profile's `autoconnect no`), so the saved client profile is activated
+/// explicitly by name instead.
+pub async fn activate_known_network() -> Result<WifiRuntimeStatus, AgentError> {
+    let out = nmcli(&["-t", "-f", "NAME,TYPE,AUTOCONNECT", "con", "show"])
+        .await
+        .map_err(|e| AgentError::Wifi(e.to_string()))?;
+
+    let candidates: Vec<String> = out
+        .lines()
+        .filter_map(|line| {
+            let fields = split_nmcli(line);
+            (fields.len() >= 3
+                && fields[1] == "802-11-wireless"
+                && fields[2].eq_ignore_ascii_case("yes")
+                && fields[0] != crate::ap::AP_CON_NAME)
+                .then(|| fields[0].clone())
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return Err(AgentError::Wifi("no saved client network".into()));
+    }
+
+    for name in candidates {
+        if nmcli(&["-w", "20", "con", "up", &name]).await.is_ok() {
+            return Ok(query_status().await.unwrap_or_default());
+        }
+    }
+    Err(AgentError::Wifi(
+        "could not join a saved client network".into(),
+    ))
+}
+
 /// Read current Wi-Fi status from NetworkManager.
 pub async fn query_status() -> Result<WifiRuntimeStatus> {
     let out = nmcli(&["-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device"]).await?;

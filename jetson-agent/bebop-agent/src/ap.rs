@@ -199,6 +199,24 @@ async fn lower(state: &AppState) -> anyhow::Result<()> {
             s.last_error = None;
         })
         .await;
+
+    // NetworkManager treats `con down` as a user-requested deactivation and
+    // will not auto-activate a saved client profile on its own, so Known
+    // Network would otherwise stay down until an unrelated event (carrier
+    // change, NM restart). Activate a saved client profile explicitly (not
+    // `device connect`, which may re-select the AP profile). Spawn so a slow
+    // or out-of-range known network can't stall the supervisor. Skip when
+    // still hosting: `reconfigure` lowers the AP in `ap` mode only so the
+    // supervisor can re-raise it, and we must not race a client join.
+    if !state.config().await.network.hosts_ap() {
+        let st = state.clone();
+        tokio::spawn(async move {
+            match wifi::activate_known_network().await {
+                Ok(status) => st.set_wifi_status(status).await,
+                Err(e) => warn!(error = %e, "failed to reactivate a known network"),
+            }
+        });
+    }
     Ok(())
 }
 
