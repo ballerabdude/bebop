@@ -113,6 +113,21 @@ python gr00t/experiment/launch_finetune.py \
    "GPU NOT DETECTED"). Use jetson-stats **7.2.2** from `master` until it is
    released: `sudo pip3 install --break-system-packages -U "git+https://github.com/rbonghi/jetson_stats.git"`.
    `nvidia-smi dmon` also works for live SM% even though `--query-gpu` shows N/A.
+   With 7.2.2 the GPU can *still* read as not detected for the whole boot,
+   because `jtop.service` and `nv-load-display-modules.service` (which loads the
+   Thor nvidia driver) are both only `Before=multi-user.target` and run
+   unordered: jtop's NVML probe fires ~3 s before the driver finishes, logs
+   `NVML check failed: Driver Not Loaded`, and never re-probes. Order jtop after
+   the driver with a drop-in:
+   ```ini
+   # /etc/systemd/system/jtop.service.d/10-wait-nvidia-driver.conf
+   [Unit]
+   After=nv-load-display-modules.service
+   Wants=nv-load-display-modules.service
+   ```
+   then `sudo systemctl daemon-reload && sudo systemctl restart jtop` (a reboot
+   is the real test). `jtop --version` will still print 7.2.2 — the version is
+   not the problem once 7.2.2 is installed.
 
 ## On-device self-imitation learning (the target workflow)
 

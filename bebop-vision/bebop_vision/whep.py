@@ -107,7 +107,12 @@ class WhepSession:
         self._src = mk("appsrc", "src")
         self._src.set_property("is-live", True)
         self._src.set_property("format", Gst.Format.TIME)
-        self._src.set_property("block", True)
+        # Non-blocking producer: with `block=True`, a slow mobile uplink
+        # backpressures send -> encoder -> appsrc until push-buffer wedges
+        # the feeder thread, freezing the stream until the client
+        # renegotiates. Dropping stale frames is the right behaviour for
+        # live video.
+        self._src.set_property("block", False)
         self._src.set_property("max-buffers", 4)
         self._src.set_property("leaky-type", GstApp.AppLeakyType.DOWNSTREAM)
         rate = max(1, int(round(self._fps)))
@@ -137,7 +142,14 @@ class WhepSession:
         enc = mk("nvv4l2h264enc", "enc")
         enc.set_property("bitrate", int(bitrate))
         enc.set_property("control-rate", 1)  # constant_bitrate
-        enc.set_property("iframeinterval", max(1, int(round(self._fps))))
+        # idrinterval, not just iframeinterval: nvv4l2h264enc emits
+        # non-IDR I-frames at iframeinterval, while IDR keyframes (the
+        # only sync point a decoder can recover from after loss) default
+        # to every 256 frames (~17 s). That let a mobile client freeze
+        # after any packet loss until it renegotiated. One IDR per second.
+        gop = max(1, int(round(self._fps)))
+        enc.set_property("iframeinterval", gop)
+        enc.set_property("idrinterval", gop)
         parse = mk("h264parse", "parse")
         parse.set_property("config-interval", -1)
         self._pay = mk("rtph264pay", "pay")
@@ -154,6 +166,65 @@ class WhepSession:
             if not prev.link(el):
                 raise RuntimeError(f"failed to link {prev.name} -> {el.name}")
             prev = el
+
+        # Diagnostic counters: AUs leaving the encoder and RTP packets
+        # leaving the payloader. Distinguishes "appsrc accepted frames"
+        # from "media actually left the pipeline" when a client stalls.
+        self._enc_out = 0
+        self._rtp_out = 0
+        self._idr_out = 0
+
+        def _has_idr(data):
+            i = 0
+            while True:
+                j = data.find(b"\x00\x00\x01", i)
+                if j < 0:
+                    return False
+                k = j + 3
+                while k < len(data) and data[k] == 0:
+                    k += 1
+                if k < len(data) and (data[k] & 0x1F) == 5:
+                    return True
+                i = j + 3
+
+        def _count_enc(pad, info):
+            self._enc_out += 1
+            buf = info.get_buffer()
+            if buf is not None:
+                try:
+                    ok, mapinfo = buf.map(Gst.MapFlags.READ)
+                    if ok:
+                        try:
+                            if _has_idr(bytes(mapinfo.data)):
+                                self._idr_out += 1
+                        finally:
+                            buf.unmap(mapinfo)
+                except Exception:
+                    pass
+            return Gst.PadProbeReturn.OK
+
+        def _count_rtp(pad, info):
+            try:
+                bl = info.get_buffer_list()
+            except Exception:
+                bl = None
+            if bl is not None:
+                try:
+                    self._rtp_out += bl.get_length()
+                except Exception:
+                    self._rtp_out += 1
+            else:
+                self._rtp_out += 1
+            return Gst.PadProbeReturn.OK
+
+        self._probe_cbs = (_count_enc, _count_rtp)
+        self._probe_ids = [
+            enc.get_static_pad("src").add_probe(
+                Gst.PadProbeType.BUFFER, _count_enc),
+            self._pay.get_static_pad("src").add_probe(
+                Gst.PadProbeType.BUFFER | Gst.PadProbeType.BUFFER_LIST,
+                _count_rtp),
+        ]
 
         self._pipeline = pipeline
         ret = pipeline.set_state(Gst.State.PLAYING)
@@ -229,6 +300,9 @@ class WhepSession:
         """Push one frame: MJPEG bytes (jpeg) or a BGR ndarray (bgr)."""
         if self._closed or not self._pad_linked:
             return
+        src = self._src
+        if src is None:
+            return
         Gst = self._Gst
         if self._input_kind == "jpeg":
             blob = data if isinstance(data, (bytes, bytearray)) else bytes(data)
@@ -244,9 +318,11 @@ class WhepSession:
         buf.pts = self._pts
         buf.duration = self._dur_ns
         self._pts += self._dur_ns
-        self._src.emit("push-buffer", buf)
+        src.emit("push-buffer", buf)
 
     def connection_state(self):
+        if self._webrtc is None:
+            return None
         try:
             return self._webrtc.get_property("connection-state")
         except Exception:
@@ -261,9 +337,70 @@ class WhepSession:
             GstWebRTC.WebRTCPeerConnectionState.DISCONNECTED,
         )
 
+    def connected(self) -> bool:
+        return (self.connection_state()
+                == self._GstWebRTC.WebRTCPeerConnectionState.CONNECTED)
+
+    def take_error(self):
+        """Drain the pipeline bus; return an error/EOS string or None.
+
+        Nothing watches the WHEP pipeline bus, so a decoder/encoder error
+        (or the peer's EOS) would otherwise stop the media silently while
+        the session stayed "alive" — the operator's stream just freezes
+        until they reconnect. Polled from the feeder loop instead."""
+        if self._pipeline is None:
+            return None
+        Gst = self._Gst
+        try:
+            bus = self._pipeline.get_bus()
+            if bus is None:
+                return None
+            while True:
+                msg = bus.try_pop()
+                if msg is None:
+                    return None
+                if msg.type == Gst.MessageType.ERROR:
+                    err, dbg = msg.parse_error()
+                    return f"{err.message} [{dbg or ''}]"
+                if msg.type == Gst.MessageType.EOS:
+                    return "EOS"
+        except Exception:
+            return None
+
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def enc_out(self) -> int:
+        return self._enc_out
+
+    @property
+    def rtp_out(self) -> int:
+        return self._rtp_out
+
+    @property
+    def idr_out(self) -> int:
+        return self._idr_out
+
+    def pay_stats(self):
+        """Live rtph264pay stats (seqnum advances per emitted RTP packet)."""
+        if self._pay is None:
+            return {}
+        try:
+            s = self._pay.get_property("stats")
+        except Exception:
+            return {}
+        if s is None:
+            return {}
+        out = {}
+        for k in ("seqnum", "timestamp", "ssrc", "pt", "num-pushed"):
+            try:
+                if s.has_field(k):
+                    out[k] = s.get_value(k)
+            except Exception:
+                pass
+        return out
 
     def close(self) -> None:
         if self._closed:
@@ -277,4 +414,15 @@ class WhepSession:
             self._pipeline.set_state(self._Gst.State.NULL)
         except Exception:
             pass
+        # Drop every reference so webrtcbin/libnice finalize now. The ICE
+        # agent's sockets and the NVMM/dmabuf fds are only released on
+        # finalize; holding these (plus the probe closures that capture
+        # self) kept each reconnected session's fds alive, so the process
+        # bled sockets until fd numbers crossed FD_SETSIZE and glibc's
+        # select() aborted.
         self._pipeline = None
+        self._webrtc = None
+        self._src = None
+        self._pay = None
+        self._probe_cbs = None
+        self._probe_ids = None

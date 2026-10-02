@@ -17,6 +17,7 @@ The old MJPEG (`/video`) and fragmented-MP4 (`codec=h264|h265`) operator
 paths were removed once every client moved to WebRTC.
 """
 
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -27,6 +28,8 @@ import numpy as np
 PACING_S = 1.0 / 20.0      # serve at most 20 fps; frames arrive at 15
 STREAMS = ("color_near", "color_far", "depth_near", "depth_far")
 DEPTH_VIEW = (424, 240)    # rendered depth size (matches render_depth)
+CONNECT_TIMEOUT_S = 15.0   # drop a session whose ICE never reaches CONNECTED
+IDLE_TIMEOUT_S = 8.0       # drop a connected session that stops getting frames
 
 
 def render_depth(depth_mm):
@@ -38,23 +41,69 @@ def render_depth(depth_mm):
     return cv2.resize(vis, DEPTH_VIEW, interpolation=cv2.INTER_AREA)
 
 
-def _whep_feed(session, cam, kind):
-    """Push frames into a WHEP session until it or the peer ends."""
+def _whep_feed(session, cam, kind, label="", on_done=None):
+    """Push frames into a WHEP session until it or the peer ends.
+
+    A mobile peer that vanishes silently (network switch, screen lock,
+    backgrounding) never trips `failed()`, so the old code leaked the
+    NVENC pipeline and its GPU/dmabuf fds forever. Bound every session:
+    drop it if ICE never connects, or if a connected session stops
+    receiving frames. The pipeline bus is drained too, so a decoder /
+    encoder error surfaces as a close instead of a frozen picture.
+    """
+    started = time.monotonic()
+    last_push = started
+    last_log = started
+    connected = False
     last = None
-    while not session.closed:
-        if session.failed():
-            break
-        fr = cam.read() if cam else None
-        if fr is not None and fr is not last:
-            last = fr
-            if kind == "color":
-                data = getattr(fr, "color_jpeg", None)
-            else:
-                data = render_depth(fr.depth) if fr.depth is not None else None
-            if data is not None:
-                session.push(data)
-        time.sleep(PACING_S)
-    session.close()
+    reason = None
+    frames = 0
+    try:
+        while not session.closed:
+            err = session.take_error()
+            if err is not None:
+                reason = f"pipeline error: {err}"
+                break
+            if session.failed():
+                reason = "peer failed"
+                break
+            now = time.monotonic()
+            if connected and now - last_log >= 3.0:
+                last_log = now
+                print(f"[videoserver] whep {label} tick frames={frames} "
+                      f"enc_out={session.enc_out} rtp_out={session.rtp_out} idr={session.idr_out} "
+                      f"state={session.connection_state()} "
+                      f"pay={session.pay_stats()}")
+            if session.connected():
+                if not connected:
+                    connected = True
+                    last_push = now
+            elif not connected and now - started > CONNECT_TIMEOUT_S:
+                reason = "connect timeout"
+                break
+            if connected and now - last_push > IDLE_TIMEOUT_S:
+                reason = "idle timeout"
+                break
+            fr = cam.read() if cam else None
+            if fr is not None and fr is not last:
+                last = fr
+                if kind == "color":
+                    data = getattr(fr, "color_jpeg", None)
+                else:
+                    data = render_depth(fr.depth) if fr.depth is not None else None
+                if data is not None:
+                    session.push(data)
+                    frames += 1
+                    last_push = time.monotonic()
+            time.sleep(PACING_S)
+    finally:
+        print(f"[videoserver] whep {label} closed ({reason or 'replaced'}) "
+              f"frames={frames} enc_out={session.enc_out} "
+              f"rtp_out={session.rtp_out} idr={session.idr_out} "
+              f"last_push_age={time.monotonic() - last_push:.2f}s")
+        session.close()
+        if on_done is not None:
+            on_done()
 
 
 class VideoServer:
@@ -63,9 +112,27 @@ class VideoServer:
         self.port = port
         self._httpd = None
         self._thread = None
+        self._sessions = {}
+        self._sessions_lock = threading.Lock()
+
+    def _register(self, key, session):
+        """Adopt `session` as the one for `key`, closing any predecessor.
+
+        Mobile clients reconnect (stream switch, network flap) and each
+        POST used to leave the previous NVENC pipeline running. One live
+        session per stream keeps fd/GPU usage bounded."""
+        with self._sessions_lock:
+            old = self._sessions.get(key)
+            self._sessions[key] = session
+        if old is not None and old is not session:
+            old.close()
+
+    def _unregister(self, key, session):
+        with self._sessions_lock:
+            if self._sessions.get(key) is session:
+                del self._sessions[key]
 
     def start(self):
-        import threading
         server = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -100,6 +167,10 @@ class VideoServer:
                 return jpg.tobytes() if ok else None
 
             def do_GET(self):
+                # Don't hold keep-alive connections open: each WHEP POST
+                # from a reconnecting client otherwise leaves a handler
+                # thread + socket alive until timeout, leaking fds.
+                self.close_connection = True
                 if self.path.startswith("/snapshot"):
                     name, role, kind = self._pick()
                     fr = self._frame(role, kind)
@@ -136,6 +207,7 @@ class VideoServer:
                 self.end_headers()
 
             def do_POST(self):
+                self.close_connection = True
                 if self.path.startswith("/whep"):
                     self._whep()
                 else:
@@ -185,8 +257,15 @@ class VideoServer:
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                server._register(name, session)
+                print(f"[videoserver] whep {name} open (role={role})")
+
+                def done(key=name, sess=session):
+                    server._unregister(key, sess)
+
                 threading.Thread(
-                    target=_whep_feed, args=(session, cam, kind), daemon=True,
+                    target=_whep_feed, args=(session, cam, kind),
+                    kwargs={"label": name, "on_done": done}, daemon=True,
                     name="whep-feed").start()
 
         try:
@@ -204,6 +283,11 @@ class VideoServer:
               f"on :{self.port}/whep")
 
     def stop(self):
+        with self._sessions_lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for session in sessions:
+            session.close()
         if self._httpd is not None:
             self._httpd.shutdown()
             self._httpd.server_close()
