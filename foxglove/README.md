@@ -78,6 +78,19 @@ channels to a `VideoStream` and the depth channels to images, decoding
 H.265 via the system FFmpeg with no GPU. (The Rerun web viewer still needs
 browser HEVC; Foxglove's WebCodecs has no software HEVC path.)
 
+For the bebop_navd Rerun dashboard (camera grid + telemetry plots), open the
+session through the launcher instead; it takes a local path or a capture URL
+(cached under `~/.cache/bebop/captures`):
+
+```bash
+python rerun_dashboards/open.py \
+    http://bebop.local:9090/captures/dl/navd_session_<stamp>.mcap
+```
+
+Plain `rerun <session>.mcap rerun_dashboards/bebop_navd.rbl` does *not*
+apply the dashboard: the MCAP loader names the app after the file, and a
+blueprint only applies to recordings with its own app id (`bebop_navd`).
+
 Record a session on the robot, copy it off, open it here:
 
 ```bash

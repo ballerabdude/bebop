@@ -1,9 +1,19 @@
 """Generate the Rerun blueprint artifact `bebop_navd.rbl`.
 
-The dashboard itself is defined in `navd_blueprint.build()`; this writes it
-to a Blueprint-kind `.rbl` that is applied to a session directly:
+Normally you don't need this: `open.py` loads a session (path or URL) and
+sends the dashboard straight from `navd_blueprint.build()`:
 
-    rerun <session>.mcap rerun_dashboards/bebop_navd.rbl
+    python rerun_dashboards/open.py <session.mcap | URL>
+
+This `.rbl` is only for the plain `rerun` CLI. It is saved under
+application id `bebop_navd`, and the viewer only applies a blueprint to
+recordings with the *same* app id. Opening a `.mcap` directly names the app
+after the file (e.g. `navd_session_20261001_223516.mcap`), so
+`rerun x.mcap bebop_navd.rbl` loads the data but leaves the dashboard
+unapplied. Convert with a matching app id first, then open the `.rrd`:
+
+    rerun mcap convert --application-id bebop_navd <session>.mcap -o <session>.rrd
+    rerun <session>.rrd rerun_dashboards/bebop_navd.rbl
 
 Important: use `Blueprint.save(...)`, which writes a *Blueprint* store. The
 older `rr.init(); rr.send_blueprint(); rr.save()` path writes a *Recording*
