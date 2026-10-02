@@ -23,10 +23,37 @@ from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+try:
+    from bebop_vision.foxglove_proto import (CompressedImage,
+                                            CompressedVideo, RawImage)
+    from bebop_vision import navd_proto
+    _PROTO = {m.DESCRIPTOR.full_name: m
+              for m in (CompressedImage, CompressedVideo, RawImage)}
+    _NAVD = {navd_proto.Twist.DESCRIPTOR.full_name: navd_proto.Twist,
+             navd_proto.Odom.DESCRIPTOR.full_name: navd_proto.Odom}
+except ImportError:  # pragma: no cover - standalone use
+    _PROTO = {}
+    _NAVD = {}
+
 try:
     from mcap.reader import make_reader
 except ImportError as exc:  # pragma: no cover
     raise ImportError("pip install mcap") from exc
+
+
+def _foxglove_blob(schema_name, message_encoding, data):
+    """(blob, format) from a Foxglove image/video message.
+
+    Protobuf is what the recorder writes now; JSON is kept so sessions
+    recorded before the protobuf migration still extract.
+    """
+    if message_encoding == "protobuf" and schema_name in _PROTO:
+        msg = _PROTO[schema_name].FromString(data)
+        return msg.data, getattr(msg, "format", None)
+    payload = json.loads(data)
+    return base64.b64decode(payload["data"]), payload.get("format")
 
 
 def _decode_video(aus_by_role):
@@ -72,16 +99,23 @@ def extract(mcap_path, out_dir, tol_us=15_000):
             topic = channel.topic
             if channel.message_encoding == "raw":
                 ticks.setdefault(message.log_time, {})[topic] = message.data
+            elif (channel.message_encoding == "protobuf"
+                  and schema.name in _NAVD):
+                msg = _NAVD[schema.name].FromString(message.data)
+                ticks.setdefault(message.log_time, {})[topic] = {
+                    f.name: getattr(msg, f.name) for f in msg.DESCRIPTOR.fields}
+            elif ((channel.message_encoding == "protobuf"
+                   and schema.name in _PROTO)
+                  or topic in IMAGE_TOPICS):
+                raw, fmt = _foxglove_blob(
+                    schema.name, channel.message_encoding, message.data)
+                if fmt in VIDEO_FORMATS and topic in COLOR_ROLE:
+                    video_aus[COLOR_ROLE[topic]].append(
+                        (message.log_time, fmt, raw))
+                ticks.setdefault(message.log_time, {})[topic] = raw
             else:
-                payload = json.loads(message.data)
-                # Foxglove CompressedImage/Video -> raw codec bytes
-                if topic in IMAGE_TOPICS and isinstance(payload, dict):
-                    raw = base64.b64decode(payload["data"])
-                    if payload.get("format") in VIDEO_FORMATS and topic in COLOR_ROLE:
-                        video_aus[COLOR_ROLE[topic]].append(
-                            (message.log_time, payload["format"], raw))
-                    payload = raw
-                ticks.setdefault(message.log_time, {})[topic] = payload
+                ticks.setdefault(message.log_time, {})[topic] = \
+                    json.loads(message.data)
 
     # Hardware-encoded color (H.265/H.264, CompressedVideo): decode the AU
     # stream in order and align each decoded frame with the log_time of the

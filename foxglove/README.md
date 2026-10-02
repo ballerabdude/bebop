@@ -62,13 +62,21 @@ index layout.
 ### navd sessions (`bebop_navd_layout.json`)
 
 Review layout for navd recorder-v2 MCAP sessions
-(`bebop-vision/bebop_vision/recorder_mcap.py`, JSON-encoded channels):
+(`bebop-vision/bebop_vision/recorder_mcap.py`). Image/video channels are
+Protobuf-encoded Foxglove messages; the custom twist/odom/calib channels
+are JSON:
 
-- **Image panels**: `/color_near` (`foxglove.CompressedImage`),
-  `/depth_near_preview` (16uc1 turbo depth preview),
-  `/bev_map` (top-down 60x60 teacher occupancy map with goal arrow)
-- **Plots**: teleop twist `/cmd_vel.vx|.wz` (the imitation label),
-  odometry, goal vs heading, ground-plane-fit health
+- **Image panels**: `/color_near` + `/color_far` (`foxglove.CompressedVideo`
+  H.265, hardware NVENC; falls back to `foxglove.CompressedImage` JPEG),
+  `/depth_near` + `/depth_far` (16-bit PNG, turbo colormap)
+- **Plots**: teleop twist `/cmd_vel.vx|.wz` (the imitation label), odometry
+  `/odom.x|.y|.theta`
+
+The protobuf encoding also lets the native [Rerun](https://rerun.io) viewer
+open a session directly (`rerun <session>.mcap`): Rerun maps the color
+channels to a `VideoStream` and the depth channels to images, decoding
+H.265 via the system FFmpeg with no GPU. (The Rerun web viewer still needs
+browser HEVC; Foxglove's WebCodecs has no software HEVC path.)
 
 Record a session on the robot, copy it off, open it here:
 

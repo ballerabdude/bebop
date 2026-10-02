@@ -19,8 +19,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from bebop_vision.orbbec import OrbbecRig  # noqa: E402
 
-RATE_HZ = 10.0
-HALF_PERIOD_MS = 1000.0 / 15 / 2  # pairing gate: half the 15 fps period
+RATE_HZ = 30.0
+HALF_PERIOD_MS = 1000.0 / 30 / 2  # pairing gate: half the 30 fps period
 
 
 def stats(vals):

@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package bebop.navd;
+
+// Operator teleop twist (the imitation label).
+message Twist {
+  double vx = 1;
+  double wz = 2;
+  int64 stamp_ns = 3;
+}
+
+// Wheel odometry in the odom frame.
+message Odom {
+  double x = 1;
+  double y = 2;
+  double theta = 3;
+  int64 stamp_ns = 4;
+}

@@ -42,6 +42,74 @@ _ENCODERS = {
     "h265": ("nvv4l2h265enc", "h265parse"),
 }
 
+# Bitstream facts needed to make every keyframe self-contained. NVENC emits
+# the parameter sets once, ahead of the first IDR; later keyframes are CRAs
+# (H.265) and carry none, so a decode that starts at one (Foxglove's seek /
+# GOP replay) fails. See ParameterSetInjector.
+_PARAM_SET_TYPES = {"h265": frozenset({32, 33, 34}),  # VPS, SPS, PPS
+                    "h264": frozenset({7, 8})}        # SPS, PPS
+_IRAP_TYPES = {"h265": frozenset(range(16, 24)),      # BLA/IDR/CRA (+ reserved)
+               "h264": frozenset({5})}                # IDR
+
+
+def _iter_annexb_nalus(data):
+    """Yield (start, end, header_offset) for each Annex-B NAL unit in `data`."""
+    n = len(data)
+    starts = []
+    i = 0
+    while i + 2 < n:
+        if data[i] == 0 and data[i + 1] == 0:
+            if data[i + 2] == 1:
+                starts.append((i, 3))
+                i += 3
+                continue
+            if i + 3 < n and data[i + 2] == 0 and data[i + 3] == 1:
+                starts.append((i, 4))
+                i += 4
+                continue
+        i += 1
+    for j, (off, sc) in enumerate(starts):
+        end = starts[j + 1][0] if j + 1 < len(starts) else n
+        yield off, end, off + sc
+
+
+def _nalu_type(data, header_offset, codec):
+    if header_offset >= len(data):
+        return -1
+    if codec == "h265":
+        return (data[header_offset] >> 1) & 0x3F
+    return data[header_offset] & 0x1F
+
+
+class ParameterSetInjector:
+    """Re-insert cached VPS/SPS/PPS before every keyframe AU that lacks them.
+
+    Foxglove's CompressedVideo contract requires each keyframe message to
+    carry the parameter sets so a decode starting at any keyframe (seek, or
+    the GOP replay its players use) is self-contained. NVENC only emits them
+    ahead of the first IDR, so we remember them from that AU and prepend them
+    to later IRAP (CRA) access units.
+    """
+
+    def __init__(self, codec):
+        self.codec = codec
+        self._param_types = _PARAM_SET_TYPES[codec]
+        self._irap_types = _IRAP_TYPES[codec]
+        self._params = b""
+
+    def process(self, au):
+        nalus = list(_iter_annexb_nalus(au))
+        types = {_nalu_type(au, hdr, self.codec) for _, _, hdr in nalus}
+        present = types & self._param_types
+        if present:
+            self._params = b"".join(
+                au[off:end] for off, end, hdr in nalus
+                if _nalu_type(au, hdr, self.codec) in self._param_types)
+        if (types & self._irap_types) and self._params:
+            if self._param_types - types:  # not already self-contained
+                return self._params + au
+        return au
+
 
 def _nv12_caps(out_width, out_height):
     if out_width and out_height:
@@ -150,10 +218,15 @@ class HwVideoEncoder:
         self._dur_ns = int(round(Gst.SECOND / self.fps)) if self.fps else 0
         gop = int(iframe_interval if iframe_interval is not None
                   else max(1, round(self.fps)))
+        # `idrinterval` (not just `iframeinterval`): for H.264, an "intra
+        # frame" is a non-IDR I-slice that Foxglove does not treat as a
+        # keyframe (and carries no SPS/PPS), so periodic IDRs are required
+        # for seekable recordings. For H.265 this turns the periodic CRAs
+        # into IDRs, which reset the DPB.
         desc = (
             _appsrc_prefix(input_kind, self.width, self.height, self.fps, ow, oh)
             + f"{enc} bitrate={int(bitrate)} control-rate=constant_bitrate "
-            f"iframeinterval={gop} ! "
+            f"iframeinterval={gop} idrinterval={gop} ! "
             f"{parse} ! appsink name=sink sync=false emit-signals=false "
             "max-buffers=8"
         )
@@ -161,6 +234,7 @@ class HwVideoEncoder:
         self._src = self._pipeline.get_by_name("src")
         self._sink = self._pipeline.get_by_name("sink")
         self._pending = collections.deque()
+        self._inject = ParameterSetInjector(codec)
         self._pts = 0
         self._Gst = Gst
         self._pipeline.set_state(Gst.State.PLAYING)
@@ -196,7 +270,8 @@ class HwVideoEncoder:
                 break
             b = s.get_buffer()
             tag = self._pending.popleft() if self._pending else None
-            out.append((bytes(b.extract_dup(0, b.get_size())), tag))
+            au = bytes(b.extract_dup(0, b.get_size()))
+            out.append((self._inject.process(au), tag))
         return out
 
     def flush(self):

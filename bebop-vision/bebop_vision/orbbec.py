@@ -322,7 +322,7 @@ class OrbbecCamera:
         self.read_fps = 0.0
         self._lock = threading.Lock()
         self._frame = None
-        # Short arrival-ordered history (≈0.4 s at 15 fps) — lets consumers
+        # Short arrival-ordered history (≈0.2 s at 30 fps) — lets consumers
         # pair frames across cameras by arrival time instead of trusting two
         # independent latest-wins slots (recorder_mcap NavdRecorder._tick).
         self._history = collections.deque(maxlen=6)

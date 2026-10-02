@@ -147,5 +147,7 @@
   NOT from the flat proto root.
 - GIL: pyorbbecsdk capture must stay serial (§2.8 of docs/navd.md);
   thread pools are fine for numpy/cv2 work only.
-- Dual cameras must run matched 15 fps (hardware sync pairing); 30+30
-  starves the GIL and BEV collapses to ~1 Hz.
+- Dual cameras run matched 30 fps under hardware sync (both cams negotiate
+  848x480@30 on the Thor). The old "matched 15 fps / 30+30 starves the GIL"
+  rule was measured on the Orin Nano with the since-removed BEV worker;
+  with BEV excised the Thor recorder sustains ~29 Hz at 30+30.

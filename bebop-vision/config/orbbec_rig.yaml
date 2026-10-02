@@ -6,12 +6,11 @@
 # depth_profile is the *preferred* profile; the camera service negotiates
 # down to what the device advertises.
 #
-# Far camera runs at 10 fps (full 848x480) even though the swapped USB 3
-# cable now advertises 30 fps: with both cameras filtering 848x480@30 the
-# SDK filter chains starve the GIL and the BEV worker collapses to ~1 Hz
-# (measured 2026-09-06); far@10 restores ~9 Hz fused grids (near@30). The
-# far camera feeds the 1.5-3 m horizon at a 10 Hz BEV tick, so 10 fps is
-# sufficient (4 cm of travel between frames at v_max 0.4 m/s).
+# Both cameras run 848x480@30 (a hardware-synced pair, so both rates match).
+# The old 15 fps choice was dictated by the Orin Nano's GIL cliff with the
+# (now-removed) BEV worker; on the Thor, with BEV excised, the recorder
+# sustains ~28.8 Hz at 30+30 (measured 2026-10-01: dt median 33.4 ms,
+# p95 40 ms, one 128 ms hitch over 8 s).
 robots:
   default:
     cameras:
@@ -20,10 +19,9 @@ robots:
         height_m: 1.27
         pitch_deg: -66.0
         yaw_deg: 0.0
-        # 15 fps: hardware-sync requires matching depth/color rates across
-        # the primary+secondary pair (see far camera note); 15 fps keeps the
-        # SDK filter load under the GIL cliff while phase-locking the pair.
-        depth_profile: [848, 480, 15]
+        # 30 fps, matched across the hardware-synced primary+secondary pair
+        # (see header note).
+        depth_profile: [848, 480, 30]
         # Depth preset (set at open; resets to "Default" on power cycle).
         # Supersedes the old depth_work_mode (presets bundle their own work
         # mode). Built-in "High Accuracy" replaces "High Density" (user
@@ -68,12 +66,10 @@ robots:
         height_m: 1.32
         pitch_deg: -17.4
         yaw_deg: 0.0
-        # 15 fps (was 10): must match the primary's rate for hardware sync
-        # (Orbbec multi-camera sync, Primary + Secondary-synced, delays 0).
-        # Both at 30 starves the GIL -> BEV ~1 Hz (measured 2026-09-06);
-        # 15+15 keeps the filter load at 30 frames/s total, below that cliff,
-        # and far gains 50% data rate vs the old 10 fps.
-        depth_profile: [848, 480, 15]
+        # Match the primary's rate for hardware sync (Orbbec multi-camera
+        # sync, Primary + Secondary-synced, delays 0); 30 fps absorbs the
+        # horizon motion the old 10 fps workaround was trading away.
+        depth_profile: [848, 480, 30]
         depth_preset: High Accuracy
         color_format: mjpg
         depth_filters: [temporal, hole]

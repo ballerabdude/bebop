@@ -104,53 +104,55 @@ def test_mcap_roundtrip(tmp_path):
     assert path.exists() and path.stat().st_size > 10_000
 
     from mcap.reader import make_reader
+    from bebop_vision import foxglove_proto as fp
+    from bebop_vision import navd_proto
+    _PROTO = {m.DESCRIPTOR.full_name: m for m in
+              (fp.CompressedImage, fp.CompressedVideo, fp.RawImage,
+               navd_proto.Twist, navd_proto.Odom)}
     with open(path, "rb") as f:
         msgs = {}
         for schema, channel, message in make_reader(f).iter_messages():
-            payload = message.data
-            if channel.message_encoding == "json":
-                payload = json.loads(payload)
-            msgs.setdefault(channel.topic, []).append(payload)
+            data = message.data
+            if channel.message_encoding == "protobuf":
+                data = _PROTO[schema.name].FromString(data)
+            elif channel.message_encoding == "json":
+                data = json.loads(data)
+            msgs.setdefault(channel.topic, []).append(data)
 
     # every topic present with a sane number of ticks
     for topic in ("/cmd_vel", "/odom",
                   "/color_near", "/color_far",
-                  "/depth_near", "/depth_far",
-                  "/depth_near_preview", "/depth_far_preview"):
+                  "/depth_near", "/depth_far"):
         assert topic in msgs, f"missing {topic}"
         assert len(msgs[topic]) >= 3, f"{topic}: too few messages"
+    assert "/depth_near_preview" not in msgs
     assert len(msgs["/calib"]) == 1  # written once at session start
-    # images decode
+    # images decode (protobuf-encoded foxglove messages)
     import cv2
     color_msg = msgs["/color_near"][0]
-    assert color_msg["format"] == "jpeg"
-    assert color_msg["timestamp"]["sec"] > 1_600_000_000
-    jpg = np.frombuffer(base64.b64decode(color_msg["data"]), np.uint8)
+    assert color_msg.format == "jpeg"
+    assert color_msg.timestamp.seconds > 1_600_000_000
+    jpg = np.frombuffer(color_msg.data, np.uint8)
     color = cv2.imdecode(jpg, cv2.IMREAD_COLOR)
     assert color is not None and color.shape == (800, 1280, 3)
     color_far_msg = msgs["/color_far"][0]
-    assert color_far_msg["format"] == "jpeg"
-    assert color_far_msg["frame_id"] == "far_color"
+    assert color_far_msg.format == "jpeg"
+    assert color_far_msg.frame_id == "far_color"
     # far rides the passthrough path: MCAP payload == camera JPEG bytes
-    assert base64.b64decode(color_far_msg["data"]) == \
-        rig.cameras["far"].read().color_jpeg
-    jpg_far = np.frombuffer(base64.b64decode(color_far_msg["data"]), np.uint8)
+    assert color_far_msg.data == rig.cameras["far"].read().color_jpeg
+    jpg_far = np.frombuffer(color_far_msg.data, np.uint8)
     color_far = cv2.imdecode(jpg_far, cv2.IMREAD_COLOR)
     assert color_far is not None and color_far.shape == (800, 1280, 3)
     png_msg = msgs["/depth_near"][0]
-    assert png_msg["format"] == "png"
-    png = np.frombuffer(base64.b64decode(png_msg["data"]), np.uint8)
+    assert png_msg.format == "png"
+    png = np.frombuffer(png_msg.data, np.uint8)
     depth = cv2.imdecode(png, cv2.IMREAD_UNCHANGED)
     assert depth.dtype == np.uint16 and depth.shape == (480, 848)
     assert (depth == 1500).all()
-    prev = msgs["/depth_near_preview"][0]
-    assert prev["encoding"] == "16UC1" and prev["width"] == 106
-    prev_arr = np.frombuffer(base64.b64decode(prev["data"]), np.uint16)
-    assert prev_arr.size == prev["width"] * prev["height"]
-    # state payloads decode and carry the fake robot's values
+    # telemetry decodes and carries the fake robot's values
     cmd = msgs["/cmd_vel"][0]
-    assert cmd["vx"] == pytest.approx(0.2)
-    assert cmd["wz"] == pytest.approx(-0.1)
+    assert cmd.vx == pytest.approx(0.2)
+    assert cmd.wz == pytest.approx(-0.1)
     assert "/bev_teacher" not in msgs and "/bev_map" not in msgs \
         and "/goal" not in msgs
     calib = msgs["/calib"][0]
@@ -196,6 +198,29 @@ def test_extractor_layout(tmp_path):
         assert img is not None and img.shape == (800, 1280, 3), sub
 
 
+def test_h265_parameter_set_injector():
+    """Every keyframe AU must carry VPS/SPS/PPS so a decode starting at it is
+    self-contained (Foxglove seek / GOP replay); NVENC only emits them once."""
+    from bebop_vision.hw_video import ParameterSetInjector
+
+    def nalu(nal_type):
+        # Annex-B start code + 2-byte H.265 header (type<<1, tid_plus1=1)
+        return b"\x00\x00\x00\x01" + bytes([(nal_type << 1) & 0xFE, 0x01]) + b"\xaa"
+
+    vps, sps, pps = nalu(32), nalu(33), nalu(34)
+    idr, cra, trail = nalu(19), nalu(21), nalu(1)
+    params = vps + sps + pps
+    inj = ParameterSetInjector("h265")
+
+    assert inj.process(params + idr) == params + idr  # first IDR cached as-is
+    assert inj.process(trail) == trail                # delta untouched
+    fixed = inj.process(cra)                          # later CRA made whole
+    assert fixed == params + cra
+    assert inj.process(params + cra) == params + cra  # no duplication
+    # an op that starts mid-GOP matters only at keyframes; P-frames pass through
+    assert inj.process(nalu(1)) == nalu(1)
+
+
 def test_mcap_h265_hardware(tmp_path):
     """Hardware NVENC color path: MCAP carries CompressedVideo H.265 and the
     extractor decodes it back to per-tick training JPEGs. Skipped off-Thor."""
@@ -213,13 +238,28 @@ def test_mcap_h265_hardware(tmp_path):
     rec.stop()
 
     from mcap.reader import make_reader
+    from bebop_vision import foxglove_proto as fp
     with open(path, "rb") as f:
-        color = [json.loads(m.data) for s, c, m in make_reader(f).iter_messages()
+        color = [fp.CompressedVideo.FromString(m.data)
+                 for s, c, m in make_reader(f).iter_messages()
                  if c.topic == "/color_near"]
-    assert color and color[0]["format"] == "h265"
+    assert color and color[0].format == "h265"
     # H.265 access units are start-code prefixed (00 00 00 01 / 00 00 01)
-    au = base64.b64decode(color[0]["data"])
+    au = color[0].data
     assert au[:4] == b"\x00\x00\x00\x01" or au[:3] == b"\x00\x00\x01"
+
+    # Every keyframe AU is self-contained (VPS/SPS/PPS) for Foxglove seeking.
+    from bebop_vision.hw_video import (_IRAP_TYPES, _PARAM_SET_TYPES,
+                                       _iter_annexb_nalus, _nalu_type)
+    irap, param = _IRAP_TYPES["h265"], _PARAM_SET_TYPES["h265"]
+    keyframes = 0
+    for msg in color:
+        raw = msg.data
+        types = {_nalu_type(raw, hdr, "h265") for _, _, hdr in _iter_annexb_nalus(raw)}
+        if types & irap:
+            keyframes += 1
+            assert (types & param) == param, "keyframe AU missing VPS/SPS/PPS"
+    assert keyframes >= 1  # at least the opening IDR
 
     import sys
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))

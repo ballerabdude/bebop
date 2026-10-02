@@ -132,7 +132,7 @@ def run_record_navd(args):
     safety = load_rig_config()["robots"]["default"].get("safety", {})
     max_frame_age_s = float(safety.get("max_frame_age_s", 0.3))
     budget = args.disk_budget_gb * 1e9
-    rate = args.record_rate if args.record_rate is not None else 10.0
+    rate = args.record_rate if args.record_rate is not None else 30.0
     rec = None
     rec_holder = {"rec": None}   # active segment recorder (set by new_segment)
 
@@ -175,7 +175,8 @@ def run_record_navd(args):
             _release_recorder_lock()
         return
 
-    # --auto: follow the drive state; roll segments on size/time.
+    # --auto: follow the drive state; one MCAP per drive session (rolling by
+    # size/time is opt-in via --max-segment-*, 0 = off).
     max_bytes = args.max_segment_mb * 1e6
     max_s = args.max_segment_min * 60.0
     seg = seg_path = seg_t0 = None
@@ -187,8 +188,9 @@ def run_record_navd(args):
             active = _drive_active(robot)
             rolled = False
             if seg is not None:
-                rolled = (seg.bytes_written >= max_bytes
-                          or _time.monotonic() - seg_t0 >= max_s)
+                rolled = ((max_bytes > 0 and seg.bytes_written >= max_bytes)
+                          or (max_s > 0
+                              and _time.monotonic() - seg_t0 >= max_s))
             if active and seg is None:
                 try:
                     seg, seg_path, seg_t0 = new_segment()
@@ -247,11 +249,15 @@ def main():
     parser.add_argument("--seconds", type=float,
                         help="stop after this many seconds")
     parser.add_argument("--record-rate", type=float, default=None,
-                        help="recording rate in Hz (default: 10)")
-    parser.add_argument("--max-segment-mb", type=float, default=400.0,
-                        help="record-navd --auto: roll segment above this size")
-    parser.add_argument("--max-segment-min", type=float, default=10.0,
-                        help="record-navd --auto: roll segment above this many minutes")
+                        help="recording rate in Hz (default: 30; the dual "
+                             "cameras are hardware-synced at 30 fps, so 30 "
+                             "captures every frame — higher only duplicates)")
+    parser.add_argument("--max-segment-mb", type=float, default=0.0,
+                        help="record-navd --auto: roll the MCAP above this "
+                             "size (0 = off, one file per drive session)")
+    parser.add_argument("--max-segment-min", type=float, default=0.0,
+                        help="record-navd --auto: roll the MCAP above this "
+                             "many minutes (0 = off)")
     parser.add_argument("--disk-budget-gb", type=float, default=20.0,
                         help="record-navd --auto: prune oldest sessions below this total")
     parser.add_argument("--rig", metavar="YAML",

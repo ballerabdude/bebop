@@ -156,16 +156,16 @@ not this document — is the source of truth for extrinsics.
 
 | Stream | Format | Rate | Purpose |
 |---|---|---|---|
-| depth (both cams) | 848x480 @ 15 fps, Y16 (uint16, mm) | hardware-synced pair, ~10 Hz processed | BEV geometry |
-| color (PE) | 1280x800 @ 15 fps, MJPG | capture only | dataset recording, debugging |
-| color (ED) | 1280x800 @ 15 fps, MJPG | capture only | dataset recording |
+| depth (both cams) | 848x480 @ 30 fps, Y16 (uint16, mm) | hardware-synced pair, ~29 Hz processed | BEV geometry |
+| color (PE) | 1280x800 @ 30 fps, MJPG | capture only | dataset recording, debugging |
+| color (ED) | 1280x800 @ 30 fps, MJPG | capture only | dataset recording |
 
-Rates are **matched 15 + 15 by requirement**: the multi-camera sync hub
-needs matched rates, and 30+30 starves the GIL (BEV collapsed to ~1 Hz
-when tried). 15+15 keeps filters under the cliff (BEV 9.8 Hz, recorder
-8 Hz, far data +50% vs the old 10 fps far field).
+Rates are **matched 30 + 30 by requirement**: the multi-camera sync hub
+needs matched rates. The old 15+15 pairing was a workaround for the Orin
+Nano's GIL cliff with the (since-removed) BEV worker; on the Thor the
+recorder sustains ~29 Hz at 30+30 (recorder default `--record-rate 30`).
 
-Bandwidth: 2x depth Y16 @ 848x480x15 ≈ 24 MB/s total — fits on separate
+Bandwidth: 2x depth Y16 @ 848x480x30 ≈ 48 MB/s total — fits on separate
 SuperSpeed lanes; do **not** put both cameras on a shared USB 2.0 path.
 
 Frame sync: **hardware sync via the Orbbec Multi-Camera Sync Hub** (8-pin,
@@ -299,8 +299,8 @@ Color streams are recorded but do not participate in Phase A control.
 
 ### 6.1 `bebop_vision/orbbec.py` — camera service
 
-- `OrbbecCamera(serial, role, depth_profile=(848,480,15), color_profile=None)`
-  (15 fps since the hardware-sync pairing; 30 was the pre-sync default).
+- `OrbbecCamera(serial, role, depth_profile=(848,480,30), color_profile=None)`
+  (30 fps, matched across the hardware-synced pair; the config overrides it).
   Opens via `ob.Context().query_devices()` matched by serial (never index —
   enumeration order is not stable with two identical devices).
 - Depth filters enabled per Section 3.3. Optional color stream (recording).
@@ -475,19 +475,16 @@ Recording format: **one MCAP file per session**, written on-robot by
 single data artifact. MCAP is already the firmware's capture format (policy
 capture), indexed, and opens directly in Foxglove for review.
 
-Channels (JSON-encoded, ~10 Hz):
+Channels (MCAP, 30 Hz):
 
 | Channel | Payload |
 |---|---|
-| `/color_near` | `foxglove.CompressedImage` (JPEG, q85, base64 JSON) — renders in Foxglove Image panel |
-| `/depth_near`, `/depth_far` | raw PNG (uint16 mm, lossless — **training channels**) |
-| `/depth_near_preview` | `foxglove.RawImage` 106x60 16uc1 — dashboard depth view |
-| `/bev_map` | `foxglove.RawImage` 60x60 rgb8 top-down teacher map + goal arrow |
-| `/cmd_vel` | `{vx, wz}` — the operator's teleop twist from firmware telemetry |
-| `/odom` | `{x, y, theta}` |
-| `/goal` | `{type, heading_rad \| xy}` — current goal slot |
-| `/bev_teacher` | 60x60 uint8 geometric grid (raw + plane_ok) — computed online by the Phase A code |
-| `/calib` | intrinsics + rig extrinsics, once at session start |
+| `/color_near` | `foxglove.CompressedVideo` H.265 (hardware NVENC; JPEG fallback) |
+| `/color_far` | same encoding |
+| `/depth_near`, `/depth_far` | `foxglove.CompressedImage` 16-bit PNG (lossless — **training channels**) |
+| `/cmd_vel` | `bebop.navd.Twist` Protobuf `{vx, wz}` — operator teleop twist |
+| `/odom` | `bebop.navd.Odom` Protobuf `{x, y, theta}` |
+| `/calib` | intrinsics + rig extrinsics, JSON, once at session start |
 
 Review sessions in Foxglove with `foxglove/bebop_navd_layout.json`
 (generate via `python3 foxglove/make_foxglove_layout.py --layout navd`).

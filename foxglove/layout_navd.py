@@ -1,4 +1,4 @@
-"""Foxglove layout: navd MCAP session review (color, depth preview, BEV map,
+"""Foxglove layout: navd MCAP session review (color, depth preview,
 teleop twist / odometry plots).
 
 Channels are the JSON-encoded ones written by
@@ -41,11 +41,10 @@ def build():
     config_by_id = {
         "Image!color": image("/color_near", "Color (near)"),
         "Image!color_far": image("/color_far", "Color (far)"),
-        "Image!depth": image("/depth_near_preview", "Depth (near)",
+        "Image!depth": image("/depth_near", "Depth (near)",
                              minValue=300, maxValue=6000, colormap="turbo"),
-        "Image!depth_far": image("/depth_far_preview", "Depth (far)",
+        "Image!depth_far": image("/depth_far", "Depth (far)",
                                  minValue=300, maxValue=6000, colormap="turbo"),
-        "Image!map": image("/bev_map", "BEV teacher map (60x60, 3x3 m)"),
         "Plot!cmd": plot([
             state_path("/cmd_vel", "vx", "vx (m/s)"),
             state_path("/cmd_vel", "wz", "wz (rad/s)"),
@@ -53,20 +52,14 @@ def build():
         "Plot!odom": plot([
             state_path("/odom", "x", "x (m)"),
             state_path("/odom", "y", "y (m)"),
-        ], title="Odometry (m)"),
-        "Plot!goal": plot([
-            state_path("/goal", "heading_rad", "heading goal (rad)"),
-            state_path("/odom", "theta", "odom theta (rad)"),
-        ], title="Goal vs heading"),
-        "Plot!plane": plot([
-            state_path("/bev_teacher.plane_ok", "near", "plane_ok near"),
-            state_path("/bev_teacher.plane_ok", "far", "plane_ok far"),
-        ], title="Ground-plane fit health"),
+            state_path("/odom", "theta", "theta (rad)"),
+        ], title="Odometry"),
     }
 
-    # Three columns: color (near/far) | depth previews (near/far) | BEV map
-    # on top, plots below (2x2 mosaic). Foxglove mosaic nodes are binary
-    # splits, so three columns = row(color, row(depth, map+plots)).
+    # Three columns: color (near/far) | depth previews (near/far) | plots
+    # (teleop twist, odometry). The recorder emits only these channels; the
+    # former BEV-map / goal / ground-plane panels were dropped with the BEV
+    # teacher stack.
     layout = {
         "direction": "row",
         "first": {
@@ -85,27 +78,13 @@ def build():
             },
             "second": {
                 "direction": "column",
-                "first": "Image!map",
-                "second": {
-                    "direction": "row",
-                    "first": {
-                        "direction": "column",
-                        "first": "Plot!cmd",
-                        "second": "Plot!odom",
-                        "splitPercentage": 50,
-                    },
-                    "second": {
-                        "direction": "column",
-                        "first": "Plot!goal",
-                        "second": "Plot!plane",
-                        "splitPercentage": 50,
-                    },
-                },
-                "splitPercentage": 45,
+                "first": "Plot!cmd",
+                "second": "Plot!odom",
+                "splitPercentage": 50,
             },
-            "splitPercentage": 38,
+            "splitPercentage": 50,
         },
-        "splitPercentage": 28,
+        "splitPercentage": 34,
     }
 
     return foxglove_doc(config_by_id, layout)

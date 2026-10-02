@@ -31,49 +31,35 @@
     "Image!depth": {
       "foxglovePanelTitle": "Depth (near)",
       "imageMode": {
-        "imageTopic": "/depth_near_preview",
+        "imageTopic": "/depth_near",
         "minValue": 300,
         "maxValue": 6000,
         "colormap": "turbo"
       },
       "imageTopics": [
         {
-          "topic": "/depth_near_preview"
+          "topic": "/depth_near"
         }
       ],
-      "topic": "/depth_near_preview",
-      "imageTopic": "/depth_near_preview",
+      "topic": "/depth_near",
+      "imageTopic": "/depth_near",
       "mode": "image"
     },
     "Image!depth_far": {
       "foxglovePanelTitle": "Depth (far)",
       "imageMode": {
-        "imageTopic": "/depth_far_preview",
+        "imageTopic": "/depth_far",
         "minValue": 300,
         "maxValue": 6000,
         "colormap": "turbo"
       },
       "imageTopics": [
         {
-          "topic": "/depth_far_preview"
+          "topic": "/depth_far"
         }
       ],
-      "topic": "/depth_far_preview",
-      "imageTopic": "/depth_far_preview",
-      "mode": "image"
-    },
-    "Image!map": {
-      "foxglovePanelTitle": "BEV teacher map (60x60, 3x3 m)",
-      "imageMode": {
-        "imageTopic": "/bev_map"
-      },
-      "imageTopics": [
-        {
-          "topic": "/bev_map"
-        }
-      ],
-      "topic": "/bev_map",
-      "imageTopic": "/bev_map",
+      "topic": "/depth_far",
+      "imageTopic": "/depth_far",
       "mode": "image"
     },
     "Plot!cmd": {
@@ -102,7 +88,7 @@
       "sidebarDimension": 240
     },
     "Plot!odom": {
-      "foxglovePanelTitle": "Odometry (m)",
+      "foxglovePanelTitle": "Odometry",
       "paths": [
         {
           "value": "/odom.x",
@@ -115,55 +101,11 @@
           "enabled": true,
           "label": "y (m)",
           "timestampMethod": "receiveTime"
-        }
-      ],
-      "showLegend": true,
-      "legendDisplay": "top",
-      "showPlotValuesInLegend": true,
-      "showXAxisLabels": true,
-      "showYAxisLabels": true,
-      "isSynced": true,
-      "xAxisVal": "timestamp",
-      "sidebarDimension": 240
-    },
-    "Plot!goal": {
-      "foxglovePanelTitle": "Goal vs heading",
-      "paths": [
-        {
-          "value": "/goal.heading_rad",
-          "enabled": true,
-          "label": "heading goal (rad)",
-          "timestampMethod": "receiveTime"
         },
         {
           "value": "/odom.theta",
           "enabled": true,
-          "label": "odom theta (rad)",
-          "timestampMethod": "receiveTime"
-        }
-      ],
-      "showLegend": true,
-      "legendDisplay": "top",
-      "showPlotValuesInLegend": true,
-      "showXAxisLabels": true,
-      "showYAxisLabels": true,
-      "isSynced": true,
-      "xAxisVal": "timestamp",
-      "sidebarDimension": 240
-    },
-    "Plot!plane": {
-      "foxglovePanelTitle": "Ground-plane fit health",
-      "paths": [
-        {
-          "value": "/bev_teacher.plane_ok.near",
-          "enabled": true,
-          "label": "plane_ok near",
-          "timestampMethod": "receiveTime"
-        },
-        {
-          "value": "/bev_teacher.plane_ok.far",
-          "enabled": true,
-          "label": "plane_ok far",
+          "label": "theta (rad)",
           "timestampMethod": "receiveTime"
         }
       ],
@@ -200,26 +142,12 @@
       },
       "second": {
         "direction": "column",
-        "first": "Image!map",
-        "second": {
-          "direction": "row",
-          "first": {
-            "direction": "column",
-            "first": "Plot!cmd",
-            "second": "Plot!odom",
-            "splitPercentage": 50
-          },
-          "second": {
-            "direction": "column",
-            "first": "Plot!goal",
-            "second": "Plot!plane",
-            "splitPercentage": 50
-          }
-        },
-        "splitPercentage": 45
+        "first": "Plot!cmd",
+        "second": "Plot!odom",
+        "splitPercentage": 50
       },
-      "splitPercentage": 38
+      "splitPercentage": 50
     },
-    "splitPercentage": 28
+    "splitPercentage": 34
   }
 }
