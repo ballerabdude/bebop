@@ -17,8 +17,11 @@ User=root
 Group=root
 WorkingDirectory=/home/bebop/bebop/bebop-vision
 Environment=PYTHONUNBUFFERED=1
-# Give the downloader a private /run/bebop for its status files.
+# Give the downloader a private /run/bebop for its status files. Preserve it
+# across unit exit so the app can still read the outcome (progress, or the
+# failure reason like a token without access) after the process ends.
 RuntimeDirectory=bebop
+RuntimeDirectoryPreserve=yes
 
 # %i is the catalog model id (see config/models.yaml). The token is read
 # from /etc/bebop/hf_token; progress is written to /run/bebop/models/%i.json

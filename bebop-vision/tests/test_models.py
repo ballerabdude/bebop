@@ -97,3 +97,29 @@ def test_classify_and_detail_map_auth_errors():
         pass
 
     assert download_model._classify(NotFound("x")) == "failed"
+
+
+def test_download_progress_counts_cache_growth(monkeypatch, tmp_path):
+    """The partial blob is etag-named; progress must come from cache growth."""
+    spec = models.ModelSpec(id="m", kind="hf", repo="a/b", files=("f.bin",), bytes=100)
+    writes = []
+    monkeypatch.setattr(
+        download_model.models, "write_status", lambda _id, **kw: writes.append(kw)
+    )
+
+    def fake_download(_spec, filename, _token, dest):
+        cache = dest / ".cache" / "huggingface" / "download"
+        cache.mkdir(parents=True, exist_ok=True)
+        # etag-named partial, NOT the model filename
+        (cache / "apa6_blob.incomplete").write_bytes(b"x" * 40)
+        import time as _time
+
+        _time.sleep(0.7)  # let the polling loop observe the partial
+        (dest / filename).write_bytes(b"y" * 100)
+
+    monkeypatch.setattr(download_model, "_download_file", fake_download)
+    download_model._download_with_progress(spec, None, tmp_path, 100)
+
+    partial = [w for w in writes if 0 < w.get("bytes_downloaded", 0) < 100]
+    assert partial, f"expected an in-flight progress sample, got {writes}"
+    assert writes[-1]["bytes_downloaded"] >= 100
