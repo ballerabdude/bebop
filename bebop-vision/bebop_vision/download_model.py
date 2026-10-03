@@ -34,23 +34,29 @@ def _final_bytes(spec: ModelSpec, dest: Path) -> int:
     return total
 
 
-def _downloaded_bytes(spec: ModelSpec, dest: Path) -> int:
-    """Best-effort progress: completed files + in-flight ``.incomplete`` blobs."""
-    total = _final_bytes(spec, dest)
+def _cache_bytes(dest: Path) -> int:
+    """Bytes currently staged in the Hugging Face cache (the `.incomplete`
+    blobs). The partial file is named by etag, not by the model filename, so
+    we count the whole download cache rather than matching names."""
+    total = 0
     cache = dest / ".cache"
     if cache.is_dir():
-        wanted = {Path(name).name for name in spec.files}
         try:
-            incomplete = list(cache.rglob("*.incomplete"))
+            entries = list(cache.rglob("*"))
         except OSError:
-            incomplete = []
-        for p in incomplete:
-            if any(w in p.name for w in wanted):
-                try:
+            entries = []
+        for p in entries:
+            try:
+                if p.is_file():
                     total += p.stat().st_size
-                except OSError:
-                    pass
+            except OSError:
+                pass
     return total
+
+
+def _downloaded_bytes(spec: ModelSpec, dest: Path) -> int:
+    """Best-effort progress: completed files + in-flight cache bytes."""
+    return _final_bytes(spec, dest) + _cache_bytes(dest)
 
 
 def _classify(exc: BaseException) -> str:
@@ -126,8 +132,10 @@ def _download_file(spec: ModelSpec, filename: str, token: str | None, dest: Path
 
 
 def _download_with_progress(spec: ModelSpec, token: str | None, dest: Path, total: int) -> None:
-    last = 0
     for filename in spec.files:
+        # Baseline the cache so progress reflects only the current file
+        # (the partial blob is etag-named and not attributable by filename).
+        base = _cache_bytes(dest)
         done = threading.Event()
         errors: list[BaseException] = []
 
@@ -142,12 +150,12 @@ def _download_with_progress(spec: ModelSpec, token: str | None, dest: Path, tota
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
         while not done.wait(0.5):
-            last = _downloaded_bytes(spec, dest)
+            downloaded = _final_bytes(spec, dest) + max(0, _cache_bytes(dest) - base)
             models.write_status(
                 spec.id,
                 state="downloading",
                 detail=f"{spec.repo}/{filename}",
-                bytes_downloaded=last,
+                bytes_downloaded=min(downloaded, total) if total else downloaded,
                 bytes_total=total,
             )
         thread.join()
