@@ -1526,8 +1526,8 @@ joints:
     #[test]
     fn shipped_bebop_wheeled_yaml_parses_power_block() {
         // Guards the deployed wheeled config: the chassis reuses the V2
-        // power board (can4, addr 0xAA) and 13s NMC pack, and the parser
-        // must auto-register both `can2` (wheels) and `can4` (power) in
+        // power board (can0, addr 0xAA) and 13s NMC pack, and the parser
+        // must auto-register both `can4` (wheels) and `can0` (power) in
         // the bus pool — the YAML deliberately carries no explicit
         // `can_interfaces:` list. Losing the `power:` block silently
         // hides the operator app's battery card (present=false).
@@ -1537,14 +1537,14 @@ joints:
         assert_eq!(cfg.num_wheels(), 2);
         assert!(cfg.drive.is_some());
         let power = cfg.power.as_ref().expect("power block present");
-        assert_eq!(power.can_interface, "can4");
+        assert_eq!(power.can_interface, "can0");
         assert_eq!(power.power_id, 170);
         assert_eq!(power.poll_interval_ms, 1000);
         assert_eq!(power.battery_cells, 13);
         assert!((power.cell_full_voltage - 4.20).abs() < 1e-6);
         assert!((power.cell_empty_voltage - 3.00).abs() < 1e-6);
-        assert!(cfg.can_interfaces.contains(&"can2".to_string()));
         assert!(cfg.can_interfaces.contains(&"can4".to_string()));
+        assert!(cfg.can_interfaces.contains(&"can0".to_string()));
     }
 }
 

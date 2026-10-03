@@ -129,9 +129,10 @@ struct CapturesResponse {
     files: Vec<CaptureEntry>,
 }
 
-/// List all `policy_capture_*.mcap` files in the capture dir, newest
-/// first. The currently-open segment (still being appended to by the
-/// writer) is included so the operator can grab a partial recording
+/// List every MCAP in the capture dir — `policy_capture_*` (firmware),
+/// `navd_session_*` (bebop-vision) and `system_*` (always-on system log) —
+/// newest first. The currently-open segment (still being appended to by
+/// the writer) is included so the operator can grab a partial recording
 /// if needed — `ServeDir` will stream whatever bytes are on disk at
 /// download time.
 async fn list_captures(State(state): State<AppState>) -> impl IntoResponse {
@@ -149,11 +150,14 @@ async fn list_captures(State(state): State<AppState>) -> impl IntoResponse {
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            // navd recorder sessions (bebop-vision) share this dir and are
+            // navd recorder sessions (bebop-vision) and the always-on
+            // system log (bebop-linux) share this dir and are
             // listed/downloadable alongside policy captures.
             let is_mcap = name.ends_with(".mcap");
             if !(is_mcap
-                && (name.starts_with("policy_capture_") || name.starts_with("navd_session_")))
+                && (name.starts_with("policy_capture_")
+                    || name.starts_with("navd_session_")
+                    || name.starts_with("system_")))
             {
                 continue;
             }
