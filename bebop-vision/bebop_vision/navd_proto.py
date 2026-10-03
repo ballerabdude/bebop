@@ -15,6 +15,8 @@ from bebop_vision.proto.navd import telemetry_pb2
 
 Twist = telemetry_pb2.Twist
 Odom = telemetry_pb2.Odom
+ImuAccel = telemetry_pb2.ImuAccel
+ImuGyro = telemetry_pb2.ImuGyro
 
 
 def schema(message_cls):

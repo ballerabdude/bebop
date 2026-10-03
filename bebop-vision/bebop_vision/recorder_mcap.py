@@ -17,6 +17,8 @@ Channels:
   /depth_far    same encoding
   /cmd_vel      bebop.navd.Twist (Protobuf) — operator twist (teleop label)
   /odom         bebop.navd.Odom (Protobuf)
+  /imu_accel_<role>  bebop.navd.ImuAccel (Protobuf, full accel rate)
+  /imu_gyro_<role>   bebop.navd.ImuGyro  (Protobuf, full gyro rate)
   /calib        JSON intrinsics + rig extrinsics, written once at start
 
 All image/video/telemetry channels are Protobuf-encoded so Rerun's MCAP
@@ -68,6 +70,11 @@ class NavdRecorder:
                  max_frame_age_s=0.3, color_codec="h265"):
         self.rig = rig
         self.robot = robot
+        # Segment start (monotonic): the cameras run across segments and keep
+        # buffering IMU, so the first tick would otherwise flush the idle-period
+        # backlog into this segment (IMU predating the video/depth). Drop any
+        # sample older than this.
+        self._t0 = time.monotonic()
         self.rate_hz = rate_hz
         self.jpeg_quality = jpeg_quality
         self.max_frame_age_s = max_frame_age_s
@@ -155,6 +162,20 @@ class NavdRecorder:
                 self._depth_topic("far"), "protobuf",
                 self._sch_compressed_image),
         }
+        # Camera IMU: full-rate accel/gyro samples drained from each camera's
+        # capture-thread buffer (not one latest-sample-per-tick). Log_time is
+        # host epoch reconstructed from the sample's monotonic recv_ts;
+        # `device_stamp_us` is the camera clock VIO fuses on.
+        self._sch_imu_accel = self._writer.register_schema(
+            *navd_proto.schema(navd_proto.ImuAccel))
+        self._sch_imu_gyro = self._writer.register_schema(
+            *navd_proto.schema(navd_proto.ImuGyro))
+        self._imu_ch = {
+            role: {"accel": self._writer.register_channel(
+                       f"/imu_accel_{role}", "protobuf", self._sch_imu_accel),
+                   "gyro": self._writer.register_channel(
+                       f"/imu_gyro_{role}", "protobuf", self._sch_imu_gyro)}
+            for role in self.rig.cameras}
         self._write_calib()
 
     # --- payloads ------------------------------------------------------------
@@ -276,6 +297,7 @@ class NavdRecorder:
                   navd_proto.Odom(x=float(st.odom[0]), y=float(st.odom[1]),
                                   theta=float(st.odom[2]),
                                   stamp_ns=log_ns).SerializeToString(), log_ns)
+        self._drain_imu(time.time_ns() - time.monotonic_ns())
         # Camera reads stay serial in this thread (pyorbbecsdk must not be
         # pooled — §2.8). BEV + PNG/JPEG encodes are numpy/cv2 (GIL-releasing)
         # and run as per-camera jobs in the pool; results are written
@@ -352,6 +374,36 @@ class NavdRecorder:
                               foxglove_proto.CompressedImage,
                               f"{role}_color", "jpeg", job["jpg"], log_ns),
                           log_ns)
+
+    def _drain_imu(self, wall_off):
+        """Write all buffered camera IMU samples at their own log times.
+
+        The buffer is drained every tick so nothing is dropped between ticks
+        (unlike the image path's latest-wins slots). `wall_off` converts the
+        sample's monotonic arrival time to host epoch ns; `device_stamp_us`
+        rides along for device-clock fusion. Samples older than the segment
+        start are discarded (the cameras buffer across segments).
+        """
+        for role, cam in self.rig.cameras.items():
+            drain = getattr(cam, "drain_imu", None)
+            chans = self._imu_ch.get(role)
+            if drain is None or not chans:
+                continue
+            for kind, x, y, z, dev_us, recv_ts in drain():
+                if recv_ts < self._t0:
+                    continue
+                log_ns = int(recv_ts * 1e9) + wall_off
+                if kind == "accel":
+                    msg = navd_proto.ImuAccel(ax=x, ay=y, az=z,
+                                              stamp_ns=log_ns,
+                                              device_stamp_us=int(dev_us))
+                    cid = chans["accel"]
+                else:
+                    msg = navd_proto.ImuGyro(gx=x, gy=y, gz=z,
+                                             stamp_ns=log_ns,
+                                             device_stamp_us=int(dev_us))
+                    cid = chans["gyro"]
+                self._add(cid, msg.SerializeToString(), log_ns)
 
     def _write_video_color(self, role, payload, kind, log_ns, meta):
         """Push one color frame through this role's NVENC and write the AUs.

@@ -39,6 +39,11 @@ robots:
         # SpatialModerateFilter cost ~60% for no validity gain. `[]`
         # disables all host filtering.
         depth_filters: [temporal, hole]
+        # Camera IMU (accel + gyro) captured into the session MCAP as a VIO
+        # input. Rates: 50/100/200/500/1000 Hz; the device clock is shared
+        # with depth/color (tools/orbbec_imu_probe).
+        imu: true
+        imu_hz: 200
         # Self-view mask shapes in DEPTH coordinates (848x480) — orbbec.py
         # zeroes these pixels before the frame is published. Two forms per
         # entry, mix freely:
@@ -73,6 +78,8 @@ robots:
         depth_preset: High Accuracy
         color_format: mjpg
         depth_filters: [temporal, hole]
+        imu: true
+        imu_hz: 200
     bev:
       range_m: 3.0        # forward horizon
       width_m: 3.0        # lateral span (-1.5..+1.5)

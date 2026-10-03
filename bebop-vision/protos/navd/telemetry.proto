@@ -16,3 +16,23 @@ message Odom {
   double theta = 3;
   int64 stamp_ns = 4;
 }
+
+// Camera IMU sample (one axis triad). `stamp_ns` is the host epoch time
+// assigned at record time (MCAP log_time); `device_stamp_us` is the camera
+// device clock the accel/gyro/depth streams share, kept for offline VIO
+// fusion. The IMU is a fusion input, not pose ground truth.
+message ImuAccel {
+  double ax = 1;
+  double ay = 2;
+  double az = 3;
+  int64 stamp_ns = 4;
+  int64 device_stamp_us = 5;
+}
+
+message ImuGyro {
+  double gx = 1;
+  double gy = 2;
+  double gz = 3;
+  int64 stamp_ns = 4;
+  int64 device_stamp_us = 5;
+}

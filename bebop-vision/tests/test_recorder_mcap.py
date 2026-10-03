@@ -53,6 +53,11 @@ class FakeCamera:
     def recent(self):
         return list(self._hist)
 
+    def drain_imu(self):
+        t = time.monotonic()
+        return [("accel", 0.0, 0.0, 9.81, self._n, t),
+                ("gyro", 0.0, 0.0, 0.01, self._n, t)]
+
 
 class ScriptedCamera:
     """Camera with preset history: recv_ts/stamp list, freshest last."""
@@ -108,7 +113,8 @@ def test_mcap_roundtrip(tmp_path):
     from bebop_vision import navd_proto
     _PROTO = {m.DESCRIPTOR.full_name: m for m in
               (fp.CompressedImage, fp.CompressedVideo, fp.RawImage,
-               navd_proto.Twist, navd_proto.Odom)}
+               navd_proto.Twist, navd_proto.Odom,
+               navd_proto.ImuAccel, navd_proto.ImuGyro)}
     with open(path, "rb") as f:
         msgs = {}
         for schema, channel, message in make_reader(f).iter_messages():
@@ -122,7 +128,9 @@ def test_mcap_roundtrip(tmp_path):
     # every topic present with a sane number of ticks
     for topic in ("/cmd_vel", "/odom",
                   "/color_near", "/color_far",
-                  "/depth_near", "/depth_far"):
+                  "/depth_near", "/depth_far",
+                  "/imu_accel_near", "/imu_gyro_near",
+                  "/imu_accel_far", "/imu_gyro_far"):
         assert topic in msgs, f"missing {topic}"
         assert len(msgs[topic]) >= 3, f"{topic}: too few messages"
     assert "/depth_near_preview" not in msgs
@@ -196,6 +204,11 @@ def test_extractor_layout(tmp_path):
     for sub in ("color", "color_far"):
         img = cv2.imread(str(out / sub / f"{row['stamp_ns']:020d}.jpg"))
         assert img is not None and img.shape == (800, 1280, 3), sub
+    for role in ("near", "far"):
+        for kind in ("accel", "gyro"):
+            d = np.load(out / f"imu_{kind}_{role}.npz")
+            assert d["device_us"].shape == d["x"].shape
+            assert d["device_us"].size >= 3
 
 
 def test_h265_parameter_set_injector():
@@ -349,3 +362,37 @@ def test_drive_active():
     robot.state.mode = pb.MODE_RUN_POLICY
     robot.state.connected = False
     assert not _drive_active(robot)
+
+
+class StaleImuCamera(FakeCamera):
+    """Drains one pre-segment sample (camera buffered it across segments)."""
+
+    def __init__(self, serial, role):
+        super().__init__(serial, role)
+        self._stale = True
+
+    def drain_imu(self):
+        out = []
+        if self._stale:
+            self._stale = False
+            out.append(("accel", 1.0, 1.0, 1.0, 1,
+                        time.monotonic() - 100.0))
+        return out + super().drain_imu()
+
+
+def test_imu_backlog_before_segment_dropped(tmp_path):
+    """IMU buffered before the segment opens must not precede the video."""
+    from mcap.reader import make_reader
+    from bebop_vision import navd_proto
+    rig = FakeRig()
+    rig.cameras["near"] = StaleImuCamera("S-NEAR", "near")
+    path = tmp_path / "s.mcap"
+    rec = NavdRecorder(rig, FakeRobot(), path, rate_hz=20.0, color_codec=None)
+    rec.start()
+    time.sleep(0.4)
+    rec.stop()
+    with open(path, "rb") as f:
+        ax = [navd_proto.ImuAccel.FromString(m.data).ax
+              for s, c, m in make_reader(f).iter_messages()
+              if c.topic == "/imu_accel_near"]
+    assert ax and all(v != 1.0 for v in ax), "stale pre-segment IMU leaked in"

@@ -13,7 +13,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14navd/telemetry.proto\x12\nbebop.navd\"1\n\x05Twist\x12\n\n\x02vx\x18\x01 \x01(\x01\x12\n\n\x02wz\x18\x02 \x01(\x01\x12\x10\n\x08stamp_ns\x18\x03 \x01(\x03\"=\n\x04Odom\x12\t\n\x01x\x18\x01 \x01(\x01\x12\t\n\x01y\x18\x02 \x01(\x01\x12\r\n\x05theta\x18\x03 \x01(\x01\x12\x10\n\x08stamp_ns\x18\x04 \x01(\x03\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14navd/telemetry.proto\x12\nbebop.navd\"1\n\x05Twist\x12\n\n\x02vx\x18\x01 \x01(\x01\x12\n\n\x02wz\x18\x02 \x01(\x01\x12\x10\n\x08stamp_ns\x18\x03 \x01(\x03\"=\n\x04Odom\x12\t\n\x01x\x18\x01 \x01(\x01\x12\t\n\x01y\x18\x02 \x01(\x01\x12\r\n\x05theta\x18\x03 \x01(\x01\x12\x10\n\x08stamp_ns\x18\x04 \x01(\x03\"Y\n\x08ImuAccel\x12\n\n\x02\x61x\x18\x01 \x01(\x01\x12\n\n\x02\x61y\x18\x02 \x01(\x01\x12\n\n\x02\x61z\x18\x03 \x01(\x01\x12\x10\n\x08stamp_ns\x18\x04 \x01(\x03\x12\x17\n\x0f\x64\x65vice_stamp_us\x18\x05 \x01(\x03\"X\n\x07ImuGyro\x12\n\n\x02gx\x18\x01 \x01(\x01\x12\n\n\x02gy\x18\x02 \x01(\x01\x12\n\n\x02gz\x18\x03 \x01(\x01\x12\x10\n\x08stamp_ns\x18\x04 \x01(\x03\x12\x17\n\x0f\x64\x65vice_stamp_us\x18\x05 \x01(\x03\x62\x06proto3')
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'navd.telemetry_pb2', globals())
@@ -24,4 +24,8 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _TWIST._serialized_end=85
   _ODOM._serialized_start=87
   _ODOM._serialized_end=148
+  _IMUACCEL._serialized_start=150
+  _IMUACCEL._serialized_end=239
+  _IMUGYRO._serialized_start=241
+  _IMUGYRO._serialized_end=329
 # @@protoc_insertion_point(module_scope)

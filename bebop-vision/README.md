@@ -59,6 +59,7 @@ from SAM × measured depth.)
 | `tools/dashboard_api.py` | FastAPI backend for the review dashboard |
 | `dashboard/` | Review dashboard (React): replay, overlay, hand painting |
 | `tools/set_self_mask.py` | Chassis self-view mask painter |
+| `tools/orbbec_imu_probe.py` | Camera IMU (accel/gyro) profiles + depth-clock offset probe |
 | `weights/` | Checkpoints (gitignored) |
 | `datasets/` | Extracted datasets (gitignored) |
 

@@ -223,6 +223,47 @@ def _negotiate_color_profile(sensor, ob, preferred, want_format="rgb"):
     return None
 
 
+def _negotiate_imu_profile(sensor, ob, kind, want_hz):
+    """Pick the accel/gyro profile closest at or below `want_hz`.
+
+    Returns (hz, full_scale_range, sample_rate) enums ready for
+    `Config.enable_{accel,gyro}_stream`, or None if the sensor has none.
+    The sample rate is normalized to the gyro-rate enum because the SDK's
+    `enable_accel_stream` is typed against it (see tools/orbbec_imu_probe).
+    """
+    cands = []
+    plist = sensor.get_stream_profile_list()
+    for i in range(plist.get_count()):
+        p = plist.get_stream_profile_by_index(i)
+        is_accel = p.is_accel_stream_profile()
+        if (kind == "accel") != is_accel:
+            continue
+        p = p.as_accel_stream_profile() if is_accel else p.as_gyro_stream_profile()
+        try:
+            hz = float(ob.convert_imu_sample_rate_to_value(p.get_sample_rate()))
+        except Exception:
+            hz = 0.0
+        try:
+            rate = ob.convert_imu_sample_rate_value_to_type(
+                ob.convert_imu_sample_rate_to_value(p.get_sample_rate()))
+        except Exception:
+            rate = p.get_sample_rate()
+        cands.append((hz, p.get_full_scale_range(), rate))
+    if not cands:
+        return None
+    below = [c for c in cands if c[0] <= want_hz]
+    return max(below, key=lambda c: c[0]) if below else min(cands, key=lambda c: c[0])
+
+
+def _sensor_of_type(dev, ob, stream_type):
+    sensors = dev.get_sensor_list()
+    for i in range(sensors.get_count()):
+        s = sensors.get_sensor_by_index(i)
+        if s.get_type() == stream_type:
+            return s
+    return None
+
+
 def _dump_intrinsics(pipeline, serial, config_dir=None):
     """Fetch depth intrinsics from the open pipeline and cache to JSON.
 
@@ -295,7 +336,7 @@ class OrbbecCamera:
     def __init__(self, serial, role, depth_profile=(848, 480, 30),
                  color_profile=None, config_dir=None, mask_rects=None,
                  color_format="rgb", depth_work_mode=None, depth_preset=None,
-                 mask_polys=None, depth_filters=None):
+                 mask_polys=None, depth_filters=None, imu=False, imu_hz=200.0):
         self.serial = serial
         self.role = role
         self.depth_profile = tuple(depth_profile)
@@ -310,6 +351,14 @@ class OrbbecCamera:
         self.color_format = None
         self.color_format_want = color_format
         self.config_dir = config_dir
+        # Camera IMU (accel + gyro) as a VIO input: samples are buffered in
+        # the capture thread and drained by the recorder each tick. The
+        # device clock is shared with depth/color (tools/orbbec_imu_probe),
+        # so consumers fuse on `device_us`, not the recorder's log_time.
+        self.imu_enabled = bool(imu)
+        self.imu_hz = float(imu_hz)
+        self._imu_buf = collections.deque(maxlen=8192) if imu else None
+        self._imu_profiles = {}
         # Self-view shapes (rects [x0, y0, x1, y1] and/or polygons
         # [[x, y], ...]) in DEPTH-frame pixels: the rigid mount means the
         # robot's own chassis always lands on the same pixels — zeroed
@@ -434,6 +483,24 @@ class OrbbecCamera:
             cw, ch, cfps, cfmt = color_profile
             config.enable_video_stream(ob.OBStreamType.COLOR_STREAM, cw, ch,
                                        cfps, cfmt)
+        imu_note = ""
+        if self.imu_enabled:
+            for kind, stype in (("accel", ob.OBSensorType.ACCEL_SENSOR),
+                                ("gyro", ob.OBSensorType.GYRO_SENSOR)):
+                sensor = _sensor_of_type(dev, ob, stype)
+                prof = (_negotiate_imu_profile(sensor, ob, kind, self.imu_hz)
+                        if sensor is not None else None)
+                if prof is None:
+                    print(f"[orbbec] {self.role}({self.serial}): no {kind} "
+                          f"profile")
+                    continue
+                hz, fs, rate = prof
+                self._imu_profiles[kind] = prof
+                if kind == "accel":
+                    config.enable_accel_stream(fs, rate)
+                else:
+                    config.enable_gyro_stream(fs, rate)
+                imu_note += f" {kind}={hz:.0f}Hz"
         self._pipeline = ob.Pipeline(dev)
         self._pipeline.enable_frame_sync()
         self._pipeline.start(config)
@@ -447,7 +514,8 @@ class OrbbecCamera:
                       f"({exc}); BEV will fail until they exist")
         print(f"[orbbec] {self.role}({self.serial}): depth {w}x{h}@{fps} "
               f"color={'on' if self.color_profile else 'off'}"
-              f"{' (' + str(self.color_format).split('.')[-1] + ')' if self.color_profile else ''}")
+              f"{' (' + str(self.color_format).split('.')[-1] + ')' if self.color_profile else ''}"
+              f"{' imu' + imu_note if imu_note else ''}")
 
     def _read_loop(self):
         frames = 0
@@ -458,6 +526,7 @@ class OrbbecCamera:
                 fs = self._pipeline.wait_for_frames(200)
                 if fs is None:
                     continue
+                self._collect_imu(fs)
                 depth = fs.get_depth_frame()
                 if depth is None:
                     continue
@@ -514,6 +583,37 @@ class OrbbecCamera:
                 return None
             return self._frame
 
+    def _collect_imu(self, fs):
+        """Append any accel/gyro frames in this FrameSet to the IMU buffer."""
+        if self._imu_buf is None:
+            return
+        for getter, kind in (("get_accel_frame", "accel"),
+                             ("get_gyro_frame", "gyro")):
+            if kind not in self._imu_profiles:
+                continue
+            try:
+                fr = getattr(fs, getter)()
+                if fr is None:
+                    continue
+                v = fr.get_value()
+                self._imu_buf.append((kind, float(v.x), float(v.y), float(v.z),
+                                      int(fr.get_timestamp_us()),
+                                      time.monotonic()))
+            except Exception:
+                continue
+
+    def drain_imu(self):
+        """Return buffered (kind, x, y, z, device_us, recv_ts) and clear it."""
+        if self._imu_buf is None:
+            return []
+        out = []
+        while True:
+            try:
+                out.append(self._imu_buf.popleft())
+            except IndexError:
+                break
+        return out
+
     def recent(self):
         """Arrival-ordered history (oldest→newest) of recent StampedFrames."""
         with self._lock:
@@ -560,7 +660,9 @@ class OrbbecRig:
                 color_format=c.get("color_format", "rgb"),
                 depth_work_mode=c.get("depth_work_mode"),
                 depth_preset=c.get("depth_preset"),
-                depth_filters=c.get("depth_filters"))
+                depth_filters=c.get("depth_filters"),
+                imu=bool(c.get("imu", False)),
+                imu_hz=float(c.get("imu_hz", 200.0)))
 
     def get(self, role):
         return self.cameras[role]

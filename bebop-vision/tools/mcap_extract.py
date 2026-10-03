@@ -10,6 +10,7 @@ Produces (per aligned tick — all channels of a tick share log_time):
     depth/{stamp}.npz          near, far  (uint16 mm)
     labels/{stamp}.npz         teacher (uint8 60x60) — pre-fill for hand labeling
     manifest.jsonl             stamp_ns, cmd_vel, odom, goal, plane_ok, paths
+    imu_{accel,gyro}_{near,far}.npz  device_us, stamp_ns, x, y, z (full rate)
 
 Hand labels overwrite `labels/{stamp}.npz`'s `hand` array (same 60x60
 uint8 semantics: 0 navigable, 1 blocked, 2 caution); training prefers
@@ -33,9 +34,12 @@ try:
               for m in (CompressedImage, CompressedVideo, RawImage)}
     _NAVD = {navd_proto.Twist.DESCRIPTOR.full_name: navd_proto.Twist,
              navd_proto.Odom.DESCRIPTOR.full_name: navd_proto.Odom}
+    _IMU = {navd_proto.ImuAccel.DESCRIPTOR.full_name: navd_proto.ImuAccel,
+            navd_proto.ImuGyro.DESCRIPTOR.full_name: navd_proto.ImuGyro}
 except ImportError:  # pragma: no cover - standalone use
     _PROTO = {}
     _NAVD = {}
+    _IMU = {}
 
 try:
     from mcap.reader import make_reader
@@ -94,9 +98,15 @@ def extract(mcap_path, out_dir, tol_us=15_000):
     VIDEO_FORMATS = ("h264", "h265")
     ticks = {}  # log_us -> {topic: decoded payload}
     video_aus = {"near": [], "far": []}  # role -> [(log_time, codec, bytes)]
+    imu = {}  # topic -> [ImuAccel/ImuGyro] (kept out of `ticks`: full rate)
     with open(mcap_path, "rb") as f:
         for schema, channel, message in make_reader(f).iter_messages():
             topic = channel.topic
+            if (channel.message_encoding == "protobuf"
+                    and schema.name in _IMU):
+                imu.setdefault(topic, []).append(
+                    _IMU[schema.name].FromString(message.data))
+                continue
             if channel.message_encoding == "raw":
                 ticks.setdefault(message.log_time, {})[topic] = message.data
             elif (channel.message_encoding == "protobuf"
@@ -116,6 +126,18 @@ def extract(mcap_path, out_dir, tol_us=15_000):
             else:
                 ticks.setdefault(message.log_time, {})[topic] = \
                     json.loads(message.data)
+
+    for topic, samples in sorted(imu.items()):
+        kind = "accel" if "accel" in topic else "gyro"
+        role = topic.rsplit("_", 1)[-1]
+        fld = "a" if kind == "accel" else "g"
+        np.savez_compressed(
+            out / f"imu_{kind}_{role}.npz",
+            device_us=np.array([s.device_stamp_us for s in samples], np.int64),
+            stamp_ns=np.array([s.stamp_ns for s in samples], np.int64),
+            x=np.array([getattr(s, f"{fld}x") for s in samples], np.float64),
+            y=np.array([getattr(s, f"{fld}y") for s in samples], np.float64),
+            z=np.array([getattr(s, f"{fld}z") for s in samples], np.float64))
 
     # Hardware-encoded color (H.265/H.264, CompressedVideo): decode the AU
     # stream in order and align each decoded frame with the log_time of the
