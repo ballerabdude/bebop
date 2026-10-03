@@ -114,6 +114,11 @@ def main(argv=None):
             rec.save(args.save, default_blueprint=blueprint)
         else:
             rec.spawn(default_blueprint=blueprint)
+            # The viewer persists a per-app-id blueprint and reuses it, so the
+            # spawn-time default is ignored once one is cached — a blueprint
+            # edit (e.g. new IMU panels) would not show. Send it explicitly and
+            # make it the active/default so every new session picks it up.
+            rec.send_blueprint(blueprint, make_active=True, make_default=True)
         print(f"loading {path}")
         rec.log_file_from_path(path)
         rec.flush()

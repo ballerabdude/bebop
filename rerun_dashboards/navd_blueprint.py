@@ -1,12 +1,13 @@
 """Rerun blueprint (dashboard) for navd sessions.
 
 Layout: a 2x2 image/video grid (color and depth, near/far) on the left, and
-telemetry time-series (`/cmd_vel`, `/odom`) on the right.
+telemetry time-series (`/cmd_vel`, `/odom`, camera IMU) on the right.
 
-The telemetry messages are Protobuf structs (`bebop.navd.Twist`/`Odom`), so
-their fields are plotted directly by mapping each `SeriesLines` scalar input
-to a struct field via a jq-style selector — no export step. If a session
-predates the protobuf telemetry (JSON channels), these series stay empty.
+The telemetry messages are Protobuf structs (`bebop.navd.Twist`/`Odom`/
+`ImuAccel`/`ImuGyro`), so their fields are plotted directly by mapping each
+`SeriesLines` scalar input to a struct field via a jq-style selector — no
+export step. If a session predates the protobuf telemetry (JSON channels,
+or IMU capture), those series stay empty.
 """
 
 import rerun as rr
@@ -37,6 +38,25 @@ TELEMETRY = (
     )),
 )
 
+# Camera IMU (the recorder's VIO input), one view per topic — the axis field
+# names differ between accel (ax..) and gyro (gx..). near/far are paired side
+# by side in build().
+_X = (230, 60, 60)
+_Y = (60, 190, 90)
+_Z = (80, 120, 255)
+_ACCEL = (("bebop.navd.ImuAccel:message", ".ax", "ax (m/s^2)", _X),
+          ("bebop.navd.ImuAccel:message", ".ay", "ay (m/s^2)", _Y),
+          ("bebop.navd.ImuAccel:message", ".az", "az (m/s^2)", _Z))
+_GYRO = (("bebop.navd.ImuGyro:message", ".gx", "gx (rad/s)", _X),
+         ("bebop.navd.ImuGyro:message", ".gy", "gy (rad/s)", _Y),
+         ("bebop.navd.ImuGyro:message", ".gz", "gz (rad/s)", _Z))
+IMU = (
+    ("/imu_accel_near", "IMU accel (near)", _ACCEL),
+    ("/imu_gyro_near", "IMU gyro (near)", _GYRO),
+    ("/imu_accel_far", "IMU accel (far)", _ACCEL),
+    ("/imu_gyro_far", "IMU gyro (far)", _GYRO),
+)
+
 
 def _series(source_component, selector, label, color):
     mapping = VisualizerComponentMapping(
@@ -56,6 +76,10 @@ def _telemetry_view(origin, title, specs):
 
 
 def build():
+    imu_rows = [rrb.Horizontal(_telemetry_view(IMU[i][0], IMU[i][1], IMU[i][2]),
+                               _telemetry_view(IMU[i + 1][0], IMU[i + 1][1],
+                                               IMU[i + 1][2]))
+                for i in range(0, len(IMU), 2)]
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Grid(
@@ -65,6 +89,7 @@ def build():
             ),
             rrb.Vertical(
                 *[_telemetry_view(*spec) for spec in TELEMETRY],
+                *imu_rows,
             ),
             column_shares=[3.0, 1.0],
         ),
