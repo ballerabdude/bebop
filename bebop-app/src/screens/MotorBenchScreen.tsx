@@ -1658,11 +1658,13 @@ function CaptureDownloads({
     [baseUrl],
   );
 
-  /// On-robot MCAP -> Rerun .rrd conversion. The firmware runs the converter
-  /// and redirects to the cached `.rrd` under the `bebop_navd` app id +
-  /// dashboard. Paste this URL into Rerun's "open URL" to view directly.
+  /// On-robot MCAP -> Rerun .rrd conversion. The URL ends in `.rrd` so
+  /// Rerun's loader picks the Rerun format; the firmware converts on demand
+  /// and streams the bytes. Paste it into Rerun's "open URL", or click to
+  /// download it.
   const rerunUrl = useCallback(
-    (name: string) => `${baseUrl}/captures/rerun/${encodeURIComponent(name)}`,
+    (name: string) =>
+      `${baseUrl}/captures/rrd/${encodeURIComponent(name.replace(/\.mcap$/, ".rrd"))}`,
     [baseUrl],
   );
 

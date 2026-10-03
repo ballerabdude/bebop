@@ -110,7 +110,7 @@ pub async fn run_server(state: AppState, bind_addr: &str) -> Result<()> {
         .route("/captures", get(list_captures))
         .route("/captures/finalize", post(finalize_captures))
         .route("/captures/finalize-dl/:name", get(finalize_download))
-        .route("/captures/rerun/:name", get(convert_capture))
+        .route("/captures/rrd/:stem", get(serve_rrd))
         .nest_service("/captures/dl", ServeDir::new(state.capture_dir.clone()))
         .with_state(state)
         .layer(cors);
@@ -356,71 +356,98 @@ fn prune_rrds(dir: &Path, budget: u64, keep: &Path) {
     }
 }
 
-/// Convert an MCAP to a Rerun `.rrd` (app id + dashboard) on the robot,
-/// then redirect to the download URL. Cached: a fresh `.rrd` is served
-/// without re-running the converter.
-async fn convert_capture(
+/// Ensure a fresh `.rrd` exists for `mcap` (convert if needed). On failure
+/// returns an HTTP error response ready to send.
+async fn ensure_converted(
+    state: &AppState,
+    mcap: &Path,
+    rrd: &Path,
+) -> Result<(), axum::response::Response> {
+    if rrd_is_fresh(mcap, rrd) {
+        return Ok(());
+    }
+    let converter = state.rerun_converter.clone();
+    if !converter.exists() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Rerun conversion not set up on this robot (run scripts/setup-rerun.sh)",
+        )
+            .into_response());
+    }
+    let mcap = mcap.to_path_buf();
+    let rrd = rrd.to_path_buf();
+    let dir = state.capture_dir.clone();
+    let run = tokio::task::spawn_blocking(move || {
+        prune_rrds(&dir, RRD_BUDGET_BYTES, &rrd);
+        std::process::Command::new(&converter)
+            .arg(&mcap)
+            .arg(&rrd)
+            .output()
+            .map_err(|e| format!("spawn {}: {e}", converter.display()))
+    })
+    .await;
+    match run {
+        Ok(Ok(out)) if out.status.success() => Ok(()),
+        Ok(Ok(out)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "converter exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        )
+            .into_response()),
+        Ok(Err(e)) => Err((StatusCode::INTERNAL_SERVER_ERROR, e).into_response()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("conversion task failed: {e}"),
+        )
+            .into_response()),
+    }
+}
+
+/// `GET /captures/rrd/<stem>.rrd` — convert `<stem>.mcap` on demand and
+/// serve the resulting `.rrd` directly (200, streamed). The URL ends in
+/// `.rrd` so Rerun's loader selects the Rerun format; a redirect would make
+/// Rerun dispatch on the original `.mcap` extension and fail ("Bad magic
+/// number").
+async fn serve_rrd(
     State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
+    AxumPath(stem): AxumPath<String>,
 ) -> impl IntoResponse {
-    let mcap = match safe_capture_path(&state.capture_dir, &name) {
+    let Some(base) = stem.strip_suffix(".rrd") else {
+        return (StatusCode::BAD_REQUEST, "expected a .rrd path").into_response();
+    };
+    let mcap_name = format!("{base}.mcap");
+    let mcap = match safe_capture_path(&state.capture_dir, &mcap_name) {
         Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let stem = mcap
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("capture")
-        .to_string();
-    let rrd = mcap.with_file_name(format!("{stem}.rrd"));
-
-    if !rrd_is_fresh(&mcap, &rrd) {
-        let converter = state.rerun_converter.clone();
-        if !converter.exists() {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Rerun conversion not set up on this robot (run scripts/setup-rerun.sh)",
-            )
-                .into_response();
-        }
-        let mcap_for_job = mcap.clone();
-        let rrd_for_job = rrd.clone();
-        let dir_for_job = state.capture_dir.clone();
-        let run = tokio::task::spawn_blocking(move || {
-            prune_rrds(&dir_for_job, RRD_BUDGET_BYTES, &rrd_for_job);
-            std::process::Command::new(&converter)
-                .arg(&mcap_for_job)
-                .arg(&rrd_for_job)
-                .output()
-                .map_err(|e| format!("spawn {}: {e}", converter.display()))
-        })
-        .await;
-        match run {
-            Ok(Ok(out)) if out.status.success() => {}
-            Ok(Ok(out)) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!(
-                        "converter exited {}: {}",
-                        out.status,
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    ),
-                )
-                    .into_response();
-            }
-            Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("conversion task failed: {e}"),
-                )
-                    .into_response();
-            }
-        }
+    let rrd = state.capture_dir.join(&stem);
+    if let Err(resp) = ensure_converted(&state, &mcap, &rrd).await {
+        return resp;
     }
+    serve_file(rrd).await
+}
 
-    let location = format!("/captures/dl/{stem}.rrd");
-    Redirect::temporary(&location).into_response()
+/// Stream a file (with range support) via `tower-http`'s `ServeFile`.
+async fn serve_file(path: PathBuf) -> axum::response::Response {
+    use tower::ServiceExt;
+    let req = axum::http::Request::builder()
+        .uri("/")
+        .body(axum::body::Body::empty())
+        .expect("static request");
+    match tower_http::services::ServeFile::new(path)
+        .oneshot(req)
+        .await
+    {
+        Ok(res) => res.map(axum::body::Body::new).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serve failed: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
