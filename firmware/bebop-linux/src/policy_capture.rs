@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use tracing::{debug, error, info};
 
+use crate::capture_control::CaptureControl;
 use crate::logging::cdr::CdrEncoder;
 use crate::logging::ros2_msgs;
 use crate::observation::JOINT_NAMES;
@@ -186,6 +187,7 @@ impl CaptureHandle {
 pub fn spawn_capture_thread(
     capture_dir: PathBuf,
     policy_io: PolicyIoShared,
+    control: Arc<CaptureControl>,
 ) -> (CaptureHandle, JoinHandle<()>) {
     let (tx, rx) = mpsc::sync_channel::<CaptureCommand>(SAMPLE_CHANNEL_CAPACITY);
     let closed = Arc::new(AtomicBool::new(false));
@@ -197,7 +199,7 @@ pub fn spawn_capture_thread(
     };
     let join = std::thread::Builder::new()
         .name("policy-capture".to_string())
-        .spawn(move || run_writer(rx, capture_dir, policy_io, dropped_total, closed))
+        .spawn(move || run_writer(rx, capture_dir, policy_io, dropped_total, closed, control))
         .expect("spawn policy-capture thread");
     (handle, join)
 }
@@ -470,6 +472,8 @@ fn prune(dir: &Path, budget: u64, keep: &Path) {
         }
         if fs::remove_file(&seg.path).is_ok() {
             total = total.saturating_sub(seg.size);
+            // Drop the derived Rerun conversion alongside the source.
+            let _ = fs::remove_file(seg.path.with_extension("rrd"));
         }
     }
 }
@@ -480,10 +484,12 @@ fn run_writer(
     policy_io: PolicyIoShared,
     dropped_total: Arc<AtomicU64>,
     closed: Arc<AtomicBool>,
+    control: Arc<CaptureControl>,
 ) {
     debug!(dir = %capture_dir.display(), "capture: writer started (ros2 mcap)");
     let mut open: Option<OpenCapture> = None;
     let mut last_open_error: Option<(Instant, String)> = None;
+    let mut last_epoch = control.epoch();
 
     loop {
         match rx.recv_timeout(FLUSH_INTERVAL) {
@@ -496,6 +502,7 @@ fn run_writer(
                         info!(path = %c.path.display(), "capture: opened (ros2 MCAP)");
                         publish_status(&policy_io, Some(&c), &dropped_total);
                         prune(&capture_dir, DISK_BUDGET_BYTES, &c.path);
+                        control.set_policy_path(Some(c.path.clone()));
                         open = Some(c);
                         last_open_error = None;
                     }
@@ -523,6 +530,7 @@ fn run_writer(
                         if let Err(err) = $e {
                             error!(path = %c.path.display(), error = %err, "capture: write failed");
                             let bad = open.take().unwrap(); let _ = bad.finish();
+                            control.set_policy_path(None);
                             publish_status(&policy_io, None, &dropped_total);
                             continue;
                         }
@@ -550,9 +558,11 @@ fn run_writer(
                                     info!(path = %next.path.display(), "capture: opened next segment");
                                     publish_status(&policy_io, Some(&next), &dropped_total);
                                     prune(&capture_dir, DISK_BUDGET_BYTES, &next.path);
+                                    control.set_policy_path(Some(next.path.clone()));
                                     open = Some(next);
                                 }
                                 Err(e) => {
+                                    control.set_policy_path(None);
                                     error!(error = %e, "capture: open next segment failed");
                                     publish_status(&policy_io, None, &dropped_total);
                                 }
@@ -567,16 +577,43 @@ fn run_writer(
                     let rows = c.rows;
                     let _ = c.finish();
                     info!(path = %path.display(), rows, "capture: closed");
+                    control.set_policy_path(None);
                     publish_status(&policy_io, None, &dropped_total);
                 }
             }
             Ok(CaptureCommand::Shutdown) => {
                 if let Some(c) = open.take() {
+                    control.set_policy_path(None);
                     let _ = c.finish();
                 }
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                // On-demand finalize (operator download): roll the segment
+                // over so the closed file has a footer.
+                if control.epoch() > last_epoch {
+                    last_epoch = control.epoch();
+                    if let Some(prev) = open.take() {
+                        let prev_path = prev.path.clone();
+                        let prev_rows = prev.rows;
+                        let _ = prev.finish();
+                        info!(path = %prev_path.display(), rows = prev_rows, "capture: rotated segment (finalize)");
+                        match open_capture(&capture_dir) {
+                            Ok(next) => {
+                                info!(path = %next.path.display(), "capture: opened next segment");
+                                publish_status(&policy_io, Some(&next), &dropped_total);
+                                prune(&capture_dir, DISK_BUDGET_BYTES, &next.path);
+                                control.set_policy_path(Some(next.path.clone()));
+                                open = Some(next);
+                            }
+                            Err(e) => {
+                                control.set_policy_path(None);
+                                error!(error = %e, "capture: open next segment failed");
+                                publish_status(&policy_io, None, &dropped_total);
+                            }
+                        }
+                    }
+                }
                 if let Some(c) = open.as_mut() {
                     let _ = c.flush_if_due();
                     publish_status(&policy_io, Some(c), &dropped_total);
@@ -584,6 +621,7 @@ fn run_writer(
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 if let Some(c) = open.take() {
+                    control.set_policy_path(None);
                     let _ = c.finish();
                 }
                 break;

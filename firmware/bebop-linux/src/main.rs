@@ -10,6 +10,7 @@
 //! every bus before the process exits.
 
 use anyhow::{Context, Result};
+use bebop_linux::capture_control::CaptureControl;
 use bebop_linux::config::{ImuSource, RobotConfig};
 use bebop_linux::imu;
 use bebop_linux::imu_serial;
@@ -46,6 +47,10 @@ struct Args {
     /// (`system_*.mcap`, see `crate::system_capture`). `~/` is expanded;
     /// defaults to `~/bebop-captures`.
     capture_dir: Option<PathBuf>,
+    /// Executable that converts an MCAP capture into a Rerun `.rrd`
+    /// (`GET /captures/rerun/<name>`). Set up by `scripts/setup-rerun.sh`.
+    /// The endpoint returns 503 if the path is missing.
+    rerun_converter: PathBuf,
 }
 
 impl Default for Args {
@@ -54,6 +59,7 @@ impl Default for Args {
             config: PathBuf::from("config/bebop_v2.yaml"),
             policy: None,
             capture_dir: None,
+            rerun_converter: PathBuf::from("/usr/local/bin/bebop-mcap-to-rrd"),
         }
     }
 }
@@ -82,6 +88,12 @@ fn parse_args() -> Args {
                     i += 1;
                 }
             }
+            "--rerun-converter" => {
+                if i + 1 < cli.len() {
+                    args.rerun_converter = PathBuf::from(&cli[i + 1]);
+                    i += 1;
+                }
+            }
             "--help" | "-h" => {
                 println!(
                     "bebop-linux v2 runtime\n\
@@ -95,6 +107,8 @@ fn parse_args() -> Args {
                                                   [default: <config_dir>/policy.onnx]\n  \
                            --capture-dir <DIR>  Where to write MCAP captures (policy + always-on system log) \
                                                  [default: ~/bebop-captures]\n  \
+                           --rerun-converter <PATH>  MCAP -> Rerun .rrd converter for GET /captures/rerun \
+                                                 [default: /usr/local/bin/bebop-mcap-to-rrd]\n  \
                        -h, --help               Print help\n"
                 );
                 std::process::exit(0);
@@ -240,8 +254,16 @@ async fn main() -> Result<()> {
     // its `CaptureHandle` clone and the writer publishes capture status
     // (`capture_active` / `capture_path` / `capture_rows` /
     // `capture_dropped`) directly back into `policy_io_shared`.
-    let (capture_handle, capture_join) =
-        policy_capture::spawn_capture_thread(capture_dir.clone(), policy_io_shared.clone());
+    //
+    // Shared finalize/active-segment state: the HTTP layer uses it to flag
+    // the currently-writing segment and to finalize it before a download.
+    let capture_control = Arc::new(CaptureControl::new());
+
+    let (capture_handle, capture_join) = policy_capture::spawn_capture_thread(
+        capture_dir.clone(),
+        policy_io_shared.clone(),
+        capture_control.clone(),
+    );
 
     // Always-on system logger: power-board + host utilization at 1 Hz,
     // independent of the operator-toggled policy captures above. Runs for
@@ -252,6 +274,7 @@ async fn main() -> Result<()> {
         supervisor.clone(),
         capture_dir.clone(),
         shutdown_flag.clone(),
+        capture_control.clone(),
     );
 
     let policy_io_for_runner = policy_io_shared.clone();
@@ -446,6 +469,8 @@ async fn main() -> Result<()> {
     let server_capture_dir = capture_dir.clone();
     let server_nav_goal = std::sync::Arc::new(NavGoalShared::new());
     let server_vision = vision_shared.clone();
+    let server_captures = capture_control.clone();
+    let server_rerun_converter = args.rerun_converter.clone();
     let bind_addr = cfg.server.bind_addr.clone();
     let server_handle = tokio::spawn(async move {
         let state = bebop_linux::server::AppState {
@@ -457,6 +482,8 @@ async fn main() -> Result<()> {
             capture_dir: server_capture_dir,
             nav_goal: server_nav_goal,
             vision: server_vision,
+            captures: server_captures,
+            rerun_converter: server_rerun_converter,
         };
         if let Err(e) = server::run_server(state, &bind_addr).await {
             error!(error = %e, "server task exited with error");

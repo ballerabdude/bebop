@@ -18,6 +18,7 @@
 #![allow(dead_code)]
 
 pub mod can_interface;
+pub mod capture_control;
 pub mod config;
 pub mod drive;
 pub mod imu;

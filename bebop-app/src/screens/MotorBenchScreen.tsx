@@ -1544,6 +1544,10 @@ interface CaptureFile {
   name: string;
   sizeBytes: number;
   modifiedMs: number;
+  /// True for the segment a firmware writer currently has open. The app
+  /// finalizes it (`POST /captures/finalize`) before downloading so the
+  /// saved file has an MCAP footer.
+  active?: boolean;
 }
 
 interface CapturesResponse {
@@ -1645,6 +1649,50 @@ function CaptureDownloads({
     [baseUrl],
   );
 
+  /// On-robot MCAP -> Rerun .rrd conversion. The firmware runs the converter
+  /// and redirects to the cached `.rrd`, which opens with the dashboard.
+  const rerunUrl = useCallback(
+    (name: string) => `${baseUrl}/captures/rerun/${encodeURIComponent(name)}`,
+    [baseUrl],
+  );
+
+  /// Roll the active segment(s) over so the file has an MCAP footer. Cheap
+  /// and a no-op when no writer has a segment open.
+  const finalizeCaptures = useCallback(async () => {
+    try {
+      await fetch(`${baseUrl}/captures/finalize`, { method: "POST" });
+    } catch {
+      /* best-effort: fall back to whatever bytes are on disk */
+    }
+  }, [baseUrl]);
+
+  /// Native anchor download: streams straight to disk (avoids the
+  /// fetch->blob path that broke on repeat clicks / HTTP pages).
+  const saveAs = useCallback((url: string, filename: string) => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }, []);
+
+  const downloadCapture = useCallback(
+    async (f: CaptureFile) => {
+      if (f.active) await finalizeCaptures();
+      saveAs(downloadUrl(f.name), f.name);
+    },
+    [finalizeCaptures, downloadUrl, saveAs],
+  );
+
+  const downloadRerun = useCallback(
+    async (f: CaptureFile) => {
+      if (f.active) await finalizeCaptures();
+      saveAs(rerunUrl(f.name), f.name.replace(/\.mcap$/, ".rrd"));
+    },
+    [finalizeCaptures, rerunUrl, saveAs],
+  );
+
   return (
     <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev px-3.5 py-3 space-y-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1656,11 +1704,12 @@ function CaptureDownloads({
             MCAP segments on robot
           </div>
           <p className="text-[12px] text-text-dim mt-1 leading-relaxed max-w-prose">
-            Every <code className="text-text">policy_capture_*.mcap</code>{" "}
-            file on the robot, newest first. Open the downloaded file in
-            Foxglove for replay / plotting. The currently-writing segment
-            is included; downloading it grabs whatever bytes are flushed
-            so far.
+            Every capture on the robot, newest first. <b>Download</b> saves
+            the raw <code className="text-text">.mcap</code> (the
+            currently-writing segment is finalized first, so the file is
+            complete). <b>Rerun</b> converts it on the robot to a{" "}
+            <code className="text-text">.rrd</code> that opens with the navd
+            dashboard.
           </p>
         </div>
         <Button
@@ -1696,7 +1745,7 @@ function CaptureDownloads({
                   <th className="text-left font-medium py-1.5 px-3 hidden sm:table-cell">
                     Modified
                   </th>
-                  <th className="text-right font-medium py-1.5 pl-3">Download</th>
+                  <th className="text-right font-medium py-1.5 pl-3">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1711,19 +1760,24 @@ function CaptureDownloads({
                     <td className="py-1.5 px-3 text-text-dim hidden sm:table-cell">
                       {formatModified(f.modifiedMs)}
                     </td>
-                    <td className="py-1.5 pl-3 text-right">
-                      {/* Native anchor download: lets the browser
-                          stream the file to disk and avoids the
-                          fetch→blob→object-URL dance that broke on
-                          repeat clicks (304 Not Modified) and produced
-                          an insecure-blob warning on HTTP pages. */}
-                      <a
-                        href={downloadUrl(f.name)}
-                        download={f.name}
-                        className="inline-flex items-center justify-center rounded-[var(--radius-input)] border border-border bg-bg-elev-2 px-2 py-1 text-[11px] font-medium text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors no-underline"
+                    <td className="py-1.5 pl-3 text-right whitespace-nowrap">
+                      {/* Buttons (not anchors) so we can finalize the
+                          active segment before the browser streams it. */}
+                      <button
+                        type="button"
+                        onClick={() => void downloadCapture(f)}
+                        className="inline-flex items-center justify-center rounded-[var(--radius-input)] border border-border bg-bg-elev-2 px-2 py-1 text-[11px] font-medium text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors cursor-pointer"
                       >
-                        Download
-                      </a>
+                        {f.active ? "Finalize + download" : "Download"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void downloadRerun(f)}
+                        title="Convert to a Rerun .rrd with the navd dashboard and download"
+                        className="ml-1.5 inline-flex items-center justify-center rounded-[var(--radius-input)] border border-border bg-bg-elev-2 px-2 py-1 text-[11px] font-medium text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors cursor-pointer"
+                      >
+                        Rerun
+                      </button>
                     </td>
                   </tr>
                 ))}

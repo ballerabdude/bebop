@@ -37,6 +37,7 @@ use anyhow::{Context, Result};
 use prost::Message;
 use tracing::{debug, error, info};
 
+use crate::capture_control::CaptureControl;
 use crate::mode::Mode;
 use crate::powerboard::describe_faults;
 use crate::safety::Supervisor;
@@ -539,6 +540,8 @@ fn prune(dir: &Path, budget: u64, keep: &Path) {
         if fs::remove_file(&seg.path).is_ok() {
             info!(path = %seg.path.display(), "system capture: pruned (disk budget)");
             total = total.saturating_sub(seg.size);
+            // Drop the derived Rerun conversion alongside the source.
+            let _ = fs::remove_file(seg.path.with_extension("rrd"));
         }
     }
 }
@@ -551,19 +554,26 @@ pub fn spawn_system_capture(
     sup: Arc<Supervisor>,
     capture_dir: PathBuf,
     shutdown: Arc<AtomicBool>,
+    control: Arc<CaptureControl>,
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("system-capture".to_string())
-        .spawn(move || run_system_capture(sup, capture_dir, shutdown))
+        .spawn(move || run_system_capture(sup, capture_dir, shutdown, control))
         .expect("spawn system-capture thread")
 }
 
-fn run_system_capture(sup: Arc<Supervisor>, dir: PathBuf, shutdown: Arc<AtomicBool>) {
+fn run_system_capture(
+    sup: Arc<Supervisor>,
+    dir: PathBuf,
+    shutdown: Arc<AtomicBool>,
+    control: Arc<CaptureControl>,
+) {
     debug!(dir = %dir.display(), "system capture: thread started");
     let mut sampler = HostStatsSampler::new(&dir);
     let mut open = match open_system(&dir) {
         Ok(c) => {
             info!(path = %c.path.display(), "system capture: opened");
+            control.set_system_path(Some(c.path.clone()));
             prune(&dir, DISK_BUDGET_BYTES, &c.path);
             Some(c)
         }
@@ -575,6 +585,7 @@ fn run_system_capture(sup: Arc<Supervisor>, dir: PathBuf, shutdown: Arc<AtomicBo
     let mut last_open_error: Option<Instant> = None;
     let mut prev_active = false;
     let mut session = String::new();
+    let mut last_epoch = control.epoch();
 
     while !shutdown.load(Ordering::SeqCst) {
         let tick = Instant::now();
@@ -589,6 +600,7 @@ fn run_system_capture(sup: Arc<Supervisor>, dir: PathBuf, shutdown: Arc<AtomicBo
                 match open_system(&dir) {
                     Ok(c) => {
                         info!(path = %c.path.display(), "system capture: opened");
+                        control.set_system_path(Some(c.path.clone()));
                         prune(&dir, DISK_BUDGET_BYTES, &c.path);
                         open = Some(c);
                         last_open_error = None;
@@ -641,7 +653,9 @@ fn run_system_capture(sup: Arc<Supervisor>, dir: PathBuf, shutdown: Arc<AtomicBo
                     let too_big = fs::metadata(&c.path)
                         .map(|m| m.len() >= MAX_FILE_BYTES)
                         .unwrap_or(false);
-                    if too_big || tick.duration_since(c.opened_at) >= ROTATE_INTERVAL {
+                    let finalize = control.epoch() > last_epoch;
+                    if too_big || finalize || tick.duration_since(c.opened_at) >= ROTATE_INTERVAL {
+                        last_epoch = control.epoch();
                         let prev = open.take().expect("open is Some");
                         let path = prev.path.clone();
                         let rows = prev.rows;
@@ -650,10 +664,12 @@ fn run_system_capture(sup: Arc<Supervisor>, dir: PathBuf, shutdown: Arc<AtomicBo
                         match open_system(&dir) {
                             Ok(next) => {
                                 info!(path = %next.path.display(), "system capture: opened next");
+                                control.set_system_path(Some(next.path.clone()));
                                 prune(&dir, DISK_BUDGET_BYTES, &next.path);
                                 open = Some(next);
                             }
                             Err(e) => {
+                                control.set_system_path(None);
                                 error!(error = %format!("{e:#}"), "system capture: open next failed");
                             }
                         }
@@ -662,6 +678,7 @@ fn run_system_capture(sup: Arc<Supervisor>, dir: PathBuf, shutdown: Arc<AtomicBo
                 Err(e) => {
                     error!(error = %format!("{e:#}"), "system capture: write failed");
                     if let Some(bad) = open.take() {
+                        control.set_system_path(None);
                         let _ = bad.finish();
                     }
                 }
@@ -675,6 +692,7 @@ fn run_system_capture(sup: Arc<Supervisor>, dir: PathBuf, shutdown: Arc<AtomicBo
     }
 
     if let Some(c) = open.take() {
+        control.set_system_path(None);
         let _ = c.finish();
     }
     debug!("system capture: thread exiting");

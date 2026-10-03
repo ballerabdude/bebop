@@ -16,6 +16,7 @@
 //!
 //! All three feed a shared mpsc to the WS sink writer.
 
+use crate::capture_control::CaptureControl;
 use crate::imu::ImuShared;
 use crate::nav_goal::NavGoalShared;
 use crate::policy_control::PolicyControlShared;
@@ -26,19 +27,19 @@ use crate::server::telemetry::{build_telemetry, telemetry_envelope};
 use crate::vision::VisionShared;
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::{header, StatusCode};
-use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::response::{IntoResponse, Redirect};
+use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use bebop_proto::runtime::v1 as proto;
 use serde::Serialize;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
@@ -50,6 +51,11 @@ use tracing::{debug, info, warn};
 /// and the per-connection telemetry flags. Starts at 1; 0 is reserved
 /// as "no connection".
 static WS_CONN_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Cap on the total size of cached `.rrd` conversions in the capture dir.
+/// They're derived artifacts (not pruned by the capture writers), so the
+/// convert endpoint evicts oldest-first above this.
+const RRD_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -74,6 +80,13 @@ pub struct AppState {
     pub nav_goal: Arc<NavGoalShared>,
     /// bebop-vision service control + status (see [`crate::vision`]).
     pub vision: VisionShared,
+    /// Finalize / active-segment state shared with the MCAP capture writers.
+    /// Used to flag the currently-writing segment in `GET /captures` and to
+    /// roll it over before a download (`POST /captures/finalize`).
+    pub captures: Arc<CaptureControl>,
+    /// Executable that converts an MCAP into a Rerun `.rrd`
+    /// (`GET /captures/rerun/<name>`); see `scripts/setup-rerun.sh`.
+    pub rerun_converter: PathBuf,
 }
 
 pub async fn run_server(state: AppState, bind_addr: &str) -> Result<()> {
@@ -95,6 +108,8 @@ pub async fn run_server(state: AppState, bind_addr: &str) -> Result<()> {
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
         .route("/captures", get(list_captures))
+        .route("/captures/finalize", post(finalize_captures))
+        .route("/captures/rerun/:name", get(convert_capture))
         .nest_service("/captures/dl", ServeDir::new(state.capture_dir.clone()))
         .with_state(state)
         .layer(cors);
@@ -122,6 +137,10 @@ struct CaptureEntry {
     /// Modification time as Unix milliseconds. 0 if `stat` doesn't
     /// expose it on this filesystem.
     modified_ms: u64,
+    /// True for the segment a firmware writer currently has open (still
+    /// being appended to). The app calls `/captures/finalize` before
+    /// downloading one of these so the served file has a footer.
+    active: bool,
 }
 
 #[derive(Serialize)]
@@ -137,6 +156,8 @@ struct CapturesResponse {
 /// download time.
 async fn list_captures(State(state): State<AppState>) -> impl IntoResponse {
     let dir = state.capture_dir.clone();
+    let system_active = state.captures.system_path();
+    let policy_active = state.captures.policy_path();
     // Read on a blocking thread so the axum executor isn't blocked on
     // a slow eMMC `readdir` (cheap on the Jetson, but free safety).
     let result = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<CaptureEntry>> {
@@ -174,10 +195,14 @@ async fn list_captures(State(state): State<AppState>) -> impl IntoResponse {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
+            let path = entry.path();
+            let active = system_active.as_deref() == Some(path.as_path())
+                || policy_active.as_deref() == Some(path.as_path());
             out.push(CaptureEntry {
                 name,
                 size_bytes: meta.len(),
                 modified_ms,
+                active,
             });
         }
         // Newest first so the operator sees the most relevant capture
@@ -204,6 +229,162 @@ async fn list_captures(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Roll the currently-writing segment(s) over so their files have a
+/// footer. The app calls this before downloading an `active` capture.
+/// Waits (bounded) for the writers to open a fresh segment.
+async fn finalize_captures(State(state): State<AppState>) -> impl IntoResponse {
+    let control = &state.captures;
+    let before = (control.system_path(), control.policy_path());
+    control.request_finalize();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let now = (control.system_path(), control.policy_path());
+        let sys_done = before.0.is_none() || now.0 != before.0;
+        let pol_done = before.1.is_none() || now.1 != before.1;
+        if sys_done && pol_done {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// Validate a capture filename and resolve it inside the capture dir.
+/// Rejects path separators / traversal and non-MCAP names.
+fn safe_capture_path(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || !name.ends_with(".mcap")
+    {
+        return Err(format!("invalid capture name {name:?}"));
+    }
+    let path = dir.join(name);
+    if !path.is_file() {
+        return Err(format!("no such capture {name:?}"));
+    }
+    Ok(path)
+}
+
+fn rrd_is_fresh(mcap: &Path, rrd: &Path) -> bool {
+    let (Ok(m), Ok(r)) = (std::fs::metadata(mcap), std::fs::metadata(rrd)) else {
+        return false;
+    };
+    match (m.modified(), r.modified()) {
+        (Ok(mt), Ok(rt)) => rt >= mt,
+        _ => false,
+    }
+}
+
+/// Evict oldest `.rrd` conversions until the cache fits `budget` (never
+/// removing `keep`, the file we're about to write).
+fn prune_rrds(dir: &Path, budget: u64, keep: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".rrd"))
+        {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        total += meta.len();
+        files.push((path, meta.len(), meta.modified().unwrap_or(UNIX_EPOCH)));
+    }
+    if total <= budget {
+        return;
+    }
+    files.sort_by_key(|(_, _, m)| *m);
+    for (path, size, _) in files {
+        if total <= budget {
+            break;
+        }
+        if path == keep {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
+/// Convert an MCAP to a Rerun `.rrd` (app id + dashboard) on the robot,
+/// then redirect to the download URL. Cached: a fresh `.rrd` is served
+/// without re-running the converter.
+async fn convert_capture(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> impl IntoResponse {
+    let mcap = match safe_capture_path(&state.capture_dir, &name) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let stem = mcap
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("capture")
+        .to_string();
+    let rrd = mcap.with_file_name(format!("{stem}.rrd"));
+
+    if !rrd_is_fresh(&mcap, &rrd) {
+        let converter = state.rerun_converter.clone();
+        if !converter.exists() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Rerun conversion not set up on this robot (run scripts/setup-rerun.sh)",
+            )
+                .into_response();
+        }
+        let mcap_for_job = mcap.clone();
+        let rrd_for_job = rrd.clone();
+        let dir_for_job = state.capture_dir.clone();
+        let run = tokio::task::spawn_blocking(move || {
+            prune_rrds(&dir_for_job, RRD_BUDGET_BYTES, &rrd_for_job);
+            std::process::Command::new(&converter)
+                .arg(&mcap_for_job)
+                .arg(&rrd_for_job)
+                .output()
+                .map_err(|e| format!("spawn {}: {e}", converter.display()))
+        })
+        .await;
+        match run {
+            Ok(Ok(out)) if out.status.success() => {}
+            Ok(Ok(out)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "converter exited {}: {}",
+                        out.status,
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ),
+                )
+                    .into_response();
+            }
+            Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("conversion task failed: {e}"),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let location = format!("/captures/dl/{stem}.rrd");
+    Redirect::temporary(&location).into_response()
+}
+
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state))
 }
@@ -218,6 +399,8 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         nav_goal,
         vision,
         capture_dir: _,
+        captures: _,
+        rerun_converter: _,
     } = state;
     // Per-connection identity for operator arbitration. Monotonic so a
     // reconnecting client never inherits a stale assignment; never 0
@@ -455,4 +638,30 @@ struct TelemetryState {
 struct NavPushState {
     subscribed: bool,
     rate_hz: u32,
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[test]
+    fn safe_capture_path_rejects_traversal_and_non_mcap() {
+        let dir = std::env::temp_dir();
+        assert!(safe_capture_path(&dir, "../evil.mcap").is_err());
+        assert!(safe_capture_path(&dir, "a/b.mcap").is_err());
+        assert!(safe_capture_path(&dir, "a\\b.mcap").is_err());
+        assert!(safe_capture_path(&dir, "notes.txt").is_err());
+        assert!(safe_capture_path(&dir, "").is_err());
+        assert!(safe_capture_path(&dir, "missing.mcap").is_err());
+    }
+
+    #[test]
+    fn safe_capture_path_accepts_existing_mcap() {
+        let dir = std::env::temp_dir().join(format!("bebop_ws_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("system_x.mcap");
+        std::fs::write(&path, b"x").unwrap();
+        assert_eq!(safe_capture_path(&dir, "system_x.mcap").unwrap(), path);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
