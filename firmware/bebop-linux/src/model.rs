@@ -734,10 +734,16 @@ fn build_entry(spec: &ModelSpec) -> ModelEntry {
     }
 
     let status = read_status(&spec.id);
-    let unit = query_unit(&spec.id).ok();
-    let running = unit.as_ref().map(|u| u.0).unwrap_or(false);
-    let active_state = unit.as_ref().map(|u| u.1.clone()).unwrap_or_default();
-    let unit_detail = unit.map(|u| u.2).unwrap_or_default();
+    // Only surface the systemd substate while the unit is meaningful — a
+    // never-run model legitimately reads "inactive/dead", which must not be
+    // shown to the operator as an error.
+    let (running, active_state, unit_detail) = match query_unit(&spec.id) {
+        Ok((running, active_state, detail)) if running || active_state == "failed" => {
+            (running, active_state, detail)
+        }
+        Ok((running, active_state, _)) => (running, active_state, String::new()),
+        Err(_) => (false, String::new(), String::new()),
+    };
 
     let (bytes_downloaded, bytes_total, detail) = if ready {
         (

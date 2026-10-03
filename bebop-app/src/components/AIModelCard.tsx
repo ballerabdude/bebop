@@ -340,7 +340,9 @@ function ModelRow({
           </div>
         ) : null}
 
-        {!isDownloading && entry.detail && downloadable ? (
+        {!isDownloading &&
+        entry.detail &&
+        (entry.state === "failed" || entry.state === "unauthorized") ? (
           <div className="text-[11px] text-danger leading-snug">{entry.detail}</div>
         ) : null}
 
