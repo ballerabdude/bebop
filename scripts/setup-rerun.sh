@@ -25,7 +25,8 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exit 1
 fi
 
-for f in rerun_dashboards/mcap_to_rrd.py rerun_dashboards/navd_blueprint.py; do
+for f in rerun_dashboards/mcap_to_rrd.py rerun_dashboards/navd_blueprint.py \
+         rerun_dashboards/system_blueprint.py; do
     if [[ ! -f "${REPO_ROOT}/${f}" ]]; then
         echo "missing ${REPO_ROOT}/${f} (run from the repo checkout)" >&2
         exit 1
@@ -43,6 +44,8 @@ install -m 0644 "${REPO_ROOT}/rerun_dashboards/mcap_to_rrd.py" \
     "${LIB_DIR}/mcap_to_rrd.py"
 install -m 0644 "${REPO_ROOT}/rerun_dashboards/navd_blueprint.py" \
     "${LIB_DIR}/navd_blueprint.py"
+install -m 0644 "${REPO_ROOT}/rerun_dashboards/system_blueprint.py" \
+    "${LIB_DIR}/system_blueprint.py"
 
 echo "==> installing wrapper -> ${WRAPPER}"
 cat > "${WRAPPER}" <<EOF

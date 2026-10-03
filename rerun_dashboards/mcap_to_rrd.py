@@ -21,11 +21,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rerun as rr  # noqa: E402
 
 import navd_blueprint  # noqa: E402
+import system_blueprint  # noqa: E402
+
+
+def _blueprint_for(in_path: str):
+    """(app id, blueprint) — the system dashboard for `system_*` logs, the
+    navd dashboard otherwise."""
+    name = os.path.basename(in_path)
+    if name.startswith("system_"):
+        return system_blueprint.NAME, system_blueprint.build()
+    return navd_blueprint.NAME, navd_blueprint.build()
 
 
 def convert(in_path: str, out_path: str) -> None:
-    blueprint = navd_blueprint.build()
-    rec = rr.RecordingStream(navd_blueprint.NAME)
+    app_id, blueprint = _blueprint_for(in_path)
+    rec = rr.RecordingStream(app_id)
     rec.save(out_path, default_blueprint=blueprint)
     rec.log_file_from_path(in_path)
     rec.flush()
