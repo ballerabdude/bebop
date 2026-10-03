@@ -109,6 +109,7 @@ pub async fn run_server(state: AppState, bind_addr: &str) -> Result<()> {
         .route("/ws", get(ws_upgrade))
         .route("/captures", get(list_captures))
         .route("/captures/finalize", post(finalize_captures))
+        .route("/captures/finalize-dl/:name", get(finalize_download))
         .route("/captures/rerun/:name", get(convert_capture))
         .nest_service("/captures/dl", ServeDir::new(state.capture_dir.clone()))
         .with_state(state)
@@ -230,10 +231,8 @@ async fn list_captures(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// Roll the currently-writing segment(s) over so their files have a
-/// footer. The app calls this before downloading an `active` capture.
-/// Waits (bounded) for the writers to open a fresh segment.
-async fn finalize_captures(State(state): State<AppState>) -> impl IntoResponse {
-    let control = &state.captures;
+/// footer. Waits (bounded) for the writers to open a fresh segment.
+async fn finalize_now(control: &CaptureControl) {
     let before = (control.system_path(), control.policy_path());
     control.request_finalize();
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -246,7 +245,46 @@ async fn finalize_captures(State(state): State<AppState>) -> impl IntoResponse {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+/// `POST /captures/finalize` — explicit finalize (kept for API/scripting).
+async fn finalize_captures(State(state): State<AppState>) -> impl IntoResponse {
+    finalize_now(&state.captures).await;
     Json(serde_json::json!({ "ok": true }))
+}
+
+/// `GET /captures/finalize-dl/<name>` — finalize `name` if it's the active
+/// segment, then redirect to its normal download URL. This lets the app
+/// keep a plain, copyable `<a href>` link that still yields a complete file
+/// (the browser follows the redirect; Foxglove/Rerun follow it too).
+async fn finalize_download(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> impl IntoResponse {
+    let path = match safe_capture_path(&state.capture_dir, &name) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let active = state.captures.system_path().as_deref() == Some(path.as_path())
+        || state.captures.policy_path().as_deref() == Some(path.as_path());
+    if active {
+        finalize_now(&state.captures).await;
+    }
+    let location = format!("/captures/dl/{}", url_encode(&name));
+    Redirect::temporary(&location).into_response()
+}
+
+/// Percent-encode a capture filename for use in a redirect Location.
+fn url_encode(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Validate a capture filename and resolve it inside the capture dir.

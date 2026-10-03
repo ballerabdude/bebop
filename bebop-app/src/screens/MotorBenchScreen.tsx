@@ -1644,53 +1644,26 @@ function CaptureDownloads({
   /// the browser issues its own GET, follows redirects, supports
   /// range requests for resume, and writes the bytes directly to
   /// the destination file.
+  /// Raw download URL. A real, copyable link — paste it straight into
+  /// Foxglove's "remote file" (or any MCAP tool).
   const downloadUrl = useCallback(
     (name: string) => `${baseUrl}/captures/dl/${encodeURIComponent(name)}`,
     [baseUrl],
   );
 
-  /// On-robot MCAP -> Rerun .rrd conversion. The firmware runs the converter
-  /// and redirects to the cached `.rrd`, which opens with the dashboard.
-  const rerunUrl = useCallback(
-    (name: string) => `${baseUrl}/captures/rerun/${encodeURIComponent(name)}`,
+  /// Finalizing download: same file, but the server rolls the segment over
+  /// first (if it's the live one) so it has a footer. Copyable too.
+  const finalizeDlUrl = useCallback(
+    (name: string) => `${baseUrl}/captures/finalize-dl/${encodeURIComponent(name)}`,
     [baseUrl],
   );
 
-  /// Roll the active segment(s) over so the file has an MCAP footer. Cheap
-  /// and a no-op when no writer has a segment open.
-  const finalizeCaptures = useCallback(async () => {
-    try {
-      await fetch(`${baseUrl}/captures/finalize`, { method: "POST" });
-    } catch {
-      /* best-effort: fall back to whatever bytes are on disk */
-    }
-  }, [baseUrl]);
-
-  /// Native anchor download: streams straight to disk (avoids the
-  /// fetch->blob path that broke on repeat clicks / HTTP pages).
-  const saveAs = useCallback((url: string, filename: string) => {
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  }, []);
-
-  const downloadCapture = useCallback(
-    async (f: CaptureFile) => {
-      if (f.active) await finalizeCaptures();
-      saveAs(downloadUrl(f.name), f.name);
-    },
-    [finalizeCaptures, downloadUrl, saveAs],
-  );
-
-  const downloadRerun = useCallback(
-    async (f: CaptureFile) => {
-      if (f.active) await finalizeCaptures();
-      saveAs(rerunUrl(f.name), f.name.replace(/\.mcap$/, ".rrd"));
-    },
-    [finalizeCaptures, rerunUrl, saveAs],
+  /// On-robot MCAP -> Rerun .rrd conversion. The firmware runs the converter
+  /// and redirects to the cached `.rrd` under the `bebop_navd` app id +
+  /// dashboard. Paste this URL into Rerun's "open URL" to view directly.
+  const rerunUrl = useCallback(
+    (name: string) => `${baseUrl}/captures/rerun/${encodeURIComponent(name)}`,
+    [baseUrl],
   );
 
   return (
@@ -1761,23 +1734,26 @@ function CaptureDownloads({
                       {formatModified(f.modifiedMs)}
                     </td>
                     <td className="py-1.5 pl-3 text-right whitespace-nowrap">
-                      {/* Buttons (not anchors) so we can finalize the
-                          active segment before the browser streams it. */}
-                      <button
-                        type="button"
-                        onClick={() => void downloadCapture(f)}
-                        className="inline-flex items-center justify-center rounded-[var(--radius-input)] border border-border bg-bg-elev-2 px-2 py-1 text-[11px] font-medium text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors cursor-pointer"
+                      {/* Plain copyable links: right-click / copy-link to
+                          paste the URL into Foxglove (raw MCAP) or Rerun
+                          (.rrd). The live segment uses the finalizing URL so
+                          the saved file has a footer. */}
+                      <a
+                        href={f.active ? finalizeDlUrl(f.name) : downloadUrl(f.name)}
+                        download={f.name}
+                        title={f.active ? "Finalizes the live segment, then downloads" : "Download the raw MCAP"}
+                        className="inline-flex items-center justify-center rounded-[var(--radius-input)] border border-border bg-bg-elev-2 px-2 py-1 text-[11px] font-medium text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors no-underline"
                       >
                         {f.active ? "Finalize + download" : "Download"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void downloadRerun(f)}
-                        title="Convert to a Rerun .rrd with the navd dashboard and download"
-                        className="ml-1.5 inline-flex items-center justify-center rounded-[var(--radius-input)] border border-border bg-bg-elev-2 px-2 py-1 text-[11px] font-medium text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors cursor-pointer"
+                      </a>
+                      <a
+                        href={rerunUrl(f.name)}
+                        download={f.name.replace(/\.mcap$/, ".rrd")}
+                        title="Convert on the robot to a Rerun .rrd with the navd dashboard"
+                        className="ml-1.5 inline-flex items-center justify-center rounded-[var(--radius-input)] border border-border bg-bg-elev-2 px-2 py-1 text-[11px] font-medium text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors no-underline"
                       >
                         Rerun
-                      </button>
+                      </a>
                     </td>
                   </tr>
                 ))}
