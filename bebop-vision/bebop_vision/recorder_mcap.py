@@ -118,7 +118,12 @@ class NavdRecorder:
         self._file = open(out_path, "wb")
         # No chunk compression: payloads are already-compressed JPEG/PNG,
         # and the zstd chunk path has proven lossy with this mcap build.
-        self._writer = Writer(self._file, compression=CompressionType.NONE)
+        # Small chunks (256 KiB) bound how much the in-memory chunk builder
+        # holds, so a sudden power cut loses at most a few ticks — the
+        # writer only writes a chunk once it fills (or on finish()). See
+        # `tools/mcap_recover.py` for reading an unterminated file.
+        self._writer = Writer(self._file, compression=CompressionType.NONE,
+                              chunk_size=256 * 1024)
         self._writer.start()
         self._sch_calib = self._writer.register_schema(
             "bebop.navd.Calib", "jsonschema", _obj_schema({}))

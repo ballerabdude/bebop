@@ -98,6 +98,10 @@ const ROS2_PROFILE: &str = "ros2";
 
 const SAMPLE_CHANNEL_CAPACITY: usize = 2000;
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// `fsync` cadence: bounds how much flushed data can still be in the OS
+/// page cache if power is cut. Separate from `FLUSH_INTERVAL` (which
+/// finalizes the chunk) because sync is the expensive part.
+const SYNC_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const DISK_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const ROTATE_CHECK_EVERY: u64 = 100;
@@ -203,9 +207,13 @@ pub fn spawn_capture_thread(
 struct OpenCapture {
     path: PathBuf,
     writer: mcap::Writer<BufWriter<fs::File>>,
+    /// Second handle to the same file for `sync_all` (the writer owns the
+    /// BufWriter, so the File isn't otherwise reachable).
+    sync_file: fs::File,
     channel_ids: [u16; 5],
     rows: u64,
     last_flush: Instant,
+    last_sync: Instant,
 }
 
 fn ns_to_sec_nsec(ns: u64) -> (u32, u32) {
@@ -342,6 +350,10 @@ impl OpenCapture {
             self.writer.flush().context("mcap: flush")?;
             self.last_flush = now;
         }
+        if now.duration_since(self.last_sync) >= SYNC_INTERVAL {
+            self.sync_file.sync_all().context("mcap: fsync")?;
+            self.last_sync = now;
+        }
         Ok(())
     }
 
@@ -360,6 +372,9 @@ fn open_capture(dir: &Path) -> Result<OpenCapture> {
     let path = dir.join(filename);
     let file =
         fs::File::create(&path).with_context(|| format!("create file {}", path.display()))?;
+    let sync_file = file
+        .try_clone()
+        .with_context(|| format!("clone handle for {}", path.display()))?;
     let buf = BufWriter::with_capacity(64 * 1024, file);
     let mut writer = mcap::Writer::with_options(
         buf,
@@ -389,9 +404,11 @@ fn open_capture(dir: &Path) -> Result<OpenCapture> {
     Ok(OpenCapture {
         path,
         writer,
+        sync_file,
         channel_ids,
         rows: 0,
         last_flush: Instant::now(),
+        last_sync: Instant::now(),
     })
 }
 

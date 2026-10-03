@@ -42,9 +42,9 @@ except ImportError:  # pragma: no cover - standalone use
     _IMU = {}
 
 try:
-    from mcap.reader import make_reader
-except ImportError as exc:  # pragma: no cover
-    raise ImportError("pip install mcap") from exc
+    from tools.mcap_recover import iter_messages as iter_mcap_messages
+except ImportError:  # pragma: no cover - standalone use
+    from mcap_recover import iter_messages as iter_mcap_messages
 
 
 def _foxglove_blob(schema_name, message_encoding, data):
@@ -100,7 +100,7 @@ def extract(mcap_path, out_dir, tol_us=15_000):
     video_aus = {"near": [], "far": []}  # role -> [(log_time, codec, bytes)]
     imu = {}  # topic -> [ImuAccel/ImuGyro] (kept out of `ticks`: full rate)
     with open(mcap_path, "rb") as f:
-        for schema, channel, message in make_reader(f).iter_messages():
+        for schema, channel, message in iter_mcap_messages(f):
             topic = channel.topic
             if (channel.message_encoding == "protobuf"
                     and schema.name in _IMU):

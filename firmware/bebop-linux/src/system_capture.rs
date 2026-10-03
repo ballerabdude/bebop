@@ -55,8 +55,13 @@ const PROFILE: &str = "bebop_system";
 
 /// Sampling period: the requested always-on 1 Hz.
 const SAMPLE_PERIOD: Duration = Duration::from_secs(1);
-/// Flush cadence so a crash loses at most a few seconds of samples.
-const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+/// Flush cadence. `flush()` finalizes the in-progress chunk, so a sudden
+/// power loss can only drop samples buffered since the last flush.
+const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// `fsync` cadence: bounds how much flushed data can still be sitting in
+/// the OS page cache when power is cut. `sync_all` on eMMC/NVMe is not
+/// free, so we don't do it every second.
+const SYNC_INTERVAL: Duration = Duration::from_secs(5);
 /// Roll to a new file after this long even if the size budget is nowhere
 /// near — keeps individual files small and lets pruning work.
 const ROTATE_INTERVAL: Duration = Duration::from_secs(3600);
@@ -391,9 +396,13 @@ fn drive_active(sup: &Arc<Supervisor>) -> bool {
 struct OpenSystem {
     path: PathBuf,
     writer: mcap::Writer<BufWriter<fs::File>>,
+    /// Second handle to the same file, for `sync_all` (the writer owns the
+    /// BufWriter, so we can't reach the File through it).
+    sync_file: fs::File,
     channels: [u16; 3],
     rows: u64,
     last_flush: Instant,
+    last_sync: Instant,
     opened_at: Instant,
 }
 
@@ -416,6 +425,12 @@ impl OpenSystem {
     fn flush(&mut self) -> Result<()> {
         self.writer.flush().context("mcap: flush")?;
         self.last_flush = Instant::now();
+        // Periodically push the flushed bytes out of the OS page cache too,
+        // so a sudden power cut can't lose more than SYNC_INTERVAL.
+        if self.last_flush.duration_since(self.last_sync) >= SYNC_INTERVAL {
+            self.sync_file.sync_all().context("mcap: fsync")?;
+            self.last_sync = Instant::now();
+        }
         Ok(())
     }
 
@@ -441,6 +456,9 @@ fn open_system(dir: &Path) -> Result<OpenSystem> {
     let path = unique_path(dir, &format!("system_{stamp}"));
     let file =
         fs::File::create(&path).with_context(|| format!("create file {}", path.display()))?;
+    let sync_file = file
+        .try_clone()
+        .with_context(|| format!("clone handle for {}", path.display()))?;
     let buf = BufWriter::with_capacity(64 * 1024, file);
     let mut writer = mcap::Writer::with_options(
         buf,
@@ -467,9 +485,11 @@ fn open_system(dir: &Path) -> Result<OpenSystem> {
     Ok(OpenSystem {
         path,
         writer,
+        sync_file,
         channels,
         rows: 0,
         last_flush: Instant::now(),
+        last_sync: Instant::now(),
         opened_at: Instant::now(),
     })
 }
@@ -777,5 +797,38 @@ mod tests {
         // empty wheel set counts as armed (legged build), matching the
         // Python recorder's `all({}.values())`.
         assert!(is_drive_active(Mode::DialIn, false, &[]));
+    }
+
+    /// A sudden power cut leaves the file without a footer (no `finish()`).
+    /// `flush()` finalizes the in-progress chunk, so everything up to the
+    /// last flush is a sequence of complete chunks and must still be
+    /// recoverable by a streaming reader.
+    #[test]
+    fn unterminated_capture_is_streamable() {
+        let dir = tmp_dir("unterminated");
+        let mut cap = open_system(&dir).expect("open system capture");
+        let path = cap.path.clone();
+        let wall = 1_700_000_000_000_000_000u64;
+        for i in 0..3u64 {
+            let p = proto::Power {
+                stamp_ns: (wall + i) as i64,
+                present: true,
+                ..Default::default()
+            };
+            cap.post(0, wall + i, &p.encode_to_vec()).unwrap();
+        }
+        cap.flush().expect("flush completes the chunk");
+        // Skip Drop -> no finish(), exactly like losing power mid-run.
+        std::mem::forget(cap);
+
+        let bytes = fs::read(&path).expect("read capture file");
+        let n = mcap::MessageStream::new(&bytes)
+            .expect("stream unterminated file")
+            .filter_map(Result::ok)
+            .count();
+        assert_eq!(n, 3, "flushed messages survive without a footer");
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
     }
 }
