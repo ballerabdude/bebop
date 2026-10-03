@@ -1,19 +1,27 @@
 //! Physical mode-toggle button.
 //!
-//! A momentary switch wired between a GPIO header pin (default: Orin Nano
-//! pin 32 → `gpiochip0` line 41, which has an internal pull-down) and
-//! 3.3 V (no external resistor needed). Pressing it
-//! toggles the robot between `client` ("Known Network") and `ap` ("Hosted
-//! Network"). By default (`button_hold_secs = 0`) a debounced press toggles
-//! immediately; set `button_hold_secs > 0` to require holding the line
-//! active for that long instead.
+//! The button can be sourced two ways (`network.button_source`):
 //!
-//! The line level is **polled**, not edge-timed, so it works with momentary
-//! push-buttons and latching switches alike and does not depend on a release
-//! edge arriving.
+//!   * `"serial"` (default on the Thor) — the switch is wired to the Teensy,
+//!     which forwards debounced press/release events over its USB control
+//!     channel. Handled by [`crate::control_serial`].
+//!   * `"gpio"` — a momentary switch wired to a Jetson header pin (default:
+//!     Orin Nano pin 32 → `gpiochip0` line 41, internal pull-down) and
+//!     3.3 V (no external resistor needed). Handled here.
 //!
-//! Implemented with the pure-Rust [`gpiocdev`] crate (GPIO uAPI v2), so it
-//! needs no `libgpiod` build dependency and can request a line bias.
+//! Either way, the robot toggles between `client` ("Known Network") and
+//! `ap` ("Hosted Network") after the button is held for `button_hold_secs`
+//! (default **5 s**, so a brief accidental press does nothing). Set
+//! `button_hold_secs = 0` to toggle on a debounced press edge instead.
+//!
+//! The GPIO line level is **polled**, not edge-timed, so it works with
+//! momentary push-buttons and latching switches alike and does not depend on
+//! a release edge arriving. The serial path consumes explicit press/release
+//! edges produced by the firmware's own debouncer.
+//!
+//! The GPIO path is implemented with the pure-Rust [`gpiocdev`] crate (GPIO
+//! uAPI v2), so it needs no `libgpiod` build dependency and can request a
+//! line bias.
 
 use std::time::{Duration, Instant};
 
@@ -28,8 +36,9 @@ use crate::state::AppState;
 /// How often the button thread samples the line.
 const POLL: Duration = Duration::from_millis(100);
 
-/// Entry point. Never returns while enabled; parks if the button is
-/// disabled or the line cannot be requested, so it can't take the agent down.
+/// Entry point. Dispatches to the configured button source, then never
+/// returns while enabled; parks if the button is disabled or the source
+/// cannot be armed, so it can't take the agent down.
 pub async fn run(state: AppState) -> anyhow::Result<()> {
     let cfg = state.config().await.network;
     if !cfg.button_enabled {
@@ -37,6 +46,17 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
         std::future::pending::<()>().await;
         return Ok(());
     }
+
+    if cfg.button_is_serial() {
+        return crate::control_serial::run(state).await;
+    }
+
+    run_gpio(state).await
+}
+
+/// GPIO-backed mode button (Jetson header pin). Never returns while enabled.
+async fn run_gpio(state: AppState) -> anyhow::Result<()> {
+    let cfg = state.config().await.network;
 
     let (tx, mut rx) = mpsc::channel::<()>(4);
 
@@ -185,7 +205,7 @@ fn button_loop(
 }
 
 /// Flip the persisted network mode and reconcile the hotspot immediately.
-async fn toggle_mode(state: &AppState) {
+pub(crate) async fn toggle_mode(state: &AppState) {
     let mut new_mode = String::new();
     state
         .update_config(|c| {

@@ -36,8 +36,10 @@ pub struct AgentConfig {
 ///   * `ap` — host the setup hotspot ("Hosted Network"); stays up
 ///     indefinitely and is only changed by the physical button.
 ///
-/// The GPIO button toggles `mode` (a press by default; a hold if
-/// `button_hold_secs > 0`).
+/// The mode button toggles `mode` after being held for `button_hold_secs`
+/// (default 5 s, so an accidental bump is ignored). It is sourced from a
+/// Jetson GPIO line or, on the Thor (no header), from the Teensy control
+/// channel over USB serial (`button_source = "serial"`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
     /// `"ap"` (default) or `"client"`.
@@ -65,6 +67,18 @@ pub struct NetworkConfig {
     #[serde(default = "default_true")]
     pub button_enabled: bool,
 
+    /// Where the mode-toggle button lives: `"serial"` (the Teensy control
+    /// channel — used on the Thor, which has no GPIO header) or `"gpio"`
+    /// (a Jetson header pin, the historical Orin Nano path).
+    #[serde(default = "default_button_source")]
+    pub button_source: String,
+
+    /// Serial device for the Teensy control channel. Only used when
+    /// `button_source = "serial"`. udev (`install-jetson.sh --setup-imu`)
+    /// exposes the Teensy's third CDC port as this stable symlink.
+    #[serde(default = "default_control_device")]
+    pub control_device: String,
+
     /// GPIO chip the button is wired to.
     #[serde(default = "default_button_chip")]
     pub button_chip: String,
@@ -88,9 +102,10 @@ pub struct NetworkConfig {
     #[serde(default = "default_button_bias")]
     pub button_bias: String,
 
-    /// Hold time in seconds before the press toggles the mode. `0` (the
-    /// default) toggles on a debounced press edge, which suits a momentary
-    /// push-button.
+    /// Hold time in seconds before the press toggles the mode. `5` (the
+    /// default) requires the button to be held for a full 5 s so an
+    /// accidental brush doesn't switch the robot between Known and Hosted
+    /// Network. Set to `0` to toggle on a debounced press edge instead.
     #[serde(default = "default_button_hold_secs")]
     pub button_hold_secs: u64,
 }
@@ -104,6 +119,8 @@ impl Default for NetworkConfig {
             ap_band: default_ap_band(),
             setup_bind_addr: default_setup_bind_addr(),
             button_enabled: true,
+            button_source: default_button_source(),
+            control_device: default_control_device(),
             button_chip: default_button_chip(),
             button_line: default_button_line(),
             button_active_low: default_false(),
@@ -117,6 +134,12 @@ impl NetworkConfig {
     /// True when the robot should host the setup hotspot.
     pub fn hosts_ap(&self) -> bool {
         self.mode.eq_ignore_ascii_case("ap")
+    }
+
+    /// True when the mode-toggle button comes from the Teensy control
+    /// channel rather than a Jetson GPIO line.
+    pub fn button_is_serial(&self) -> bool {
+        self.button_source.eq_ignore_ascii_case("serial")
     }
 
     /// NetworkManager `802-11-wireless.band` value.
@@ -242,6 +265,16 @@ fn default_button_chip() -> String {
     "gpiochip0".into()
 }
 
+fn default_button_source() -> String {
+    // The current robot (Jetson AGX Thor) exposes no usable GPIO header, so
+    // the button lives on the Teensy and arrives over the control channel.
+    "serial".into()
+}
+
+fn default_control_device() -> String {
+    "/dev/bebop-control".into()
+}
+
 fn default_button_line() -> u32 {
     41 // Orin Nano 40-pin header pin 32 (GPIO07); internal pull-down
 }
@@ -252,7 +285,8 @@ fn default_button_bias() -> String {
 }
 
 fn default_button_hold_secs() -> u64 {
-    0
+    // Require a deliberate hold so a bump can't switch Known/Hosted Network.
+    5
 }
 
 fn default_true() -> bool {
@@ -300,6 +334,10 @@ mod tests {
         assert!(cfg.ap_password.len() >= 8);
         assert_eq!(cfg.nm_band(), "bg");
         assert_eq!(cfg.button_line, 41);
+        assert_eq!(cfg.button_source, "serial");
+        assert!(cfg.button_is_serial());
+        assert_eq!(cfg.control_device, "/dev/bebop-control");
+        assert_eq!(cfg.button_hold_secs, 5);
     }
 
     #[test]

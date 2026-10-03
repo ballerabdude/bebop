@@ -29,15 +29,27 @@
   containers, OTA, or controller pairing.
 - Network mode is a two-way switch with **no fallback**: `ap` (Hosted
   Network, boot default) or `client` (Known Network). The **physical button
-  press** toggles it; the app cannot. The code default is Orin Nano-derived:
-  `[network] button_chip=gpiochip0`, `button_line=41`, `button_bias=none`
-  (`jetson-agent/bebop-agent/src/config/mod.rs`) — Orin header **pin 32**
-  (`GPIO07`, internal pull-down; wire the switch to 3.3 V, active-high, no
-  resistor). **On Thor these do not carry over:** header pin 32 is `PDD.04`
-  (`GPIO09`) on the **AON** controller (`tegra264-gpio-aon`, a separate
-  gpiochip), so verify with `gpioinfo` and override `button_chip`/`button_line`
-  before trusting the button. Avoid pins 7/15 (IMU) and, for a resistorless
-  button, pins with no internal pull.
+  press** toggles it; the app cannot.
+- **Mode button now lives on the Teensy** (`[network] button_source="serial"`,
+  the default). Thor has no usable GPIO header, so the switch is wired to the
+  Teensy 4.1 (`teensy_bridge`, pin 2 → GND, internal pull-up) and its
+  debounced press/release events ride the **third USB CDC**
+  (`USB_TRIPLE_SERIAL`, `16c0:048c` if04 → `/dev/bebop-control`, symlinked by
+  `install-jetson.sh --setup-imu`). `bebop-agent` reads it in
+  `control_serial.rs` and toggles via the shared `button::toggle_mode` after
+  a **5 s hold** (`button_hold_secs`, default 5; set 0 to toggle on press). Set
+  `button_source="gpio"` for the old Jetson-header path: Orin Nano
+  `button_chip=gpiochip0`, `button_line=41`, `button_bias=none` (header
+  **pin 32**, `GPIO07`, internal pull-down; switch to 3.3 V, active-high, no
+  resistor). On Thor that pin is `PDD.04` on the **AON** controller
+  (`tegra264-gpio-aon`, separate gpiochip) — verify with `gpioinfo` before
+  trusting it.
+- **USB type gotcha:** `USB_TRIPLE_SERIAL` changes the Teensy PID from
+  `16c0:048b` → `16c0:048c`, so the udev rules/`/dev/bebop-imu` symlink only
+  exist after re-running `install-jetson.sh --setup-imu`. Interface map:
+  if00=`/dev/bebop-imu` (IMU frames, `bebop-linux`), if02=`/dev/bebop-imu-debug`,
+  if04=`/dev/bebop-control` (control frames, `bebop-agent`). The IMU frame
+  format is unchanged.
 - AP capability on this robot is confirmed (`nmcli -f WIFI-PROPERTIES.AP
   dev show wlP1p1s0` → yes; `iw list` shows `* AP`). It is a single radio,
   so the hotspot and a client Wi-Fi connection are mutually exclusive —

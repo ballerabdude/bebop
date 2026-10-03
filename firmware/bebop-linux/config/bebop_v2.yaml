@@ -377,7 +377,7 @@ joints:
 imu:
   # IMU backend: "spi" (default) reads the BNO085 directly over the
   # Jetson's SPI bus using the GPIOs below. "serial" instead consumes
-  # pre-fused frames streamed by the Teensy `imu_bridge` firmware over
+  # pre-fused frames streamed by the Teensy `teensy_bridge` firmware over
   # USB serial — in that case the BNO is wired to the Teensy, the
   # spi_device / int_line / rst_line fields are ignored, and you set
   # `serial_device` to the Teensy's primary ACM port. The `mount:` block
@@ -387,7 +387,7 @@ imu:
   #                                 # /dev/bebop-imu is the stable symlink
   #                                 # created by `install-jetson.sh
   #                                 # --setup-imu` (udev, matches the Teensy
-  #                                 # 16c0:048b interface 0). Falls back to a
+  #                                 # 16c0:048c interface 0). Falls back to a
   #                                 # raw "/dev/ttyACM0" if you skip that.
 
   # SPI controller + INT/RST GPIOs for the Bebop V2 wiring above. These

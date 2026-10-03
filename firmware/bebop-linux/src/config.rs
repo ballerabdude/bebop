@@ -496,7 +496,7 @@ pub enum ImuSource {
     Spi,
     /// Read pre-fused frames streamed by the Teensy over USB serial
     /// (see [`crate::imu_serial::spawn_imu_serial_thread`] and the Teensy
-    /// `imu_bridge` firmware). The BNO is wired to the Teensy, not the
+    /// `teensy_bridge` firmware). The BNO is wired to the Teensy, not the
     /// Jetson, so the SPI/INT/RST fields are unused.
     Serial,
 }
@@ -518,7 +518,7 @@ impl std::str::FromStr for ImuSource {
 pub struct ImuConfig {
     /// Which backend feeds the shared IMU snapshot.
     pub source: ImuSource,
-    /// Serial device the Teensy `imu_bridge` enumerates as, e.g.
+    /// Serial device the Teensy `teensy_bridge` enumerates as, e.g.
     /// `/dev/ttyACM0`. Only meaningful when `source == Serial`.
     pub serial_device: String,
     /// SPI character device — e.g. `/dev/spidev0.0` for the Jetson
@@ -1041,7 +1041,7 @@ struct RawConfig {
 struct RawImu {
     /// `"spi"` (default) or `"serial"`. Selects the IMU backend.
     source: Option<String>,
-    /// Serial device for the Teensy `imu_bridge`. Defaults to
+    /// Serial device for the Teensy `teensy_bridge`. Defaults to
     /// `/dev/ttyACM0`. Only used when `source: serial`.
     serial_device: Option<String>,
     /// SPI character device. Defaults to `/dev/spidev0.0` for the Jetson

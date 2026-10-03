@@ -189,9 +189,20 @@ pub async fn activate_known_network() -> Result<WifiRuntimeStatus, AgentError> {
         return Err(AgentError::Wifi("no saved client network".into()));
     }
 
+    // A mode switch lowers the AP and asks us to rejoin right away, but the
+    // radio is still tearing the AP down for a moment: a `con up` fired
+    // immediately can wait out its whole timeout and fail even though the
+    // network is in range (observed on Thor — the first attempt timed out at
+    // 20 s, then NM's own autoconnect joined moments later). Give the device
+    // a beat, then retry with backoff before giving up.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     for name in candidates {
-        if nmcli(&["-w", "20", "con", "up", &name]).await.is_ok() {
-            return Ok(query_status().await.unwrap_or_default());
+        for attempt in 0..3u32 {
+            if nmcli(&["-w", "15", "con", "up", &name]).await.is_ok() {
+                return Ok(query_status().await.unwrap_or_default());
+            }
+            info!(ssid = %name, attempt = attempt + 1, "rejoin attempt failed; retrying");
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
     }
     Err(AgentError::Wifi(

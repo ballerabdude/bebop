@@ -199,7 +199,7 @@ async fn main() -> Result<()> {
     // runner (reader / file-state owner).
     let policy_control_shared = policy_control::new_shared();
     // Pick the IMU backend: read the BNO directly over the Jetson's SPI
-    // bus, or consume pre-fused frames from the Teensy `imu_bridge` over
+    // bus, or consume pre-fused frames from the Teensy `teensy_bridge` over
     // USB serial. Both fill `imu_shared` with the same body-frame snapshot.
     let imu_handle = cfg.imu.as_ref().and_then(|imu_cfg| match imu_cfg.source {
         ImuSource::Spi => {

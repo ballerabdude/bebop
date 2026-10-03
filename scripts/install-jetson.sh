@@ -51,7 +51,7 @@
 #                                             # group rw on /dev/spidev* and
 #                                             # /dev/gpiochip* (SPI backend) AND
 #                                             # a stable /dev/bebop-imu symlink
-#                                             # for the Teensy `imu_bridge`
+#                                             # for the Teensy `teensy_bridge`
 #                                             # serial backend (so bebop-linux
 #                                             # can open whichever the YAML
 #                                             # selects without root)
@@ -376,11 +376,13 @@ EOF
 #                        - /dev/spidev0.0 (SPI controller via jetson-io `spi1`)
 #                        - /dev/gpiochip0 (line 144 = INT/HINTN, 106 = RST)
 #   * source: serial — the BNO is wired to the Teensy, which runs the
-#                      `imu_bridge` firmware and streams binary frames to
+#                      `teensy_bridge` firmware and streams binary frames to
 #                      the Jetson over USB serial. `bebop-linux` opens a
 #                      tty (e.g. /dev/ttyACM0). The Teensy enumerates with
-#                      USB_DUAL_SERIAL as 16c0:048b: interface 0 is the
-#                      binary frame stream, interface 2 is the debug log.
+#                      USB_TRIPLE_SERIAL as 16c0:048c: interface 0 is the
+#                      binary frame stream, interface 2 the debug log, and
+#                      interface 4 the control channel (buttons/events read
+#                      by `bebop-agent`, exposed as /dev/bebop-control).
 #
 # JetPack ships /dev/spidev* and /dev/gpiochip* as root-only (mode 0600,
 # owner root:root); /dev/ttyACM* are usually group `dialout`. So a
@@ -388,9 +390,9 @@ EOF
 # that hands all of them to `${IMU_GROUP}` (default `bebop`, matching the
 # OEM login group) so the runtime can come up as a regular service user
 # without sudo. For the serial backend it also creates stable symlinks
-# /dev/bebop-imu (binary stream) and /dev/bebop-imu-debug (log), so the
-# YAML can point at a name that doesn't shift when other USB CDC devices
-# enumerate ahead of the Teensy.
+# /dev/bebop-imu (binary stream), /dev/bebop-imu-debug (log) and
+# /dev/bebop-control (control), so config can point at a name that doesn't
+# shift when other USB CDC devices enumerate ahead of the Teensy.
 #
 # Caveat: enabling `spi1` itself is a one-time, *interactive*
 # device-tree change made via `sudo /opt/nvidia/jetson-io/jetson-io.py`
@@ -441,14 +443,16 @@ EOF
 KERNEL=="spidev*",   GROUP="${IMU_GROUP}", MODE="0660"
 KERNEL=="gpiochip*", GROUP="${IMU_GROUP}", MODE="0660"
 #
-# --- source: serial (Teensy imu_bridge) ------------------------------
-# The Teensy enumerates with USB_DUAL_SERIAL as 16c0:048b and presents
-# two CDC-ACM interfaces. Interface 0 carries the binary IMU frames;
-# interface 2 is the human-readable debug log. Give the ${IMU_GROUP}
-# group access and create stable symlinks so the YAML 'serial_device'
-# can point at /dev/bebop-imu regardless of ttyACM enumeration order.
-SUBSYSTEM=="tty", ATTRS{idVendor}=="16c0", ATTRS{idProduct}=="048b", ENV{ID_USB_INTERFACE_NUM}=="00", GROUP="${IMU_GROUP}", MODE="0660", SYMLINK+="bebop-imu"
-SUBSYSTEM=="tty", ATTRS{idVendor}=="16c0", ATTRS{idProduct}=="048b", ENV{ID_USB_INTERFACE_NUM}=="02", GROUP="${IMU_GROUP}", MODE="0660", SYMLINK+="bebop-imu-debug"
+# --- source: serial (Teensy teensy_bridge firmware) -------------------
+# The Teensy enumerates with USB_TRIPLE_SERIAL as 16c0:048c and presents
+# three CDC-ACM interfaces. Interface 0 carries the binary IMU frames;
+# interface 2 is the human-readable debug log; interface 4 is the control
+# channel (button/event frames consumed by bebop-agent). Give the
+# ${IMU_GROUP} group access and create stable symlinks so config can point
+# at /dev/bebop-imu and /dev/bebop-control regardless of ttyACM order.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="16c0", ATTRS{idProduct}=="048c", ENV{ID_USB_INTERFACE_NUM}=="00", GROUP="${IMU_GROUP}", MODE="0660", SYMLINK+="bebop-imu"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="16c0", ATTRS{idProduct}=="048c", ENV{ID_USB_INTERFACE_NUM}=="02", GROUP="${IMU_GROUP}", MODE="0660", SYMLINK+="bebop-imu-debug"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="16c0", ATTRS{idProduct}=="048c", ENV{ID_USB_INTERFACE_NUM}=="04", GROUP="${IMU_GROUP}", MODE="0660", SYMLINK+="bebop-control"
 EOF
     echo "    wrote /etc/udev/rules.d/99-bebop-imu.rules"
 
@@ -492,20 +496,27 @@ EOF
         echo "      (none — no /dev/gpiochip* nodes found; very unusual on Jetson)"
     fi
     echo
-    echo "    Teensy imu_bridge serial (source: serial):"
+    echo "    Teensy teensy_bridge firmware (source: serial):"
     if compgen -G "/dev/bebop-imu*" >/dev/null; then
-        ls -l /dev/bebop-imu* 2>/dev/null | sed 's/^/      /'
+        ls -l /dev/bebop-imu* /dev/bebop-control 2>/dev/null | sed 's/^/      /'
     else
         cat <<'EOF'
       (none — /dev/bebop-imu not present)
-      Either the Teensy isn't plugged in / flashed with the `imu_bridge`
-      firmware, or it's running a non-dual-serial USB type. Flash it with:
+      Either the Teensy isn't plugged in / flashed with the `teensy_bridge`
+      firmware, or it's running a non-triple-serial USB type. Flash it with:
 
-          pio run -e imu_bridge --target upload   # from firmware/bebop-locomotion
+          pio run -e teensy_bridge --target upload   # from firmware/bebop-locomotion
 
       then re-run `--setup-imu`. Only needed when bebop_v2.yaml sets
       `imu.source: "serial"`; ignore this for the SPI backend.
 EOF
+    fi
+    if [[ -e /dev/bebop-control ]]; then
+        echo "      control channel: /dev/bebop-control present (buttons/events)"
+    elif compgen -G "/dev/bebop-imu*" >/dev/null; then
+        echo "      WARNING: /dev/bebop-control missing; bebop-agent's serial"
+        echo "      button source will idle. Re-flash with USB_TRIPLE_SERIAL and"
+        echo "      re-run --setup-imu."
     fi
 
     # 5) If the invoking user isn't already in the group, nudge them.

@@ -55,16 +55,30 @@
 # setup_bind_addr = "0.0.0.0:9091"
 
 # --- mode button ----------------------------------------------------------
-# A momentary switch between the GPIO pin and 3.3 V. A press toggles
-# between Hosted Network (ap) and Known Network (client). On the Orin Nano
-# 40-pin header, pin 32 is gpiochip0 line 41 and has an internal
-# pull-down, so wire the switch from pin 32 to 3.3 V (pins 1/17) and keep
-# button_active_low=false — no resistor needed (avoid pins 7/15 (IMU) and
-# pin 29, which has no internal pull).
+# A momentary switch. Holding it for `button_hold_secs` (default 5 s) toggles
+# between Hosted Network (ap) and Known Network (client). The button can come
+# from one of two sources:
+#
+#   button_source = "serial"  (default) — the switch is wired to the Teensy
+#       4.1 next to the IMU, which forwards debounced press/release events
+#       over its USB control channel (`USB_TRIPLE_SERIAL`). The Jetson reads
+#       that as /dev/bebop-control (created by `install-jetson.sh
+#       --setup-imu`). Use this on the Thor, which has no usable GPIO header.
+#       Recommended wiring: switch from Teensy pin 2 to GND (internal
+#       pull-up; no resistor).
+#
+#   button_source = "gpio" — a switch between a Jetson header pin and the
+#       rail that suits its pinmux. On the Orin Nano 40-pin header, pin 32 is
+#       gpiochip0 line 41 and has an internal pull-down, so wire the switch
+#       from pin 32 to 3.3 V (pins 1/17) and keep button_active_low=false —
+#       no resistor needed (avoid pins 7/15 (IMU) and pin 29, which has no
+#       internal pull).
 #
 # button_enabled = true
-# button_chip = "gpiochip0"
-# button_line = 41           # header pin 32 (GPIO07)
-# button_active_low = false  # switch ties the line to 3.3 V when pressed
-# button_bias = "none"       # leave the pinmux's built-in pull-down alone
-# button_hold_secs = 0       # 0 = toggle on press; >0 = require a hold
+# button_source = "serial"      # "serial" (Teensy) or "gpio" (Jetson header)
+# control_device = "/dev/bebop-control"  # only for button_source = "serial"
+# button_chip = "gpiochip0"     # only for button_source = "gpio"
+# button_line = 41              # only for button_source = "gpio" (pin 32)
+# button_active_low = false     # only for button_source = "gpio"
+# button_bias = "none"          # only for button_source = "gpio"
+# button_hold_secs = 5          # seconds the button must be held; 0 = on press

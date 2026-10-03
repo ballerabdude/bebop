@@ -1,5 +1,5 @@
 //! BNO085 IMU reader that consumes pre-fused frames streamed by the
-//! Teensy `imu_bridge` firmware over USB serial, instead of talking to
+//! Teensy `teensy_bridge` firmware over USB serial, instead of talking to
 //! the chip over the Jetson's own SPI bus.
 //!
 //! ## Why a serial backend
@@ -195,7 +195,7 @@ pub fn spawn_imu_serial_thread(
                             "IMU(serial): still cannot open the port after {} attempts; \
                              will keep retrying every {} ms (suppressing per-attempt \
                              warnings) — hint: check the Teensy is flashed with the \
-                             `imu_bridge` firmware and the USB cable / device path",
+                             `teensy_bridge` firmware and the USB cable / device path",
                             OPEN_LOUD_ATTEMPTS, OPEN_BACKOFF_MAX_MS
                         );
                     }

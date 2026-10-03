@@ -3,7 +3,8 @@
 //! Provisioning-only daemon:
 //!   * Wi-Fi status poller (wraps NetworkManager)
 //!   * Hosted Network supervisor (`ap` / `client` modes)
-//!   * GPIO mode button (press toggles Known/Hosted)
+//!   * Mode button (press toggles Known/Hosted) — from a Jetson GPIO line or
+//!     the Teensy USB control channel (see [`button`], [`control_serial`])
 //!   * Setup server (protobuf-over-WebSocket + a status page), reachable on
 //!     the LAN or directly over the robot's setup hotspot.
 //!
@@ -13,6 +14,7 @@
 mod ap;
 mod button;
 mod config;
+mod control_serial;
 mod dispatcher;
 mod error;
 mod server;

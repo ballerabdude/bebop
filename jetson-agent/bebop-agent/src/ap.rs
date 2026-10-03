@@ -149,6 +149,15 @@ async fn raise(state: &AppState, cfg: &NetworkConfig) -> anyhow::Result<()> {
         band,
         "wifi-sec.key-mgmt",
         "wpa-psk",
+        // WPA2-PSK with CCMP only. Without an explicit `proto rsn` NM offers
+        // WPA1 (TKIP) alongside WPA2, which makes phones/laptops flag the
+        // hotspot as "weak security" even though the passphrase is fine.
+        "wifi-sec.proto",
+        "rsn",
+        "wifi-sec.pairwise",
+        "ccmp",
+        "wifi-sec.group",
+        "ccmp",
         "wifi-sec.psk",
         &cfg.ap_password,
         "ipv4.method",

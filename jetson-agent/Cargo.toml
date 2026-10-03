@@ -27,6 +27,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 toml  = "0.8"
 
+# Teensy control channel (buttons/events over USB CDC).
+serialport = { version = "4", default-features = false }
+
 # Protobuf
 prost       = "0.13"
 prost-build = "0.13"
