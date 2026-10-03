@@ -25,6 +25,7 @@ pub mod imu;
 pub mod imu_serial;
 pub mod logging;
 pub mod mode;
+pub mod model;
 pub mod nav_goal;
 pub mod observation;
 pub mod odrive;

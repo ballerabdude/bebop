@@ -14,6 +14,7 @@ dependencies = [
     "mcap>=1.4",
     "pyorbbecsdk2==2.1.2",
     "pyyaml>=6",
+    "huggingface_hub>=0.26.0",
     "torch>=2.5",
     "transformers>=4.55",
     "websockets>=12",
@@ -29,7 +30,6 @@ runtime = [
 ]
 teacher = [
     "einops",
-    "huggingface_hub>=0.26.0",
     "onnx",
     "pillow>=10",
     "pycocotools",

@@ -1045,6 +1045,26 @@ if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
     VISION_UNIT="${WORK_DIR}/bebop-vision.service"
 fi
 
+# Model-weight download template unit: root, oneshot, started on demand by the
+# app (firmware runs `systemctl start bebop-model-download@<id>`). Installed
+# but not enabled. Ships as a static file referencing the robot's repo path.
+MODEL_UNIT=""
+if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
+    if [[ "${LOCAL}" -eq 1 ]]; then
+        model_unit_src="${LOCAL_REPO_ROOT}/bebop-vision/deploy/systemd/bebop-model-download@.service"
+        if [[ ! -f "${model_unit_src}" ]]; then
+            echo "missing local deploy asset: ${model_unit_src}" >&2
+            exit 1
+        fi
+        install -m 0644 "${model_unit_src}" "${WORK_DIR}/bebop-model-download@.service"
+    else
+        echo "==> fetching bebop-model-download@.service"
+        fetch_repo_file "bebop-vision/deploy/systemd/bebop-model-download@.service" \
+            "${WORK_DIR}/bebop-model-download@.service"
+    fi
+    MODEL_UNIT="${WORK_DIR}/bebop-model-download@.service"
+fi
+
 # ---------------------------------------------------------------------------
 # Prereqs (only what bebop-agent strictly needs; bebop-linux is pure-Rust
 # against SocketCAN and doesn't add anything new at install time).
@@ -1188,6 +1208,12 @@ EOF
     fi
     echo "==> installing bebop-vision.service (not enabled)"
     install -m 0644 "${VISION_UNIT}" /etc/systemd/system/bebop-vision.service
+
+    # Model-weight download template unit. Not enabled: the app starts an
+    # instance (`bebop-model-download@<id>.service`) on demand. The `@`
+    # template is required for the per-model instances.
+    echo "==> installing bebop-model-download@.service (on demand)"
+    install -m 0644 "${MODEL_UNIT}" "/etc/systemd/system/bebop-model-download@.service"
 fi
 
 # ---------------------------------------------------------------------------

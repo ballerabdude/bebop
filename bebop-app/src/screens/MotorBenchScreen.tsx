@@ -33,6 +33,8 @@ interface MotorBenchProps {
   /** When provided, render a "Teleop" link to the combined live-video +
    *  drive screen. Available on both connection paths. */
   onOpenTeleop?: () => void;
+  /** When provided, render a "Models" link to the provisioning screen. */
+  onOpenModels?: () => void;
 }
 
 const MODE_LABEL: Record<RuntimeMode, string> = {
@@ -57,6 +59,7 @@ export function MotorBenchScreen({
   onBack,
   onOpenVideo,
   onOpenTeleop,
+  onOpenModels,
 }: MotorBenchProps) {
   const transportRef = useRef<RuntimeTransport | null>(null);
   const [connecting, setConnecting] = useState(true);
@@ -977,6 +980,11 @@ export function MotorBenchScreen({
         {onOpenVideo ? (
           <Button variant="ghost" onClick={onOpenVideo}>
             Live video
+          </Button>
+        ) : null}
+        {onOpenModels ? (
+          <Button variant="ghost" onClick={onOpenModels}>
+            Models
           </Button>
         ) : null}
         <Button variant="ghost" onClick={onBack}>

@@ -167,6 +167,9 @@ export interface RuntimeSnapshot {
   /// `bebop-vision.service` unit isn't installed — the UI hides the
   /// vision control card in that case.
   vision: VisionView;
+  /// Model-weight provisioning state. `model.present === false` when the
+  /// download template unit isn't installed — the UI hides the model card.
+  model: ModelView;
 }
 
 /// Policy I/O view. Mirrors the scalar capture/lifecycle fields of the
@@ -208,4 +211,47 @@ export interface VisionView {
   detail: string;
   service: string;
   mode: string;
+}
+
+/// One catalog model and its live provisioning status. `kind === "hf"`
+/// entries are downloadable (from Hugging Face); `kind === "local"` entries
+/// were trained on the robot or copied from a workstation, so `ready` just
+/// reports presence.
+export interface ModelEntryView {
+  id: string;
+  name: string;
+  description: string;
+  kind: string;
+  /// What the model is for (e.g. "segmentation", "navigation").
+  purpose: string;
+  repo: string;
+  files: string[];
+  revision: string;
+  gated: boolean;
+  bytesTotal: number;
+  path: string;
+  ready: boolean;
+  /// "idle" | "downloading" | "ready" | "failed" | "unauthorized"
+  state: string;
+  detail: string;
+  bytesDownloaded: number;
+}
+
+/// The active model chosen for one purpose.
+export interface PurposeSelectionView {
+  purpose: string;
+  modelId: string;
+}
+
+/// Model-weight provisioning state (Hugging Face token + per-model status).
+/// `present === false` means the download unit isn't installed; the UI hides
+/// the provisioning card in that case.
+export interface ModelView {
+  tokenSet: boolean;
+  present: boolean;
+  diskFreeBytes: number;
+  detail: string;
+  models: ModelEntryView[];
+  /// Active model per purpose (unset purposes are absent).
+  selection: PurposeSelectionView[];
 }

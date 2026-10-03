@@ -18,6 +18,8 @@ interface DashboardProps {
   onDisconnect: () => void;
   onOpenMotors: () => void;
   onOpenTeleop: () => void;
+  /** Open the model provisioning / purpose-configuration screen. */
+  onOpenModels: () => void;
 }
 
 /// Live dashboard shown after setup. Stays connected to the provisioning
@@ -29,6 +31,7 @@ export function DashboardScreen({
   onDisconnect,
   onOpenMotors,
   onOpenTeleop,
+  onOpenModels,
 }: DashboardProps) {
   const [info, setInfo] = useState<DeviceInfo | null>(null);
   const [wifi, setWifi] = useState<WifiStatus | null>(null);
@@ -227,6 +230,9 @@ export function DashboardScreen({
             Open motor bench
           </Button>
         </div>
+        <Button variant="secondary" onClick={onOpenModels} disabled={!reachable}>
+          Configure models
+        </Button>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           <Button variant="secondary" onClick={onReconfigure}>
             Change Wi-Fi network

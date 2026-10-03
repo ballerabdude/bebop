@@ -2,6 +2,7 @@
 
 use crate::imu::ImuShared;
 use crate::mode::Mode;
+use crate::model::{ModelEntry, ModelShared};
 use crate::policy_io::{self, PolicyIoShared};
 use crate::powerboard::describe_faults;
 use crate::safety::limits::MotorSnapshot;
@@ -290,12 +291,56 @@ fn build_vision_stats(vision: &VisionShared) -> proto::VisionState {
     }
 }
 
+/// Snapshot the model provisioning state into the wire proto. Always
+/// returns a value; `present = false` when the download template unit isn't
+/// installed, which the UI uses to hide the provisioning card.
+fn build_model_stats(model: &ModelShared) -> proto::ModelState {
+    let snap = model.snapshot();
+    proto::ModelState {
+        token_set: snap.token_set,
+        present: snap.present,
+        disk_free_bytes: snap.disk_free_bytes,
+        detail: snap.last_error,
+        models: snap.models.iter().map(model_entry_to_proto).collect(),
+        selection: snap
+            .selection
+            .iter()
+            .map(|(purpose, model_id)| proto::PurposeSelection {
+                purpose: purpose.clone(),
+                model_id: model_id.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn model_entry_to_proto(entry: &ModelEntry) -> proto::ModelCatalogEntry {
+    let spec = &entry.spec;
+    proto::ModelCatalogEntry {
+        id: spec.id.clone(),
+        name: spec.name.clone(),
+        description: spec.description.clone(),
+        kind: spec.kind.clone(),
+        repo: spec.repo.clone(),
+        files: spec.files.clone(),
+        revision: spec.revision.clone(),
+        gated: spec.gated,
+        bytes_total: entry.bytes_total,
+        path: spec.path.clone(),
+        purpose: spec.purpose.clone(),
+        ready: entry.ready,
+        state: entry.state.clone(),
+        detail: entry.detail.clone(),
+        bytes_downloaded: entry.bytes_downloaded,
+    }
+}
+
 pub fn build_snapshot(
     sup: &Arc<Supervisor>,
     imu: &ImuShared,
     imu_present: bool,
     policy_io: &PolicyIoShared,
     vision: &VisionShared,
+    model: &ModelShared,
     conn_id: u64,
 ) -> proto::Snapshot {
     let motors = sup.snapshot_motors();
@@ -318,6 +363,7 @@ pub fn build_snapshot(
         wheels: wheels.iter().map(wheel_state_to_proto).collect(),
         drive: Some(build_drive_state(sup, conn_id)),
         vision: Some(build_vision_stats(vision)),
+        model: Some(build_model_stats(model)),
         ..Default::default()
     }
 }
@@ -328,6 +374,7 @@ pub fn build_telemetry(
     imu_present: bool,
     policy_io: &PolicyIoShared,
     vision: &VisionShared,
+    model: &ModelShared,
     conn_id: u64,
 ) -> proto::TelemetryFrame {
     let motors = sup.snapshot_motors();
@@ -349,6 +396,7 @@ pub fn build_telemetry(
         wheels: wheels.iter().map(wheel_state_to_proto).collect(),
         drive: Some(build_drive_state(sup, conn_id)),
         vision: Some(build_vision_stats(vision)),
+        model: Some(build_model_stats(model)),
         ..Default::default()
     }
 }

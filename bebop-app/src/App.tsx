@@ -5,6 +5,7 @@ import { ConfigScreen } from "./screens/ConfigScreen";
 import { ConnectByIpScreen } from "./screens/ConnectByIpScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { MotorBenchScreen } from "./screens/MotorBenchScreen";
+import { ModelsScreen } from "./screens/ModelsScreen";
 import { TeleopScreen } from "./screens/TeleopScreen";
 import { VideoScreen } from "./screens/VideoScreen";
 import { WelcomeScreen } from "./screens/WelcomeScreen";
@@ -27,12 +28,15 @@ type Step =
   | "direct-video"
   | "motors"
   | "teleop"
-  | "video";
+  | "video"
+  | "models"
+  | "direct-models";
 
 function containerWidth(step: Step): string {
   if (step === "motors" || step === "direct-motors") return "max-w-6xl";
   if (step === "teleop" || step === "direct-teleop") return "max-w-6xl";
   if (step === "dashboard") return "max-w-3xl";
+  if (step === "models" || step === "direct-models") return "max-w-3xl";
   return "max-w-[520px]";
 }
 
@@ -152,6 +156,7 @@ function App() {
               setTeleopReturn("dashboard");
               setStep("teleop");
             }}
+            onOpenModels={() => setStep("models")}
           />
         ) : null}
 
@@ -164,6 +169,7 @@ function App() {
               setTeleopReturn("motors");
               setStep("teleop");
             }}
+            onOpenModels={() => setStep("models")}
           />
         ) : null}
 
@@ -177,6 +183,7 @@ function App() {
               setTeleopReturn("direct-motors");
               setStep("direct-teleop");
             }}
+            onOpenModels={() => setStep("direct-models")}
           />
         ) : null}
 
@@ -185,6 +192,18 @@ function App() {
             robotIp={robotIp}
             onBack={() => setStep("motors")}
             backLabel="Back to motor bench"
+          />
+        ) : null}
+
+        {step === "models" && robotIp ? (
+          <ModelsScreen robotIp={robotIp} onBack={() => setStep("dashboard")} />
+        ) : null}
+
+        {step === "direct-models" && directIp ? (
+          <ModelsScreen
+            robotIp={directIp.ip}
+            runtimePort={directIp.port}
+            onBack={() => setStep("direct-motors")}
           />
         ) : null}
 

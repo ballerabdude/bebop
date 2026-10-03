@@ -86,15 +86,37 @@ Labeling side (workstation with NVIDIA GPU — SAM 3.1 teacher):
     --index-url https://download.pytorch.org/whl/cu128
 ```
 
-### SAM weights
+### Model weights
 
-SAM 3.x checkpoints are gated. Request access at
-<https://huggingface.co/facebook/sam3.1>, put `HF_TOKEN=...` in `.env`
-(gitignored), then:
+The robot does not ship weights. `config/models.yaml` is the catalog (shared
+with the firmware): each entry is either `kind: hf` (download from Hugging
+Face) or `kind: local` (trained on the robot, or copied from a workstation
+with `scp`), and carries a `purpose` (e.g. `segmentation`, `backbone`,
+`navigation`). Models sharing a purpose are alternatives. Add a model by
+appending a catalog entry — no code changes.
+
+**From the app (recommended):** *Configure models* on the Dashboard, the
+Motor Bench footer (or the direct-connect screens) opens the **Models**
+screen. It lists the catalog grouped by purpose, downloads on demand, and
+lets the operator pick the active model per purpose. Gated entries need a
+Hugging Face token, which the app sends to the robot (stored root-only at
+`/etc/bebop/hf_token`, never echoed back). The token's account must have
+accepted each model's license first, e.g.
+<https://huggingface.co/facebook/sam3.1>. The purpose→model choice is
+persisted at `/etc/bebop/model_selection.json` for the runtime to read. The
+robot must be in Known Network (client) mode with internet during the
+download; the firmware drives `bebop-model-download@<id>.service` and streams
+progress into telemetry.
+
+**On the workstation / by hand:**
 
 ```sh
-.venv/bin/python -m bebop_vision.download_sam3          # both versions
-.venv/bin/python -m bebop_vision.download_sam3 sam3.1   # one version
+# Put HF_TOKEN in .env (gitignored) or export it, then:
+.venv/bin/python -m bebop_vision.download_model sam3.1   # one catalog id
+.venv/bin/python -m bebop_vision.download_model --all    # every hf entry
+
+# Legacy compatibility wrapper (downloads sam3 + sam3.1):
+.venv/bin/python -m bebop_vision.download_sam3
 ```
 
 ## Collecting data

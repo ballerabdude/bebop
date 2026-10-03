@@ -7,6 +7,7 @@
 use crate::drive::Twist;
 use crate::imu::ImuShared;
 use crate::mode::Mode;
+use crate::model::ModelShared;
 use crate::nav_goal::{NavGoal, NavGoalShared};
 use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
@@ -44,6 +45,7 @@ pub fn handle_client_message(
     policy_control: &PolicyControlShared,
     nav_goal: &NavGoalShared,
     vision: &VisionShared,
+    model: &ModelShared,
     conn_id: u64,
     bytes: &[u8],
 ) -> proto::ServerRuntimeMessage {
@@ -109,9 +111,16 @@ pub fn handle_client_message(
             )
         }
         P::UnsubscribeTelemetry(_) => ack(request_id, "telemetry unsubscribed".into()),
-        P::GetSnapshot(_) => {
-            snapshot_response(request_id, sup, imu, imu_present, policy_io, vision, conn_id)
-        }
+        P::GetSnapshot(_) => snapshot_response(
+            request_id,
+            sup,
+            imu,
+            imu_present,
+            policy_io,
+            vision,
+            model,
+            conn_id,
+        ),
         P::SetMotorEnabled(req) => {
             let result = if req.enabled {
                 sup.arm(&req.joint_name)
@@ -272,6 +281,51 @@ pub fn handle_client_message(
                 )
             }
         }
+        P::SetHfToken(req) => {
+            // Write-only secret: persisted root-only, never echoed back.
+            if req.token.trim().is_empty() {
+                error_response(request_id, "empty Hugging Face token".into())
+            } else {
+                model.set_token(req.token);
+                ack(request_id, "Hugging Face token stored".into())
+            }
+        }
+        P::ClearHfToken(_) => {
+            model.clear_token();
+            ack(request_id, "Hugging Face token cleared".into())
+        }
+        P::DownloadModel(req) => {
+            // Long-running (multi-GB): the downloader runs as a per-model
+            // systemd unit and its progress arrives in telemetry as
+            // `ModelState`. Validate here so the operator gets immediate
+            // feedback rather than a silently failed unit.
+            match model.validate_download(&req.model_id) {
+                Ok(()) => {
+                    let id = req.model_id.clone();
+                    model.download(req.model_id);
+                    ack(request_id, format!("download of {id} queued"))
+                }
+                Err(e) => error_response(request_id, e),
+            }
+        }
+        P::SetModelPurpose(req) => {
+            match model.validate_purpose(&req.purpose, &req.model_id) {
+                Ok(()) => {
+                    let purpose = req.purpose.clone();
+                    let model_id = req.model_id.clone();
+                    model.set_purpose(req.purpose, req.model_id);
+                    ack(
+                        request_id,
+                        if model_id.is_empty() {
+                            format!("purpose {purpose} cleared")
+                        } else {
+                            format!("purpose {purpose} -> {model_id}")
+                        },
+                    )
+                }
+                Err(e) => error_response(request_id, e),
+            }
+        }
         P::SetVelocityCommand(req) => {
             // Arbitrated drive command: the first client to send a
             // non-zero twist claims the "active operator" assignment and
@@ -380,6 +434,7 @@ pub fn snapshot_response(
     imu_present: bool,
     policy_io: &PolicyIoShared,
     vision: &VisionShared,
+    model: &ModelShared,
     conn_id: u64,
 ) -> proto::ServerRuntimeMessage {
     proto::ServerRuntimeMessage {
@@ -391,6 +446,7 @@ pub fn snapshot_response(
                 imu_present,
                 policy_io,
                 vision,
+                model,
                 conn_id,
             ),
         )),

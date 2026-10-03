@@ -18,6 +18,7 @@
 
 use crate::capture_control::CaptureControl;
 use crate::imu::ImuShared;
+use crate::model::ModelShared;
 use crate::nav_goal::NavGoalShared;
 use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
@@ -80,6 +81,9 @@ pub struct AppState {
     pub nav_goal: Arc<NavGoalShared>,
     /// bebop-vision service control + status (see [`crate::vision`]).
     pub vision: VisionShared,
+    /// Gated model-weight provisioning control + status (see
+    /// [`crate::model`]).
+    pub model: ModelShared,
     /// Finalize / active-segment state shared with the MCAP capture writers.
     /// Used to flag the currently-writing segment in `GET /captures` and to
     /// roll it over before a download (`POST /captures/finalize`).
@@ -463,6 +467,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         policy_control,
         nav_goal,
         vision,
+        model,
         capture_dir: _,
         captures: _,
         rerun_converter: _,
@@ -501,6 +506,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let imu_tele = imu.clone();
     let policy_io_tele = policy_io.clone();
     let vision_tele = vision.clone();
+    let model_tele = model.clone();
     let tele_state_tele = telemetry_state.clone();
     let mut client_telemetry_subscribed = false;
     let telemetry_task = tokio::spawn(async move {
@@ -522,6 +528,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 imu_present,
                 &policy_io_tele,
                 &vision_tele,
+                &model_tele,
                 conn_id,
             );
             let env = telemetry_envelope(frame);
@@ -616,6 +623,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     &policy_control,
                     &nav_goal,
                     &vision,
+                    &model,
                     conn_id,
                     &bytes,
                 );

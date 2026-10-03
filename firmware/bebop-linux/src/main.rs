@@ -15,6 +15,7 @@ use bebop_linux::config::{ImuSource, RobotConfig};
 use bebop_linux::imu;
 use bebop_linux::imu_serial;
 use bebop_linux::mode::Mode;
+use bebop_linux::model;
 use bebop_linux::nav_goal::NavGoalShared;
 use bebop_linux::policy_capture;
 use bebop_linux::policy_control;
@@ -203,6 +204,10 @@ async fn main() -> Result<()> {
     // Operator control of the Python bebop-vision service (start/stop via
     // systemd). The background poller also feeds `VisionState` telemetry.
     let vision_shared = vision::spawn_vision_supervisor(shutdown_flag.clone());
+
+    // Gated model-weight provisioning: store the operator's Hugging Face
+    // token and drive the SAM 3.1 download unit. Feeds `ModelState`.
+    let model_shared = model::spawn_model_supervisor(shutdown_flag.clone());
 
     // Shared latest IMU reading (always present; the I²C reader fills it
     // when an `imu:` block exists in the YAML, otherwise stays at default
@@ -469,6 +474,7 @@ async fn main() -> Result<()> {
     let server_capture_dir = capture_dir.clone();
     let server_nav_goal = std::sync::Arc::new(NavGoalShared::new());
     let server_vision = vision_shared.clone();
+    let server_model = model_shared.clone();
     let server_captures = capture_control.clone();
     let server_rerun_converter = args.rerun_converter.clone();
     let bind_addr = cfg.server.bind_addr.clone();
@@ -482,6 +488,7 @@ async fn main() -> Result<()> {
             capture_dir: server_capture_dir,
             nav_goal: server_nav_goal,
             vision: server_vision,
+            model: server_model,
             captures: server_captures,
             rerun_converter: server_rerun_converter,
         };

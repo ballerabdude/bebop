@@ -19,6 +19,8 @@
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
   ClientRuntimeMessageSchema,
+  ClearHfTokenSchema,
+  DownloadModelSchema,
   EmergencyStopSchema,
   GetSnapshotSchema,
   Mode,
@@ -30,6 +32,8 @@ import {
   SetModeSchema,
   SetMotorEnabledSchema,
   SetMotorTargetSchema,
+  SetHfTokenSchema,
+  SetModelPurposeSchema,
   SetPolicyDryRunSchema,
   SetNavigationGoalSchema,
   SetVelocityCommandSchema,
@@ -53,11 +57,16 @@ import {
   type WheelState as ProtoWheelState,
   type DriveState as ProtoDriveState,
   type VisionState as ProtoVisionState,
+  type ModelState as ProtoModelState,
+  type ModelCatalogEntry as ProtoModelCatalogEntry,
+  type PurposeSelection as ProtoPurposeSelection,
 } from "../proto/bebop_runtime_pb";
 import type {
   BusView,
   DriveView,
   ImuView,
+  ModelEntryView,
+  ModelView,
   MotorView,
   PolicyIoView,
   PowerView,
@@ -605,6 +614,43 @@ export class RuntimeTransport {
     });
   }
 
+  // -------------------------------------------------------------- models
+
+  /// Store the Hugging Face token used for gated model downloads. Write-only:
+  /// the robot persists it root-only and never echoes it back
+  /// (`snapshot.model.tokenSet` is all the UI sees).
+  async setHfToken(token: string): Promise<void> {
+    await this.requestAck({
+      case: "setHfToken",
+      value: create(SetHfTokenSchema, { token }),
+    });
+  }
+
+  /// Forget the stored Hugging Face token.
+  async clearHfToken(): Promise<void> {
+    await this.requestAck({
+      case: "clearHfToken",
+      value: create(ClearHfTokenSchema, {}),
+    });
+  }
+
+  /// Start an asynchronous weight download for a catalog model id. The Ack
+  /// means "queued" — progress arrives via telemetry (`snapshot.model`).
+  async downloadModel(modelId: string): Promise<void> {
+    await this.requestAck({
+      case: "downloadModel",
+      value: create(DownloadModelSchema, { modelId }),
+    });
+  }
+
+  /// Select the active model for a purpose. `modelId === ""` clears it.
+  async setModelPurpose(purpose: string, modelId: string): Promise<void> {
+    await this.requestAck({
+      case: "setModelPurpose",
+      value: create(SetModelPurposeSchema, { purpose, modelId }),
+    });
+  }
+
   // -------------------------------------------------------------- internals
   private async requestAck(payload: ClientPayload): Promise<void> {
     const reply = await this.request(payload);
@@ -720,6 +766,7 @@ function snapshotFromProto(s: Snapshot | TelemetryFrame): RuntimeSnapshot {
     imu: imuFromProto(s.imu),
     policyIo: policyIoFromProto(s.policyIo),
     vision: visionFromProto(s.vision),
+    model: modelFromProto(s.model),
   };
 }
 
@@ -845,6 +892,54 @@ const EMPTY_VISION_VIEW: VisionView = {
   detail: "",
   service: "",
   mode: "",
+};
+
+function modelEntryFromProto(e: ProtoModelCatalogEntry): ModelEntryView {
+  return {
+    id: e.id,
+    name: e.name,
+    description: e.description,
+    kind: e.kind,
+    purpose: e.purpose,
+    repo: e.repo,
+    files: e.files,
+    revision: e.revision,
+    gated: e.gated,
+    bytesTotal: Number(e.bytesTotal),
+    path: e.path,
+    ready: e.ready,
+    state: e.state,
+    detail: e.detail,
+    bytesDownloaded: Number(e.bytesDownloaded),
+  };
+}
+
+function modelFromProto(p: ProtoModelState | undefined): ModelView {
+  // Absent field on older firmware collapses to "not installed" — the UI
+  // hides the provisioning card rather than offering a button that can't work.
+  if (!p) {
+    return EMPTY_MODEL_VIEW;
+  }
+  return {
+    tokenSet: p.tokenSet,
+    present: p.present,
+    diskFreeBytes: Number(p.diskFreeBytes),
+    detail: p.detail,
+    models: p.models.map(modelEntryFromProto),
+    selection: p.selection.map((s: ProtoPurposeSelection) => ({
+      purpose: s.purpose,
+      modelId: s.modelId,
+    })),
+  };
+}
+
+const EMPTY_MODEL_VIEW: ModelView = {
+  tokenSet: false,
+  present: false,
+  diskFreeBytes: 0,
+  detail: "",
+  models: [],
+  selection: [],
 };
 
 function powerFromProto(p: ProtoPowerStats | undefined): PowerView {

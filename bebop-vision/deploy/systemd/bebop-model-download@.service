@@ -1,0 +1,31 @@
+[Unit]
+Description=Bebop model weight download (%i)
+Documentation=https://github.com/ballerabdude/bebop
+# Fetching gated weights needs the network (the robot must be in Known
+# Network / client mode with internet).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/home/bebop/bebop/bebop-vision
+Environment=PYTHONUNBUFFERED=1
+# Give the downloader a private /run/bebop for its status files.
+RuntimeDirectory=bebop
+
+# %i is the catalog model id (see config/models.yaml). The token is read
+# from /etc/bebop/hf_token; progress is written to /run/bebop/models/%i.json
+# and relayed to the app as `ModelState`.
+#
+# Deliberately NOT enabled: the operator starts it on demand from the app
+# (firmware runs `systemctl start --no-block bebop-model-download@<id>`).
+# A multi-GB download can take many minutes, far past systemd's default
+# oneshot start timeout, so it is disabled here.
+ExecStart=/home/bebop/bebop/bebop-vision/.venv/bin/python -u -m bebop_vision.download_model %i
+TimeoutStartSec=infinity
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

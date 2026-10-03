@@ -110,6 +110,24 @@ message ClientRuntimeMessage {
     // stops it. The request is asynchronous: the ack means "queued", and
     // the new state shows up in `VisionState` within a poll interval.
     SetVisionEnabled     set_vision_enabled    = 23;
+    // Store the Hugging Face access token used to download gated model
+    // weights from the catalog (SAM 3.1, DINOv3, ...). Write-only: the
+    // token is persisted root-only on the robot and never echoed back —
+    // `ModelState.token_set` only reports whether one is present. The
+    // download itself is a separate, asynchronous request (`DownloadModel`)
+    // because the weights are multi-gigabyte.
+    SetHfToken           set_hf_token          = 24;
+    // Delete the stored Hugging Face token.
+    ClearHfToken         clear_hf_token        = 25;
+    // Start the async download of a catalog model's weights (see
+    // `ModelState`). The reply is "queued", not "done"; progress rides
+    // telemetry. Rejected when the id is unknown, the entry isn't
+    // downloadable (kind != "hf"), or the download unit isn't installed.
+    DownloadModel        download_model        = 26;
+    // Select which catalog model serves a purpose (e.g. "segmentation",
+    // "navigation"). Persisted on the robot so the runtime knows what to
+    // load. An empty `model_id` clears the purpose's selection.
+    SetModelPurpose      set_model_purpose     = 27;
   }
   reserved 12;
   reserved "set_policy_capture";
@@ -410,6 +428,10 @@ message TelemetryFrame {
   // both the humanoid and wheeled builds — it's a process-level service,
   // not a motor feature.
   VisionState vision = 19;
+  // Gated model-weight provisioning state (Hugging Face token + SAM 3.1
+  // download). `model.present = false` when the download unit isn't
+  // installed; the UI hides the provisioning card in that case.
+  ModelState model = 20;
 }
 
 // One-shot reply to GetSnapshot — same content as TelemetryFrame.
@@ -430,6 +452,7 @@ message Snapshot {
   // Deprecated (plan §9): see TelemetryFrame.nav.
   NavState nav = 18 [deprecated = true];
   VisionState vision = 19;
+  ModelState model = 20;
 }
 
 message BusStatusUpdate {
@@ -564,6 +587,35 @@ message SetPolicyDryRun {
 // state is reflected asynchronously in `VisionState`.
 message SetVisionEnabled {
   bool enabled = 1;
+}
+
+// Store the Hugging Face access token used for gated model weights
+// (SAM 3.1). The token is written root-only on the robot and never
+// returned in telemetry — only `ModelState.token_set` is exposed.
+message SetHfToken {
+  string token = 1;
+}
+
+// Delete the stored Hugging Face token. The weights already on disk are
+// left alone; this only forgets the credential.
+message ClearHfToken {}
+
+// Start the asynchronous weight download for a catalog model. `model_id`
+// is the catalog `id` (e.g. "sam3.1"); the downloader resolves the HF repo
+// and files from `bebop-vision/config/models.yaml`. The reply is an Ack
+// meaning "queued" — the download is long (many GB) and its progress is
+// reflected in `ModelState`.
+message DownloadModel {
+  string model_id = 1;
+}
+
+// Select the active model for a purpose. The firmware persists the mapping
+// (used by the runtime to decide what to load) and echoes the full
+// selection in `ModelState.selection`. `model_id` must name a catalog entry
+// whose `purpose` matches; empty clears the selection.
+message SetModelPurpose {
+  string purpose  = 1;
+  string model_id = 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -875,4 +927,84 @@ message VisionState {
   // Human-readable run mode baked into the unit ("recorder"), so the UI
   // can label the start button without hard-coding the command.
   string mode    = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Model-weight provisioning (Hugging Face downloads + local artifacts)
+// ---------------------------------------------------------------------------
+//
+// The robot does not ship model weights: gated ones (SAM 3.1, DINOv3, ...)
+// require a Hugging Face token, and locally trained ones (navd students,
+// ONNX experiments) are produced on the robot or a workstation. The catalog
+// lives in `bebop-vision/config/models.yaml` and is served to the app here;
+// the operator supplies a token (see `SetHfToken`) and starts a download per
+// model (see `DownloadModel`). Downloads run as a per-model systemd unit
+// (`bebop-model-download@<id>.service`) because they are long (many GB).
+//
+// `present = false` when the download unit isn't installed (older robots);
+// the UI hides the provisioning card in that case.
+message ModelState {
+  // True iff a Hugging Face token is stored on the robot (`/etc/bebop/hf_token`).
+  bool   token_set       = 1;
+  // True iff the download unit (template) is installed on this robot.
+  bool   present         = 2;
+  // Free space on the weights filesystem in bytes (0 when unknown).
+  uint64 disk_free_bytes = 3;
+  // Last provisioning error (a rejected token, an unsupported id, ...).
+  string detail          = 4;
+  // The catalog plus each entry's live status.
+  repeated ModelCatalogEntry models = 5;
+  // Active model per purpose (see `SetModelPurpose`). A purpose missing from
+  // this list has no selection.
+  repeated PurposeSelection selection = 6;
+}
+
+// The active model chosen for one purpose.
+message PurposeSelection {
+  // Purpose key ("segmentation", "backbone", "navigation", ...).
+  string purpose  = 1;
+  // Catalog id of the selected model; empty means unset.
+  string model_id = 2;
+}
+
+// One catalog model and its current provisioning status.
+message ModelCatalogEntry {
+  // Stable identifier used in `DownloadModel` (e.g. "sam3.1").
+  string id          = 1;
+  // Human-readable name for the UI.
+  string name        = 2;
+  // One-line description.
+  string description = 3;
+  // Source kind: "hf" (downloadable from Hugging Face) or "local"
+  // (trained/produced off-robot; presence is reported but there is nothing
+  // to download).
+  string kind        = 4;
+  // Hugging Face repo id (kind="hf"); empty otherwise.
+  string repo        = 5;
+  // Repo-relative filenames to fetch (kind="hf").
+  repeated string files = 6;
+  // Pinned revision (kind="hf"), e.g. "main".
+  string revision    = 7;
+  // True when the repo is gated and a Hugging Face token is required.
+  bool   gated       = 8;
+  // Expected total size in bytes across files (0 when unknown).
+  uint64 bytes_total = 9;
+  // On-robot weights path. Absolute, or relative to the weights directory.
+  string path        = 10;
+  // What the model is for ("segmentation", "backbone", "navigation",
+  // "trajectory", "vlm", ...). Models sharing a purpose are alternatives;
+  // the operator picks one via `SetModelPurpose`.
+  string purpose     = 11;
+
+  // ---- live status ----------------------------------------------------
+  // True iff every file is present on disk.
+  bool   ready             = 20;
+  // Coarse lifecycle: "idle" | "downloading" | "ready" | "failed" |
+  // "unauthorized". "idle" for a kind="local" entry that isn't present.
+  string state             = 21;
+  // Human-readable status detail (systemd substate or last downloader
+  // message).
+  string detail            = 22;
+  // Bytes downloaded so far (best-effort).
+  uint64 bytes_downloaded  = 23;
 }

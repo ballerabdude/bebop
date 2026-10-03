@@ -1,0 +1,65 @@
+# Bebop model catalog.
+#
+# The robot does NOT ship model weights. This file is the single source of
+# truth for what can be provisioned, shared by the firmware (which serves it
+# to the app and reports status) and the Python downloader
+# (`python -m bebop_vision.download_model <id>`).
+#
+# `kind`:
+#   hf    - fetch from Hugging Face. `gated: true` entries need an HF token
+#           (set from the app); the token's account must have accepted the
+#           model's license. Files land in `bebop-vision/weights/`.
+#   local - trained/produced on the robot or copied from a workstation
+#           (e.g. `scp`). Presence is reported in the app; there is nothing
+#           to download.
+#
+# Add a model by appending an entry — no code changes.
+
+models:
+  # --- Hugging Face (gated) -------------------------------------------------
+  - id: sam3.1
+    name: SAM 3.1
+    description: Open-vocabulary, text-prompted instance segmentation.
+    kind: hf
+    purpose: segmentation
+    repo: facebook/sam3.1
+    files: [sam3.1_multiplex.pt]
+    revision: main
+    gated: true
+    bytes: 3502755717
+
+  - id: sam3
+    name: SAM 3
+    description: Previous-generation open-vocabulary segmentation.
+    kind: hf
+    purpose: segmentation
+    repo: facebook/sam3
+    files: [sam3.pt]
+    revision: main
+    gated: true
+
+  # DINOv3 backbones pair with SAM 3.1 for a stronger open-vocab stack.
+  - id: dinov3-vitl16
+    name: DINOv3 ViT-L/16
+    description: Self-supervised vision backbone (SAM 3.1 feature extractor).
+    kind: hf
+    purpose: backbone
+    repo: facebook/dinov3-vitl16-pretrain-lvd1689m
+    files: [model.safetensors]
+    revision: main
+    gated: true
+
+  # --- Local / on-robot trained --------------------------------------------
+  - id: navd
+    name: navd (BEV student)
+    description: Locally trained bird's-eye-view navigation model (ONNX).
+    kind: local
+    purpose: navigation
+    path: navd.onnx
+
+  - id: navd_traj
+    name: navd-traj
+    description: Locally trained end-to-end trajectory model (ONNX).
+    kind: local
+    purpose: navigation
+    path: navd_traj.onnx
