@@ -41,12 +41,15 @@ RestartSec=3
 KillMode=mixed
 TimeoutStopSec=10
 
-# Hardening — relaxed for raw CAN + low-level access. `ProtectHome=true`
+# Hardening — relaxed for raw CAN + low-level access. `ProtectHome=read-only`
 # means MCAP captures MUST land outside `/root`/`/home`; see
-# `StateDirectory=bebop-captures` + the `--capture-dir` flag above.
+# `StateDirectory=bebop-captures` + the `--capture-dir` flag above. It is
+# read-only (not `true`) because the firmware reads the shared model catalog
+# and stats the weights under `bebop-vision/` in the repo checkout
+# (`src/model.rs`); writes to `/home` are still denied.
 NoNewPrivileges=false
 ProtectSystem=false
-ProtectHome=true
+ProtectHome=read-only
 PrivateTmp=true
 
 [Install]
