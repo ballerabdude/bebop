@@ -225,11 +225,16 @@ impl ModelShared {
             ));
         }
         if sanitize_instance(&spec.id).is_none() {
-            return Err(format!("model id {:?} is not a valid unit instance", spec.id));
+            return Err(format!(
+                "model id {:?} is not a valid unit instance",
+                spec.id
+            ));
         }
         let snap = self.snapshot();
         if !snap.present {
-            return Err(format!("{MODEL_UNIT_TEMPLATE} is not installed on this robot"));
+            return Err(format!(
+                "{MODEL_UNIT_TEMPLATE} is not installed on this robot"
+            ));
         }
         if spec.gated && !snap.token_set {
             return Err("no Hugging Face token stored; set one first".to_string());
@@ -275,7 +280,11 @@ impl ModelShared {
 pub fn spawn_model_supervisor(shutdown: Arc<AtomicBool>) -> ModelShared {
     let catalog = match load_catalog(Path::new(MODEL_CATALOG_PATH)) {
         Ok(models) => {
-            info!(count = models.len(), path = MODEL_CATALOG_PATH, "model catalog loaded");
+            info!(
+                count = models.len(),
+                path = MODEL_CATALOG_PATH,
+                "model catalog loaded"
+            );
             Arc::new(models)
         }
         Err(e) => {
@@ -325,7 +334,10 @@ fn handle_request(state: &Mutex<ModelSnapshot>, catalog: &[ModelSpec], req: Mode
             if spec.kind != "hf" {
                 store_error(
                     state,
-                    format!("{} is a {} model and is not downloadable", spec.id, spec.kind),
+                    format!(
+                        "{} is a {} model and is not downloadable",
+                        spec.id, spec.kind
+                    ),
                 );
                 return;
             }
@@ -338,7 +350,10 @@ fn handle_request(state: &Mutex<ModelSnapshot>, catalog: &[ModelSpec], req: Mode
             };
             let snap = state.lock().map(|g| g.clone()).unwrap_or_default();
             if spec.gated && !snap.token_set {
-                store_error(state, "no Hugging Face token stored; set one first".to_string());
+                store_error(
+                    state,
+                    "no Hugging Face token stored; set one first".to_string(),
+                );
                 return;
             }
             if !snap.present {
@@ -372,7 +387,10 @@ fn handle_request(state: &Mutex<ModelSnapshot>, catalog: &[ModelSpec], req: Mode
                     Some(spec) => {
                         store_error(
                             state,
-                            format!("{} serves purpose {:?}, not {:?}", spec.id, spec.purpose, purpose),
+                            format!(
+                                "{} serves purpose {:?}, not {:?}",
+                                spec.id, spec.purpose, purpose
+                            ),
                         );
                         return;
                     }
@@ -429,7 +447,8 @@ fn write_token(path: &Path, token: &str) -> Result<()> {
         let mut f = fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(token.as_bytes())
             .with_context(|| format!("write {}", tmp.display()))?;
-        f.sync_all().with_context(|| format!("fsync {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
     }
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("chmod 0600 {}", tmp.display()))?;
@@ -457,7 +476,10 @@ fn sanitize_instance(id: &str) -> Option<String> {
     if id.is_empty() {
         return None;
     }
-    if id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) {
+    if id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
         Some(id.to_string())
     } else {
         None
@@ -531,13 +553,16 @@ fn save_selection_at(path: &Path, selection: &BTreeMap<String, String>) -> Resul
     let text = serde_json::to_string_pretty(selection).context("serialize model selection")?;
     let tmp = path.with_file_name(format!(
         "{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("model_selection.json")
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("model_selection.json")
     ));
     {
         let mut f = fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(text.as_bytes())
             .with_context(|| format!("write {}", tmp.display()))?;
-        f.sync_all().with_context(|| format!("fsync {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
     }
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644))
         .with_context(|| format!("chmod 0644 {}", tmp.display()))?;
@@ -571,7 +596,11 @@ fn local_path(spec: &ModelSpec) -> PathBuf {
 fn files_bytes(files: &[PathBuf]) -> u64 {
     files
         .iter()
-        .map(|p| fs::metadata(p).map(|m| if m.is_file() { m.len() } else { 0 }).unwrap_or(0))
+        .map(|p| {
+            fs::metadata(p)
+                .map(|m| if m.is_file() { m.len() } else { 0 })
+                .unwrap_or(0)
+        })
         .sum()
 }
 
@@ -584,7 +613,9 @@ fn disk_free_bytes(path: &Path) -> u64 {
     // read from on success.
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statvfs(c_path.as_ptr(), &mut st) } == 0 {
-        (st.f_bavail as u64).saturating_mul(st.f_frsize as u64)
+        // `f_bavail`/`f_frsize` are `c_ulong` (64-bit on the supported
+        // 64-bit targets), so no widening cast is needed.
+        st.f_bavail.saturating_mul(st.f_frsize)
     } else {
         0
     }
@@ -595,7 +626,18 @@ fn disk_free_bytes(path: &Path) -> u64 {
 fn query_unit(model_id: &str) -> Result<(bool, String, String)> {
     let unit = format!("bebop-model-download@{model_id}.service");
     let out = Command::new("systemctl")
-        .args(["show", &unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "Result"])
+        .args([
+            "show",
+            &unit,
+            "-p",
+            "LoadState",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+        ])
         .output()
         .with_context(|| format!("spawn `systemctl show {unit}`"))?;
     if !out.status.success() {
@@ -662,9 +704,12 @@ fn derive_state(
 /// Build the live entry for one catalog spec.
 fn build_entry(spec: &ModelSpec) -> ModelEntry {
     let files = entry_files(spec);
-    let ready = !files.is_empty() && files.iter().all(|p| {
-        fs::metadata(p).map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
-    });
+    let ready = !files.is_empty()
+        && files.iter().all(|p| {
+            fs::metadata(p)
+                .map(|m| m.is_file() && m.len() > 0)
+                .unwrap_or(false)
+        });
     let mut bytes_total = spec.bytes;
 
     if spec.kind != "hf" {
@@ -695,12 +740,28 @@ fn build_entry(spec: &ModelSpec) -> ModelEntry {
     let unit_detail = unit.map(|u| u.2).unwrap_or_default();
 
     let (bytes_downloaded, bytes_total, detail) = if ready {
-        (files_bytes(&files), if bytes_total == 0 { files_bytes(&files) } else { bytes_total }, String::new())
+        (
+            files_bytes(&files),
+            if bytes_total == 0 {
+                files_bytes(&files)
+            } else {
+                bytes_total
+            },
+            String::new(),
+        )
     } else if let Some(st) = status.as_ref() {
         (
             st.bytes_downloaded,
-            if st.bytes_total > 0 { st.bytes_total } else { bytes_total },
-            if st.detail.is_empty() { unit_detail } else { st.detail.clone() },
+            if st.bytes_total > 0 {
+                st.bytes_total
+            } else {
+                bytes_total
+            },
+            if st.detail.is_empty() {
+                unit_detail
+            } else {
+                st.detail.clone()
+            },
         )
     } else {
         (0, bytes_total, unit_detail)
@@ -732,7 +793,10 @@ fn refresh_into(state: &Mutex<ModelSnapshot>, catalog: &[ModelSpec]) {
         s.selection = load_selection();
         // Clear a stale error once the environment is healthy again: the
         // token exists and no entry is in a failure state.
-        let any_failed = s.models.iter().any(|m| m.state == "failed" || m.state == "unauthorized");
+        let any_failed = s
+            .models
+            .iter()
+            .any(|m| m.state == "failed" || m.state == "unauthorized");
         if s.token_set && !any_failed && s.present {
             s.last_error.clear();
         }
@@ -840,7 +904,10 @@ models:
     #[test]
     fn sanitize_instance_is_conservative() {
         assert_eq!(sanitize_instance("sam3.1").as_deref(), Some("sam3.1"));
-        assert_eq!(sanitize_instance("navd_traj-v2").as_deref(), Some("navd_traj-v2"));
+        assert_eq!(
+            sanitize_instance("navd_traj-v2").as_deref(),
+            Some("navd_traj-v2")
+        );
         assert!(sanitize_instance("../../etc/passwd").is_none());
         assert!(sanitize_instance("a/b").is_none());
         assert!(sanitize_instance("").is_none());
