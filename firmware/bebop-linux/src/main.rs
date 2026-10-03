@@ -465,14 +465,23 @@ async fn main() -> Result<()> {
 
     info!("ready: mode = Idle");
 
-    // Wait for shutdown signal. SIGINT first; ignore SIGTERM beyond logging
-    // because the Drop impl on `supervisor` will fire either way.
+    // Wait for a shutdown signal. systemd sends SIGTERM on stop/restart;
+    // without a handler the default disposition terminates the process
+    // immediately, so the capture threads never run their shutdown path and
+    // the MCAPs are left without a footer (indexed viewers reject them).
+    // Catch SIGTERM and take the same graceful path as ctrl-c so `finish()`
+    // runs and the files stay readable.
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
     tokio::select! {
         res = signal::ctrl_c() => {
             if let Err(e) = res {
                 warn!(error = %e, "ctrl-c handler error");
             }
             info!("ctrl-c received; shutting down");
+        }
+        _ = sigterm.recv() => {
+            info!("SIGTERM received; shutting down");
         }
         _ = server_handle => {
             warn!("server task ended; shutting down");
