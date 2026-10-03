@@ -209,6 +209,7 @@ dependencies = [
  "ndarray 0.16.1",
  "ort",
  "prost",
+ "prost-build",
  "serde",
  "serde_json",
  "serde_yaml",

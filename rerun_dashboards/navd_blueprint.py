@@ -8,6 +8,12 @@ The telemetry messages are Protobuf structs (`bebop.navd.Twist`/`Odom`/
 `SeriesLines` scalar input to a struct field via a jq-style selector — no
 export step. If a session predates the protobuf telemetry (JSON channels,
 or IMU capture), those series stay empty.
+
+The `power` / `host` views read the firmware's always-on system log
+(`system_*.mcap`, Protobuf `bebop.system.*`). Load one or more of those
+files alongside the session (pass them as extra paths to `open.py`) to
+overlay power draw and host utilization on the drive. Without a system log
+those two views stay empty, like the IMU views on old sessions.
 """
 
 import rerun as rr
@@ -57,6 +63,28 @@ IMU = (
     ("/imu_gyro_far", "IMU gyro (far)", _GYRO),
 )
 
+# Always-on system log (`system_*.mcap`): power board + host utilization.
+# These series only populate when a system log is loaded alongside the
+# session (see the module docstring).
+_PWR = (
+    ("bebop.system.Power:message", ".battery_voltage_v", "battery (V)", (0, 170, 0)),
+    ("bebop.system.Power:message", ".motor_voltage_v", "motor (V)", (0, 90, 255)),
+    ("bebop.system.Power:message", ".board_temperature_c", "board temp (C)", (255, 140, 0)),
+    ("bebop.system.Power:message", ".total_motor_current_a", "motor current (A)", (230, 60, 60)),
+    ("bebop.system.Power:message", ".state_of_charge_pct", "SOC (%)", (150, 90, 255)),
+)
+_HOST = (
+    ("bebop.system.Host:message", ".cpu_pct", "cpu (%)", (0, 90, 255)),
+    ("bebop.system.Host:message", ".gpu_pct", "gpu (%)", (0, 170, 0)),
+    ("bebop.system.Host:message", ".ram_used_pct", "ram (%)", (255, 140, 0)),
+    ("bebop.system.Host:message", ".load1", "load1", (230, 60, 60)),
+    ("bebop.system.Host:message", ".disk_used_pct", "disk (%)", (150, 90, 255)),
+)
+SYSTEM = (
+    ("/power", "power (system log)", _PWR),
+    ("/host", "host (system log)", _HOST),
+)
+
 
 def _series(source_component, selector, label, color):
     mapping = VisualizerComponentMapping(
@@ -89,6 +117,7 @@ def build():
             ),
             rrb.Vertical(
                 *[_telemetry_view(*spec) for spec in TELEMETRY],
+                *[_telemetry_view(*spec) for spec in SYSTEM],
                 *imu_rows,
             ),
             column_shares=[3.0, 1.0],

@@ -24,6 +24,7 @@ use bebop_linux::safety::power_monitor::spawn_power_monitor;
 use bebop_linux::safety::supervisor::spawn_rx_threads;
 use bebop_linux::safety::{BusPool, Supervisor};
 use bebop_linux::server;
+use bebop_linux::system_capture;
 use bebop_linux::vision;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,9 +40,11 @@ struct Args {
     /// Path to the trained policy ONNX. If `None`, defaults to
     /// `<config_dir>/policy.onnx` (sibling of the joint YAML).
     policy: Option<PathBuf>,
-    /// Directory to write operator-toggled observation/action MCAP
-    /// captures into. `~/` is expanded; defaults to `~/bebop-captures`.
-    /// See `crate::policy_capture` for the file naming scheme.
+    /// Directory to write MCAP captures into: operator-toggled
+    /// observation/action captures (`policy_capture_*.mcap`, see
+    /// `crate::policy_capture`) plus the always-on power/host system log
+    /// (`system_*.mcap`, see `crate::system_capture`). `~/` is expanded;
+    /// defaults to `~/bebop-captures`.
     capture_dir: Option<PathBuf>,
 }
 
@@ -90,7 +93,7 @@ fn parse_args() -> Args {
                                                  [default: config/bebop_v2.yaml]\n  \
                         -p, --policy <PATH>      Trained policy ONNX \
                                                   [default: <config_dir>/policy.onnx]\n  \
-                           --capture-dir <DIR>  Where to write operator-toggled MCAP captures \
+                           --capture-dir <DIR>  Where to write MCAP captures (policy + always-on system log) \
                                                  [default: ~/bebop-captures]\n  \
                        -h, --help               Print help\n"
                 );
@@ -239,6 +242,17 @@ async fn main() -> Result<()> {
     // `capture_dropped`) directly back into `policy_io_shared`.
     let (capture_handle, capture_join) =
         policy_capture::spawn_capture_thread(capture_dir.clone(), policy_io_shared.clone());
+
+    // Always-on system logger: power-board + host utilization at 1 Hz,
+    // independent of the operator-toggled policy captures above. Runs for
+    // the whole process (idle, thermal soak, spin-up included) and stamps
+    // drive-state transitions on `/session` so a navd session can be
+    // correlated with the system timeline.
+    let system_join = system_capture::spawn_system_capture(
+        supervisor.clone(),
+        capture_dir.clone(),
+        shutdown_flag.clone(),
+    );
 
     let policy_io_for_runner = policy_io_shared.clone();
     let policy_control_for_runner = policy_control_shared.clone();
@@ -489,6 +503,10 @@ async fn main() -> Result<()> {
     // "motors disabling".
     capture_handle.shutdown();
     let _ = capture_join.join();
+
+    // Stop the always-on system logger last: it only reads the supervisor
+    // and the host, so it can drain up to the shutdown instant.
+    let _ = system_join.join();
 
     // `supervisor` Arc ends here; its inner Drop sends Disable to every motor.
     info!("bye");

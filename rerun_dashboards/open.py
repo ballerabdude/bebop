@@ -5,6 +5,12 @@
     python rerun_dashboards/open.py \\
         http://bebop.local:9090/captures/dl/navd_session_20261001_223516.mcap
 
+Pass the firmware's always-on system log(s) as extra paths to populate the
+`power` / `host` views (Protobuf `bebop.system.*`, `system_*.mcap`); they
+rotate hourly, so a long drive may span more than one file:
+
+    python rerun_dashboards/open.py navd_session_*.mcap system_*.mcap
+
 A URL is downloaded once into the cache dir (default
 `~/.cache/bebop/captures`, override with `--cache-dir`) and reused while
 the server-side size matches.
@@ -90,7 +96,8 @@ def _resolve(src, cache_dir):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("sessions", nargs="+",
-                    help="navd session .mcap path(s) or http(s) URL(s)")
+                    help="navd session .mcap path(s) or http(s) URL(s); "
+                         "add system_*.mcap paths to populate power/host")
     ap.add_argument("--cache-dir", default=DEFAULT_CACHE,
                     help=f"download cache (default: {DEFAULT_CACHE})")
     ap.add_argument("--save", metavar="OUT.rrd",

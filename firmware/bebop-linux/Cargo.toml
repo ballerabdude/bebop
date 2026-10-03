@@ -146,6 +146,12 @@ serialport = { version = "4", default-features = false }
 # the `derive` feature so the probe can declare its CLI as a struct.
 clap = { version = "4", features = ["derive"] }
 
+[build-dependencies]
+# Generates the `bebop.system.*` types from `protos/system.proto` and the
+# serialized FileDescriptorSet embedded in the always-on system MCAP
+# (`src/system_capture.rs`). Same version as `bebop-proto`.
+prost-build = "0.13"
+
 [profile.release]
 opt-level = 3
 lto = true
