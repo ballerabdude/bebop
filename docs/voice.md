@@ -144,11 +144,23 @@ NemotronLabs VoiceChat-11B, or careful VAD + cancellation).
 |---|---|---|
 | Catalog + downloader | `bebop-vision/config/models.yaml`, `bebop_vision/models.py`, `bebop_vision/download_model.py`, `firmware/bebop-linux/src/model.rs`, `tests/test_models.py` | ✅ done |
 | Design | `docs/voice.md` | ✅ |
-| Firmware control | `jetson-agent/bebop-proto/proto/bebop_runtime.proto`, `firmware/bebop-linux/src/voice.rs`, `src/server/{ws,handlers,telemetry}.rs`, `src/main.rs` | ⬜ next |
-| App control + page | `bebop-app/src/proto/*` (regen), `runtime/{types,wsTransport,index}.ts`, `screens/VoiceScreen.tsx`, `screens/DashboardScreen.tsx`, `App.tsx` | ⬜ next |
-| Voice service | `bebop-vision/bebop_vision/voice_server.py`, `deploy/systemd/bebop-voice.service` | ⬜ next |
-| Install | `scripts/install-jetson.sh` (wheel + unit) | ⬜ next |
-| Bring-up | engine build, latency tuning, NVFP4 | ⬜ on robot |
+| Firmware control | `jetson-agent/bebop-proto/proto/bebop_runtime.proto`, `firmware/bebop-linux/src/voice.rs`, `src/server/{ws,handlers,telemetry}.rs`, `src/main.rs` | ✅ deployed to robot |
+| App control + page | `bebop-app/src/proto/*`, `runtime/{types,wsTransport,index}.ts`, `screens/VoiceScreen.tsx`, `voice/useVoiceSession.ts`, `screens/DashboardScreen.tsx`, `screens/MotorBenchScreen.tsx`, `App.tsx` | ✅ done (push-to-talk) |
+| Voice service | `bebop-vision/bebop_vision/voice_server.py`, `deploy/systemd/bebop-voice.service`, `tests/test_voice_server.py` | ✅ deployed to robot |
+| Install | `scripts/install-jetson.sh` (`--setup-voice`), `requirements-voice.txt` | ✅ venv bootstrapped on robot |
+| Bring-up | engine build, latency tuning, NVFP4 | ⏳ model downloading; engine build next |
+
+### Bring-up status (2026-10-04)
+
+- Firmware (branch `feat/voice-omni`) installed on the Thor via
+  `install-jetson.sh --local --build --linux-only`; the catalog serves 6
+  models including `qwen3-omni-30b`, and the app shows it on the Models page.
+- `tensorrt-edgellm[server]==0.11.0` (aarch64 wheel, 447 MB) installed into
+  `bebop-vision/.venv-voice`; `runtime.load()` validated.
+- `voice_server --stub` protocol verified on the Thor (text + 24 kHz PCM).
+- Remaining: finish the Qwen3-Omni snapshot download, start
+  `bebop-voice.service` (first start builds the six TensorRT engines), then
+  test push-to-talk from the app.
 
 ## Latency budget (target)
 

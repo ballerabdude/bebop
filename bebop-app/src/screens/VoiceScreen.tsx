@@ -6,6 +6,7 @@ import {
   type VoiceView,
 } from "../runtime";
 import { Banner, Button, Card } from "../components/ui";
+import { useVoiceSession } from "../voice/useVoiceSession";
 
 const EMPTY_VOICE: VoiceView = {
   present: false,
@@ -36,6 +37,7 @@ export function VoiceScreen({
   const [voice, setVoice] = useState<VoiceView>(EMPTY_VOICE);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const session = useVoiceSession(robotIp, 9093);
 
   useEffect(() => {
     if (!robotIp) return;
@@ -135,16 +137,52 @@ export function VoiceScreen({
 
       <Card>
         <div className="py-2 flex flex-col gap-2">
-          <div className="text-xs text-text-dim uppercase tracking-wider">
-            Talk
+          <div className="flex items-center justify-between">
+            <div className="text-xs text-text-dim uppercase tracking-wider">
+              Talk
+            </div>
+            <span className="text-[12px] text-text-dim">
+              {session.phase === "listening"
+                ? "Listening…"
+                : session.phase === "thinking"
+                  ? "Thinking…"
+                  : session.phase === "speaking"
+                    ? "Speaking…"
+                    : session.phase === "connecting"
+                      ? "Connecting…"
+                      : session.phase === "error"
+                        ? "Error"
+                        : ""}
+            </span>
           </div>
-          <p className="text-[13px] text-text-dim leading-relaxed">
-            Push-to-talk audio is served by <code>bebop-voice.service</code> on{" "}
-            <code>:9093</code>. Start the service, then hold to talk.
-          </p>
-          <Button disabled variant="secondary">
-            Hold to talk
+          {session.error ? <Banner tone="error">{session.error}</Banner> : null}
+          <Button
+            variant={session.phase === "listening" ? "primary" : "secondary"}
+            disabled={!voice.running || session.phase === "thinking" || session.phase === "speaking"}
+            onPointerDown={(e) => {
+              e.preventDefault();
+              if (!voice.running) return;
+              void session.startTalking();
+            }}
+            onPointerUp={() => session.stopTalking()}
+            onPointerLeave={() => session.stopTalking()}
+            onPointerCancel={() => session.stopTalking()}
+            onContextMenu={(e) => e.preventDefault()}
+            style={{ touchAction: "none" }}
+          >
+            {session.phase === "listening" ? "Release to send" : "Hold to talk"}
           </Button>
+          {session.reply ? (
+            <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
+              {session.reply}
+            </p>
+          ) : (
+            <p className="text-[13px] text-text-dim leading-relaxed">
+              {voice.running
+                ? "Hold the button and speak. The robot replies with speech."
+                : "Start the voice service above, then hold to talk."}
+            </p>
+          )}
         </div>
       </Card>
 
