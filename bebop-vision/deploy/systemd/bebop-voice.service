@@ -1,0 +1,37 @@
+[Unit]
+Description=Bebop voice — on-device speech-to-speech (Qwen3-Omni, TensorRT Edge-LLM) on :9093
+Documentation=https://github.com/ballerabdude/bebop
+# The voice service owns a large GPU model and connects to the local
+# TensorRT Edge-LLM server it supervises. It does not need the runtime to be
+# up to start, but ordering keeps the two from racing at boot when the
+# operator has enabled this unit.
+After=network-online.target bebop-linux.service
+Wants=network-online.target bebop-linux.service
+
+[Service]
+Type=simple
+# Runs as root like bebop-vision: it reads the root-only HF token
+# (/etc/bebop/hf_token) to fetch/refresh the checkpoint, the weights live
+# under the repo checkout, and the TensorRT engine cache lives in
+# /var/lib/bebop-voice. Root here is deliberate, not an oversight.
+User=root
+Group=root
+WorkingDirectory=/home/bebop/bebop/bebop-vision
+Environment=PYTHONUNBUFFERED=1
+# Dedicated venv: the recorder's .venv pins numpy 1.26.4 for pyorbbecsdk,
+# while TensorRT Edge-LLM pulls its own numpy/GPU stack. Bootstrap it with
+# `install-jetson.sh --setup-voice` (see docs/voice.md).
+ExecStart=/home/bebop/bebop/bebop-vision/.venv-voice/bin/python -u -m bebop_vision.voice_server
+
+# First start builds the checkpoint's TensorRT engines, which can take
+# several minutes; give shutdown room to release the GPU and reap the
+# child server before systemd escalates.
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+
+[Install]
+# Deliberately NOT enabled by install-jetson.sh: the operator starts and
+# stops the voice service from the app (firmware drives systemd).
+# `systemctl enable bebop-voice` opts into auto-start at boot.
+WantedBy=multi-user.target

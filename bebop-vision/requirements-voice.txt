@@ -1,0 +1,19 @@
+# Voice (speech-to-speech) service dependencies.
+#
+# Installed into a DEDICATED venv (`bebop-vision/.venv-voice`) by
+# `scripts/install-jetson.sh --setup-voice`, not into the recorder's `.venv`:
+# the recorder pins numpy 1.26.4 for pyorbbecsdk, and TensorRT Edge-LLM pulls
+# its own numpy/CUDA stack. Keeping them separate avoids breaking the camera.
+#
+# `tensorrt-edgellm[server]` ships the high-level Python API, the
+# OpenAI-compatible server (`tensorrt-edgellm-serve`), and Hugging Face Hub
+# downloads. The published aarch64 wheel covers Jetson Thor (JetPack 7.x,
+# CUDA 13, SM110, platform TensorRT 10) — no source/CMake build. See
+# docs/voice.md for the model layout and the on-robot bring-up notes.
+tensorrt-edgellm[server]==0.11.0
+
+# The gateway talks to the local Edge-LLM server over HTTP/SSE and serves the
+# app its own WebSocket. `uvicorn` (from [server]) needs one of these to speak
+# WebSocket; `websockets` is the aarch64-friendly choice.
+websockets>=12
+httpx>=0.27
