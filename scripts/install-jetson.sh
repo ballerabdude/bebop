@@ -91,6 +91,9 @@
 #   sudo ./install-jetson.sh --quantize-voice-only
 #                                             # just the quantization; don't
 #                                             # download or install binaries
+#   sudo ./install-jetson.sh --quantize-voice --num-samples 128
+#                                             # fewer calibration samples
+#                                             # (faster; 512 default, ~128 floor)
 #
 # Requires:
 #   * `gh` CLI authenticated (`gh auth login`) — needed to list/download
@@ -163,6 +166,9 @@ SETUP_VOICE_ONLY=0
 # from the FP16 snapshot downloaded via the app's Models page.
 QUANTIZE_VOICE=0
 QUANTIZE_VOICE_ONLY=0
+# Calibration samples for --quantize-voice (default 512, as upstream). The
+# docs floor is ~128; lower is faster, higher is better quality.
+VOICE_QUANT_SAMPLES="${VOICE_QUANT_SAMPLES:-512}"
 # --local: install from a local checkout instead of GitHub. Pre-built
 # release binaries are picked up from each crate's target/release/ and
 # configs/units come from the working tree. No `gh` required.
@@ -225,6 +231,7 @@ while [[ $# -gt 0 ]]; do
         --setup-voice-only)  SETUP_VOICE=1; SETUP_VOICE_ONLY=1; shift ;;
         --quantize-voice)    QUANTIZE_VOICE=1; shift ;;
         --quantize-voice-only) QUANTIZE_VOICE=1; QUANTIZE_VOICE_ONLY=1; shift ;;
+        --num-samples)       VOICE_QUANT_SAMPLES="$2"; shift 2 ;;
         --config-yaml)    CONFIG_YAML="$2"; shift 2 ;;
         *)                echo "unknown arg: $1" >&2; exit 2 ;;
     esac
@@ -819,8 +826,14 @@ quantize_voice() {
 
     echo "    source:      ${src}"
     echo "    destination: ${dst}"
+    echo "    samples:     ${VOICE_QUANT_SAMPLES}"
     echo "    (this is long: it calibrates on audio+image+text and needs GPU memory)"
-    run_quant "'${venv}/bin/tensorrt-edgellm-quantize' llm --model_dir '${src}' --output_dir '${dst}' --quantization nvfp4"
+    # ModelOpt JIT-compiles a CUDA conv3d kernel for the vision tower during
+    # calibration. torch.utils.cpp_extension needs ninja (in the venv) and nvcc
+    # (CUDA toolkit) on PATH, plus CUDA_HOME — none of which the systemd/login
+    # environment provides by default.
+    local cuda_home="/usr/local/cuda"
+    run_quant "export PATH=${venv}/bin:${cuda_home}/bin:\$PATH; export CUDA_HOME=${cuda_home}; ${venv}/bin/tensorrt-edgellm-quantize llm --model_dir ${src} --output_dir ${dst} --quantization nvfp4 --num_samples ${VOICE_QUANT_SAMPLES}"
     if [[ -f "${dst}/config.json" ]]; then
         echo "    NVFP4 checkpoint written to ${dst}"
     else
