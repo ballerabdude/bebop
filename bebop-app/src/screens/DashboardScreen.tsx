@@ -20,6 +20,8 @@ interface DashboardProps {
   onOpenTeleop: () => void;
   /** Open the model provisioning / purpose-configuration screen. */
   onOpenModels: () => void;
+  /** Open the speech-to-speech voice screen. */
+  onOpenVoice: () => void;
 }
 
 /// Live dashboard shown after setup. Stays connected to the provisioning
@@ -32,6 +34,7 @@ export function DashboardScreen({
   onOpenMotors,
   onOpenTeleop,
   onOpenModels,
+  onOpenVoice,
 }: DashboardProps) {
   const [info, setInfo] = useState<DeviceInfo | null>(null);
   const [wifi, setWifi] = useState<WifiStatus | null>(null);
@@ -232,6 +235,9 @@ export function DashboardScreen({
         </div>
         <Button variant="secondary" onClick={onOpenModels} disabled={!reachable}>
           Configure models
+        </Button>
+        <Button variant="secondary" onClick={onOpenVoice} disabled={!reachable}>
+          Talk to robot
         </Button>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           <Button variant="secondary" onClick={onReconfigure}>

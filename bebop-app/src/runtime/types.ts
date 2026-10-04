@@ -143,6 +143,22 @@ export interface ImuView {
   headingAccuracyRad: number;
 }
 
+/// State of the on-robot voice (speech-to-speech) service
+/// (`bebop-voice.service`). `present === false` means the unit isn't
+/// installed on this robot; the UI should hide the voice card. `running` is
+/// true while the unit is systemd-`active` (the Python service is up).
+/// `model` names the catalog voice model being served (e.g.
+/// "qwen3-omni-30b"). Audio does not travel over the runtime WS — the voice
+/// page talks to the service's own WebSocket on :9093 (see docs/voice.md).
+export interface VoiceView {
+  present: boolean;
+  running: boolean;
+  state: string;
+  detail: string;
+  service: string;
+  model: string;
+}
+
 export interface RuntimeSnapshot {
   hostUnixMs: number;
   mode: RuntimeMode;
@@ -170,6 +186,9 @@ export interface RuntimeSnapshot {
   /// Model-weight provisioning state. `model.present === false` when the
   /// download template unit isn't installed — the UI hides the model card.
   model: ModelView;
+  /// Voice (speech-to-speech) service state. `voice.present === false` when
+  /// `bebop-voice.service` isn't installed — the UI hides the voice card.
+  voice: VoiceView;
 }
 
 /// Policy I/O view. Mirrors the scalar capture/lifecycle fields of the

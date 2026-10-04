@@ -42,3 +42,4 @@ pub mod server;
 pub mod system_capture;
 pub mod udp_command;
 pub mod vision;
+pub mod voice;

@@ -35,6 +35,8 @@ interface MotorBenchProps {
   onOpenTeleop?: () => void;
   /** When provided, render a "Models" link to the provisioning screen. */
   onOpenModels?: () => void;
+  /** When provided, render a "Voice" link to the speech-to-speech screen. */
+  onOpenVoice?: () => void;
 }
 
 const MODE_LABEL: Record<RuntimeMode, string> = {
@@ -60,6 +62,7 @@ export function MotorBenchScreen({
   onOpenVideo,
   onOpenTeleop,
   onOpenModels,
+  onOpenVoice,
 }: MotorBenchProps) {
   const transportRef = useRef<RuntimeTransport | null>(null);
   const [connecting, setConnecting] = useState(true);
@@ -985,6 +988,11 @@ export function MotorBenchScreen({
         {onOpenModels ? (
           <Button variant="ghost" onClick={onOpenModels}>
             Models
+          </Button>
+        ) : null}
+        {onOpenVoice ? (
+          <Button variant="ghost" onClick={onOpenVoice}>
+            Voice
           </Button>
         ) : null}
         <Button variant="ghost" onClick={onBack}>

@@ -38,6 +38,7 @@ import {
   SetNavigationGoalSchema,
   SetVelocityCommandSchema,
   SetVisionEnabledSchema,
+  SetVoiceEnabledSchema,
   Vec2Schema,
   SetWheelEnabledSchema,
   SetAllWheelsEnabledSchema,
@@ -57,6 +58,7 @@ import {
   type WheelState as ProtoWheelState,
   type DriveState as ProtoDriveState,
   type VisionState as ProtoVisionState,
+  type VoiceState as ProtoVoiceState,
   type ModelState as ProtoModelState,
   type ModelCatalogEntry as ProtoModelCatalogEntry,
   type PurposeSelection as ProtoPurposeSelection,
@@ -73,6 +75,7 @@ import type {
   RuntimeMode,
   RuntimeSnapshot,
   VisionView,
+  VoiceView,
   WheelView,
 } from "./types";
 
@@ -614,6 +617,21 @@ export class RuntimeTransport {
     });
   }
 
+  // -------------------------------------------------------------- voice
+
+  /// Start or stop the on-robot voice (speech-to-speech) service
+  /// (`bebop-voice.service`). The firmware forwards the request to systemd
+  /// and acks immediately; the resulting state arrives asynchronously in
+  /// telemetry (`snapshot.voice`). The first start can take minutes while the
+  /// checkpoint's TensorRT engines build. Audio itself is served by the unit
+  /// on :9093, not over this socket (see docs/voice.md).
+  async setVoiceEnabled(enabled: boolean): Promise<void> {
+    await this.requestAck({
+      case: "setVoiceEnabled",
+      value: create(SetVoiceEnabledSchema, { enabled }),
+    });
+  }
+
   // -------------------------------------------------------------- models
 
   /// Store the Hugging Face token used for gated model downloads. Write-only:
@@ -767,6 +785,7 @@ function snapshotFromProto(s: Snapshot | TelemetryFrame): RuntimeSnapshot {
     policyIo: policyIoFromProto(s.policyIo),
     vision: visionFromProto(s.vision),
     model: modelFromProto(s.model),
+    voice: voiceFromProto(s.voice),
   };
 }
 
@@ -892,6 +911,31 @@ const EMPTY_VISION_VIEW: VisionView = {
   detail: "",
   service: "",
   mode: "",
+};
+
+function voiceFromProto(p: ProtoVoiceState | undefined): VoiceView {
+  // Absent field on older firmware collapses to "not installed" — the UI
+  // hides the voice control rather than offering a button that can't work.
+  if (!p) {
+    return EMPTY_VOICE_VIEW;
+  }
+  return {
+    present: p.present,
+    running: p.running,
+    state: p.state,
+    detail: p.detail,
+    service: p.service,
+    model: p.model,
+  };
+}
+
+const EMPTY_VOICE_VIEW: VoiceView = {
+  present: false,
+  running: false,
+  state: "",
+  detail: "",
+  service: "",
+  model: "",
 };
 
 function modelEntryFromProto(e: ProtoModelCatalogEntry): ModelEntryView {

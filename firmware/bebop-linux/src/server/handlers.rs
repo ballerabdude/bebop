@@ -14,6 +14,7 @@ use crate::policy_io::PolicyIoShared;
 use crate::safety::limits::BreachReason;
 use crate::safety::Supervisor;
 use crate::vision::{VisionShared, VISION_SERVICE};
+use crate::voice::{VoiceShared, VOICE_SERVICE};
 use bebop_proto::runtime::v1 as proto;
 use bebop_proto::Message;
 use bytes::Bytes;
@@ -46,6 +47,7 @@ pub fn handle_client_message(
     nav_goal: &NavGoalShared,
     vision: &VisionShared,
     model: &ModelShared,
+    voice: &VoiceShared,
     conn_id: u64,
     bytes: &[u8],
 ) -> proto::ServerRuntimeMessage {
@@ -119,6 +121,7 @@ pub fn handle_client_message(
             policy_io,
             vision,
             model,
+            voice,
             conn_id,
         ),
         P::SetMotorEnabled(req) => {
@@ -281,6 +284,27 @@ pub fn handle_client_message(
                 )
             }
         }
+        P::SetVoiceEnabled(req) => {
+            // Start/stop the Python voice service via systemd. The request is
+            // queued on a background thread (the first start can take minutes
+            // while TensorRT engines build), so this acks immediately; the
+            // resulting state arrives in telemetry as `VoiceState`.
+            if !voice.snapshot().present {
+                error_response(
+                    request_id,
+                    format!("{VOICE_SERVICE} is not installed on this robot"),
+                )
+            } else {
+                voice.request(req.enabled);
+                ack(
+                    request_id,
+                    format!(
+                        "voice {} requested",
+                        if req.enabled { "start" } else { "stop" }
+                    ),
+                )
+            }
+        }
         P::SetHfToken(req) => {
             // Write-only secret: persisted root-only, never echoed back.
             if req.token.trim().is_empty() {
@@ -435,6 +459,7 @@ pub fn snapshot_response(
     policy_io: &PolicyIoShared,
     vision: &VisionShared,
     model: &ModelShared,
+    voice: &VoiceShared,
     conn_id: u64,
 ) -> proto::ServerRuntimeMessage {
     proto::ServerRuntimeMessage {
@@ -447,6 +472,7 @@ pub fn snapshot_response(
                 policy_io,
                 vision,
                 model,
+                voice,
                 conn_id,
             ),
         )),

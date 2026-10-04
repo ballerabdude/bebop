@@ -15,5 +15,6 @@ export type {
   RuntimeMode,
   RuntimeSnapshot,
   VisionView,
+  VoiceView,
   WheelView,
 } from "./types";

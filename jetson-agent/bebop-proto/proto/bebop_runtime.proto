@@ -128,6 +128,14 @@ message ClientRuntimeMessage {
     // "navigation"). Persisted on the robot so the runtime knows what to
     // load. An empty `model_id` clears the purpose's selection.
     SetModelPurpose      set_model_purpose     = 27;
+    // Start/stop the on-robot voice (speech-to-speech) service
+    // (`bebop-voice.service`) via systemd, mirroring `SetVisionEnabled`.
+    // The firmware (root) drives the unit; the running state rides back in
+    // telemetry/snapshot as `VoiceState`. The request is asynchronous: the
+    // ack means "queued", and the new state shows up within a poll interval.
+    // Audio itself does not travel over this socket — the app talks to the
+    // voice service's own WebSocket on :9093 (see docs/voice.md).
+    SetVoiceEnabled      set_voice_enabled     = 28;
   }
   reserved 12;
   reserved "set_policy_capture";
@@ -432,6 +440,9 @@ message TelemetryFrame {
   // download). `model.present = false` when the download unit isn't
   // installed; the UI hides the provisioning card in that case.
   ModelState model = 20;
+  // On-robot voice (speech-to-speech) service state. `voice.present = false`
+  // when `bebop-voice.service` isn't installed; the UI hides the voice card.
+  VoiceState voice = 21;
 }
 
 // One-shot reply to GetSnapshot — same content as TelemetryFrame.
@@ -453,6 +464,7 @@ message Snapshot {
   NavState nav = 18 [deprecated = true];
   VisionState vision = 19;
   ModelState model = 20;
+  VoiceState voice = 21;
 }
 
 message BusStatusUpdate {
@@ -1007,4 +1019,39 @@ message ModelCatalogEntry {
   string detail            = 22;
   // Bytes downloaded so far (best-effort).
   uint64 bytes_downloaded  = 23;
+}
+
+// ---------------------------------------------------------------------------
+// Voice (speech-to-speech) service
+// ---------------------------------------------------------------------------
+//
+// Appended at the bottom (see the ImuStats note) so adding it doesn't shift
+// the descriptor indices of the messages above. Audio does not travel over
+// the runtime WS: the app connects to the voice service's own WebSocket on
+// :9093. The runtime WS only carries control (`SetVoiceEnabled`) and state
+// (`VoiceState`). See docs/voice.md.
+
+// Start/stop the on-robot voice service (`bebop-voice.service`). The firmware
+// forwards the request to systemd and acks immediately; the resulting state
+// is reflected asynchronously in `VoiceState`.
+message SetVoiceEnabled {
+  bool enabled = 1;
+}
+
+// Snapshot of the `bebop-voice.service` systemd unit. Mirrors `VisionState`;
+// `model` names the catalog voice model being served.
+message VoiceState {
+  // True iff the systemd unit is installed (`LoadState=loaded`).
+  bool   present = 1;
+  // True while the unit is `active` (the Python service is up).
+  bool   running = 2;
+  // Raw systemd ActiveState ("active", "inactive", "activating", "failed").
+  string state   = 3;
+  // systemd SubState, with `Result` appended when it isn't "success", or the
+  // last systemctl error / service detail (e.g. "building engines").
+  string detail  = 4;
+  // Fully-qualified unit name, e.g. "bebop-voice.service".
+  string service = 5;
+  // Catalog id of the voice model the service serves (e.g. "qwen3-omni-30b").
+  string model   = 6;
 }

@@ -8,6 +8,7 @@ import { MotorBenchScreen } from "./screens/MotorBenchScreen";
 import { ModelsScreen } from "./screens/ModelsScreen";
 import { TeleopScreen } from "./screens/TeleopScreen";
 import { VideoScreen } from "./screens/VideoScreen";
+import { VoiceScreen } from "./screens/VoiceScreen";
 import { WelcomeScreen } from "./screens/WelcomeScreen";
 import { WifiScreen } from "./screens/WifiScreen";
 import "./App.css";
@@ -29,14 +30,17 @@ type Step =
   | "motors"
   | "teleop"
   | "video"
+  | "voice"
   | "models"
-  | "direct-models";
+  | "direct-models"
+  | "direct-voice";
 
 function containerWidth(step: Step): string {
   if (step === "motors" || step === "direct-motors") return "max-w-6xl";
   if (step === "teleop" || step === "direct-teleop") return "max-w-6xl";
   if (step === "dashboard") return "max-w-3xl";
   if (step === "models" || step === "direct-models") return "max-w-3xl";
+  if (step === "voice" || step === "direct-voice") return "max-w-3xl";
   return "max-w-[520px]";
 }
 
@@ -157,6 +161,7 @@ function App() {
               setStep("teleop");
             }}
             onOpenModels={() => setStep("models")}
+            onOpenVoice={() => setStep("voice")}
           />
         ) : null}
 
@@ -170,6 +175,7 @@ function App() {
               setStep("teleop");
             }}
             onOpenModels={() => setStep("models")}
+            onOpenVoice={() => setStep("voice")}
           />
         ) : null}
 
@@ -184,6 +190,7 @@ function App() {
               setStep("direct-teleop");
             }}
             onOpenModels={() => setStep("direct-models")}
+            onOpenVoice={() => setStep("direct-voice")}
           />
         ) : null}
 
@@ -201,6 +208,18 @@ function App() {
 
         {step === "direct-models" && directIp ? (
           <ModelsScreen
+            robotIp={directIp.ip}
+            runtimePort={directIp.port}
+            onBack={() => setStep("direct-motors")}
+          />
+        ) : null}
+
+        {step === "voice" && robotIp ? (
+          <VoiceScreen robotIp={robotIp} onBack={() => setStep("dashboard")} />
+        ) : null}
+
+        {step === "direct-voice" && directIp ? (
+          <VoiceScreen
             robotIp={directIp.ip}
             runtimePort={directIp.port}
             onBack={() => setStep("direct-motors")}

@@ -28,6 +28,7 @@ use bebop_linux::safety::{BusPool, Supervisor};
 use bebop_linux::server;
 use bebop_linux::system_capture;
 use bebop_linux::vision;
+use bebop_linux::voice;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -208,6 +209,11 @@ async fn main() -> Result<()> {
     // Gated model-weight provisioning: store the operator's Hugging Face
     // token and drive the SAM 3.1 download unit. Feeds `ModelState`.
     let model_shared = model::spawn_model_supervisor(shutdown_flag.clone());
+
+    // Operator control of the Python voice (speech-to-speech) service
+    // (start/stop via systemd). The background poller also feeds `VoiceState`
+    // telemetry. Audio itself is served by the unit on :9093, not here.
+    let voice_shared = voice::spawn_voice_supervisor(shutdown_flag.clone());
 
     // Shared latest IMU reading (always present; the I²C reader fills it
     // when an `imu:` block exists in the YAML, otherwise stays at default
@@ -475,6 +481,7 @@ async fn main() -> Result<()> {
     let server_nav_goal = std::sync::Arc::new(NavGoalShared::new());
     let server_vision = vision_shared.clone();
     let server_model = model_shared.clone();
+    let server_voice = voice_shared.clone();
     let server_captures = capture_control.clone();
     let server_rerun_converter = args.rerun_converter.clone();
     let bind_addr = cfg.server.bind_addr.clone();
@@ -489,6 +496,7 @@ async fn main() -> Result<()> {
             nav_goal: server_nav_goal,
             vision: server_vision,
             model: server_model,
+            voice: server_voice,
             captures: server_captures,
             rerun_converter: server_rerun_converter,
         };

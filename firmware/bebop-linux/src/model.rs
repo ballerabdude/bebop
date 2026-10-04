@@ -141,7 +141,10 @@ pub fn parse_catalog(text: &str) -> Result<Vec<ModelSpec>> {
             );
         }
         if m.kind == "hf" && m.download == "files" && m.files.is_empty() {
-            anyhow::bail!("catalog entry {:?}: kind=hf download=files requires files", m.id);
+            anyhow::bail!(
+                "catalog entry {:?}: kind=hf download=files requires files",
+                m.id
+            );
         }
     }
     Ok(cat.models)
@@ -913,9 +916,7 @@ models:
 
     #[test]
     fn snapshot_entry_rejects_unknown_download_mode() {
-        let err = parse_catalog(
-            "models:\n  - id: x\n    repo: a/b\n    download: torrent\n",
-        );
+        let err = parse_catalog("models:\n  - id: x\n    repo: a/b\n    download: torrent\n");
         assert!(err.is_err());
     }
 

@@ -9,6 +9,7 @@ use crate::safety::limits::MotorSnapshot;
 use crate::safety::power_monitor::PowerBoardSnapshot;
 use crate::safety::{bus_pool::read_can_state, Supervisor};
 use crate::vision::VisionShared;
+use crate::voice::VoiceShared;
 use bebop_proto::runtime::v1 as proto;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -291,6 +292,28 @@ fn build_vision_stats(vision: &VisionShared) -> proto::VisionState {
     }
 }
 
+/// Snapshot the voice service state into the wire proto. Always returns a
+/// value; `present = false` when the unit isn't installed, which the UI uses
+/// to hide the voice control.
+fn build_voice_stats(voice: &VoiceShared) -> proto::VoiceState {
+    let snap = voice.snapshot();
+    // Prefer the last systemctl error over the raw systemd substate when one
+    // is set — "Unit not found" is more useful than "dead".
+    let detail = if snap.last_error.is_empty() {
+        snap.detail
+    } else {
+        snap.last_error
+    };
+    proto::VoiceState {
+        present: snap.present,
+        running: snap.running,
+        state: snap.state,
+        detail,
+        service: snap.service,
+        model: snap.model,
+    }
+}
+
 /// Snapshot the model provisioning state into the wire proto. Always
 /// returns a value; `present = false` when the download template unit isn't
 /// installed, which the UI uses to hide the provisioning card.
@@ -334,6 +357,7 @@ fn model_entry_to_proto(entry: &ModelEntry) -> proto::ModelCatalogEntry {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_snapshot(
     sup: &Arc<Supervisor>,
     imu: &ImuShared,
@@ -341,6 +365,7 @@ pub fn build_snapshot(
     policy_io: &PolicyIoShared,
     vision: &VisionShared,
     model: &ModelShared,
+    voice: &VoiceShared,
     conn_id: u64,
 ) -> proto::Snapshot {
     let motors = sup.snapshot_motors();
@@ -364,10 +389,12 @@ pub fn build_snapshot(
         drive: Some(build_drive_state(sup, conn_id)),
         vision: Some(build_vision_stats(vision)),
         model: Some(build_model_stats(model)),
+        voice: Some(build_voice_stats(voice)),
         ..Default::default()
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_telemetry(
     sup: &Arc<Supervisor>,
     imu: &ImuShared,
@@ -375,6 +402,7 @@ pub fn build_telemetry(
     policy_io: &PolicyIoShared,
     vision: &VisionShared,
     model: &ModelShared,
+    voice: &VoiceShared,
     conn_id: u64,
 ) -> proto::TelemetryFrame {
     let motors = sup.snapshot_motors();
@@ -397,6 +425,7 @@ pub fn build_telemetry(
         drive: Some(build_drive_state(sup, conn_id)),
         vision: Some(build_vision_stats(vision)),
         model: Some(build_model_stats(model)),
+        voice: Some(build_voice_stats(voice)),
         ..Default::default()
     }
 }

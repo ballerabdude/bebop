@@ -26,6 +26,7 @@ use crate::safety::{Supervisor, SupervisorEvent};
 use crate::server::handlers::{encode, handle_client_message};
 use crate::server::telemetry::{build_telemetry, telemetry_envelope};
 use crate::vision::VisionShared;
+use crate::voice::VoiceShared;
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, State};
@@ -84,6 +85,9 @@ pub struct AppState {
     /// Gated model-weight provisioning control + status (see
     /// [`crate::model`]).
     pub model: ModelShared,
+    /// Voice (speech-to-speech) service control + status (see
+    /// [`crate::voice`]).
+    pub voice: VoiceShared,
     /// Finalize / active-segment state shared with the MCAP capture writers.
     /// Used to flag the currently-writing segment in `GET /captures` and to
     /// roll it over before a download (`POST /captures/finalize`).
@@ -468,6 +472,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         nav_goal,
         vision,
         model,
+        voice,
         capture_dir: _,
         captures: _,
         rerun_converter: _,
@@ -507,6 +512,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let policy_io_tele = policy_io.clone();
     let vision_tele = vision.clone();
     let model_tele = model.clone();
+    let voice_tele = voice.clone();
     let tele_state_tele = telemetry_state.clone();
     let mut client_telemetry_subscribed = false;
     let telemetry_task = tokio::spawn(async move {
@@ -529,6 +535,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 &policy_io_tele,
                 &vision_tele,
                 &model_tele,
+                &voice_tele,
                 conn_id,
             );
             let env = telemetry_envelope(frame);
@@ -624,6 +631,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     &nav_goal,
                     &vision,
                     &model,
+                    &voice,
                     conn_id,
                     &bytes,
                 );
