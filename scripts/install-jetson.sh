@@ -83,6 +83,14 @@
 #   sudo ./install-jetson.sh --setup-voice-only
 #                                             # just the voice env; don't
 #                                             # download or install binaries
+#   sudo ./install-jetson.sh --quantize-voice  # quantize the downloaded
+#                                             # Qwen3-Omni checkpoint to
+#                                             # NVFP4 (the only supported
+#                                             # Omni precision) into
+#                                             # weights/qwen3-omni-30b-nvfp4
+#   sudo ./install-jetson.sh --quantize-voice-only
+#                                             # just the quantization; don't
+#                                             # download or install binaries
 #
 # Requires:
 #   * `gh` CLI authenticated (`gh auth login`) — needed to list/download
@@ -151,6 +159,10 @@ SETUP_ORBBEC_ONLY=0
 # bebop-voice.service (speech-to-speech). Opt-in because the wheel is large.
 SETUP_VOICE=0
 SETUP_VOICE_ONLY=0
+# --quantize-voice: produce the NVFP4 Qwen3-Omni checkpoint the runtime needs
+# from the FP16 snapshot downloaded via the app's Models page.
+QUANTIZE_VOICE=0
+QUANTIZE_VOICE_ONLY=0
 # --local: install from a local checkout instead of GitHub. Pre-built
 # release binaries are picked up from each crate's target/release/ and
 # configs/units come from the working tree. No `gh` required.
@@ -211,6 +223,8 @@ while [[ $# -gt 0 ]]; do
         --setup-orbbec-only) SETUP_ORBBEC=1; SETUP_ORBBEC_ONLY=1; shift ;;
         --setup-voice)       SETUP_VOICE=1; shift ;;
         --setup-voice-only)  SETUP_VOICE=1; SETUP_VOICE_ONLY=1; shift ;;
+        --quantize-voice)    QUANTIZE_VOICE=1; shift ;;
+        --quantize-voice-only) QUANTIZE_VOICE=1; QUANTIZE_VOICE_ONLY=1; shift ;;
         --config-yaml)    CONFIG_YAML="$2"; shift 2 ;;
         *)                echo "unknown arg: $1" >&2; exit 2 ;;
     esac
@@ -745,6 +759,64 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Voice model quantization (FP16 snapshot -> NVFP4)
+# ---------------------------------------------------------------------------
+#
+# TensorRT Edge-LLM supports Qwen3-Omni only at NVFP4 (or INT4 AWQ) for the
+# Thinker+Talker; the raw FP16 checkpoint builds engines but fails runtime
+# init. This runs the one-time on-robot quantization into
+# `weights/qwen3-omni-30b-nvfp4/`, which `bebop-voice.service` then prefers
+# automatically (see `bebop_vision.voice_server.resolve_model_dir`).
+#
+# Requires `--setup-voice` first (the `tools` extra: PyTorch + ModelOpt +
+# datasets) and the FP16 checkpoint downloaded via the app's Models page.
+# Runs as the invoking user so the output stays user-owned; the calibration
+# datasets land in that user's HF cache.
+quantize_voice() {
+    echo "==> quantizing the voice model to NVFP4 (Qwen3-Omni)"
+    local checkout_root="${LOCAL_REPO_ROOT}"
+    if [[ -z "${checkout_root}" ]]; then
+        checkout_root="$(cd "${SCRIPT_DIR}/.." && pwd)"
+    fi
+    local vision_dir="${checkout_root}/bebop-vision"
+    local venv="${vision_dir}/.venv-voice"
+    local src="${vision_dir}/weights/qwen3-omni-30b"
+    local dst="${vision_dir}/weights/qwen3-omni-30b-nvfp4"
+    local run_user="${SUDO_USER:-root}"
+    run_quant() {
+        if [[ "${run_user}" != "root" ]]; then
+            sudo -u "${run_user}" -H bash -lc "$*"
+        else
+            bash -lc "$*"
+        fi
+    }
+
+    if [[ ! -x "${venv}/bin/tensorrt-edgellm-quantize" ]]; then
+        echo "    ERROR: ${venv} is missing tensorrt-edgellm-quantize; run --setup-voice first" >&2
+        exit 1
+    fi
+    if [[ ! -f "${src}/config.json" ]]; then
+        echo "    ERROR: FP16 checkpoint not found at ${src}; download it from the Models page first" >&2
+        exit 1
+    fi
+    if [[ -f "${dst}/config.json" ]]; then
+        echo "    NVFP4 checkpoint already present at ${dst}; nothing to do"
+        return 0
+    fi
+
+    echo "    source:      ${src}"
+    echo "    destination: ${dst}"
+    echo "    (this is long: it calibrates on audio+image+text and needs GPU memory)"
+    run_quant "'${venv}/bin/tensorrt-edgellm-quantize' llm --model_dir '${src}' --output_dir '${dst}' --quantization nvfp4"
+    if [[ -f "${dst}/config.json" ]]; then
+        echo "    NVFP4 checkpoint written to ${dst}"
+    else
+        echo "    ERROR: quantization did not produce ${dst}/config.json" >&2
+        exit 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Sanity checks
 # ---------------------------------------------------------------------------
 
@@ -757,11 +829,12 @@ fi
 # before we touch gh / artifacts so an operator can run them from a
 # freshly-cloned checkout without needing a CI build artifact to be
 # available.
-if [[ "${SETUP_CAN_ONLY}" -eq 1 || "${SETUP_IMU_ONLY}" -eq 1 || "${SETUP_ORBBEC_ONLY}" -eq 1 || "${SETUP_VOICE_ONLY}" -eq 1 ]]; then
+if [[ "${SETUP_CAN_ONLY}" -eq 1 || "${SETUP_IMU_ONLY}" -eq 1 || "${SETUP_ORBBEC_ONLY}" -eq 1 || "${SETUP_VOICE_ONLY}" -eq 1 || "${QUANTIZE_VOICE_ONLY}" -eq 1 ]]; then
     [[ "${SETUP_CAN_ONLY}" -eq 1 ]] && setup_can
     [[ "${SETUP_IMU_ONLY}" -eq 1 ]] && setup_imu
     [[ "${SETUP_ORBBEC_ONLY}" -eq 1 ]] && setup_orbbec
     [[ "${SETUP_VOICE_ONLY}" -eq 1 ]] && setup_voice
+    [[ "${QUANTIZE_VOICE_ONLY}" -eq 1 ]] && quantize_voice
     exit 0
 fi
 
@@ -1351,6 +1424,10 @@ fi
 
 if [[ "${SETUP_VOICE}" -eq 1 ]]; then
     setup_voice
+fi
+
+if [[ "${QUANTIZE_VOICE}" -eq 1 ]]; then
+    quantize_voice
 fi
 
 # ---------------------------------------------------------------------------

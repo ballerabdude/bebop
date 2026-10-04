@@ -268,6 +268,8 @@ export interface VoiceHealth {
   /// Human-readable progress line (e.g. "building talker engine").
   detail: string;
   model: string;
+  /// "nvfp4" | "fp16" — which checkpoint the service is serving.
+  precision: string;
   modelDownloaded: boolean;
   /// Seconds since the model server was started (anchors the build timer).
   elapsedS: number;
@@ -313,6 +315,7 @@ export function useVoiceHealth(
             phase: String(j.phase ?? ""),
             detail: String(j.detail ?? ""),
             model: String(j.model ?? ""),
+            precision: String(j.precision ?? ""),
             modelDownloaded: Boolean(j.model_downloaded),
             elapsedS: Number(j.elapsed_s ?? 0),
             heartbeatMs: Number(j.heartbeat_ms ?? 0),

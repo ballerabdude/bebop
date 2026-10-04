@@ -118,6 +118,24 @@ def read_hf_token() -> str | None:
     return models.load_token()
 
 
+# Qwen3-Omni is only supported at NVFP4 / INT4-AWQ; the raw FP16 snapshot is
+# quantized once on-robot into a sibling directory with this suffix.
+QUANT_SUFFIX = "-nvfp4"
+
+
+def quantized_dir(spec: models.ModelSpec) -> Path:
+    base = spec.target_dir
+    return base.parent / f"{base.name}{QUANT_SUFFIX}"
+
+
+def resolve_model_dir(spec: models.ModelSpec) -> Path:
+    """Serve the on-robot NVFP4 quantization when present, else the snapshot."""
+    quant = quantized_dir(spec)
+    if (quant / "config.json").is_file():
+        return quant
+    return spec.target_dir
+
+
 def resolve_edgellm_bin() -> str:
     """Locate the `tensorrt-edgellm-serve` console script.
 
@@ -151,6 +169,7 @@ class VoiceStatus:
     phase: str = "idle"  # idle|starting|building|ready|error|stub
     detail: str = ""
     model: str = ""
+    precision: str = ""
     model_downloaded: bool = False
     updated_ms: int = 0
     log_tail: list[str] = field(default_factory=list)
@@ -180,6 +199,7 @@ class VoiceStatus:
             "phase": self.phase,
             "detail": self.detail,
             "model": self.model,
+            "precision": self.precision,
             "model_downloaded": self.model_downloaded,
             "updated_ms": self.updated_ms,
             "heartbeat_ms": self.heartbeat_ms,
@@ -636,11 +656,18 @@ def main(argv: list[str] | None = None) -> int:
     if not spec.is_snapshot:
         _log(f"voice model {spec.id} must use download: snapshot")
         return 1
-    model_dir = spec.target_dir
-    downloaded = (model_dir / ".bebop-complete").is_file()
-    _log(f"voice model {spec.id} -> {model_dir}")
+    model_dir = resolve_model_dir(spec)
+    quantized = model_dir != spec.target_dir
+    if quantized:
+        downloaded = (model_dir / "config.json").is_file()
+    else:
+        downloaded = (spec.target_dir / ".bebop-complete").is_file()
+    precision = "nvfp4" if quantized else "fp16"
+    _log(f"voice model {spec.id} -> {model_dir} ({precision})")
 
-    status = VoiceStatus(model=spec.id, model_downloaded=downloaded)
+    status = VoiceStatus(
+        model=spec.id, precision=precision, model_downloaded=downloaded
+    )
 
     if args.check:
         print(
@@ -648,6 +675,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "model": spec.id,
                     "model_dir": str(model_dir),
+                    "precision": precision,
                     "downloaded": downloaded,
                     "stub": args.stub,
                 },
@@ -663,8 +691,8 @@ def main(argv: list[str] | None = None) -> int:
         status.set(
             phase="error",
             detail=(
-                f"checkpoint not downloaded at {model_dir}; "
-                "download it from the app's Models page"
+                f"checkpoint not ready at {model_dir}; download it from the "
+                "Models page and run the NVFP4 quantization step (docs/voice.md)"
             ),
         )
     else:

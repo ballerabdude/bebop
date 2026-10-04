@@ -10,7 +10,7 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from bebop_vision import voice_server  # noqa: E402
+from bebop_vision import models, voice_server  # noqa: E402
 
 
 def test_pcm16_to_wav_roundtrip():
@@ -138,3 +138,24 @@ def test_status_snapshot_has_elapsed_and_heartbeat():
     assert snap["phase"] == "building"
     assert snap["elapsed_s"] >= 4
     assert snap["heartbeat_age_s"] is not None and snap["heartbeat_age_s"] < 5
+
+
+def test_resolve_model_dir_prefers_nvfp4(monkeypatch, tmp_path):
+    monkeypatch.setattr(models, "WEIGHTS_DIR", tmp_path)
+    spec = models.ModelSpec(
+        id="qwen3-omni-30b",
+        kind="hf",
+        repo="a/b",
+        download="snapshot",
+        dest="qwen3-omni-30b",
+    )
+    raw = tmp_path / "qwen3-omni-30b"
+    raw.mkdir()
+    # No quantization yet -> the raw snapshot.
+    assert voice_server.resolve_model_dir(spec) == raw
+    assert voice_server.quantized_dir(spec) == tmp_path / "qwen3-omni-30b-nvfp4"
+
+    quant = tmp_path / "qwen3-omni-30b-nvfp4"
+    quant.mkdir()
+    (quant / "config.json").write_text("{}")
+    assert voice_server.resolve_model_dir(spec) == quant

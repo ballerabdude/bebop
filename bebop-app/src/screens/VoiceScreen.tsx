@@ -147,6 +147,7 @@ export function VoiceScreen({
             {voice.model ? (
               <div className="text-[13px] text-text-dim font-mono">
                 {voice.model}
+                {health?.precision ? ` · ${health.precision}` : ""}
               </div>
             ) : null}
             {statusDetail ? (
