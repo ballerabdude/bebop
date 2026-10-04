@@ -6,7 +6,7 @@ import {
   type VoiceView,
 } from "../runtime";
 import { Banner, Button, Card } from "../components/ui";
-import { useVoiceSession } from "../voice/useVoiceSession";
+import { useVoiceHealth, useVoiceSession } from "../voice/useVoiceSession";
 
 const EMPTY_VOICE: VoiceView = {
   present: false,
@@ -38,6 +38,34 @@ export function VoiceScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const session = useVoiceSession(robotIp, 9093);
+  const health = useVoiceHealth(robotIp, 9093, voice.running);
+
+  // Human-readable service status. Systemd `running` is necessary but not
+  // sufficient: the model server may still be building engines or have failed.
+  const ready = health?.ok ?? false;
+  const building = health?.phase === "starting" || health?.phase === "building";
+  const failed = health?.phase === "error";
+  const statusText = !voice.running
+    ? voice.state || "Stopped"
+    : health == null
+      ? "Starting…"
+      : health.phase === "ready"
+        ? "Ready"
+        : health.phase === "stub"
+          ? "Ready (stub)"
+          : building
+            ? "Building engines…"
+            : failed
+              ? "Error"
+              : health.phase;
+  const statusDetail = health?.detail || voice.detail;
+  const dotClass = ready
+    ? "bg-success"
+    : failed
+      ? "bg-danger"
+      : building
+        ? "bg-accent animate-pulse"
+        : "bg-text-dim/40";
 
   useEffect(() => {
     if (!robotIp) return;
@@ -98,14 +126,8 @@ export function VoiceScreen({
                 Speech-to-speech
               </div>
               <div className="flex items-center gap-2">
-                <div
-                  className={`w-2.5 h-2.5 rounded-full ${
-                    voice.running ? "bg-success" : "bg-text-dim/40"
-                  }`}
-                />
-                <span className="text-[12px] text-text-dim">
-                  {voice.running ? "Running" : voice.state || "Stopped"}
-                </span>
+                <div className={`w-2.5 h-2.5 rounded-full ${dotClass}`} />
+                <span className="text-[12px] text-text-dim">{statusText}</span>
               </div>
             </div>
             {voice.model ? (
@@ -113,9 +135,13 @@ export function VoiceScreen({
                 {voice.model}
               </div>
             ) : null}
-            {voice.detail ? (
-              <div className="text-[12px] text-text-dim leading-snug">
-                {voice.detail}
+            {statusDetail ? (
+              <div
+                className={`text-[12px] leading-snug ${
+                  failed ? "text-danger" : "text-text-dim"
+                }`}
+              >
+                {statusDetail}
               </div>
             ) : null}
             <Button
@@ -129,6 +155,11 @@ export function VoiceScreen({
               <p className="text-[12px] text-text-dim leading-relaxed">
                 The first start downloads nothing but builds the model&apos;s
                 TensorRT engines — this can take several minutes.
+              </p>
+            ) : building ? (
+              <p className="text-[12px] text-text-dim leading-relaxed">
+                First start only. The engines are cached, so later starts are
+                quick.
               </p>
             ) : null}
           </div>
@@ -158,10 +189,10 @@ export function VoiceScreen({
           {session.error ? <Banner tone="error">{session.error}</Banner> : null}
           <Button
             variant={session.phase === "listening" ? "primary" : "secondary"}
-            disabled={!voice.running || session.phase === "thinking" || session.phase === "speaking"}
+            disabled={!ready || session.phase === "thinking" || session.phase === "speaking"}
             onPointerDown={(e) => {
               e.preventDefault();
-              if (!voice.running) return;
+              if (!ready) return;
               void session.startTalking();
             }}
             onPointerUp={() => session.stopTalking()}
@@ -178,9 +209,13 @@ export function VoiceScreen({
             </p>
           ) : (
             <p className="text-[13px] text-text-dim leading-relaxed">
-              {voice.running
+              {ready
                 ? "Hold the button and speak. The robot replies with speech."
-                : "Start the voice service above, then hold to talk."}
+                : building
+                  ? "Waiting for the engines to finish building…"
+                  : failed
+                    ? "The voice service reported an error — see the status above."
+                    : "Start the voice service above, then hold to talk."}
             </p>
           )}
         </div>

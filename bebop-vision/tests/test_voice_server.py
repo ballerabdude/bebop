@@ -60,3 +60,45 @@ def test_stub_voice_empty_utterance_is_done():
         ws.send_text(json.dumps({"type": "utterance_end"}))
         msg = ws.receive()
         assert json.loads(msg["text"])["type"] == "done"
+
+
+def test_healthz_reports_phase_and_detail():
+    status = voice_server.VoiceStatus(
+        phase="building",
+        detail="building thinker layer 3/48",
+        model="qwen3-omni-30b",
+        model_downloaded=True,
+    )
+    app = voice_server.build_app(None, stub=False, voice="x", status=status)
+    client = TestClient(app)
+    body = client.get("/healthz").json()
+    assert body["phase"] == "building"
+    assert body["ok"] is False
+    assert "thinker" in body["detail"]
+    assert body["model_downloaded"] is True
+    assert body["model"] == "qwen3-omni-30b"
+
+
+def test_healthz_ready_is_ok():
+    status = voice_server.VoiceStatus(phase="ready", model="qwen3-omni-30b")
+    app = voice_server.build_app(None, stub=False, voice="x", status=status)
+    assert TestClient(app).get("/healthz").json()["ok"] is True
+
+
+def test_voice_rejects_when_not_ready():
+    status = voice_server.VoiceStatus(phase="error", detail="tokenizer conversion failed")
+    app = voice_server.build_app(None, stub=False, voice="x", status=status)
+    client = TestClient(app)
+    with client.websocket_connect("/voice") as ws:
+        msg = json.loads(ws.receive_text())
+        assert msg["type"] == "error"
+        assert "not ready" in msg["message"]
+
+
+def test_friendly_detail_strips_logger_prefix():
+    assert (
+        voice_server._friendly_detail(
+            "16:47:09 INFO builder.qwen3_omni_moe.thinker: building thinker layer 13/48"
+        )
+        == "building thinker layer 13/48"
+    )

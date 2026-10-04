@@ -259,3 +259,63 @@ export function useVoiceSession(host: string, port = 9093): VoiceSession {
 
   return { phase, transcript, reply, error, startTalking, stopTalking };
 }
+
+/// Status reported by `GET /healthz` on the voice service.
+export interface VoiceHealth {
+  ok: boolean;
+  /// "starting" | "building" | "ready" | "error" | "stub"
+  phase: string;
+  /// Last meaningful model-server log line (e.g. "building thinker layer 12/48").
+  detail: string;
+  model: string;
+  modelDownloaded: boolean;
+}
+
+/// Poll the voice service's `/healthz` while the page is open (and the
+/// service is systemd-running). Returns `null` until the first successful
+/// response — including during the window before the gateway's HTTP server is
+/// listening, or when the service is stopped.
+export function useVoiceHealth(
+  host: string,
+  port = 9093,
+  enabled = true,
+  pollMs = 1500,
+): VoiceHealth | null {
+  const [health, setHealth] = useState<VoiceHealth | null>(null);
+  useEffect(() => {
+    if (!enabled || !host) {
+      setHealth(null);
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      try {
+        const res = await fetch(`http://${host}:${port}/healthz`, {
+          cache: "no-store",
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const j = (await res.json()) as Record<string, unknown>;
+        if (!cancelled) {
+          setHealth({
+            ok: Boolean(j.ok),
+            phase: String(j.phase ?? ""),
+            detail: String(j.detail ?? ""),
+            model: String(j.model ?? ""),
+            modelDownloaded: Boolean(j.model_downloaded),
+          });
+        }
+      } catch {
+        if (!cancelled) setHealth(null);
+      } finally {
+        if (!cancelled) timer = setTimeout(tick, pollMs);
+      }
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [host, port, enabled, pollMs]);
+  return health;
+}

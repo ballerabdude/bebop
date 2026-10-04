@@ -6,7 +6,8 @@ owns two things:
 1. **The model server.** It supervises `tensorrt-edgellm-serve`, which serves
    the catalog's `voice` checkpoint (Qwen3-Omni-30B-A3B) as an
    OpenAI-compatible HTTP API on 127.0.0.1:8000. The first start builds the
-   checkpoint's TensorRT engines into `--cache-dir`; that can take minutes.
+   checkpoint's TensorRT engines into `--cache-dir`; that can take many
+   minutes.
 2. **The app gateway.** It exposes a turn-based WebSocket on :9093 that the
    Tauri app's Voice page talks to. The app streams 16 kHz mono PCM16 for one
    utterance, then receives streamed text and 24 kHz mono PCM16 speech back.
@@ -27,10 +28,17 @@ Wire protocol (:9093), one utterance per connection turn:
     svc -> {"type":"done"}
     svc -> {"type":"error","message":"..."}       (on failure)
 
-`GET /healthz` reports readiness (model server up, checkpoint present).
+`GET /healthz` is the status surface the app polls:
 
-The `--stub` flag runs a tiny local echo/tone generator instead of the model,
-so the gateway + app protocol can be exercised without the 60 GB checkpoint.
+    {"ok": bool, "phase": "starting|building|ready|error|stub",
+     "detail": "<last meaningful log line>", "model": "qwen3-omni-30b",
+     "model_downloaded": bool, "updated_ms": 123, "log_tail": [...]}
+
+The gateway serves `/healthz` immediately, even while the model server is
+still building or has failed, so the operator sees progress instead of a
+silent "running". The `--stub` flag runs a tiny echo/tone generator instead of
+the model, so the gateway + app protocol can be exercised without the 60 GB
+checkpoint.
 """
 
 from __future__ import annotations
@@ -45,12 +53,15 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import wave
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import models
@@ -72,6 +83,12 @@ OUTPUT_RATE = 24000
 # How many prior turns to keep in the conversation. Audio history is base64
 # in the prompt, so keep this small to bound prefill cost.
 DEFAULT_HISTORY_TURNS = 4
+# How many model-server log lines to retain for `/healthz` and the journal.
+LOG_RING = 200
+# First build can take a long time (six TensorRT engines); only give up after
+# this long without the server answering `/health`.
+BUILD_TIMEOUT_S = 5400.0
+READY_PHASES = ("ready", "stub")
 
 SYSTEM_PROMPT = (
     "You are Bebop, a friendly robot companion. Reply naturally and briefly, "
@@ -124,40 +141,92 @@ def pcm16_to_wav(pcm: bytes, rate: int) -> bytes:
     return buf.getvalue()
 
 
+# --- status ---------------------------------------------------------------
+
+
+@dataclass
+class VoiceStatus:
+    """Operator-facing state, polled by the app via `GET /healthz`."""
+
+    phase: str = "idle"  # idle|starting|building|ready|error|stub
+    detail: str = ""
+    model: str = ""
+    model_downloaded: bool = False
+    updated_ms: int = 0
+    log_tail: list[str] = field(default_factory=list)
+
+    def set(self, phase: str | None = None, detail: str | None = None) -> None:
+        if phase is not None:
+            self.phase = phase
+        if detail is not None:
+            self.detail = detail
+        self.updated_ms = int(time.time() * 1000)
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "ok": self.phase in READY_PHASES,
+            "phase": self.phase,
+            "detail": self.detail,
+            "model": self.model,
+            "model_downloaded": self.model_downloaded,
+            "updated_ms": self.updated_ms,
+            "log_tail": self.log_tail[-20:],
+        }
+
+
+# --- model server supervision --------------------------------------------
+
+
 class EdgeLLMServer:
-    """Supervises the `tensorrt-edgellm-serve` child process."""
+    """Supervises the `tensorrt-edgellm-serve` child process.
+
+    The child is started on a background thread so the gateway can serve
+    `/healthz` (and report build progress) immediately. Its stdout/stderr are
+    captured line-by-line: echoed to the journal and folded into
+    `VoiceStatus.detail` so the app can show what's happening.
+    """
 
     def __init__(
         self,
         model: str,
         cache_dir: Path,
+        status: VoiceStatus,
         port: int = EDGELLM_PORT,
         extra_args: list[str] | None = None,
     ) -> None:
         self.model = model
         self.cache_dir = cache_dir
+        self.status = status
         self.port = port
         self.extra_args = extra_args or []
-        self.proc: subprocess.Popen[bytes] | None = None
+        self.proc: subprocess.Popen[str] | None = None
+        self._lock = threading.Lock()
 
     @property
     def base_url(self) -> str:
         return f"http://{EDGELLM_HOST}:{self.port}"
 
-    def _already_running(self) -> bool:
+    def health_ok(self) -> bool:
         import httpx
 
         try:
-            r = httpx.get(f"{self.base_url}/health", timeout=1.0)
+            r = httpx.get(f"{self.base_url}/health", timeout=1.5)
             return r.status_code == 200
         except Exception:  # noqa: BLE001 - any failure means "not up"
             return False
 
-    def start(self) -> None:
-        if self._already_running():
-            _log(f"Edge-LLM server already up on {self.base_url}")
-            return
+    def start_background(self) -> None:
+        """Kick off start + monitor. Returns immediately."""
+        threading.Thread(
+            target=self._run, name="edgellm-supervisor", daemon=True
+        ).start()
+
+    def _run(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if self.health_ok():
+            _log(f"Edge-LLM server already up on {self.base_url}")
+            self.status.set(phase="ready", detail="")
+            return
         cmd = [
             resolve_edgellm_bin(),
             self.model,
@@ -168,42 +237,102 @@ class EdgeLLMServer:
             *self.extra_args,
         ]
         _log("starting: " + " ".join(cmd))
+        self.status.set(phase="starting", detail="launching TensorRT Edge-LLM server")
         env = os.environ.copy()
         token = read_hf_token()
         if token:
             env["HF_TOKEN"] = token
-        self.proc = subprocess.Popen(cmd, env=env)
+        with self._lock:
+            self.proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            proc = self.proc
         atexit.register(self.stop)
+        threading.Thread(
+            target=self._read_output, name="edgellm-logs", daemon=True
+        ).start()
 
-    def wait_ready(self, timeout_s: float = 1800.0) -> bool:
-        """Block until /health is up. Generous: first run builds engines."""
-        import httpx
-
-        deadline = time.monotonic() + timeout_s
+        deadline = time.monotonic() + BUILD_TIMEOUT_S
         while time.monotonic() < deadline:
-            if self.proc is not None and self.proc.poll() is not None:
-                _log(f"Edge-LLM server exited rc={self.proc.returncode}")
-                return False
-            try:
-                r = httpx.get(f"{self.base_url}/health", timeout=2.0)
-                if r.status_code == 200:
-                    _log("Edge-LLM server ready")
-                    return True
-            except Exception:  # noqa: BLE001 - keep polling
-                pass
+            if proc.poll() is not None:
+                self.status.set(
+                    phase="error",
+                    detail=self._error_detail(proc.returncode),
+                )
+                _log(f"Edge-LLM server exited rc={proc.returncode}")
+                return
+            if self.health_ok():
+                self.status.set(phase="ready", detail="")
+                _log("Edge-LLM server ready")
+                return
             time.sleep(2.0)
-        _log("timed out waiting for the Edge-LLM server")
-        return False
+        self.status.set(
+            phase="error",
+            detail="timed out waiting for the Edge-LLM server to become healthy",
+        )
+
+    def _read_output(self) -> None:
+        with self._lock:
+            proc = self.proc
+        if proc is None or proc.stdout is None:
+            return
+        for raw in proc.stdout:
+            line = raw.rstrip()
+            if not line:
+                continue
+            self.status.log_tail.append(line)
+            del self.status.log_tail[:-LOG_RING]
+            _log(line)
+            # First output means the builder has actually begun.
+            phase = "building" if self.status.phase in ("starting", "building") else None
+            self.status.set(phase=phase, detail=_friendly_detail(line))
+
+    def _error_detail(self, rc: int | None) -> str:
+        # Surface the most useful recent line: a traceback's final exception,
+        # else the last non-empty log line.
+        for line in reversed(self.status.log_tail):
+            stripped = line.strip()
+            if stripped.startswith(("RuntimeError", "ValueError", "ImportError",
+                                    "ModuleNotFoundError", "FileNotFoundError",
+                                    "OSError", "CUDA", "[TRT] Error", "Error")):
+                return stripped
+        if self.status.log_tail:
+            return self.status.log_tail[-1]
+        return f"Edge-LLM server exited (rc={rc})"
 
     def stop(self) -> None:
-        if self.proc is None or self.proc.poll() is not None:
+        with self._lock:
+            proc = self.proc
+        if proc is None or proc.poll() is not None:
             return
         _log("stopping Edge-LLM server")
-        self.proc.terminate()
+        proc.terminate()
         try:
-            self.proc.wait(timeout=20)
+            proc.wait(timeout=20)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
+            proc.kill()
+
+
+def _friendly_detail(line: str) -> str:
+    """Trim a raw builder log line for display in the app."""
+    text = line.strip()
+    # Drop the leading `HH:MM:SS LEVEL logger.name:` prefix when present.
+    parts = text.split(":", 3)
+    if len(parts) == 4 and parts[0].count(":") == 2:
+        text = parts[3].strip()
+    elif len(parts) >= 3 and parts[0][:2].isdigit():
+        text = parts[-1].strip()
+    if len(text) > 160:
+        text = text[:157] + "..."
+    return text or line.strip()
+
+
+# --- generation -----------------------------------------------------------
 
 
 async def stream_completion(
@@ -280,7 +409,16 @@ async def stream_stub(
         await asyncio.sleep(0.01)
 
 
-def build_app(server: EdgeLLMServer | None, *, stub: bool, voice: str) -> Any:
+# --- gateway app ----------------------------------------------------------
+
+
+def build_app(
+    server: EdgeLLMServer | None,
+    *,
+    stub: bool,
+    voice: str,
+    status: VoiceStatus | None = None,
+) -> Any:
     """Construct the FastAPI app.
 
     FastAPI resolves the endpoint's annotations with `typing.get_type_hints`,
@@ -289,28 +427,40 @@ def build_app(server: EdgeLLMServer | None, *, stub: bool, voice: str) -> Any:
     import, or FastAPI fails to recognize the websocket parameter and the
     route rejects every upgrade with 403.
     """
+    if status is None:
+        spec = voice_spec()
+        status = VoiceStatus(
+            phase="stub" if stub else "idle",
+            model=spec.id if spec else "",
+        )
     app = FastAPI(title="bebop-voice", docs_url=None, redoc_url=None)
+    # The app polls `GET /healthz` from a different origin (tauri://… or a dev
+    # http://localhost); WebSockets aren't CORS-gated but the fetch is.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
-        spec = voice_spec()
-        model_present = spec is not None and (
-            spec.target_dir / ".bebop-complete"
-        ).is_file()
-        model_ready = stub or (server is not None and server._already_running())
-        return JSONResponse(
-            {
-                "ok": model_ready,
-                "stub": stub,
-                "model": spec.id if spec else None,
-                "model_downloaded": model_present,
-                "model_ready": model_ready,
-            }
-        )
+        return JSONResponse(status.snapshot())
 
     @app.websocket("/voice")
     async def voice_ws(ws: WebSocket) -> None:
         await ws.accept()
+        if status.phase not in READY_PHASES:
+            await ws.send_text(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "message": f"voice service not ready ({status.phase}): {status.detail}",
+                    }
+                )
+            )
+            await ws.close()
+            return
         history: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
@@ -439,16 +589,18 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"voice model {spec.id} must use download: snapshot")
         return 1
     model_dir = spec.target_dir
+    downloaded = (model_dir / ".bebop-complete").is_file()
     _log(f"voice model {spec.id} -> {model_dir}")
 
+    status = VoiceStatus(model=spec.id, model_downloaded=downloaded)
+
     if args.check:
-        present = (model_dir / ".bebop-complete").is_file()
         print(
             json.dumps(
                 {
                     "model": spec.id,
                     "model_dir": str(model_dir),
-                    "downloaded": present,
+                    "downloaded": downloaded,
                     "stub": args.stub,
                 },
                 indent=2,
@@ -457,23 +609,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     server: EdgeLLMServer | None = None
-    if not args.stub:
-        if not (model_dir / ".bebop-complete").is_file():
-            _log(
+    if args.stub:
+        status.set(phase="stub", detail="stub mode (no model)")
+    elif not downloaded:
+        status.set(
+            phase="error",
+            detail=(
                 f"checkpoint not downloaded at {model_dir}; "
-                "download it from the app's Models page first"
-            )
-            return 1
-        server = EdgeLLMServer(
-            str(model_dir), args.cache_dir, extra_args=args.edgellm_arg
+                "download it from the app's Models page"
+            ),
         )
-        server.start()
-        # Don't block the listener on engine build: serve /healthz immediately
-        # and let the first turn wait. But do a bounded wait so a fast start is
-        # ready before the operator connects.
-        server.wait_ready(timeout_s=1800.0)
+    else:
+        server = EdgeLLMServer(
+            str(model_dir), args.cache_dir, status, extra_args=args.edgellm_arg
+        )
+        # Non-blocking: the gateway serves /healthz immediately and reports
+        # build progress while the engines compile.
+        server.start_background()
 
-    app = build_app(server, stub=args.stub, voice=args.voice)
+    app = build_app(server, stub=args.stub, voice=args.voice, status=status)
     import uvicorn
 
     _log(f"listening on ws://{args.host}:{args.port}/voice")
