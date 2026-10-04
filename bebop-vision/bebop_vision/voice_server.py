@@ -42,6 +42,7 @@ import base64
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -100,6 +101,19 @@ def read_hf_token() -> str | None:
     return models.load_token()
 
 
+def resolve_edgellm_bin() -> str:
+    """Locate the `tensorrt-edgellm-serve` console script.
+
+    Under systemd the venv's `bin/` is not on `PATH`, so prefer the sibling of
+    the running interpreter (the venv that owns this process), then fall back
+    to `PATH`.
+    """
+    sibling = Path(sys.executable).parent / EDGELLM_BIN
+    if sibling.exists():
+        return str(sibling)
+    return shutil.which(EDGELLM_BIN) or EDGELLM_BIN
+
+
 def pcm16_to_wav(pcm: bytes, rate: int) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -145,7 +159,7 @@ class EdgeLLMServer:
             return
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         cmd = [
-            EDGELLM_BIN,
+            resolve_edgellm_bin(),
             self.model,
             "--cache-dir",
             str(self.cache_dir),
