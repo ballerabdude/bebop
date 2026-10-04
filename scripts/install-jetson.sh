@@ -700,9 +700,15 @@ setup_voice() {
         exit 1
     fi
 
+    if [[ "${SKIP_PREREQS}" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
+        apt_install_if_missing python3-venv
+    fi
     if [[ ! -x "${venv}/bin/python" ]]; then
-        echo "    creating ${venv} (needs the python3-venv package on fresh JetPack)"
-        run_as_user "python3 -m venv '${venv}'"
+        # --system-site-packages exposes the platform's TensorRT Python
+        # bindings (shipped by JetPack in the system Python); Edge-LLM needs
+        # them and deliberately does not bundle TensorRT.
+        echo "    creating ${venv} (--system-site-packages for JetPack TensorRT)"
+        run_as_user "python3 -m venv --system-site-packages '${venv}'"
     fi
     run_as_user "'${venv}/bin/pip' install --upgrade pip"
     echo "    installing voice requirements (downloads a large wheel)"
