@@ -21,6 +21,13 @@
 # platform TensorRT 10) — no source/CMake build.
 tensorrt-edgellm[server,server-tools,tools]==0.11.0
 
+# `datasets`/`sklearn` pull pandas, but with --system-site-packages pip treats
+# JetPack's system pandas (built against numpy 1.x) as satisfied. The venv has
+# numpy 2.2.6, so the quantizer then dies with
+# "numpy.dtype size changed, may indicate binary incompatibility".
+# Pin a venv-local pandas so the numpy-2 ABI wins.
+pandas>=2.2
+
 # The gateway talks to the local Edge-LLM server over HTTP/SSE and serves the
 # app its own WebSocket. `uvicorn` (from [server]) needs one of these to speak
 # WebSocket; `websockets` is the aarch64-friendly choice.
