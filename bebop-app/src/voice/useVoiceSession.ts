@@ -265,10 +265,21 @@ export interface VoiceHealth {
   ok: boolean;
   /// "starting" | "building" | "ready" | "error" | "stub"
   phase: string;
-  /// Last meaningful model-server log line (e.g. "building thinker layer 12/48").
+  /// Human-readable progress line (e.g. "building talker engine").
   detail: string;
   model: string;
   modelDownloaded: boolean;
+  /// Seconds since the model server was started (anchors the build timer).
+  elapsedS: number;
+  /// Wall-clock ms of the last supervisor heartbeat.
+  heartbeatMs: number;
+  /// Age of the last heartbeat, computed server-side (clock-consistent). A
+  /// value that keeps growing means the build supervisor itself is stuck.
+  heartbeatAgeS: number | null;
+  /// Component currently being built (e.g. "talker"), or "".
+  component: string;
+  /// Components finished this build (e.g. ["llm", "visual", "audio"]).
+  componentsDone: string[];
 }
 
 /// Poll the voice service's `/healthz` while the page is open (and the
@@ -303,6 +314,16 @@ export function useVoiceHealth(
             detail: String(j.detail ?? ""),
             model: String(j.model ?? ""),
             modelDownloaded: Boolean(j.model_downloaded),
+            elapsedS: Number(j.elapsed_s ?? 0),
+            heartbeatMs: Number(j.heartbeat_ms ?? 0),
+            heartbeatAgeS:
+              j.heartbeat_age_s === null || j.heartbeat_age_s === undefined
+                ? null
+                : Number(j.heartbeat_age_s),
+            component: String(j.component ?? ""),
+            componentsDone: Array.isArray(j.components_done)
+              ? (j.components_done as string[])
+              : [],
           });
         }
       } catch {

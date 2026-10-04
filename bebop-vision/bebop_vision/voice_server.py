@@ -154,6 +154,14 @@ class VoiceStatus:
     model_downloaded: bool = False
     updated_ms: int = 0
     log_tail: list[str] = field(default_factory=list)
+    # Liveness / progress. `heartbeat_ms` is refreshed by the supervisor loop
+    # every couple of seconds even when the build logs go quiet, so the app can
+    # tell "compiling silently" from "hung". `started_ms` anchors the elapsed
+    # timer; `component`/`components_done` track the six-engine build.
+    started_ms: int = 0
+    heartbeat_ms: int = 0
+    component: str = ""
+    components_done: list[str] = field(default_factory=list)
 
     def set(self, phase: str | None = None, detail: str | None = None) -> None:
         if phase is not None:
@@ -162,7 +170,11 @@ class VoiceStatus:
             self.detail = detail
         self.updated_ms = int(time.time() * 1000)
 
+    def beat(self) -> None:
+        self.heartbeat_ms = int(time.time() * 1000)
+
     def snapshot(self) -> dict[str, Any]:
+        now = int(time.time() * 1000)
         return {
             "ok": self.phase in READY_PHASES,
             "phase": self.phase,
@@ -170,6 +182,15 @@ class VoiceStatus:
             "model": self.model,
             "model_downloaded": self.model_downloaded,
             "updated_ms": self.updated_ms,
+            "heartbeat_ms": self.heartbeat_ms,
+            "heartbeat_age_s": round((now - self.heartbeat_ms) / 1000, 1)
+            if self.heartbeat_ms
+            else None,
+            "elapsed_s": round((now - self.started_ms) / 1000, 1)
+            if self.started_ms
+            else 0,
+            "component": self.component,
+            "components_done": self.components_done,
             "log_tail": self.log_tail[-20:],
         }
 
@@ -201,6 +222,7 @@ class EdgeLLMServer:
         self.extra_args = extra_args or []
         self.proc: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
+        self._component: str | None = None
 
     @property
     def base_url(self) -> str:
@@ -223,6 +245,8 @@ class EdgeLLMServer:
 
     def _run(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.status.started_ms = int(time.time() * 1000)
+        self.status.beat()
         if self.health_ok():
             _log(f"Edge-LLM server already up on {self.base_url}")
             self.status.set(phase="ready", detail="")
@@ -259,6 +283,7 @@ class EdgeLLMServer:
 
         deadline = time.monotonic() + BUILD_TIMEOUT_S
         while time.monotonic() < deadline:
+            self.status.beat()
             if proc.poll() is not None:
                 self.status.set(
                     phase="error",
@@ -290,7 +315,30 @@ class EdgeLLMServer:
             _log(line)
             # First output means the builder has actually begun.
             phase = "building" if self.status.phase in ("starting", "building") else None
-            self.status.set(phase=phase, detail=_friendly_detail(line))
+            self.status.set(phase=phase, detail=self._progress_detail(line))
+
+    def _progress_detail(self, line: str) -> str | None:
+        """Derive a persistent progress line from a build log line.
+
+        The TensorRT compile phase is log-silent for minutes, so once a
+        component starts we keep showing it rather than letting stray `[TRT]`
+        warnings replace the meaningful status. Returns None to leave the
+        current detail untouched.
+        """
+        if "Building component " in line:
+            name = line.split("Building component ", 1)[1].strip()
+            self._component = name
+            self.status.component = name
+            return f"building {name} engine"
+        if "Build completed in" in line and self._component:
+            done = self._component
+            self.status.components_done.append(done)
+            self._component = None
+            self.status.component = ""
+            return f"{done} engine built"
+        if self._component:
+            return None
+        return _friendly_detail(line)
 
     def _error_detail(self, rc: int | None) -> str:
         # Surface the most useful recent line: a traceback's final exception,

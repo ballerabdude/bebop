@@ -17,6 +17,13 @@ const EMPTY_VOICE: VoiceView = {
   model: "",
 };
 
+function formatElapsed(s: number): string {
+  if (!s || s < 0) return "";
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, "0")}`;
+}
+
 /// Voice (speech-to-speech) control + status. Start/stop the on-robot
 /// `bebop-voice.service` (Qwen3-Omni via TensorRT Edge-LLM) over the runtime
 /// WebSocket; the audio itself is served by that unit on :9093.
@@ -58,14 +65,21 @@ export function VoiceScreen({
             : failed
               ? "Error"
               : health.phase;
-  const statusDetail = health?.detail || voice.detail;
+  const statusDetail = building && health
+    ? `${health.detail}${health.elapsedS ? ` · ${formatElapsed(health.elapsedS)}` : ""}`
+    : health?.detail || voice.detail;
+  const stale = Boolean(
+    building && health?.heartbeatAgeS != null && health.heartbeatAgeS > 10,
+  );
   const dotClass = ready
     ? "bg-success"
     : failed
       ? "bg-danger"
-      : building
-        ? "bg-accent animate-pulse"
-        : "bg-text-dim/40";
+      : stale
+        ? "bg-danger"
+        : building
+          ? "bg-accent animate-pulse"
+          : "bg-text-dim/40";
 
   useEffect(() => {
     if (!robotIp) return;
@@ -142,6 +156,18 @@ export function VoiceScreen({
                 }`}
               >
                 {statusDetail}
+              </div>
+            ) : null}
+            {stale ? (
+              <Banner tone="error">
+                No heartbeat for {Math.round(health?.heartbeatAgeS ?? 0)}s — the
+                build may be stuck. Check{" "}
+                <code>journalctl -u bebop-voice</code>.
+              </Banner>
+            ) : building && health && health.componentsDone.length > 0 ? (
+              <div className="text-[11px] text-text-dim leading-snug">
+                built: {health.componentsDone.join(", ")}
+                {health.component ? ` · now: ${health.component}` : ""}
               </div>
             ) : null}
             <Button

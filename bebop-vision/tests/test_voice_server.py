@@ -1,6 +1,8 @@
 """Tests for the voice gateway protocol (stub mode; no model/GPU needed)."""
 
 import json
+import time
+from pathlib import Path
 
 import pytest
 
@@ -102,3 +104,37 @@ def test_friendly_detail_strips_logger_prefix():
         )
         == "building thinker layer 13/48"
     )
+
+
+def test_progress_detail_tracks_components():
+    status = voice_server.VoiceStatus()
+    server = voice_server.EdgeLLMServer("m", Path("/tmp/does-not-matter"), status)
+    assert (
+        server._progress_detail(
+            "17:00:00 INFO experimental.builder: Building component talker"
+        )
+        == "building talker engine"
+    )
+    assert status.component == "talker"
+    # Generic TRT lines must not clobber the meaningful component progress.
+    assert (
+        server._progress_detail("[TRT] Compiler backend is used during engine build.")
+        is None
+    )
+    assert status.component == "talker"
+    assert (
+        server._progress_detail("17:01:00 INFO builder: Build completed in 10.0 s (x)")
+        == "talker engine built"
+    )
+    assert status.components_done == ["talker"]
+    assert status.component == ""
+
+
+def test_status_snapshot_has_elapsed_and_heartbeat():
+    status = voice_server.VoiceStatus(phase="building")
+    status.started_ms = int(time.time() * 1000) - 5000
+    status.beat()
+    snap = status.snapshot()
+    assert snap["phase"] == "building"
+    assert snap["elapsed_s"] >= 4
+    assert snap["heartbeat_age_s"] is not None and snap["heartbeat_age_s"] < 5
