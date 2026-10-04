@@ -21,8 +21,32 @@ from pathlib import Path
 from . import models
 from .models import ModelSpec
 
+# Written into a snapshot dir once every file has landed. The firmware uses
+# its presence as the `ready` signal (a snapshot tree is too large to walk on
+# every telemetry poll).
+SNAPSHOT_MARKER = ".bebop-complete"
+
+
+def _tree_bytes(root: Path) -> int:
+    """Sum regular-file bytes under ``root``, excluding the HF cache dir."""
+    total = 0
+    cache = root / ".cache"
+    try:
+        entries = list(root.rglob("*"))
+    except OSError:
+        return 0
+    for p in entries:
+        try:
+            if p.is_file() and cache not in p.parents:
+                total += p.stat().st_size
+        except OSError:
+            pass
+    return total
+
 
 def _final_bytes(spec: ModelSpec, dest: Path) -> int:
+    if spec.is_snapshot:
+        return _tree_bytes(dest)
     total = 0
     for name in spec.files:
         p = dest / name
@@ -102,7 +126,11 @@ def _preflight_size(spec: ModelSpec, token: str | None) -> int:
     from huggingface_hub import HfApi
 
     info = HfApi().model_info(spec.repo, files_metadata=True, token=token)
-    sizes = {s.rfilename: getattr(s, "size", None) for s in (info.siblings or [])}
+    siblings = info.siblings or []
+    if spec.is_snapshot:
+        total = sum(int(getattr(s, "size", 0) or 0) for s in siblings)
+        return total or spec.bytes
+    sizes = {s.rfilename: getattr(s, "size", None) for s in siblings}
     total = 0
     found = False
     for filename in spec.files:
@@ -131,7 +159,61 @@ def _download_file(spec: ModelSpec, filename: str, token: str | None, dest: Path
     )
 
 
+def _download_snapshot(spec: ModelSpec, token: str | None, dest: Path) -> None:
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id=spec.repo,
+        revision=spec.revision,
+        local_dir=str(dest),
+        token=token,
+    )
+
+
+def _download_snapshot_with_progress(
+    spec: ModelSpec, token: str | None, dest: Path, total: int
+) -> None:
+    """Whole-repo download. One `snapshot_download` call; progress is polled
+    from the growing destination tree plus the HF cache."""
+    base = _cache_bytes(dest)
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            _download_snapshot(spec, token, dest)
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
+            errors.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    while not done.wait(0.5):
+        downloaded = _final_bytes(spec, dest) + max(0, _cache_bytes(dest) - base)
+        models.write_status(
+            spec.id,
+            state="downloading",
+            detail=spec.repo,
+            bytes_downloaded=min(downloaded, total) if total else downloaded,
+            bytes_total=total,
+        )
+    thread.join()
+    if errors:
+        raise errors[0]
+    models.write_status(
+        spec.id,
+        state="downloading",
+        detail=f"{spec.repo} (finalizing)",
+        bytes_downloaded=_downloaded_bytes(spec, dest),
+        bytes_total=total,
+    )
+
+
 def _download_with_progress(spec: ModelSpec, token: str | None, dest: Path, total: int) -> None:
+    if spec.is_snapshot:
+        _download_snapshot_with_progress(spec, token, dest, total)
+        return
     for filename in spec.files:
         # Baseline the cache so progress reflects only the current file
         # (the partial blob is etag-named and not attributable by filename).
@@ -171,8 +253,11 @@ def _download_with_progress(spec: ModelSpec, token: str | None, dest: Path, tota
 
 
 def download_one(spec: ModelSpec, token: str | None) -> None:
-    dest = models.WEIGHTS_DIR
+    dest = spec.target_dir if spec.is_snapshot else models.WEIGHTS_DIR
     dest.mkdir(parents=True, exist_ok=True)
+    # A stale completion marker must not survive a re-download.
+    if spec.is_snapshot:
+        (dest / SNAPSHOT_MARKER).unlink(missing_ok=True)
     models.write_status(spec.id, state="downloading", detail=f"contacting {spec.repo}", bytes_total=spec.bytes)
 
     try:
@@ -202,6 +287,11 @@ def download_one(spec: ModelSpec, token: str | None) -> None:
         raise
 
     downloaded = _final_bytes(spec, dest)
+    if spec.is_snapshot:
+        # Presence signal for the firmware (which must not walk a multi-GB
+        # tree on every telemetry poll).
+        (dest / SNAPSHOT_MARKER).write_text("ok\n")
+        downloaded = _final_bytes(spec, dest)
     models.write_status(
         spec.id,
         state="ready",

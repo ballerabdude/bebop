@@ -42,10 +42,24 @@ class ModelSpec:
     gated: bool = False
     bytes: int = 0
     path: str = ""
+    # kind="hf" fetch strategy: "files" (named `files`) or "snapshot" (whole
+    # repo). Snapshot entries are for checkpoints a runtime builds from.
+    download: str = "files"
+    # Snapshot destination subdir under WEIGHTS_DIR (defaults to `id`).
+    dest: str = ""
 
     @property
     def downloadable(self) -> bool:
         return self.kind == "hf"
+
+    @property
+    def is_snapshot(self) -> bool:
+        return self.kind == "hf" and self.download == "snapshot"
+
+    @property
+    def target_dir(self) -> Path:
+        """Where a snapshot download lands (``weights/<dest or id>/``)."""
+        return WEIGHTS_DIR / (self.dest or self.id)
 
 
 def _as_tuple(value) -> tuple[str, ...]:
@@ -69,6 +83,8 @@ def spec_from_mapping(raw: dict) -> ModelSpec:
         gated=bool(raw.get("gated", False)),
         bytes=int(raw.get("bytes", 0) or 0),
         path=str(raw.get("path", "")),
+        download=str(raw.get("download", "files")),
+        dest=str(raw.get("dest", "")),
     )
 
 
@@ -84,8 +100,18 @@ def load_catalog(path: Path | str = CATALOG_PATH) -> dict[str, ModelSpec]:
         spec = spec_from_mapping(entry)
         if not spec.id:
             raise ValueError(f"catalog entry with empty id in {path}")
-        if spec.kind == "hf" and (not spec.repo or not spec.files):
-            raise ValueError(f"catalog entry {spec.id!r}: kind=hf requires repo + files")
+        if spec.kind == "hf":
+            if not spec.repo:
+                raise ValueError(f"catalog entry {spec.id!r}: kind=hf requires a repo")
+            if spec.download not in ("files", "snapshot"):
+                raise ValueError(
+                    f"catalog entry {spec.id!r}: unsupported download "
+                    f"{spec.download!r} (expected 'files' or 'snapshot')"
+                )
+            if spec.download == "files" and not spec.files:
+                raise ValueError(
+                    f"catalog entry {spec.id!r}: kind=hf download=files requires files"
+                )
         if spec.id in out:
             raise ValueError(f"duplicate catalog id {spec.id!r}")
         out[spec.id] = spec

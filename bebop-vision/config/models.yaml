@@ -13,6 +13,14 @@
 #           (e.g. `scp`). Presence is reported in the app; there is nothing
 #           to download.
 #
+# `download` (kind="hf" only):
+#   files    - fetch just the named `files` (default). Presence is the files.
+#   snapshot - fetch the whole repo with `snapshot_download` into
+#              `weights/<dest or id>/`. Used for checkpoints a runtime builds
+#              from (config + tokenizer + chat template + safetensors shards),
+#              e.g. TensorRT Edge-LLM voice models. A `.bebop-complete` marker
+#              is written on success; presence is that marker.
+#
 # Add a model by appending an entry — no code changes.
 
 models:
@@ -63,3 +71,19 @@ models:
     kind: local
     purpose: navigation
     path: navd_traj.onnx
+
+  # --- Voice / speech-to-speech (TensorRT Edge-LLM) ------------------------
+  # Full-repo snapshot: the Edge-LLM checkpoint-direct builder needs the whole
+  # repo (config, tokenizer, chat template, safetensors shards), not a file
+  # list. The voice service serves this checkpoint on :9093 (see docs/voice.md).
+  - id: qwen3-omni-30b
+    name: Qwen3-Omni 30B-A3B
+    description: End-to-end speech-to-speech (audio in, natural speech out).
+    kind: hf
+    purpose: voice
+    repo: Qwen/Qwen3-Omni-30B-A3B-Instruct
+    download: snapshot
+    dest: qwen3-omni-30b
+    revision: main
+    gated: false
+    bytes: 63000000000

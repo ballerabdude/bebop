@@ -1,0 +1,180 @@
+# Voice: on-robot speech-to-speech (Qwen3-Omni)
+
+Status: **in progress** (branch `feat/voice-omni`). Provisioning foundation
+landed; firmware control path, voice service, and app page are next.
+
+## Goal (v1)
+
+A new app page where the operator talks to the robot and it talks back.
+**No actions, no tool calls** — pure speech-to-speech. Fully local: the model
+runs on the robot, audio never leaves the device (except between the phone and
+the robot on the LAN).
+
+## Why Qwen3-Omni + TensorRT Edge-LLM
+
+- **One model, native speech-out.** `Qwen/Qwen3-Omni-30B-A3B-Instruct`
+  (Apache-2.0) takes audio (or text/image) in and emits text **and 24 kHz
+  speech** out. No ASR → LLM → TTS glue, so prosody and turn feel are preserved.
+- **NVIDIA supports it on Thor.** TensorRT Edge-LLM (TRT-Edge-LLM) lists Qwen3
+  Omni 30B-A3B as a supported model with a six-engine layout (Thinker, Talker,
+  CodePredictor, audio encoder, visual encoder, Code2Wav) and a streaming
+  Thinker/Talker path.
+- **Prebuilt aarch64 wheel — no source build.** The wheel matrix includes
+  *Jetson Thor: JetPack 7.0/7.1/7.2, CUDA 13, SM110, platform TensorRT 10*.
+  So the robot runs `pip install "tensorrt-edgellm[server]==0.11.0"` and
+  `tensorrt-edgellm-serve`, not a CMake/CuTeDSL build.
+- **HF provisioning already exists.** The model is a normal HF checkpoint; we
+  extend the existing catalog/downloader to fetch a full-repo snapshot.
+
+Hardware context: Thor dev kit, 122 GB unified RAM, ~273 GB/s bandwidth,
+JetPack 7.2 / CUDA 13.2 / sm_110. Qwen3-30B-A3B-class MoE runs ~60-80 tok/s at
+C=1 on Thor, which is enough for conversational latency.
+
+## Architecture
+
+```
+   phone / PC (Tauri app)
+   ┌──────────────────────────────────────────────┐
+   │  VoiceScreen.tsx                             │
+   │   • getUserMedia → 16 kHz mono PCM16         │
+   │   • AudioContext playback of 24 kHz PCM16    │
+   │   • control over runtime WS (:9090)          │
+   │   • audio over voice WS (:9093)              │
+   └───────────────┬───────────────────┬──────────┘
+                   │ control           │ audio (turn-based)
+        ┌──────────▼─────────┐   ┌─────▼──────────────────────────┐
+        │ bebop-linux (:9090)│   │ bebop-voice.service (:9093)    │
+        │  SetVoiceEnabled   │   │  Python WS gateway             │
+        │  VoiceState        │   │   ├─ spawns tensorrt-edgellm-  │
+        │  systemctl start/  │   │   │   serve on 127.0.0.1:8000  │
+        │  stop voice unit   │   │   ├─ WAV/PCM → OpenAI audio in  │
+        └────────────────────┘   │   └─ text + PCM chunks → app   │
+                                 └─────┬──────────────────────────┘
+                                       │ OpenAI-compatible HTTP
+                                 ┌─────▼──────────────────────────┐
+                                 │ tensorrt-edgellm-serve         │
+                                 │ Qwen3-Omni-30B-A3B (6 engines) │
+                                 │ cache: /var/lib/bebop-voice/   │
+                                 └────────────────────────────────┘
+```
+
+### Why a separate port for audio
+
+The runtime WS (`:9090`) is protobuf, one envelope per frame, and the firmware
+would have to relay raw audio to the Python service. The video stack already
+establishes the pattern of a separate Python server on its own port (`:9092`).
+Voice audio gets `:9093`; the runtime WS stays the **control plane** (start/stop
++ status), which is what "reuse the websocket session" means here.
+
+## Model provisioning
+
+`bebop-vision/config/models.yaml` gains a snapshot entry:
+
+```yaml
+  - id: qwen3-omni-30b
+    name: Qwen3-Omni 30B-A3B
+    description: End-to-end speech-to-speech (audio in, natural speech out).
+    kind: hf
+    purpose: voice
+    repo: Qwen/Qwen3-Omni-30B-A3B-Instruct
+    download: snapshot
+    dest: qwen3-omni-30b
+    revision: main
+    gated: false
+    bytes: 63000000000
+```
+
+The catalog schema gains `download: files|snapshot` and `dest`:
+
+- `files` (default) — the existing per-file `hf_hub_download` behavior.
+- `snapshot` — `snapshot_download` the whole repo into
+  `weights/<dest or id>/`, then write a `.bebop-complete` marker. The firmware
+  treats that marker as `ready` (a 60 GB tree must not be walked every poll).
+
+The app's Models page renders it automatically (grouped under "voice") and the
+existing download button drives `bebop-model-download@qwen3-omni-30b.service`.
+The HF token flow is unchanged.
+
+**Quantization (open):** the 30B checkpoint is ~60 GB in BF16. TRT-Edge-LLM can
+serve it directly (checkpoint-direct builder), or we first run
+`tensorrt-edgellm-quantize` to NVFP4 (~20 GB, faster) using the `[tools]` extra
+on the robot. v1 can serve BF16 to reduce moving parts; NVFP4 is the tuning
+step. Engine build is cached in `/var/lib/bebop-voice/edgellm` and happens on
+first voice-service start (surfaced as `VoiceState.detail = "building engines"`).
+
+## Wire protocol
+
+### Control (runtime WS `:9090`)
+
+- `ClientRuntimeMessage.SetVoiceEnabled { bool enabled }` (tag 28) — firmware
+  shells out to `systemctl start/stop bebop-voice.service`, mirroring
+  `SetVisionEnabled`.
+- `TelemetryFrame.voice` / `Snapshot.voice` (tag 21) — new `VoiceState`:
+
+```proto
+message VoiceState {
+  bool   present = 1;   // unit installed
+  bool   running = 2;   // systemd active
+  string state   = 3;   // raw ActiveState
+  string detail  = 4;   // SubState / last error / "building engines"
+  string service = 5;
+  string model   = 6;   // catalog id being served
+  bool   ready   = 7;   // engines built and server answering /health
+}
+```
+
+### Audio (voice WS `:9093`)
+
+Turn-based v1 (push-to-talk or client VAD), JSON control frames + binary audio:
+
+- app → robot: `{"type":"utterance_start","sample_rate":16000,"format":"pcm16"}`
+  then binary PCM16 frames, then `{"type":"utterance_end"}`.
+- robot → app: `{"type":"text","delta":"..."}` (transcript/response), then
+  `{"type":"audio_start","sample_rate":24000,"format":"pcm16"}`, binary PCM16
+  frames, `{"type":"audio_end"}`, `{"type":"done"}`.
+- `{"type":"error","message":"..."}` on failure.
+- `GET /healthz` for readiness.
+
+Full-duplex (barge-in) is a later step (needs a full-duplex model such as
+NemotronLabs VoiceChat-11B, or careful VAD + cancellation).
+
+## Components and changes
+
+| Area | Files | State |
+|---|---|---|
+| Catalog + downloader | `bebop-vision/config/models.yaml`, `bebop_vision/models.py`, `bebop_vision/download_model.py`, `firmware/bebop-linux/src/model.rs`, `tests/test_models.py` | ✅ done |
+| Design | `docs/voice.md` | ✅ |
+| Firmware control | `jetson-agent/bebop-proto/proto/bebop_runtime.proto`, `firmware/bebop-linux/src/voice.rs`, `src/server/{ws,handlers,telemetry}.rs`, `src/main.rs` | ⬜ next |
+| App control + page | `bebop-app/src/proto/*` (regen), `runtime/{types,wsTransport,index}.ts`, `screens/VoiceScreen.tsx`, `screens/DashboardScreen.tsx`, `App.tsx` | ⬜ next |
+| Voice service | `bebop-vision/bebop_vision/voice_server.py`, `deploy/systemd/bebop-voice.service` | ⬜ next |
+| Install | `scripts/install-jetson.sh` (wheel + unit) | ⬜ next |
+| Bring-up | engine build, latency tuning, NVFP4 | ⬜ on robot |
+
+## Latency budget (target)
+
+| Stage | Budget |
+|---|---|
+| Client capture + VAD end-of-utterance | ~0.2-0.3 s |
+| Audio encode + transport (LAN) | ~0.05 s |
+| Thinker prefill + first Talker frame | ~0.3-0.5 s |
+| Code2Wav + transport + playback | ~0.1 s |
+| **End-to-end** | **~0.7-1.0 s** |
+
+Knobs: `codec_chunk_frames` (smaller = sooner but rougher), `talker_top_k`,
+`max_audio_length`, and a short system prompt.
+
+## Risks / open questions
+
+1. **Engine build time & disk.** First serve builds six engines; budget tens of
+   GB and several minutes. Confirm the wheel builds Qwen3-Omni without the
+   `[tools]` extra (checkpoint-direct builder) or whether NVFP4 quantization is
+   required first.
+2. **Talker `text_projection`.** The C++ build needs `-DENABLE_CUTE_DSL=gemm`;
+   the prebuilt wheel should already handle this — verify audio is not garbled.
+3. **GPU/bandwidth contention** with `bebop-vision` (camera + navd ONNX). The
+   LLM is bandwidth-bound; schedule voice when not training/recording heavily.
+4. **Audio transport choice.** v1 uses a dedicated `:9093` WS. If a single
+   connection is required, audio can move onto `:9090` as a protobuf `bytes`
+   envelope (precedent: `NavMaskFrame.grid`), at the cost of a firmware relay.
+5. **Model license/gating.** Qwen3-Omni is Apache-2.0; verify the HF repo is
+   not gated (if it is, flip `gated: true` and the token flow already works).

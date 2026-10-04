@@ -94,10 +94,23 @@ pub struct ModelSpec {
     /// On-robot path (kind="local"); absolute or relative to the weights dir.
     #[serde(default)]
     pub path: String,
+    /// kind="hf" fetch strategy: "files" (named `files`, default) or
+    /// "snapshot" (whole repo). Snapshot entries are checkpoints a runtime
+    /// builds from; presence is a `.bebop-complete` marker written by the
+    /// Python downloader.
+    #[serde(default = "default_download")]
+    pub download: String,
+    /// Snapshot destination subdir under the weights dir (defaults to `id`).
+    #[serde(default)]
+    pub dest: String,
 }
 
 fn default_kind() -> String {
     "hf".to_string()
+}
+
+fn default_download() -> String {
+    "files".to_string()
 }
 
 fn default_revision() -> String {
@@ -120,8 +133,15 @@ pub fn parse_catalog(text: &str) -> Result<Vec<ModelSpec>> {
         if m.kind == "hf" && m.repo.trim().is_empty() {
             anyhow::bail!("catalog entry {:?}: kind=hf requires a repo", m.id);
         }
-        if m.kind == "hf" && m.files.is_empty() {
-            anyhow::bail!("catalog entry {:?}: kind=hf requires files", m.id);
+        if m.kind == "hf" && m.download != "files" && m.download != "snapshot" {
+            anyhow::bail!(
+                "catalog entry {:?}: unsupported download {:?} (expected \"files\" or \"snapshot\")",
+                m.id,
+                m.download
+            );
+        }
+        if m.kind == "hf" && m.download == "files" && m.files.is_empty() {
+            anyhow::bail!("catalog entry {:?}: kind=hf download=files requires files", m.id);
         }
     }
     Ok(cat.models)
@@ -574,12 +594,33 @@ fn weights_root() -> PathBuf {
     PathBuf::from(WEIGHTS_DIR)
 }
 
+/// Marker file the Python downloader writes into a snapshot dir on success.
+/// Must match `bebop_vision.download_model.SNAPSHOT_MARKER`.
+pub const SNAPSHOT_MARKER: &str = ".bebop-complete";
+
 /// The on-disk files a model entry consists of.
 fn entry_files(spec: &ModelSpec) -> Vec<PathBuf> {
     match spec.kind.as_str() {
+        // A snapshot is a whole-repo tree too large to stat file-by-file on
+        // every poll; readiness is the downloader's completion marker.
+        "hf" if spec.download == "snapshot" => vec![snapshot_marker(spec)],
         "hf" => spec.files.iter().map(|f| weights_root().join(f)).collect(),
         _ => vec![local_path(spec)],
     }
+}
+
+/// Snapshot destination dir (`weights/<dest or id>/`).
+fn snapshot_dir(spec: &ModelSpec) -> PathBuf {
+    let name = if spec.dest.is_empty() {
+        spec.id.as_str()
+    } else {
+        spec.dest.as_str()
+    };
+    weights_root().join(name)
+}
+
+fn snapshot_marker(spec: &ModelSpec) -> PathBuf {
+    snapshot_dir(spec).join(SNAPSHOT_MARKER)
 }
 
 fn local_path(spec: &ModelSpec) -> PathBuf {
@@ -704,6 +745,7 @@ fn derive_state(
 /// Build the live entry for one catalog spec.
 fn build_entry(spec: &ModelSpec) -> ModelEntry {
     let files = entry_files(spec);
+    let is_snapshot = spec.kind == "hf" && spec.download == "snapshot";
     let ready = !files.is_empty()
         && files.iter().all(|p| {
             fs::metadata(p)
@@ -746,13 +788,16 @@ fn build_entry(spec: &ModelSpec) -> ModelEntry {
     };
 
     let (bytes_downloaded, bytes_total, detail) = if ready {
+        // A snapshot tree is too large to walk on every poll; report the
+        // catalog's size hint instead.
+        let done = if is_snapshot {
+            bytes_total
+        } else {
+            files_bytes(&files)
+        };
         (
-            files_bytes(&files),
-            if bytes_total == 0 {
-                files_bytes(&files)
-            } else {
-                bytes_total
-            },
+            done,
+            if bytes_total == 0 { done } else { bytes_total },
             String::new(),
         )
     } else if let Some(st) = status.as_ref() {
@@ -830,20 +875,55 @@ models:
     kind: local
     purpose: navigation
     path: navd.onnx
+  - id: qwen3-omni-30b
+    name: Qwen3-Omni
+    kind: hf
+    purpose: voice
+    repo: Qwen/Qwen3-Omni-30B-A3B-Instruct
+    download: snapshot
+    dest: qwen3-omni-30b
+    bytes: 63000000000
 "#;
 
     #[test]
     fn parse_catalog_reads_entries_and_defaults() {
         let models = parse_catalog(CATALOG).unwrap();
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 3);
         assert_eq!(models[0].id, "sam3.1");
         assert_eq!(models[0].kind, "hf");
+        assert_eq!(models[0].download, "files");
         assert_eq!(models[0].purpose, "segmentation");
         assert!(models[0].gated);
         assert_eq!(models[0].files, vec!["sam3.1_multiplex.pt".to_string()]);
         assert_eq!(models[1].kind, "local");
         assert_eq!(models[1].purpose, "navigation");
         assert!(models[1].files.is_empty());
+    }
+
+    #[test]
+    fn snapshot_entry_needs_no_files_and_reports_marker() {
+        let models = parse_catalog(CATALOG).unwrap();
+        let omni = models.iter().find(|m| m.id == "qwen3-omni-30b").unwrap();
+        assert_eq!(omni.download, "snapshot");
+        assert!(omni.files.is_empty());
+        let files = entry_files(omni);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("qwen3-omni-30b/.bebop-complete"));
+    }
+
+    #[test]
+    fn snapshot_entry_rejects_unknown_download_mode() {
+        let err = parse_catalog(
+            "models:\n  - id: x\n    repo: a/b\n    download: torrent\n",
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn snapshot_entry_without_files_is_valid() {
+        let models =
+            parse_catalog("models:\n  - id: x\n    repo: a/b\n    download: snapshot\n").unwrap();
+        assert_eq!(models[0].download, "snapshot");
     }
 
     #[test]

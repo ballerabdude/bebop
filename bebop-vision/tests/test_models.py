@@ -123,3 +123,80 @@ def test_download_progress_counts_cache_growth(monkeypatch, tmp_path):
     partial = [w for w in writes if 0 < w.get("bytes_downloaded", 0) < 100]
     assert partial, f"expected an in-flight progress sample, got {writes}"
     assert writes[-1]["bytes_downloaded"] >= 100
+
+
+def test_real_catalog_has_voice_snapshot():
+    catalog = models.load_catalog()
+    omni = catalog["qwen3-omni-30b"]
+    assert omni.is_snapshot
+    assert omni.downloadable
+    assert omni.purpose == "voice"
+    assert omni.target_dir.name == "qwen3-omni-30b"
+
+
+def test_spec_snapshot_defaults_dest_to_id():
+    spec = models.spec_from_mapping({"id": "x", "repo": "a/b", "download": "snapshot"})
+    assert spec.is_snapshot
+    assert spec.files == ()
+    assert spec.target_dir.name == "x"
+
+
+def test_load_catalog_rejects_bad_download_mode(tmp_path):
+    path = tmp_path / "models.yaml"
+    path.write_text("models:\n  - id: bad\n    repo: a/b\n    download: torrent\n")
+    with pytest.raises(ValueError):
+        models.load_catalog(path)
+
+
+def test_load_catalog_allows_snapshot_without_files(tmp_path):
+    path = tmp_path / "models.yaml"
+    path.write_text("models:\n  - id: ok\n    repo: a/b\n    download: snapshot\n")
+    assert models.load_catalog(path)["ok"].is_snapshot
+
+
+def test_tree_bytes_excludes_hf_cache(tmp_path):
+    (tmp_path / "model.safetensors").write_bytes(b"x" * 300)
+    cache = tmp_path / ".cache" / "huggingface" / "download"
+    cache.mkdir(parents=True)
+    (cache / "blob.incomplete").write_bytes(b"y" * 999)
+    assert download_model._tree_bytes(tmp_path) == 300
+
+
+def test_snapshot_progress_reports_total(monkeypatch, tmp_path):
+    spec = models.ModelSpec(
+        id="omni", kind="hf", repo="a/b", download="snapshot", bytes=1000
+    )
+    writes = []
+    monkeypatch.setattr(
+        download_model.models, "write_status", lambda _id, **kw: writes.append(kw)
+    )
+    dest = tmp_path / "omni"
+
+    def fake_snapshot(_spec, _token, _dest):
+        _dest.mkdir(parents=True, exist_ok=True)
+        (_dest / "config.json").write_text("{}")
+        import time as _time
+
+        _time.sleep(0.7)
+        (_dest / "model.safetensors").write_bytes(b"x" * 500)
+
+    monkeypatch.setattr(download_model, "_download_snapshot", fake_snapshot)
+    download_model._download_snapshot_with_progress(spec, None, dest, 1000)
+    assert writes[-1]["bytes_total"] == 1000
+    assert writes[-1]["bytes_downloaded"] >= 500
+
+
+def test_snapshot_download_one_writes_marker(monkeypatch, tmp_path):
+    monkeypatch.setattr(models, "WEIGHTS_DIR", tmp_path)
+    spec = models.ModelSpec(
+        id="omni", kind="hf", repo="a/b", download="snapshot", dest="omni", bytes=10
+    )
+    monkeypatch.setattr(download_model, "_preflight_size", lambda _s, _t: 10)
+    monkeypatch.setattr(download_model.models, "write_status", lambda _id, **kw: None)
+
+    def fake_download(_spec, _token, _dest, _total):
+        (_dest / "config.json").write_text("{}")
+
+    monkeypatch.setattr(download_model, "_download_with_progress", fake_download)
+    download_model.download_one(spec, None)
+    assert (tmp_path / "omni" / download_model.SNAPSHOT_MARKER).exists()
