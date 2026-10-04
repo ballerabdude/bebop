@@ -740,6 +740,12 @@ setup_voice() {
         run_voice "python3 -m venv --system-site-packages '${venv}'"
     fi
     run_voice "'${venv}/bin/pip' install --upgrade pip"
+    # PyTorch must be the CUDA 13.2 aarch64 build for the quantization
+    # toolchain (ModelOpt needs CUDA). PyPI's aarch64 torch is CPU-only, so
+    # install the cu132 wheels first and let the [tools] resolution below see
+    # them already satisfied.
+    echo "    installing CUDA torch (cu132) for the quantization toolchain"
+    run_voice "'${venv}/bin/pip' install --extra-index-url https://download.pytorch.org/whl/cu132 'torch==2.13.0+cu132' 'torchvision==0.28.0+cu132'"
     echo "    installing voice requirements (downloads a large wheel)"
     run_voice "'${venv}/bin/pip' install -r '${req}'"
 
@@ -755,6 +761,13 @@ setup_voice() {
           Inspect the failure, then retry:
               ${venv}/bin/python -c 'import tensorrt; from tensorrt_edgellm import runtime; runtime.load()'
 EOF
+    fi
+    # Quantization is GPU-bound; make sure the CUDA torch actually sees the GPU.
+    torch_version="$(run_voice "'${venv}/bin/python' -c 'import torch; print(torch.__version__)'" 2>/dev/null || true)"
+    if run_voice "'${venv}/bin/python' -c 'import torch; assert torch.cuda.is_available()'" >/dev/null 2>&1; then
+        echo "    torch sees the GPU (${torch_version})"
+    else
+        echo "    WARN: torch.cuda.is_available() is false in ${venv}; --quantize-voice will fail" >&2
     fi
 }
 
