@@ -5,8 +5,13 @@ import {
   type RuntimeTransport,
   type VoiceView,
 } from "../runtime";
-import { Banner, Button, Card } from "../components/ui";
-import { useVoiceHealth, useVoiceSession } from "../voice/useVoiceSession";
+import { Banner, Button, Card, Field } from "../components/ui";
+import {
+  useVoiceConfig,
+  useVoiceHealth,
+  useVoiceSession,
+  type VoiceConfigView,
+} from "../voice/useVoiceSession";
 
 const EMPTY_VOICE: VoiceView = {
   present: false,
@@ -17,6 +22,10 @@ const EMPTY_VOICE: VoiceView = {
   model: "",
 };
 
+const SESSION_KEY = "bebop.voice.session";
+const INPUT_CLASS =
+  "w-full bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-2.5 text-text outline-none focus:border-accent";
+
 function formatElapsed(s: number): string {
   if (!s || s < 0) return "";
   const m = Math.floor(s / 60);
@@ -24,13 +33,28 @@ function formatElapsed(s: number): string {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
+function makeSessionId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `s-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+function loadSessionId(): string {
+  try {
+    const v = localStorage.getItem(SESSION_KEY);
+    if (v) return v;
+  } catch {
+    /* ignore */
+  }
+  return makeSessionId();
+}
+
 /// Voice (speech-to-speech) control + status. Start/stop the on-robot
 /// `bebop-voice.service` (Qwen3-Omni via TensorRT Edge-LLM) over the runtime
-/// WebSocket; the audio itself is served by that unit on :9093.
-///
-/// The push-to-talk audio bridge lands with the voice service; this screen
-/// owns service lifecycle and status so the operator can provision the model
-/// (Models page), start the service, and see when it is ready.
+/// WebSocket; audio is served by that unit on :9093. Voice, persona, and
+/// context are edited here and persisted on the robot (`/config`).
 export function VoiceScreen({
   robotIp,
   runtimePort = 9090,
@@ -44,43 +68,29 @@ export function VoiceScreen({
   const [voice, setVoice] = useState<VoiceView>(EMPTY_VOICE);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const session = useVoiceSession(robotIp, 9093);
+  const [sessionId, setSessionId] = useState<string>(() => loadSessionId());
+  const [personaDraft, setPersonaDraft] = useState("");
+  const [savingCfg, setSavingCfg] = useState<string | null>(null);
+  const [cfgError, setCfgError] = useState<string | null>(null);
+
+  const cfg = useVoiceConfig(robotIp, 9093, voice.running);
   const health = useVoiceHealth(robotIp, 9093, voice.running);
+  const session = useVoiceSession(robotIp, 9093, { session: sessionId });
 
-  // Human-readable service status. Systemd `running` is necessary but not
-  // sufficient: the model server may still be building engines or have failed.
-  const ready = health?.ok ?? false;
-  const building = health?.phase === "starting" || health?.phase === "building";
-  const failed = health?.phase === "error";
-  const statusText = !voice.running
-    ? voice.state || "Stopped"
-    : health == null
-      ? "Starting…"
-      : health.phase === "ready"
-        ? "Ready"
-        : health.phase === "stub"
-          ? "Ready (stub)"
-          : building
-            ? "Building engines…"
-            : failed
-              ? "Error"
-              : health.phase;
-  const statusDetail = building && health
-    ? `${health.detail}${health.elapsedS ? ` · ${formatElapsed(health.elapsedS)}` : ""}`
-    : health?.detail || voice.detail;
-  const stale = Boolean(
-    building && health?.heartbeatAgeS != null && health.heartbeatAgeS > 10,
-  );
-  const dotClass = ready
-    ? "bg-success"
-    : failed
-      ? "bg-danger"
-      : stale
-        ? "bg-danger"
-        : building
-          ? "bg-accent animate-pulse"
-          : "bg-text-dim/40";
+  useEffect(() => {
+    try {
+      localStorage.setItem(SESSION_KEY, sessionId);
+    } catch {
+      /* ignore */
+    }
+  }, [sessionId]);
 
+  const systemPrompt = cfg.config?.system_prompt;
+  useEffect(() => {
+    if (systemPrompt !== undefined) setPersonaDraft(systemPrompt);
+  }, [systemPrompt]);
+
+  // Telemetry: service lifecycle state from the runtime WS.
   useEffect(() => {
     if (!robotIp) return;
     const transport = getOrCreateRuntimeTransport(robotIp, runtimePort);
@@ -103,6 +113,38 @@ export function VoiceScreen({
 
   const transport = transportRef.current;
 
+  const ready = health?.ok ?? false;
+  const building = health?.phase === "starting" || health?.phase === "building";
+  const failed = health?.phase === "error";
+  const statusText = !voice.running
+    ? voice.state || "Stopped"
+    : health == null
+      ? "Starting…"
+      : health.phase === "ready"
+        ? "Ready"
+        : health.phase === "stub"
+          ? "Ready (stub)"
+          : building
+            ? "Building engines…"
+            : failed
+              ? "Error"
+              : health.phase;
+  const statusDetail =
+    building && health
+      ? `${health.detail}${health.elapsedS ? ` · ${formatElapsed(health.elapsedS)}` : ""}`
+      : health?.detail || voice.detail;
+  const stale = Boolean(
+    building && health?.heartbeatAgeS != null && health.heartbeatAgeS > 10,
+  );
+  const dotClass = ready
+    ? "bg-success"
+    : failed || stale
+      ? "bg-danger"
+      : building
+        ? "bg-accent animate-pulse"
+        : "bg-text-dim/40";
+  const talkActive = session.phase === "listening";
+
   async function toggle() {
     if (!transport) return;
     setError(null);
@@ -116,7 +158,17 @@ export function VoiceScreen({
     }
   }
 
-  const talkActive = session.phase === "listening";
+  async function saveCfg(key: string, partial: Partial<VoiceConfigView>) {
+    setCfgError(null);
+    setSavingCfg(key);
+    try {
+      await cfg.save(partial);
+    } catch (e) {
+      setCfgError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingCfg(null);
+    }
+  }
 
   return (
     <div className="flex flex-col flex-1 gap-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
@@ -185,11 +237,6 @@ export function VoiceScreen({
                 The first start downloads nothing but builds the model&apos;s
                 TensorRT engines — this can take several minutes.
               </p>
-            ) : building ? (
-              <p className="text-[12px] text-text-dim leading-relaxed">
-                First start only. The engines are cached, so later starts are
-                quick.
-              </p>
             ) : null}
           </div>
         </Card>
@@ -226,7 +273,9 @@ export function VoiceScreen({
               session.phase === "thinking" ||
               session.phase === "speaking"
             }
-            onClick={() => (talkActive ? session.stopTalking() : void session.startTalking())}
+            onClick={() =>
+              talkActive ? session.stopTalking() : void session.startTalking()
+            }
             onContextMenu={(e) => e.preventDefault()}
             className="w-full py-5 text-base select-none touch-none"
           >
@@ -253,6 +302,119 @@ export function VoiceScreen({
           </p>
         </div>
       </Card>
+
+      {voice.present && voice.running ? (
+        <Card>
+          <div className="py-2 flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-text-dim uppercase tracking-wider">
+                Voice &amp; personality
+              </div>
+              <button
+                type="button"
+                className="text-[12px] text-text-dim hover:text-text disabled:opacity-50"
+                disabled={cfg.config == null}
+                onClick={() => {
+                  setSessionId(makeSessionId());
+                  session.resetContext();
+                }}
+              >
+                New conversation
+              </button>
+            </div>
+            {cfgError ? <Banner tone="error">{cfgError}</Banner> : null}
+            {!cfg.config ? (
+              <p className="text-[13px] text-text-dim">Loading settings…</p>
+            ) : (
+              <>
+                <Field
+                  label="Voice"
+                  hint="Speaker baked into the checkpoint (from the model)."
+                >
+                  <select
+                    className={INPUT_CLASS}
+                    value={cfg.config.voice}
+                    disabled={
+                      savingCfg === "voice" || cfg.config.voices.length === 0
+                    }
+                    onChange={(e) =>
+                      void saveCfg("voice", { voice: e.currentTarget.value })
+                    }
+                  >
+                    {(cfg.config.voices.length
+                      ? cfg.config.voices
+                      : [cfg.config.voice]
+                    ).map((v) => (
+                      <option key={v} value={v}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field
+                  label="Memory"
+                  hint="How many past turns the robot carries into the next reply."
+                >
+                  <select
+                    className={INPUT_CLASS}
+                    value={cfg.config.history_turns}
+                    disabled={savingCfg === "turns"}
+                    onChange={(e) =>
+                      void saveCfg("turns", {
+                        history_turns: Number(e.currentTarget.value),
+                      })
+                    }
+                  >
+                    <option value={0}>Off</option>
+                    <option value={2}>2 turns</option>
+                    <option value={4}>4 turns</option>
+                    <option value={8}>8 turns</option>
+                    <option value={12}>12 turns</option>
+                  </select>
+                </Field>
+                <label className="flex items-center gap-2 text-[13px] text-text-dim">
+                  <input
+                    type="checkbox"
+                    checked={cfg.config.keep_audio_history}
+                    disabled={savingCfg === "audio"}
+                    onChange={(e) =>
+                      void saveCfg("audio", {
+                        keep_audio_history: e.currentTarget.checked,
+                      })
+                    }
+                  />
+                  Remember my voice (keeps your audio in context; slower)
+                </label>
+                <Field
+                  label="Personality"
+                  hint="System prompt. Applies on the next turn."
+                >
+                  <textarea
+                    className={`${INPUT_CLASS} min-h-24`}
+                    value={personaDraft}
+                    spellCheck={false}
+                    onChange={(e) => setPersonaDraft(e.currentTarget.value)}
+                    onBlur={() => {
+                      const next = personaDraft.trim();
+                      if (
+                        cfg.config &&
+                        next &&
+                        next !== cfg.config.system_prompt
+                      ) {
+                        void saveCfg("persona", { system_prompt: next });
+                      }
+                    }}
+                  />
+                </Field>
+                <p className="text-[11px] text-text-dim leading-snug">
+                  Conversation context is kept per session and cleared by{" "}
+                  <strong>New conversation</strong>.
+                </p>
+              </>
+            )}
+          </div>
+        </Card>
+      ) : null}
 
       <div className="mt-auto pt-4">
         <Button variant="ghost" onClick={onBack}>

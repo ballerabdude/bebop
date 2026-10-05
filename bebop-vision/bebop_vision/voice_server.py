@@ -56,11 +56,12 @@ import sys
 import threading
 import time
 import wave
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -163,6 +164,125 @@ def _silence_wav_b64(seconds: float = 0.2, rate: int = INPUT_RATE) -> str:
     """A short silent WAV, base64, for the startup warm-up audio turn."""
     pcm = b"\x00\x00" * int(rate * seconds)
     return base64.b64encode(pcm16_to_wav(pcm, rate)).decode("ascii")
+
+
+# --- operator settings + session context ---------------------------------
+
+
+# Persisted operator settings (voice, persona, context). Written by the app
+# via `POST /config`; root-owned under the service's state dir.
+CONFIG_PATH = Path("/var/lib/bebop-voice/config.json")
+MAX_SESSIONS = 32
+
+
+def _clamp_turns(n: Any) -> int:
+    try:
+        value = int(n)
+    except (TypeError, ValueError):
+        value = DEFAULT_HISTORY_TURNS
+    return max(0, min(value, 20))
+
+
+@dataclass
+class VoiceConfig:
+    """Operator-tunable settings, edited from the app's Voice page."""
+
+    voice: str = DEFAULT_VOICE
+    system_prompt: str = SYSTEM_PROMPT
+    history_turns: int = DEFAULT_HISTORY_TURNS
+    keep_audio_history: bool = False
+
+    @classmethod
+    def load(cls, path: Path | None = None) -> "VoiceConfig":
+        path = path or CONFIG_PATH
+        try:
+            raw = json.loads(path.read_text())
+        except Exception:  # noqa: BLE001 - missing/invalid -> defaults
+            return cls()
+        cfg = cls()
+        if isinstance(raw.get("voice"), str) and raw["voice"]:
+            cfg.voice = raw["voice"]
+        if isinstance(raw.get("system_prompt"), str) and raw["system_prompt"].strip():
+            cfg.system_prompt = raw["system_prompt"]
+        if "history_turns" in raw:
+            cfg.history_turns = _clamp_turns(raw["history_turns"])
+        if isinstance(raw.get("keep_audio_history"), bool):
+            cfg.keep_audio_history = raw["keep_audio_history"]
+        return cfg
+
+    def save(self, path: Path | None = None) -> None:
+        path = path or CONFIG_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(self.snapshot(), indent=2))
+        os.replace(tmp, path)
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "voice": self.voice,
+            "system_prompt": self.system_prompt,
+            "history_turns": self.history_turns,
+            "keep_audio_history": self.keep_audio_history,
+        }
+
+
+class SessionStore:
+    """Per-session conversation history, keyed by a client-supplied id.
+
+    History holds only turns *after* the system prompt (which is prepended from
+    the live config each request, so persona edits apply immediately). A
+    client-supplied `?session=<id>` id keeps context across reconnects; each
+    anonymous connection gets a fresh bucket. LRU-capped.
+    """
+
+    def __init__(self, max_sessions: int = MAX_SESSIONS) -> None:
+        self._lock = threading.Lock()
+        self._max = max_sessions
+        self._map: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+
+    def get(self, key: str) -> list[dict[str, Any]]:
+        with self._lock:
+            if key in self._map:
+                self._map.move_to_end(key)
+                return self._map[key]
+            history: list[dict[str, Any]] = []
+            self._map[key] = history
+            while len(self._map) > self._max:
+                self._map.popitem(last=False)
+            return history
+
+    def clear(self, key: str) -> None:
+        with self._lock:
+            self._map.pop(key, None)
+
+
+# Cache of the model's speaker ids (GET /v1/voices), so `/config` and the WS
+# can validate a requested voice without a round-trip every time.
+_VOICE_CACHE: dict[str, Any] = {"ts": 0.0, "voices": []}
+
+
+def known_voices(server: "EdgeLLMServer | None") -> list[str]:
+    if server is None:
+        return list(_VOICE_CACHE["voices"])
+    now = time.time()
+    if _VOICE_CACHE["voices"] and now - _VOICE_CACHE["ts"] < 60:
+        return list(_VOICE_CACHE["voices"])
+    import httpx
+
+    try:
+        r = httpx.get(f"{server.base_url}/v1/voices", timeout=5.0)
+        r.raise_for_status()
+        voices = [
+            v["id"]
+            for v in r.json().get("data", [])
+            if isinstance(v, dict) and v.get("id")
+        ]
+    except Exception:  # noqa: BLE001
+        voices = []
+    if voices:
+        _VOICE_CACHE["voices"] = voices
+        _VOICE_CACHE["ts"] = now
+    return list(_VOICE_CACHE["voices"])
 
 
 # --- status ---------------------------------------------------------------
@@ -547,7 +667,8 @@ def build_app(
     server: EdgeLLMServer | None,
     *,
     stub: bool,
-    voice: str,
+    config: VoiceConfig | None = None,
+    sessions: SessionStore | None = None,
     status: VoiceStatus | None = None,
 ) -> Any:
     """Construct the FastAPI app.
@@ -564,6 +685,10 @@ def build_app(
             phase="stub" if stub else "idle",
             model=spec.id if spec else "",
         )
+    if config is None:
+        config = VoiceConfig(voice="stub" if stub else DEFAULT_VOICE)
+    if sessions is None:
+        sessions = SessionStore()
     app = FastAPI(title="bebop-voice", docs_url=None, redoc_url=None)
     # The app polls `GET /healthz` from a different origin (tauri://… or a dev
     # http://localhost); WebSockets aren't CORS-gated but the fetch is.
@@ -574,9 +699,51 @@ def build_app(
         allow_headers=["*"],
     )
 
+    def config_view() -> dict[str, Any]:
+        snap = config.snapshot()
+        snap["voices"] = known_voices(server)
+        return snap
+
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
         return JSONResponse(status.snapshot())
+
+    @app.get("/voices")
+    async def voices() -> JSONResponse:
+        return JSONResponse({"voices": known_voices(server), "default": config.voice})
+
+    @app.get("/config")
+    async def get_config() -> JSONResponse:
+        return JSONResponse(config_view())
+
+    @app.post("/config")
+    async def set_config(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - treat a bad body as empty
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        if isinstance(body.get("voice"), str):
+            voice = body["voice"]
+            available = known_voices(server)
+            if available and voice not in available:
+                return JSONResponse(
+                    {"error": f"unknown voice {voice!r} (have {available})"},
+                    status_code=400,
+                )
+            config.voice = voice
+        if isinstance(body.get("system_prompt"), str) and body["system_prompt"].strip():
+            config.system_prompt = body["system_prompt"].strip()
+        if "history_turns" in body:
+            config.history_turns = _clamp_turns(body["history_turns"])
+        if "keep_audio_history" in body:
+            config.keep_audio_history = bool(body["keep_audio_history"])
+        try:
+            config.save()
+        except OSError as exc:
+            return JSONResponse({"error": f"save failed: {exc}"}, status_code=500)
+        return JSONResponse(config_view())
 
     @app.websocket("/voice")
     async def voice_ws(ws: WebSocket) -> None:
@@ -592,9 +759,12 @@ def build_app(
             )
             await ws.close()
             return
-        history: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
+        params = ws.query_params
+        # `?session=<id>` keeps context across reconnects; anonymous
+        # connections get a fresh bucket each time.
+        session_key = params.get("session") or f"anon-{id(ws)}"
+        history = sessions.get(session_key)
+        requested_voice = params.get("voice")
         try:
             while True:
                 msg = await ws.receive()
@@ -602,7 +772,12 @@ def build_app(
                     break
                 if "text" in msg and msg["text"] is not None:
                     ctl = json.loads(msg["text"])
-                    if ctl.get("type") != "utterance_start":
+                    kind = ctl.get("type")
+                    if kind == "reset":
+                        history.clear()
+                        await ws.send_text(json.dumps({"type": "reset"}))
+                        continue
+                    if kind != "utterance_start":
                         continue
                     sample_rate = int(ctl.get("sample_rate", INPUT_RATE))
                     pcm = await _collect_pcm(ws)
@@ -610,7 +785,14 @@ def build_app(
                         await ws.send_text(json.dumps({"type": "done"}))
                         continue
                     await _run_turn(
-                        ws, history, pcm, sample_rate, server, stub=stub, voice=voice
+                        ws,
+                        history,
+                        pcm,
+                        sample_rate,
+                        server,
+                        stub=stub,
+                        config=config,
+                        voice_override=requested_voice,
                     )
         except WebSocketDisconnect:
             pass
@@ -653,8 +835,15 @@ async def _run_turn(
     server: EdgeLLMServer | None,
     *,
     stub: bool,
-    voice: str,
+    config: VoiceConfig,
+    voice_override: str | None = None,
 ) -> None:
+    voice = config.voice
+    if voice_override:
+        available = known_voices(server)
+        if not available or voice_override in available:
+            voice = voice_override
+
     wav_b64 = base64.b64encode(pcm16_to_wav(pcm, sample_rate)).decode("ascii")
     user_msg = {
         "role": "user",
@@ -662,7 +851,13 @@ async def _run_turn(
             {"type": "input_audio", "input_audio": {"data": wav_b64, "format": "wav"}}
         ],
     }
-    messages = [*history, user_msg]
+    # The system prompt comes from the live config (persona edits apply on the
+    # next turn); `history` holds only the turns after it.
+    messages = [
+        {"role": "system", "content": config.system_prompt},
+        *history,
+        user_msg,
+    ]
 
     await ws.send_text(
         json.dumps({"type": "audio_start", "sample_rate": OUTPUT_RATE, "format": "pcm16"})
@@ -678,14 +873,19 @@ async def _run_turn(
     await ws.send_text(json.dumps({"type": "audio_end"}))
     await ws.send_text(json.dumps({"type": "done"}))
 
-    # Bounded rolling history. Keep the user *audio* out of history (it is
-    # large); retain the assistant text so the model has conversational
-    # context without re-prefilling minutes of audio.
+    # Bound the rolling history. The assistant's text is always kept; the
+    # user's (large) audio is kept only when the operator opts in, so the model
+    # can re-hear prior turns at the cost of re-prefilling them.
     if assistant_text.strip():
         history.append({"role": "assistant", "content": assistant_text.strip()})
-    keep = DEFAULT_HISTORY_TURNS * 2
-    if len(history) > keep + 1:
-        history[:] = [history[0], *history[-(keep):]]
+    if config.keep_audio_history:
+        history.append(user_msg)
+    per_turn = 2 if config.keep_audio_history else 1
+    keep = max(0, config.history_turns) * per_turn
+    if keep == 0:
+        history.clear()
+    elif len(history) > keep:
+        del history[:-keep]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -693,6 +893,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--voice", default=DEFAULT_VOICE)
+    parser.add_argument("--system-prompt", default=SYSTEM_PROMPT)
+    parser.add_argument("--history-turns", type=int, default=DEFAULT_HISTORY_TURNS)
+    parser.add_argument(
+        "--keep-audio-history",
+        action="store_true",
+        help="keep the user's audio in the conversation context (more faithful, "
+        "but re-prefills it every turn)",
+    )
     parser.add_argument("--cache-dir", type=Path, default=EDGELLM_CACHE_DIR)
     parser.add_argument(
         "--stub",
@@ -732,6 +940,20 @@ def main(argv: list[str] | None = None) -> int:
         model=spec.id, precision=precision, model_downloaded=downloaded
     )
 
+    # Operator settings persist under the state dir; CLI flags seed a first run.
+    if CONFIG_PATH.exists():
+        config = VoiceConfig.load()
+    else:
+        config = VoiceConfig(
+            voice=args.voice,
+            system_prompt=args.system_prompt,
+            history_turns=_clamp_turns(args.history_turns),
+            keep_audio_history=args.keep_audio_history,
+        )
+    sessions = SessionStore()
+    _log(f"voice settings: voice={config.voice} turns={config.history_turns} "
+         f"keep_audio={config.keep_audio_history}")
+
     if args.check:
         print(
             json.dumps(
@@ -741,6 +963,7 @@ def main(argv: list[str] | None = None) -> int:
                     "precision": precision,
                     "downloaded": downloaded,
                     "stub": args.stub,
+                    **config.snapshot(),
                 },
                 indent=2,
             )
@@ -766,7 +989,9 @@ def main(argv: list[str] | None = None) -> int:
         # build progress while the engines compile.
         server.start_background()
 
-    app = build_app(server, stub=args.stub, voice=args.voice, status=status)
+    app = build_app(
+        server, stub=args.stub, config=config, sessions=sessions, status=status
+    )
     import uvicorn
 
     _log(f"listening on ws://{args.host}:{args.port}/voice")

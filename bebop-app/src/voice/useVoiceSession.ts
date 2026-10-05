@@ -29,6 +29,15 @@ export interface VoiceSession {
   error: string | null;
   startTalking: () => Promise<void>;
   stopTalking: () => void;
+  /** Clear the server-side conversation context for this session. */
+  resetContext: () => void;
+}
+
+export interface VoiceSessionOptions {
+  /** Speaker id (`aiden`/`chelsie`/`ethan`); empty uses the service default. */
+  voice?: string;
+  /** Stable id so conversation context survives reconnects. */
+  session?: string;
 }
 
 const CAPTURE_RATE = 16000;
@@ -101,7 +110,12 @@ function micErrorMessage(e: unknown): string {
   }
 }
 
-export function useVoiceSession(host: string, port = 9093): VoiceSession {
+export function useVoiceSession(
+  host: string,
+  port = 9093,
+  options: VoiceSessionOptions = {},
+): VoiceSession {
+  const { voice, session } = options;
   const [phase, setPhase] = useState<VoicePhase>("idle");
   const [transcript, setTranscript] = useState("");
   const [reply, setReply] = useState("");
@@ -197,7 +211,11 @@ export function useVoiceSession(host: string, port = 9093): VoiceSession {
       return Promise.resolve(existing);
     }
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(wsUrl(host, port, "/voice"));
+      const qs = new URLSearchParams();
+      if (voice) qs.set("voice", voice);
+      if (session) qs.set("session", session);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      const ws = new WebSocket(wsUrl(host, port, "/voice") + suffix);
       ws.binaryType = "arraybuffer";
       ws.onopen = () => resolve(ws);
       ws.onerror = () => reject(new Error(`voice socket error (${host}:${port})`));
@@ -207,7 +225,7 @@ export function useVoiceSession(host: string, port = 9093): VoiceSession {
       ws.onmessage = handleMessage;
       wsRef.current = ws;
     });
-  }, [host, port, handleMessage]);
+  }, [host, port, handleMessage, voice, session]);
 
   const stopCapture = useCallback(() => {
     capturingRef.current = false;
@@ -327,7 +345,23 @@ export function useVoiceSession(host: string, port = 9093): VoiceSession {
     stopCapture();
   }, [stopCapture]);
 
-  return { phase, transcript, reply, error, startTalking, stopTalking };
+  const resetContext = useCallback(() => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "reset" }));
+    }
+    setReply("");
+  }, []);
+
+  return {
+    phase,
+    transcript,
+    reply,
+    error,
+    startTalking,
+    stopTalking,
+    resetContext,
+  };
 }
 
 /// Status reported by `GET /healthz` on the voice service.
@@ -412,4 +446,85 @@ export function useVoiceHealth(
     };
   }, [host, port, enabled, pollMs]);
   return health;
+}
+
+/// Operator-tunable voice settings (`GET/POST /config` on the voice service).
+export interface VoiceConfigView {
+  voice: string;
+  system_prompt: string;
+  history_turns: number;
+  keep_audio_history: boolean;
+  voices: string[];
+}
+
+export interface VoiceConfigState {
+  config: VoiceConfigView | null;
+  error: string | null;
+  save: (partial: Partial<VoiceConfigView>) => Promise<void>;
+  reload: () => void;
+}
+
+function configFromJson(j: Record<string, unknown>): VoiceConfigView {
+  return {
+    voice: String(j.voice ?? ""),
+    system_prompt: String(j.system_prompt ?? ""),
+    history_turns: Number(j.history_turns ?? 0),
+    keep_audio_history: Boolean(j.keep_audio_history),
+    voices: Array.isArray(j.voices) ? (j.voices as string[]) : [],
+  };
+}
+
+export function useVoiceConfig(
+  host: string,
+  port = 9093,
+  enabled = true,
+): VoiceConfigState {
+  const [config, setConfig] = useState<VoiceConfigView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [nonce, setNonce] = useState(0);
+
+  useEffect(() => {
+    if (!enabled || !host) {
+      setConfig(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch(httpUrl(host, port, "/config"), {
+          cache: "no-store",
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!cancelled) {
+          setConfig(configFromJson((await res.json()) as Record<string, unknown>));
+          setError(null);
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [host, port, enabled, nonce]);
+
+  const save = useCallback(
+    async (partial: Partial<VoiceConfigView>) => {
+      const res = await fetch(httpUrl(host, port, "/config"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(partial),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        throw new Error(String(body.error ?? `HTTP ${res.status}`));
+      }
+      setConfig(configFromJson((await res.json()) as Record<string, unknown>));
+      setError(null);
+    },
+    [host, port],
+  );
+
+  const reload = useCallback(() => setNonce((n) => n + 1), []);
+  return { config, error, save, reload };
 }

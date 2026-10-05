@@ -20,7 +20,7 @@ def test_pcm16_to_wav_roundtrip():
 
 
 def test_stub_voice_turn_streams_text_and_audio():
-    app = voice_server.build_app(None, stub=True, voice="x")
+    app = voice_server.build_app(None, stub=True)
     client = TestClient(app)
     with client.websocket_connect("/voice") as ws:
         ws.send_text(json.dumps({"type": "utterance_start", "sample_rate": 16000}))
@@ -55,7 +55,7 @@ def test_stub_voice_turn_streams_text_and_audio():
 
 
 def test_stub_voice_empty_utterance_is_done():
-    app = voice_server.build_app(None, stub=True, voice="x")
+    app = voice_server.build_app(None, stub=True)
     client = TestClient(app)
     with client.websocket_connect("/voice") as ws:
         ws.send_text(json.dumps({"type": "utterance_start", "sample_rate": 16000}))
@@ -71,7 +71,7 @@ def test_healthz_reports_phase_and_detail():
         model="qwen3-omni-30b",
         model_downloaded=True,
     )
-    app = voice_server.build_app(None, stub=False, voice="x", status=status)
+    app = voice_server.build_app(None, stub=False, status=status)
     client = TestClient(app)
     body = client.get("/healthz").json()
     assert body["phase"] == "building"
@@ -83,13 +83,13 @@ def test_healthz_reports_phase_and_detail():
 
 def test_healthz_ready_is_ok():
     status = voice_server.VoiceStatus(phase="ready", model="qwen3-omni-30b")
-    app = voice_server.build_app(None, stub=False, voice="x", status=status)
+    app = voice_server.build_app(None, stub=False, status=status)
     assert TestClient(app).get("/healthz").json()["ok"] is True
 
 
 def test_voice_rejects_when_not_ready():
     status = voice_server.VoiceStatus(phase="error", detail="tokenizer conversion failed")
-    app = voice_server.build_app(None, stub=False, voice="x", status=status)
+    app = voice_server.build_app(None, stub=False, status=status)
     client = TestClient(app)
     with client.websocket_connect("/voice") as ws:
         msg = json.loads(ws.receive_text())
@@ -159,3 +159,84 @@ def test_resolve_model_dir_prefers_nvfp4(monkeypatch, tmp_path):
     quant.mkdir()
     (quant / "config.json").write_text("{}")
     assert voice_server.resolve_model_dir(spec) == quant
+
+
+class _FakeWS:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, object]] = []
+
+    async def send_text(self, s: str) -> None:
+        self.sent.append(("text", s))
+
+    async def send_bytes(self, b: bytes) -> None:
+        self.sent.append(("bytes", len(b)))
+
+
+def test_run_turn_history_text_only_by_default():
+    import asyncio
+
+    ws = _FakeWS()
+    history: list[dict] = []
+    cfg = voice_server.VoiceConfig(
+        system_prompt="sys", history_turns=2, keep_audio_history=False
+    )
+    asyncio.run(
+        voice_server._run_turn(
+            ws, history, b"\x00\x00" * 100, 16000, None, stub=True, config=cfg
+        )
+    )
+    assert any(m["role"] == "assistant" for m in history)
+    assert not any(m["role"] == "user" for m in history)
+    assert len(history) <= 2
+
+
+def test_run_turn_keeps_audio_when_enabled():
+    import asyncio
+
+    ws = _FakeWS()
+    history: list[dict] = []
+    cfg = voice_server.VoiceConfig(history_turns=2, keep_audio_history=True)
+    asyncio.run(
+        voice_server._run_turn(
+            ws, history, b"\x00\x00" * 100, 16000, None, stub=True, config=cfg
+        )
+    )
+    roles = [m["role"] for m in history]
+    assert "assistant" in roles and "user" in roles
+    assert len(history) <= 4
+
+
+def test_config_post_and_get(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_server, "CONFIG_PATH", tmp_path / "voice-config.json")
+    monkeypatch.setattr(
+        voice_server, "_VOICE_CACHE", {"ts": 0.0, "voices": ["aiden", "chelsie", "ethan"]}
+    )
+    app = voice_server.build_app(None, stub=True)
+    client = TestClient(app)
+    r = client.post(
+        "/config",
+        json={
+            "voice": "ethan",
+            "history_turns": 6,
+            "keep_audio_history": True,
+            "system_prompt": "be terse",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["voice"] == "ethan"
+    assert body["history_turns"] == 6
+    assert body["keep_audio_history"] is True
+    assert body["system_prompt"] == "be terse"
+    assert body["voices"] == ["aiden", "chelsie", "ethan"]
+    assert client.get("/config").json()["voice"] == "ethan"
+    assert client.post("/config", json={"voice": "nope"}).status_code == 400
+
+
+def test_config_clamps_history_turns(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_server, "CONFIG_PATH", tmp_path / "voice-config.json")
+    monkeypatch.setattr(voice_server, "_VOICE_CACHE", {"ts": 0.0, "voices": []})
+    app = voice_server.build_app(None, stub=True)
+    client = TestClient(app)
+    assert client.post("/config", json={"history_turns": 999}).json()["history_turns"] == 20
+    assert client.post("/config", json={"history_turns": -5}).json()["history_turns"] == 0
