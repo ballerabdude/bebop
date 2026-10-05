@@ -168,6 +168,33 @@ cost — it is local ViT encode + prefill latency per turn.
 Toggle with the Voice page's "Live context" switch (`VoiceConfig.tools_enabled`,
 `--no-tools`) to disable the images/status for pure chit-chat.
 
+## Cascade backend (multi-hop: ASR → brain → TTS)
+
+Selected by `VoiceConfig.backend` (`omni` default, or `cascade`; `--backend`).
+The cascade uses the **best model per stage**, each its own Edge-LLM OpenAI
+server (all served checkpoint-direct, engines cached):
+
+| Stage | Model | Endpoint |
+|---|---|---|
+| ASR | `Qwen/Qwen3-ASR-1.7B` | `POST /v1/audio/transcriptions` (`file`) |
+| Brain | `RadixArk/Qwen3.8-27B-NVFP4` (multimodal, 256k) | `POST /v1/chat/completions` |
+| TTS | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | `POST /v1/audio/speech` → 24 kHz PCM |
+
+Ports 8011/8012/8013. `CascadePipeline` supervises them (sequential engine
+builds to bound GPU memory); `_run_turn_cascade` does: transcribe → attach
+robot status + both camera frames → chat → synthesize, streaming a
+`{"type":"transcript","text":…}` event to the app for the ASR result.
+
+Because the brain is a text/VLM model, **native tool calling works** here (the
+omni server rejects tools combined with audio output).
+
+Two Edge-LLM 0.11.0 notes:
+- `tensorrt-edgellm-serve` forwards VLM-only `max_image_tokens*` kwargs to the
+  standalone TTS runtime, which rejects them. `bebop_vision.edge_serve` is a
+  drop-in launcher that strips them (the service uses it for the TTS stage).
+- TTS voices differ from omni voices (`aiden`, `dylan`, `eric`, `serena`, …);
+  `resolve_cascade_voice` maps the configured voice or falls back to `aiden`.
+
 ## Components and changes
 
 | Area | Files | State |

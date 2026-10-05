@@ -402,6 +402,30 @@ export function VoiceScreen({
                   every turn)
                 </label>
                 <Field
+                  label="Engine"
+                  hint="omni = one end-to-end model; cascade = ASR → Qwen3.8 brain → TTS. Restart the voice service to apply."
+                >
+                  <select
+                    className={INPUT_CLASS}
+                    value={cfg.config.backend}
+                    disabled={savingCfg === "backend"}
+                    onChange={(e) =>
+                      void saveCfg("backend", { backend: e.currentTarget.value })
+                    }
+                  >
+                    {(cfg.config.backends.length
+                      ? cfg.config.backends
+                      : ["omni", "cascade"]
+                    ).map((b) => (
+                      <option key={b} value={b}>
+                        {b === "cascade"
+                          ? "Cascade (best model per stage)"
+                          : "Omni (end-to-end)"}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field
                   label="Personality"
                   hint="System prompt. Applies on the next turn."
                 >

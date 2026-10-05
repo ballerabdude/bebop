@@ -184,6 +184,7 @@ export function useVoiceSession(
         delta?: string;
         message?: string;
         name?: string;
+        text?: string;
         sample_rate?: number;
       };
       try {
@@ -192,6 +193,10 @@ export function useVoiceSession(
         return;
       }
       switch (msg.type) {
+        case "transcript":
+          // Cascade backend: the ASR transcript of the user's utterance.
+          if (msg.text) setTranscript(msg.text);
+          break;
         case "text":
           if (msg.delta) setReply((r) => r + msg.delta);
           break;
@@ -470,6 +475,8 @@ export interface VoiceConfigView {
   history_turns: number;
   keep_audio_history: boolean;
   tools_enabled: boolean;
+  backend: string;
+  backends: string[];
   voices: string[];
 }
 
@@ -487,6 +494,8 @@ function configFromJson(j: Record<string, unknown>): VoiceConfigView {
     history_turns: Number(j.history_turns ?? 0),
     keep_audio_history: Boolean(j.keep_audio_history),
     tools_enabled: Boolean(j.tools_enabled),
+    backend: String(j.backend ?? "omni"),
+    backends: Array.isArray(j.backends) ? (j.backends as string[]) : ["omni", "cascade"],
     voices: Array.isArray(j.voices) ? (j.voices as string[]) : [],
   };
 }

@@ -192,6 +192,7 @@ class VoiceConfig:
     history_turns: int = DEFAULT_HISTORY_TURNS
     keep_audio_history: bool = False
     tools_enabled: bool = True
+    backend: str = "omni"  # "omni" (end-to-end) | "cascade" (ASR->brain->TTS)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "VoiceConfig":
@@ -211,6 +212,8 @@ class VoiceConfig:
             cfg.keep_audio_history = raw["keep_audio_history"]
         if isinstance(raw.get("tools_enabled"), bool):
             cfg.tools_enabled = raw["tools_enabled"]
+        if raw.get("backend") in ("omni", "cascade"):
+            cfg.backend = raw["backend"]
         return cfg
 
     def save(self, path: Path | None = None) -> None:
@@ -227,6 +230,7 @@ class VoiceConfig:
             "history_turns": self.history_turns,
             "keep_audio_history": self.keep_audio_history,
             "tools_enabled": self.tools_enabled,
+            "backend": self.backend,
         }
 
 
@@ -428,6 +432,376 @@ async def live_context(
             if views:
                 break
     return state, views
+
+
+# --- cascade (multi-hop: ASR -> VLM brain -> TTS) -------------------------
+#
+# Instead of one end-to-end omni model, the cascade uses the best model for
+# each stage, each as its own Edge-LLM OpenAI server:
+#   ASR   (Qwen3-ASR)              audio -> transcript      /v1/audio/transcriptions
+#   Brain (Qwen3.8-27B NVFP4 VLM)  text+image(+tools)->text /v1/chat/completions
+#   TTS   (Qwen3-TTS)              text -> speech           /v1/audio/speech
+#
+# A bonus: the brain is a text/VLM model, so native tool calling works (the
+# omni server rejects tools combined with audio output).
+
+CASCADE_ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
+CASCADE_BRAIN_MODEL = "RadixArk/Qwen3.8-27B-NVFP4"
+CASCADE_TTS_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+CASCADE_ASR_PORT = 8011
+CASCADE_BRAIN_PORT = 8012
+CASCADE_TTS_PORT = 8013
+
+_TTS_VOICE_CACHE: dict[str, Any] = {"ts": 0.0, "voices": []}
+
+
+class StageServer:
+    """Supervises one stage's `tensorrt-edgellm-serve` process."""
+
+    def __init__(
+        self,
+        name: str,
+        model: str,
+        cache_dir: Path,
+        port: int,
+        *,
+        capability: str,
+        extra_args: list[str] | None = None,
+        patched_launcher: bool = False,
+        status: "VoiceStatus | None" = None,
+    ) -> None:
+        self.name = name
+        self.model = model
+        self.cache_dir = Path(cache_dir)
+        self.port = port
+        self.capability = capability
+        self.extra_args = extra_args or []
+        self.patched_launcher = patched_launcher
+        self.status = status
+        self.proc: subprocess.Popen[str] | None = None
+        self.ready = False
+        self._lock = threading.Lock()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{EDGELLM_HOST}:{self.port}"
+
+    def health(self) -> dict[str, Any] | None:
+        import httpx
+
+        try:
+            r = httpx.get(f"{self.base_url}/health", timeout=2.0)
+            if r.status_code == 200:
+                return r.json()
+        except Exception:  # noqa: BLE001 - not up yet
+            pass
+        return None
+
+    def is_ready(self) -> bool:
+        h = self.health()
+        if not h:
+            return False
+        caps = h.get("capabilities", {})
+        return bool(caps.get(self.capability))
+
+    def _cmd(self) -> list[str]:
+        args = [
+            self.model,
+            "--cache-dir",
+            str(self.cache_dir),
+            "--port",
+            str(self.port),
+            "--host",
+            EDGELLM_HOST,
+            *self.extra_args,
+        ]
+        if self.patched_launcher:
+            return [sys.executable, "-m", "bebop_vision.edge_serve", *args]
+        return [resolve_edgellm_bin(), *args]
+
+    def start_and_wait(self) -> None:
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if self.is_ready():
+            self.ready = True
+            _log(f"{self.name}: already up on {self.base_url}")
+            return
+        cmd = self._cmd()
+        _log(f"{self.name}: starting ({self.model}) on port {self.port}")
+        env = os.environ.copy()
+        token = read_hf_token()
+        if token:
+            env["HF_TOKEN"] = token
+        # `-m bebop_vision.edge_serve` needs the package root importable.
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
+        with self._lock:
+            self.proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            proc = self.proc
+        atexit.register(self.stop)
+        threading.Thread(
+            target=self._read_output, name=f"{self.name}-logs", daemon=True
+        ).start()
+        deadline = time.monotonic() + BUILD_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if self.is_ready():
+                self.ready = True
+                _log(f"{self.name}: ready on {self.base_url}")
+                return
+            if proc.poll() is not None:
+                _log(f"{self.name}: exited rc={proc.returncode}")
+                return
+            time.sleep(2.0)
+        _log(f"{self.name}: timed out waiting for {self.capability}")
+
+    def _read_output(self) -> None:
+        proc = self.proc
+        if not proc or not proc.stdout:
+            return
+        for line in proc.stdout:
+            line = line.rstrip()
+            if not line or "httpx:" in line:
+                continue
+            _log(f"[{self.name}] {line}")
+
+    def stop(self) -> None:
+        with self._lock:
+            proc = self.proc
+        if proc is None or proc.poll() is not None:
+            return
+        _log(f"{self.name}: stopping")
+        proc.terminate()
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+class CascadePipeline:
+    """Owns the three stage servers and reports an aggregate status."""
+
+    def __init__(
+        self,
+        asr: StageServer,
+        brain: StageServer,
+        tts: StageServer,
+        status: "VoiceStatus",
+    ) -> None:
+        self.asr = asr
+        self.brain = brain
+        self.tts = tts
+        self.status = status
+
+    def start_background(self) -> None:
+        threading.Thread(
+            target=self._run, name="cascade-supervisor", daemon=True
+        ).start()
+
+    def _run(self) -> None:
+        self.status.set(phase="starting", detail="starting cascade")
+        # Sequential: one engine build at a time keeps GPU memory bounded.
+        for stage in (self.asr, self.tts, self.brain):
+            self.status.set(detail=f"starting {stage.name} ({stage.model})")
+            stage.start_and_wait()
+            if not stage.ready:
+                self.status.set(
+                    phase="error", detail=f"{stage.name} failed to start"
+                )
+                return
+        self.status.set(phase="ready", detail="cascade ready")
+        self.status.beat()
+
+    @property
+    def ready(self) -> bool:
+        return self.asr.ready and self.brain.ready and self.tts.ready
+
+    def stop(self) -> None:
+        for stage in (self.asr, self.brain, self.tts):
+            stage.stop()
+
+    def model_ids(self) -> list[str]:
+        return [self.asr.model, self.brain.model, self.tts.model]
+
+
+async def _cascade_transcribe(stage: StageServer, wav_bytes: bytes) -> str:
+    import httpx
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        r = await client.post(
+            f"{stage.base_url}/v1/audio/transcriptions",
+            files={"file": ("utterance.wav", wav_bytes, "audio/wav")},
+            data={"response_format": "json"},
+        )
+        r.raise_for_status()
+        return str(r.json().get("text", "")).strip()
+
+
+async def _cascade_chat(stage: StageServer, messages: list[dict[str, Any]]) -> str:
+    import httpx
+
+    async with httpx.AsyncClient(timeout=None) as client:
+        r = await client.post(
+            f"{stage.base_url}/v1/chat/completions",
+            json={"messages": messages, "max_tokens": 512, "temperature": 0.7},
+        )
+        r.raise_for_status()
+        msg = r.json()["choices"][0]["message"]
+        return str(msg.get("content") or "").strip()
+
+
+async def _cascade_speak(
+    stage: StageServer, text: str, voice: str
+) -> AsyncIterator[bytes]:
+    import httpx
+
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream(
+            "POST",
+            f"{stage.base_url}/v1/audio/speech",
+            json={"input": text, "voice": voice, "response_format": "pcm"},
+        ) as r:
+            if r.status_code != 200:
+                body = (await r.aread()).decode("utf-8", "replace")
+                raise RuntimeError(f"TTS HTTP {r.status_code}: {body[:200]}")
+            async for chunk in r.aiter_bytes():
+                if chunk:
+                    yield chunk
+
+
+def cascade_voices(tts: StageServer | None) -> list[str]:
+    """Available TTS speaker ids (cached)."""
+    if tts is None:
+        return list(_TTS_VOICE_CACHE["voices"])
+    import httpx
+
+    now = time.time()
+    if _TTS_VOICE_CACHE["voices"] and now - _TTS_VOICE_CACHE["ts"] < 120:
+        return list(_TTS_VOICE_CACHE["voices"])
+    try:
+        r = httpx.get(f"{tts.base_url}/v1/voices", timeout=5.0)
+        r.raise_for_status()
+        ids = [v["id"] for v in r.json().get("data", []) if v.get("id")]
+        if ids:
+            _TTS_VOICE_CACHE["voices"] = ids
+            _TTS_VOICE_CACHE["ts"] = now
+    except Exception:  # noqa: BLE001 - fall back to any cached/default
+        pass
+    return list(_TTS_VOICE_CACHE["voices"])
+
+
+def resolve_cascade_voice(tts: StageServer | None, requested: str) -> str:
+    voices = cascade_voices(tts)
+    if requested and (not voices or requested in voices):
+        return requested
+    if "aiden" in voices:
+        return "aiden"
+    return voices[0] if voices else "aiden"
+
+
+async def _run_turn_cascade(
+    ws: Any,
+    history: list[dict[str, Any]],
+    pcm: bytes,
+    sample_rate: int,
+    pipeline: CascadePipeline,
+    *,
+    stub: bool,
+    config: "VoiceConfig",
+    voice_override: str | None = None,
+) -> None:
+    if stub:
+        await ws.send_text(
+            json.dumps({"type": "audio_start", "sample_rate": OUTPUT_RATE, "format": "pcm16"})
+        )
+        async for ev in stream_stub([], config.voice):
+            if ev["type"] == "text":
+                await ws.send_text(json.dumps({"type": "text", "delta": ev["delta"]}))
+            elif ev["type"] == "audio":
+                await ws.send_bytes(ev["data"])
+        await ws.send_text(json.dumps({"type": "audio_end"}))
+        await ws.send_text(json.dumps({"type": "done"}))
+        return
+
+    wav_bytes = pcm16_to_wav(pcm, sample_rate)
+
+    # 1) ASR — audio to transcript.
+    transcript = await _cascade_transcribe(pipeline.asr, wav_bytes)
+    await ws.send_text(
+        json.dumps({"type": "transcript", "text": transcript, "final": True})
+    )
+
+    # 2) Brain — text + current camera views -> reply text.
+    state = ""
+    views: list[tuple[str, bytes]] = []
+    if config.tools_enabled:
+        state, views = await live_context()
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": transcript or "(no speech detected)"}
+    ]
+    for stream, jpeg in views:
+        label = "near" if "near" in stream else "far"
+        b64 = base64.b64encode(jpeg).decode("ascii")
+        content.append({"type": "text", "text": f"Camera ({label}):"})
+        content.append(
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+        )
+    system = config.system_prompt
+    if state:
+        system += f"\n\nCurrent robot status: {state}."
+    if views:
+        system += (
+            "\n\nYou can see through two cameras (near and far); the user's "
+            "message includes current views. Use them to answer questions about "
+            "what is around you."
+        )
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        *history,
+        {"role": "user", "content": content},
+    ]
+    reply = await _cascade_chat(pipeline.brain, messages)
+
+    # 3) TTS — reply text to speech.
+    voice = resolve_cascade_voice(pipeline.tts, voice_override or config.voice)
+    await ws.send_text(
+        json.dumps({"type": "text", "delta": reply})
+    )
+    await ws.send_text(
+        json.dumps({"type": "audio_start", "sample_rate": OUTPUT_RATE, "format": "pcm16"})
+    )
+    async for chunk in _cascade_speak(pipeline.tts, reply, voice):
+        await ws.send_bytes(chunk)
+    await ws.send_text(json.dumps({"type": "audio_end"}))
+    await ws.send_text(json.dumps({"type": "done"}))
+
+    if reply:
+        history.append({"role": "assistant", "content": reply})
+    if config.keep_audio_history:
+        history.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": base64.b64encode(wav_bytes).decode("ascii"),
+                            "format": "wav",
+                        },
+                    }
+                ],
+            }
+        )
+    per_turn = 2 if config.keep_audio_history else 1
+    keep = max(0, config.history_turns) * per_turn
+    if keep == 0:
+        history.clear()
+    elif len(history) > keep:
+        del history[:-keep]
 
 
 # --- status ---------------------------------------------------------------
@@ -859,6 +1233,7 @@ def build_app(
     config: VoiceConfig | None = None,
     sessions: SessionStore | None = None,
     status: VoiceStatus | None = None,
+    pipeline: CascadePipeline | None = None,
 ) -> Any:
     """Construct the FastAPI app.
 
@@ -888,9 +1263,15 @@ def build_app(
         allow_headers=["*"],
     )
 
+    def voices_list() -> list[str]:
+        if pipeline is not None:
+            return cascade_voices(pipeline.tts)
+        return known_voices(server)
+
     def config_view() -> dict[str, Any]:
         snap = config.snapshot()
-        snap["voices"] = known_voices(server)
+        snap["voices"] = voices_list()
+        snap["backends"] = ["omni", "cascade"]
         return snap
 
     @app.get("/healthz")
@@ -899,7 +1280,7 @@ def build_app(
 
     @app.get("/voices")
     async def voices() -> JSONResponse:
-        return JSONResponse({"voices": known_voices(server), "default": config.voice})
+        return JSONResponse({"voices": voices_list(), "default": config.voice})
 
     @app.get("/config")
     async def get_config() -> JSONResponse:
@@ -915,7 +1296,7 @@ def build_app(
             body = {}
         if isinstance(body.get("voice"), str):
             voice = body["voice"]
-            available = known_voices(server)
+            available = voices_list()
             if available and voice not in available:
                 return JSONResponse(
                     {"error": f"unknown voice {voice!r} (have {available})"},
@@ -930,6 +1311,8 @@ def build_app(
             config.keep_audio_history = bool(body["keep_audio_history"])
         if "tools_enabled" in body:
             config.tools_enabled = bool(body["tools_enabled"])
+        if body.get("backend") in ("omni", "cascade"):
+            config.backend = body["backend"]
         try:
             config.save()
         except OSError as exc:
@@ -975,16 +1358,28 @@ def build_app(
                     if not pcm:
                         await ws.send_text(json.dumps({"type": "done"}))
                         continue
-                    await _run_turn(
-                        ws,
-                        history,
-                        pcm,
-                        sample_rate,
-                        server,
-                        stub=stub,
-                        config=config,
-                        voice_override=requested_voice,
-                    )
+                    if pipeline is not None:
+                        await _run_turn_cascade(
+                            ws,
+                            history,
+                            pcm,
+                            sample_rate,
+                            pipeline,
+                            stub=stub,
+                            config=config,
+                            voice_override=requested_voice,
+                        )
+                    else:
+                        await _run_turn(
+                            ws,
+                            history,
+                            pcm,
+                            sample_rate,
+                            server,
+                            stub=stub,
+                            config=config,
+                            voice_override=requested_voice,
+                        )
         except WebSocketDisconnect:
             pass
         except Exception as exc:  # noqa: BLE001 - report and close cleanly
@@ -1153,7 +1548,66 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="extra argument passed through to tensorrt-edgellm-serve",
     )
+    parser.add_argument(
+        "--backend",
+        choices=["omni", "cascade"],
+        default="",
+        help="voice backend: 'omni' (end-to-end Qwen3-Omni) or 'cascade' "
+        "(ASR -> VLM brain -> TTS). Defaults to the saved config.",
+    )
     args = parser.parse_args(argv)
+
+    # Cascade backend: three stage servers, best model per stage.
+    _saved = VoiceConfig.load() if CONFIG_PATH.exists() else None
+    backend = args.backend or (_saved.backend if _saved else "omni")
+    if backend == "cascade":
+        if _saved is not None:
+            config = _saved
+        else:
+            config = VoiceConfig(
+                voice=args.voice,
+                system_prompt=args.system_prompt,
+                history_turns=_clamp_turns(args.history_turns),
+                keep_audio_history=args.keep_audio_history,
+                tools_enabled=not args.no_tools,
+            )
+        config.backend = "cascade"
+        status = VoiceStatus(model="cascade", precision="mixed", model_downloaded=True)
+        asr = StageServer(
+            "asr", CASCADE_ASR_MODEL, args.cache_dir / "asr", CASCADE_ASR_PORT,
+            capability="transcription", status=status,
+        )
+        tts = StageServer(
+            "tts", CASCADE_TTS_MODEL, args.cache_dir / "tts", CASCADE_TTS_PORT,
+            capability="speech", patched_launcher=True, status=status,
+        )
+        brain = StageServer(
+            "brain", CASCADE_BRAIN_MODEL, args.cache_dir / "brain", CASCADE_BRAIN_PORT,
+            capability="chat",
+            extra_args=[
+                "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml",
+                "--max-input-len", "8192", "--max-kv-cache-capacity", "16384",
+            ],
+            status=status,
+        )
+        pipeline = CascadePipeline(asr, brain, tts, status)
+        sessions = SessionStore()
+        _log(f"voice backend: cascade ({', '.join(pipeline.model_ids())})")
+        if args.stub:
+            status.set(phase="stub", detail="stub mode (no models)")
+        else:
+            pipeline.start_background()
+        app = build_app(
+            None, stub=args.stub, config=config, sessions=sessions,
+            status=status, pipeline=pipeline,
+        )
+        import uvicorn
+
+        _log(f"listening (cascade) on ws://{args.host}:{args.port}/voice")
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        if not args.stub:
+            pipeline.stop()
+        return 0
 
     spec = voice_spec()
     if spec is None:

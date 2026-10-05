@@ -294,6 +294,63 @@ def test_run_turn_injects_live_context(monkeypatch):
     assert any(m["role"] == "assistant" and "red" in m["content"] for m in history)
 
 
+def test_resolve_cascade_voice(monkeypatch):
+    monkeypatch.setattr(voice_server, "cascade_voices", lambda tts: ["dylan", "serena"])
+    assert voice_server.resolve_cascade_voice(None, "dylan") == "dylan"
+    assert voice_server.resolve_cascade_voice(None, "ethan") == "dylan"
+    assert voice_server.resolve_cascade_voice(None, "") == "dylan"
+
+
+def test_run_turn_cascade(monkeypatch):
+    import asyncio
+
+    ws = _FakeWS()
+    history: list[dict] = []
+    cfg = voice_server.VoiceConfig(voice="aiden", tools_enabled=False)
+    asr = voice_server.StageServer("asr", "m", Path("/tmp"), 1, capability="transcription")
+    brain = voice_server.StageServer("brain", "m", Path("/tmp"), 2, capability="chat")
+    tts = voice_server.StageServer("tts", "m", Path("/tmp"), 3, capability="speech")
+    pipe = voice_server.CascadePipeline(asr, brain, tts, voice_server.VoiceStatus(phase="ready"))
+
+    async def fake_transcribe(stage, wav):
+        return "hello robot"
+
+    seen: dict = {}
+
+    async def fake_chat(stage, messages):
+        seen["messages"] = messages
+        return "Hi there!"
+
+    async def fake_speak(stage, text, voice):
+        for chunk in (b"\x00\x01", b"\x02\x03"):
+            yield chunk
+
+    monkeypatch.setattr(voice_server, "_cascade_transcribe", fake_transcribe)
+    monkeypatch.setattr(voice_server, "_cascade_chat", fake_chat)
+    monkeypatch.setattr(voice_server, "_cascade_speak", fake_speak)
+
+    asyncio.run(
+        voice_server._run_turn_cascade(
+            ws, history, b"\x00\x00" * 100, 16000, pipe, stub=False, config=cfg
+        )
+    )
+    kinds = []
+    text_deltas = []
+    for kind, payload in ws.sent:
+        if kind == "text":
+            ev = json.loads(payload)
+            kinds.append(ev.get("type"))
+            if ev.get("type") == "text":
+                text_deltas.append(ev["delta"])
+    audio_bytes = sum(n for kind, n in ws.sent if kind == "bytes")
+    assert "transcript" in kinds
+    assert any("Hi there" in d for d in text_deltas)
+    assert audio_bytes == 4
+    assert history and history[0]["role"] == "assistant" and history[0]["content"] == "Hi there!"
+    # the transcript is what the brain sees as the user turn
+    assert seen["messages"][-1]["content"][0]["text"] == "hello robot"
+
+
 def test_run_turn_skips_context_when_disabled(monkeypatch):
     import asyncio
 

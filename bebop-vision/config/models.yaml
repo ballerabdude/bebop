@@ -87,3 +87,45 @@ models:
     revision: main
     gated: false
     bytes: 63000000000
+
+  # --- Voice cascade (speech-to-speech, best model per stage) ---------------
+  # Multi-hop: ASR (audio -> text) -> VLM brain (text+image -> text, native
+  # tool calling) -> TTS (text -> speech). Each stage is its own Edge-LLM
+  # server (see docs/voice.md). Same `snapshot` provisioning as above.
+  - id: qwen3-asr-1.7b
+    name: Qwen3-ASR 1.7B
+    description: Speech recognition (audio -> text) for the voice cascade.
+    kind: hf
+    purpose: asr
+    repo: Qwen/Qwen3-ASR-1.7B
+    download: snapshot
+    dest: qwen3-asr-1.7b
+    revision: main
+    gated: false
+    bytes: 4000000000
+
+  - id: qwen3-tts-1.7b
+    name: Qwen3-TTS 1.7B (CustomVoice)
+    description: Natural speech synthesis (text -> speech) for the cascade.
+    kind: hf
+    purpose: tts
+    repo: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+    download: snapshot
+    dest: qwen3-tts-1.7b
+    revision: main
+    gated: false
+    bytes: 4000000000
+
+  # Brain: latest Qwen3.8 27B (multimodal, 256k context), pre-quantized NVFP4
+  # so the Edge-LLM builder needs no separate quantize pass.
+  - id: qwen3.8-27b-nvfp4
+    name: Qwen3.8 27B (NVFP4)
+    description: Multimodal reasoning brain for the voice cascade (text+image).
+    kind: hf
+    purpose: brain
+    repo: RadixArk/Qwen3.8-27B-NVFP4
+    download: snapshot
+    dest: qwen3.8-27b-nvfp4
+    revision: main
+    gated: false
+    bytes: 18000000000
