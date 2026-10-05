@@ -132,55 +132,41 @@ Turn-based v1 (push-to-talk or client VAD), JSON control frames + binary audio:
 - robot → app: `{"type":"text","delta":"..."}` (transcript/response), then
   `{"type":"audio_start","sample_rate":24000,"format":"pcm16"}`, binary PCM16
   frames, `{"type":"audio_end"}`, `{"type":"done"}`.
-- robot → app: `{"type":"tool","name":"..."}` when the model invokes a tool
-  (the app shows "checking…"); the model's spoken answer follows.
 - `{"type":"error","message":"..."}` on failure.
 - `GET /healthz` for readiness.
 
 Full-duplex (barge-in) is a later step (needs a full-duplex model such as
 NemotronLabs VoiceChat-11B, or careful VAD + cancellation).
 
-### Tool calling (agentic, read-only)
+### Live context (single pass, no tools)
 
-The model server runs with `--enable-auto-tool-choice --tool-call-parser
-qwen3_xml`, so the `qwen3_xml` parser turns the model's XML tool calls into
-OpenAI `tool_calls`.
+Earlier revisions used a `describe_scene` tool. That forced a two-phase turn
+because `/v1/chat/completions` **rejects `tools` combined with audio output**
+(`400 unsupported_feature`). It also tempted the model to re-emit the tool-call
+XML instead of answering. Both are gone.
 
-> **Constraint:** `/v1/chat/completions` rejects `tools` combined with audio
-> output (`400 unsupported_feature: tools cannot be combined with audio
-> output`). The gateway therefore runs **two phases** per turn when tools are
-> enabled (`_run_turn`):
->
-> 1. **Plan (text-only, `modalities:["text"]`, tools offered).** Loop the model
->    up to `MAX_TOOL_ROUNDS`: execute any tool calls against the robot's
->    services, append `assistant(tool_calls)` + `tool` messages, repeat.
-> 2. **Speak (`modalities:["text","audio"]`, no tools).** Make one final pass
->    over the same conversation to produce the spoken answer streamed to the app.
->
-> The speaking pass must **not** replay the `tool_calls` / `tool` messages: with
-> no tool schemas in the request the model re-emits the tool-call XML
-> (`<tool_call>…</tool_call>`) instead of answering. Phase B rebuilds a clean
-> message list and injects the results as text into the system prompt
-> ("You just used your sensors. Here is what you found: …").
->
-> This costs an extra text pass per turn vs. the tools-off path. The Voice
-> page's "Tool use" switch (`VoiceConfig.tools_enabled`, `--no-tools`) turns it
-> off for pure chit-chat.
+Now every voice turn is a **single model call**: the user's audio plus the
+robot's current **near + far camera frames**, with a one-line robot status in
+the system prompt. `_run_turn` gathers the context before calling the model —
+`live_context()`:
 
-The allowlist (`TOOL_SCHEMAS` / `execute_tool`) is deliberately read-only in
-v1 — no motion:
-
-- `get_robot_state` — opens `ws://127.0.0.1:9090/ws`, sends `GetSnapshot`,
+- `robot_state_text()` opens `ws://127.0.0.1:9090/ws`, sends `GetSnapshot`, and
   formats mode / E-STOP / armed wheels / battery / odom as JSON.
-- `describe_scene {question?}` — fetches **both** cameras (`color_near` and
-  `color_far`) from `:9092/snapshot`, sends them as two labelled images to the
-  model, and returns the answer to `question` (or a general scene description
-  when omitted), as the tool result. If both cameras are down, it asks the
-  firmware to enable vision (`SetVisionEnabled(true)`) and retries for up to
-  ~30 s, so "what do you see?" turns its own eyes on.
+- `_snapshot_views()` fetches **both** cameras (`color_near` and `color_far`)
+  from `:9092/snapshot`. If they are down, it asks the firmware to enable
+  vision (`SetVisionEnabled(true)`) and waits (bounded) for the first frames.
 
-Unknown tool names are refused, never executed. Motion tools (heat/e-stop-aware)
-are a later phase and must go through a deterministic safety layer.
+The frames are attached to the user turn as two labelled `image_url` parts; the
+status is appended to the system prompt. Frames are **not** kept in history
+(only the current turn's views are sent).
+
+**Token budget** (measured against the live server): snapshots are 1280×800 and
+cost **~480 tokens each (~960 for both)**; audio adds ~80; the engine is built
+`i4096-b1-kv8192` (max ~4,096 input tokens), so keep history small. No money
+cost — it is local ViT encode + prefill latency per turn.
+
+Toggle with the Voice page's "Live context" switch (`VoiceConfig.tools_enabled`,
+`--no-tools`) to disable the images/status for pure chit-chat.
 
 ## Components and changes
 
@@ -191,7 +177,7 @@ are a later phase and must go through a deterministic safety layer.
 | Firmware control | `jetson-agent/bebop-proto/proto/bebop_runtime.proto`, `firmware/bebop-linux/src/voice.rs`, `src/server/{ws,handlers,telemetry}.rs`, `src/main.rs` | ✅ deployed to robot |
 | App control + page | `bebop-app/src/proto/*`, `runtime/{types,wsTransport,index}.ts`, `screens/VoiceScreen.tsx`, `voice/useVoiceSession.ts`, `screens/DashboardScreen.tsx`, `screens/MotorBenchScreen.tsx`, `App.tsx` | ✅ done (push-to-talk) |
 | Voice service | `bebop-vision/bebop_vision/voice_server.py`, `deploy/systemd/bebop-voice.service`, `tests/test_voice_server.py` | ✅ deployed to robot |
-| Agentic tools (read-only) | `bebop-vision/bebop_vision/voice_server.py` (`TOOL_SCHEMAS`, `execute_tool`, `_run_turn` loop), `bebop-app/src/{screens/VoiceScreen.tsx,voice/useVoiceSession.ts}` | ✅ done (`get_robot_state`, `describe_scene` w/ both cameras) |
+| Live context (single pass) | `bebop-vision/bebop_vision/voice_server.py` (`live_context`, `robot_state_text`, `_snapshot_views`, `_run_turn`), `bebop-app/src/{screens/VoiceScreen.tsx,voice/useVoiceSession.ts}` | ✅ done (both camera frames + status every turn) |
 | Install | `scripts/install-jetson.sh` (`--setup-voice`), `requirements-voice.txt` | ✅ venv bootstrapped on robot |
 | Bring-up | engine build, latency tuning, NVFP4 | ⏳ model downloading; engine build next |
 

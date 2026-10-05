@@ -289,58 +289,18 @@ def known_voices(server: "EdgeLLMServer | None") -> list[str]:
     return list(_VOICE_CACHE["voices"])
 
 
-# --- tools (Phase 1: read-only) -------------------------------------------
+# --- live context (cameras + robot status) --------------------------------
 #
-# The model proposes a tool call; this orchestrator validates the name against
-# the allowlist below and executes it against the existing robot services. No
-# motion tools yet — `get_robot_state` and `describe_scene` are read-only.
+# Every voice turn is a single model call: the user's audio plus the robot's
+# current near/far camera frames, with a one-line robot status in the system
+# prompt. No tool calls — the model server rejects tools combined with audio
+# output, and attaching the frames directly is simpler and avoids the
+# tool-call round-trip (and its bugs) entirely.
 
 ROBOT_WS_URL = "ws://127.0.0.1:9090/ws"
 VISION_SNAPSHOT_BASE = "http://127.0.0.1:9092/snapshot?stream="
-# The rig has two cameras (near + far); describe_scene sends both so the model
-# can reason about the whole scene, not just one view.
+# The rig has two cameras (near + far); both are attached to every turn.
 VISION_STREAMS = ("color_near", "color_far")
-MAX_TOOL_ROUNDS = 4
-
-TOOL_SCHEMAS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_robot_state",
-            "description": (
-                "Get the robot's current status: operating mode, whether E-STOP "
-                "is latched, which wheels are armed, battery charge, and the "
-                "odometry pose."
-            ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "describe_scene",
-            "description": (
-                "Look through the robot's two cameras (near and far) and "
-                "answer a question about what they see, or describe the scene. "
-                "Put what you want to know in `question`."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": (
-                            "What to look for, e.g. 'what color shirt is the "
-                            "person wearing?'. Use 'describe the scene' for a "
-                            "general description."
-                        ),
-                    }
-                },
-                "required": [],
-            },
-        },
-    },
-]
 
 _MODE_NAMES = {0: "UNSPECIFIED", 1: "IDLE", 2: "DIAL_IN", 3: "RUN_POLICY"}
 
@@ -370,7 +330,8 @@ def _format_snapshot(snapshot: Any) -> str:
     return json.dumps(state)
 
 
-async def tool_get_robot_state() -> str:
+async def robot_state_text() -> str:
+    """One-line robot status for the system prompt; '' when unavailable."""
     import websockets
     from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as rt
 
@@ -381,7 +342,7 @@ async def tool_get_robot_state() -> str:
             msg = rt.ClientRuntimeMessage(request_id=1)
             msg.get_snapshot.SetInParent()
             await ws.send(msg.SerializeToString())
-            deadline = time.monotonic() + 6.0
+            deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
                 data = await asyncio.wait_for(
                     ws.recv(), timeout=max(0.2, deadline - time.monotonic())
@@ -390,9 +351,9 @@ async def tool_get_robot_state() -> str:
                 env.ParseFromString(data)
                 if env.request_id == 1 and env.WhichOneof("payload") == "snapshot":
                     return _format_snapshot(env.snapshot)
-    except Exception as exc:  # noqa: BLE001 - returned to the model as text
-        return f"robot state unavailable: {exc}"
-    return "robot state unavailable: no snapshot"
+    except Exception as exc:  # noqa: BLE001 - status is best-effort
+        _log(f"robot state unavailable: {exc}")
+    return ""
 
 
 async def _fetch_snapshot(stream: str, attempts: int = 2) -> bytes | None:
@@ -415,8 +376,8 @@ async def _fetch_snapshot(stream: str, attempts: int = 2) -> bytes | None:
 async def _enable_vision() -> bool:
     """Ask the firmware to start the vision service (mirrors the app's toggle).
 
-    Best-effort: used when `describe_scene` finds both cameras down. The
-    resulting state is reflected in telemetry, so the app's vision card follows.
+    Best-effort; the resulting state is reflected in telemetry, so the app's
+    vision card follows. Returns True if the request was sent.
     """
     import websockets
     from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as rt
@@ -447,93 +408,26 @@ async def _snapshot_views() -> list[tuple[str, bytes]]:
     return views
 
 
-async def tool_describe_scene(server: "EdgeLLMServer", question: str = "") -> str:
-    import httpx
+async def live_context(
+    status: Any | None = None,
+) -> tuple[str, list[tuple[str, bytes]]]:
+    """Gather the per-turn context: robot status + current camera frames.
 
-    # Grab both cameras; keep whichever frames arrive.
+    If the cameras are down, ask the firmware to start vision and wait a
+    bounded time for the first frames. Returns `("", [])` style best-effort
+    values rather than raising.
+    """
+    state = await robot_state_text()
     views = await _snapshot_views()
-    if not views:
-        # Vision may simply be off — turn it on and give the service time to
-        # open the cameras (it takes ~15 s to start serving snapshots).
-        if await _enable_vision():
-            for _ in range(20):
-                await asyncio.sleep(1.5)
-                views = await _snapshot_views()
-                if views:
-                    break
-    if not views:
-        return (
-            "the robot's cameras are not available right now, so I can't see "
-            "anything"
-        )
-
-    content: list[dict[str, Any]] = []
-    for stream, jpeg in views:
-        label = "near" if "near" in stream else "far"
-        b64 = base64.b64encode(jpeg).decode("ascii")
-        content.append({"type": "text", "text": f"Camera ({label}):"})
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-            }
-        )
-    ask = question.strip() or (
-        "Describe the scene in one or two short spoken sentences, noting "
-        "anything close or far."
-    )
-    content.append({"type": "text", "text": ask})
-    payload = {
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are the eyes of a small robot with a near camera and a "
-                    "far camera. Answer the question using what the cameras "
-                    "show, in one or two short spoken sentences. If the answer "
-                    "is not visible, say so."
-                ),
-            },
-            {"role": "user", "content": content},
-        ],
-        "max_tokens": 160,
-        "temperature": 0.2,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            r = await client.post(
-                f"{server.base_url}/v1/chat/completions", json=payload
-            )
-            r.raise_for_status()
-            return str(r.json()["choices"][0]["message"]["content"]).strip()
-    except Exception as exc:  # noqa: BLE001
-        return f"could not analyse the images: {exc}"
-
-
-async def _tool_question(arguments: str) -> str:
-    """Pull the optional `question` string out of a tool-call's arguments."""
-    try:
-        args = json.loads(arguments) if arguments.strip() else {}
-    except json.JSONDecodeError:
-        return ""
-    if isinstance(args, dict):
-        value = args.get("question")
-        if isinstance(value, str):
-            return value
-    return ""
-
-
-async def execute_tool(
-    name: str, arguments: str, server: "EdgeLLMServer | None"
-) -> str:
-    """Allowlisted tool dispatch. Unknown names are refused, not executed."""
-    if name == "get_robot_state":
-        return await tool_get_robot_state()
-    if name == "describe_scene":
-        if server is None:
-            return "the model is not available"
-        return await tool_describe_scene(server, await _tool_question(arguments))
-    return f"unknown tool {name!r}"
+    if not views and await _enable_vision():
+        if status is not None:
+            status.set(detail="waiting for cameras to start")
+        for _ in range(10):
+            await asyncio.sleep(1.5)
+            views = await _snapshot_views()
+            if views:
+                break
+    return state, views
 
 
 # --- status ---------------------------------------------------------------
@@ -1141,108 +1035,54 @@ async def _run_turn(
         if not available or voice_override in available:
             voice = voice_override
 
+    # Live context: current camera frames + robot status, attached to the same
+    # request as the user's audio so every turn is a single model call.
+    state = ""
+    views: list[tuple[str, bytes]] = []
+    if config.tools_enabled and not stub:
+        state, views = await live_context()
+
     wav_b64 = base64.b64encode(pcm16_to_wav(pcm, sample_rate)).decode("ascii")
-    user_msg = {
-        "role": "user",
-        "content": [
-            {"type": "input_audio", "input_audio": {"data": wav_b64, "format": "wav"}}
-        ],
-    }
+    content: list[dict[str, Any]] = []
+    if views:
+        content.append({"type": "text", "text": "Your current camera views:"})
+        for stream, jpeg in views:
+            label = "near" if "near" in stream else "far"
+            b64 = base64.b64encode(jpeg).decode("ascii")
+            content.append({"type": "text", "text": f"Camera ({label}):"})
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                }
+            )
+    content.append(
+        {"type": "input_audio", "input_audio": {"data": wav_b64, "format": "wav"}}
+    )
+    user_msg = {"role": "user", "content": content}
+
     # The system prompt comes from the live config (persona edits apply on the
     # next turn); `history` holds only the turns after it.
+    system = config.system_prompt
+    if state:
+        system += f"\n\nCurrent robot status: {state}."
+    if views:
+        system += (
+            "\n\nYou can see through two cameras (near and far); the user's "
+            "message includes your current views. Use them to answer questions "
+            "about what is around you."
+        )
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": config.system_prompt},
+        {"role": "system", "content": system},
         *history,
         user_msg,
     ]
-    tools = TOOL_SCHEMAS if (config.tools_enabled and not stub) else None
 
     await ws.send_text(
         json.dumps({"type": "audio_start", "sample_rate": OUTPUT_RATE, "format": "pcm16"})
     )
-
-    async def plan(stream: AsyncIterator[dict[str, Any]]) -> dict[int, dict[str, str]]:
-        """Consume a text-only tool round; return accumulated tool calls."""
-        calls: dict[int, dict[str, str]] = {}
-        async for ev in stream:
-            if ev["type"] != "tool_call":
-                continue
-            slot = calls.setdefault(
-                ev["index"], {"id": "", "name": "", "arguments": ""}
-            )
-            if ev["id"]:
-                slot["id"] = ev["id"]
-            if ev["name"]:
-                slot["name"] = ev["name"]
-            if ev["arguments"]:
-                slot["arguments"] += ev["arguments"]
-        return calls
-
-    # Phase A — plan and execute tools, text-only (the model server rejects
-    # `tools` combined with audio output).
-    tool_results: list[tuple[str, str]] = []
-    if tools:
-        for _round in range(MAX_TOOL_ROUNDS):
-            calls = await plan(
-                _stream(server, messages, voice, tools, stub, audio=False)
-            )
-            if not calls:
-                break
-            ordered = [calls[i] for i in sorted(calls)]
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": c["id"] or f"call_{i}",
-                            "type": "function",
-                            "function": {
-                                "name": c["name"],
-                                "arguments": c["arguments"] or "{}",
-                            },
-                        }
-                        for i, c in enumerate(ordered)
-                    ],
-                }
-            )
-            for i, call in enumerate(ordered):
-                call_id = call["id"] or f"call_{i}"
-                _log(f"tool call: {call['name']}({call['arguments'][:120]})")
-                await ws.send_text(json.dumps({"type": "tool", "name": call["name"]}))
-                try:
-                    result = await execute_tool(call["name"], call["arguments"], server)
-                except Exception as exc:  # noqa: BLE001
-                    result = f"tool failed: {exc}"
-                tool_results.append((call["name"], result))
-                messages.append(
-                    {"role": "tool", "tool_call_id": call_id, "content": result}
-                )
-
-    # Phase B — speak the answer (audio on, no tools). Do NOT replay the
-    # assistant `tool_calls` / `tool` messages here: with tool schemas absent
-    # the model tends to re-emit the tool-call XML instead of answering. Feed
-    # the results as plain text context instead.
-    speak_messages = messages
-    if tool_results:
-        notes = "\n".join(f"- {name}: {result}" for name, result in tool_results)
-        speak_messages = [
-            {
-                "role": "system",
-                "content": (
-                    f"{config.system_prompt}\n\n"
-                    "You just used your sensors. Here is what you found:\n"
-                    f"{notes}\n\n"
-                    "Now answer the user's last message aloud, using these "
-                    "results. Do not mention tools or call any."
-                ),
-            },
-            *history,
-            user_msg,
-        ]
-
     final_text = ""
-    async for ev in _stream(server, speak_messages, voice, None, stub, audio=True):
+    async for ev in _stream(server, messages, voice, None, stub, audio=True):
         if ev["type"] == "text":
             final_text += ev["delta"]
             await ws.send_text(json.dumps({"type": "text", "delta": ev["delta"]}))
@@ -1254,11 +1094,22 @@ async def _run_turn(
 
     # Bound the rolling history. The assistant's text is always kept; the
     # user's (large) audio is kept only when the operator opts in, so the model
-    # can re-hear prior turns at the cost of re-prefilling them.
+    # can re-hear prior turns at the cost of re-prefilling them. Camera frames
+    # are never kept — only the current turn's views are attached.
     if final_text.strip():
         history.append({"role": "assistant", "content": final_text.strip()})
     if config.keep_audio_history:
-        history.append(user_msg)
+        history.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": wav_b64, "format": "wav"},
+                    }
+                ],
+            }
+        )
     per_turn = 2 if config.keep_audio_history else 1
     keep = max(0, config.history_turns) * per_turn
     if keep == 0:
@@ -1283,7 +1134,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-tools",
         action="store_true",
-        help="disable agentic tool calling (get_robot_state / describe_scene)",
+        help="disable live context (camera views + robot status in each turn)",
     )
     parser.add_argument("--cache-dir", type=Path, default=EDGELLM_CACHE_DIR)
     parser.add_argument(

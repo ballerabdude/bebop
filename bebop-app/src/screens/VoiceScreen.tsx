@@ -398,8 +398,8 @@ export function VoiceScreen({
                       })
                     }
                   />
-                  Tool use (let it check its own status and look through the
-                  cameras)
+                  Live context (attach the camera views and robot status to
+                  every turn)
                 </label>
                 <Field
                   label="Personality"

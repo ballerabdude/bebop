@@ -253,195 +253,69 @@ def test_format_snapshot_json():
     assert out["vision_running"] is True
 
 
-def test_tool_loop_executes_then_speaks(monkeypatch):
+def test_run_turn_injects_live_context(monkeypatch):
     import asyncio
 
     ws = _FakeWS()
     history: list[dict] = []
     cfg = voice_server.VoiceConfig(history_turns=2, tools_enabled=True)
 
-    seen_speak: list[dict] = []
+    async def fake_context(status=None):
+        return '{"battery_pct": 88, "mode": "IDLE"}', [
+            ("color_near", b"\xff\xd8near"),
+            ("color_far", b"\xff\xd8far"),
+        ]
+
+    seen: list[dict] = []
 
     async def fake_stream(server, messages, voice, tools, stub, *, audio=True):
-        if audio:
-            seen_speak[:] = list(messages)
-            yield {"type": "text", "delta": "Battery is at 88 percent."}
-        else:
-            yield {
-                "type": "tool_call",
-                "index": 0,
-                "id": "c1",
-                "name": "get_robot_state",
-                "arguments": "{}",
-            }
+        seen[:] = list(messages)
+        yield {"type": "text", "delta": "The person is wearing red."}
 
-    called: dict[str, str] = {}
-
-    async def fake_execute(name, arguments, server):
-        called["name"] = name
-        return '{"battery_pct": 88}'
-
+    monkeypatch.setattr(voice_server, "live_context", fake_context)
     monkeypatch.setattr(voice_server, "_stream", fake_stream)
-    monkeypatch.setattr(voice_server, "execute_tool", fake_execute)
 
     asyncio.run(
         voice_server._run_turn(
             ws, history, b"\x00\x00" * 100, 16000, None, stub=False, config=cfg
         )
     )
-    assert called.get("name") == "get_robot_state"
-    assert any(
-        m["role"] == "assistant" and "Battery" in str(m.get("content")) for m in history
+    # status + camera instructions go in the system prompt
+    assert seen[0]["role"] == "system"
+    assert "battery_pct" in seen[0]["content"]
+    assert "cameras" in seen[0]["content"]
+    # both camera frames + the audio ride the user turn
+    user = seen[-1]
+    assert user["role"] == "user"
+    kinds = [p["type"] for p in user["content"]]
+    assert kinds.count("image_url") == 2
+    assert "input_audio" in kinds
+    assert all(m.get("role") != "tool" for m in seen)
+    assert any(m["role"] == "assistant" and "red" in m["content"] for m in history)
+
+
+def test_run_turn_skips_context_when_disabled(monkeypatch):
+    import asyncio
+
+    called = {"n": 0}
+
+    async def fake_context(status=None):
+        called["n"] += 1
+        return "", []
+
+    async def fake_stream(server, messages, voice, tools, stub, *, audio=True):
+        yield {"type": "text", "delta": "hi"}
+
+    monkeypatch.setattr(voice_server, "live_context", fake_context)
+    monkeypatch.setattr(voice_server, "_stream", fake_stream)
+
+    cfg = voice_server.VoiceConfig(tools_enabled=False)
+    asyncio.run(
+        voice_server._run_turn(
+            _FakeWS(), [], b"\x00\x00" * 100, 16000, None, stub=False, config=cfg
+        )
     )
-    assert any('"type": "tool"' in s for _, s in ws.sent)
-    # The speaking pass must not replay tool_calls/tool messages (the model
-    # re-emits the XML if it sees them); the result is injected as text.
-    assert all(m.get("role") != "tool" for m in seen_speak)
-    assert "get_robot_state" in seen_speak[0]["content"]
-
-
-def test_unknown_tool_is_refused():
-    import asyncio
-
-    result = asyncio.run(voice_server.execute_tool("rm_rf", "{}", None))
-    assert "unknown tool" in result
-
-
-def test_describe_scene_uses_both_cameras(monkeypatch):
-    import asyncio
-    import httpx
-
-    fetched: list[str] = []
-
-    async def fake_fetch(stream):
-        fetched.append(stream)
-        return b"\xff\xd8jpeg-bytes"
-
-    captured: dict = {}
-
-    class FakeResponse:
-        status_code = 200
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"choices": [{"message": {"content": "A chair and a doorway."}}]}
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
-        async def post(self, url, json):
-            captured["json"] = json
-            return FakeResponse()
-
-    class FakeServer:
-        base_url = "http://127.0.0.1:8000"
-
-    monkeypatch.setattr(voice_server, "_fetch_snapshot", fake_fetch)
-    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
-
-    out = asyncio.run(
-        voice_server.tool_describe_scene(FakeServer(), "what color is the shirt?")
-    )
-    assert fetched == ["color_near", "color_far"]
-    parts = captured["json"]["messages"][1]["content"]
-    images = [p for p in parts if p.get("type") == "image_url"]
-    assert len(images) == 2
-    # the caller's question is the prompt shown to the vision model
-    assert parts[-1]["text"] == "what color is the shirt?"
-    assert "chair" in out
-
-
-def test_tool_question_parsing():
-    import asyncio
-
-    parse = voice_server._tool_question
-    assert asyncio.run(parse('{"question": "what color?"}')) == "what color?"
-    assert asyncio.run(parse("")) == ""
-    assert asyncio.run(parse("not json")) == ""
-    assert asyncio.run(parse('{"other": 1}')) == ""
-
-
-def test_describe_scene_errors_when_both_cameras_fail(monkeypatch):
-    import asyncio
-
-    async def fake_fetch(stream):
-        return None
-
-    async def fake_enable():
-        return False
-
-    monkeypatch.setattr(voice_server, "_fetch_snapshot", fake_fetch)
-    monkeypatch.setattr(voice_server, "_enable_vision", fake_enable)
-
-    class FakeServer:
-        base_url = "http://127.0.0.1:8000"
-
-    out = asyncio.run(voice_server.tool_describe_scene(FakeServer()))
-    assert "cameras are not available" in out
-
-
-def test_describe_scene_enables_vision_and_retries(monkeypatch):
-    import asyncio
-    import httpx
-
-    state = {"on": False}
-
-    async def fake_fetch(stream):
-        return b"\xff\xd8jpeg" if state["on"] else None
-
-    async def fake_enable():
-        state["on"] = True
-        return True
-
-    async def no_sleep(_seconds):
-        return None
-
-    captured: dict = {}
-
-    class FakeResponse:
-        status_code = 200
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"choices": [{"message": {"content": "A window and a desk."}}]}
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
-        async def post(self, url, json):
-            captured["json"] = json
-            return FakeResponse()
-
-    class FakeServer:
-        base_url = "http://127.0.0.1:8000"
-
-    monkeypatch.setattr(voice_server, "_fetch_snapshot", fake_fetch)
-    monkeypatch.setattr(voice_server, "_enable_vision", fake_enable)
-    monkeypatch.setattr(voice_server.asyncio, "sleep", no_sleep)
-    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
-
-    out = asyncio.run(voice_server.tool_describe_scene(FakeServer()))
-    assert state["on"] is True
-    assert "window" in out
-    assert len(captured["json"]["messages"][1]["content"]) >= 2
+    assert called["n"] == 0
 
 
 def test_config_tools_toggle(tmp_path, monkeypatch):
