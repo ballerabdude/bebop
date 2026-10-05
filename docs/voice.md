@@ -132,11 +132,36 @@ Turn-based v1 (push-to-talk or client VAD), JSON control frames + binary audio:
 - robot → app: `{"type":"text","delta":"..."}` (transcript/response), then
   `{"type":"audio_start","sample_rate":24000,"format":"pcm16"}`, binary PCM16
   frames, `{"type":"audio_end"}`, `{"type":"done"}`.
+- robot → app: `{"type":"tool","name":"..."}` when the model invokes a tool
+  (the app shows "checking…"); the model's spoken answer follows.
 - `{"type":"error","message":"..."}` on failure.
 - `GET /healthz` for readiness.
 
 Full-duplex (barge-in) is a later step (needs a full-duplex model such as
 NemotronLabs VoiceChat-11B, or careful VAD + cancellation).
+
+### Tool calling (agentic, read-only)
+
+The model server runs with `--enable-auto-tool-choice --tool-call-parser
+qwen3_xml`, so the `qwen3_xml` parser turns the model's XML tool calls into
+OpenAI `tool_calls`. The gateway runs the round-trip loop in `_run_turn`:
+stream the turn → if it produced tool calls, execute them against the robot's
+existing services, append `assistant(tool_calls)` + `tool` messages, and call
+the model again for the final spoken answer (bounded to `MAX_TOOL_ROUNDS`).
+
+The allowlist (`TOOL_SCHEMAS` / `execute_tool`) is deliberately read-only in
+v1 — no motion:
+
+- `get_robot_state` — opens `ws://127.0.0.1:9090/ws`, sends `GetSnapshot`,
+  formats mode / E-STOP / armed wheels / battery / odom as JSON.
+- `describe_scene` — fetches **both** cameras (`color_near` and `color_far`)
+  from `:9092/snapshot`, sends them as two labelled images to the model, and
+  returns the description as the tool result.
+
+Toggle with the Voice page's "Tool use" switch (`VoiceConfig.tools_enabled`,
+`--no-tools`). Unknown tool names are refused, never executed. Motion tools
+(heating/e-stop-aware) are a later phase and must go through a deterministic
+safety layer.
 
 ## Components and changes
 
@@ -147,6 +172,7 @@ NemotronLabs VoiceChat-11B, or careful VAD + cancellation).
 | Firmware control | `jetson-agent/bebop-proto/proto/bebop_runtime.proto`, `firmware/bebop-linux/src/voice.rs`, `src/server/{ws,handlers,telemetry}.rs`, `src/main.rs` | ✅ deployed to robot |
 | App control + page | `bebop-app/src/proto/*`, `runtime/{types,wsTransport,index}.ts`, `screens/VoiceScreen.tsx`, `voice/useVoiceSession.ts`, `screens/DashboardScreen.tsx`, `screens/MotorBenchScreen.tsx`, `App.tsx` | ✅ done (push-to-talk) |
 | Voice service | `bebop-vision/bebop_vision/voice_server.py`, `deploy/systemd/bebop-voice.service`, `tests/test_voice_server.py` | ✅ deployed to robot |
+| Agentic tools (read-only) | `bebop-vision/bebop_vision/voice_server.py` (`TOOL_SCHEMAS`, `execute_tool`, `_run_turn` loop), `bebop-app/src/{screens/VoiceScreen.tsx,voice/useVoiceSession.ts}` | ✅ done (`get_robot_state`, `describe_scene` w/ both cameras) |
 | Install | `scripts/install-jetson.sh` (`--setup-voice`), `requirements-voice.txt` | ✅ venv bootstrapped on robot |
 | Bring-up | engine build, latency tuning, NVFP4 | ⏳ model downloading; engine build next |
 

@@ -240,3 +240,134 @@ def test_config_clamps_history_turns(tmp_path, monkeypatch):
     client = TestClient(app)
     assert client.post("/config", json={"history_turns": 999}).json()["history_turns"] == 20
     assert client.post("/config", json={"history_turns": -5}).json()["history_turns"] == 0
+
+
+def test_format_snapshot_json():
+    from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as rt
+
+    snap = rt.Snapshot(mode=1, estop_latched=False)
+    snap.vision.running = True
+    out = json.loads(voice_server._format_snapshot(snap))
+    assert out["mode"] == "IDLE"
+    assert out["estop"] is False
+    assert out["vision_running"] is True
+
+
+def test_tool_loop_executes_then_speaks(monkeypatch):
+    import asyncio
+
+    ws = _FakeWS()
+    history: list[dict] = []
+    cfg = voice_server.VoiceConfig(history_turns=2, tools_enabled=True)
+
+    async def fake_stream(server, messages, voice, tools, stub):
+        if any(m.get("role") == "tool" for m in messages):
+            yield {"type": "text", "delta": "Battery is at 88 percent."}
+        else:
+            yield {
+                "type": "tool_call",
+                "index": 0,
+                "id": "c1",
+                "name": "get_robot_state",
+                "arguments": "{}",
+            }
+
+    called: dict[str, str] = {}
+
+    async def fake_execute(name, arguments, server):
+        called["name"] = name
+        return '{"battery_pct": 88}'
+
+    monkeypatch.setattr(voice_server, "_stream", fake_stream)
+    monkeypatch.setattr(voice_server, "execute_tool", fake_execute)
+
+    asyncio.run(
+        voice_server._run_turn(
+            ws, history, b"\x00\x00" * 100, 16000, None, stub=False, config=cfg
+        )
+    )
+    assert called.get("name") == "get_robot_state"
+    assert any(
+        m["role"] == "assistant" and "Battery" in str(m.get("content")) for m in history
+    )
+    assert any('"type": "tool"' in s for _, s in ws.sent)
+
+
+def test_unknown_tool_is_refused():
+    import asyncio
+
+    result = asyncio.run(voice_server.execute_tool("rm_rf", "{}", None))
+    assert "unknown tool" in result
+
+
+def test_describe_scene_uses_both_cameras(monkeypatch):
+    import asyncio
+    import httpx
+
+    fetched: list[str] = []
+
+    async def fake_fetch(stream):
+        fetched.append(stream)
+        return b"\xff\xd8jpeg-bytes"
+
+    captured: dict = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "A chair and a doorway."}}]}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json):
+            captured["json"] = json
+            return FakeResponse()
+
+    class FakeServer:
+        base_url = "http://127.0.0.1:8000"
+
+    monkeypatch.setattr(voice_server, "_fetch_snapshot", fake_fetch)
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    out = asyncio.run(voice_server.tool_describe_scene(FakeServer()))
+    assert fetched == ["color_near", "color_far"]
+    parts = captured["json"]["messages"][1]["content"]
+    images = [p for p in parts if p.get("type") == "image_url"]
+    assert len(images) == 2
+    assert "chair" in out
+
+
+def test_describe_scene_errors_when_both_cameras_fail(monkeypatch):
+    import asyncio
+
+    async def fake_fetch(stream):
+        return None
+
+    monkeypatch.setattr(voice_server, "_fetch_snapshot", fake_fetch)
+
+    class FakeServer:
+        base_url = "http://127.0.0.1:8000"
+
+    out = asyncio.run(voice_server.tool_describe_scene(FakeServer()))
+    assert "camera unavailable" in out
+
+
+def test_config_tools_toggle(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_server, "CONFIG_PATH", tmp_path / "c.json")
+    monkeypatch.setattr(voice_server, "_VOICE_CACHE", {"ts": 0.0, "voices": []})
+    app = voice_server.build_app(None, stub=True)
+    client = TestClient(app)
+    assert client.get("/config").json()["tools_enabled"] is True
+    assert client.post("/config", json={"tools_enabled": False}).json()["tools_enabled"] is False

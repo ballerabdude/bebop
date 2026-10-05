@@ -255,7 +255,9 @@ export function VoiceScreen({
               {session.phase === "listening"
                 ? "Listening…"
                 : session.phase === "thinking"
-                  ? "Thinking…"
+                  ? session.lastTool
+                    ? `Checking (${session.lastTool})…`
+                    : "Thinking…"
                   : session.phase === "speaking"
                     ? "Speaking…"
                     : session.phase === "connecting"
@@ -384,6 +386,20 @@ export function VoiceScreen({
                     }
                   />
                   Remember my voice (keeps your audio in context; slower)
+                </label>
+                <label className="flex items-center gap-2 text-[13px] text-text-dim">
+                  <input
+                    type="checkbox"
+                    checked={cfg.config.tools_enabled}
+                    disabled={savingCfg === "tools"}
+                    onChange={(e) =>
+                      void saveCfg("tools", {
+                        tools_enabled: e.currentTarget.checked,
+                      })
+                    }
+                  />
+                  Tool use (let it check its own status and look through the
+                  cameras)
                 </label>
                 <Field
                   label="Personality"

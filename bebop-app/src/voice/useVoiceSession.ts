@@ -27,6 +27,8 @@ export interface VoiceSession {
   /** The robot's reply text (streamed). */
   reply: string;
   error: string | null;
+  /** Name of the tool the robot is currently running, if any. */
+  lastTool: string | null;
   startTalking: () => Promise<void>;
   stopTalking: () => void;
   /** Clear the server-side conversation context for this session. */
@@ -120,6 +122,7 @@ export function useVoiceSession(
   const [transcript, setTranscript] = useState("");
   const [reply, setReply] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [lastTool, setLastTool] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -176,7 +179,13 @@ export function useVoiceSession(
         return;
       }
       if (typeof ev.data !== "string") return;
-      let msg: { type?: string; delta?: string; message?: string; sample_rate?: number };
+      let msg: {
+        type?: string;
+        delta?: string;
+        message?: string;
+        name?: string;
+        sample_rate?: number;
+      };
       try {
         msg = JSON.parse(ev.data);
       } catch {
@@ -191,8 +200,12 @@ export function useVoiceSession(
           break;
         case "audio_end":
           break;
+        case "tool":
+          setLastTool(msg.name ?? "tool");
+          break;
         case "done":
           setPhase("idle");
+          setLastTool(null);
           break;
         case "error":
           setError(msg.message ?? "voice error");
@@ -256,6 +269,7 @@ export function useVoiceSession(
     setError(null);
     setReply("");
     setTranscript("");
+    setLastTool(null);
     setPhase("connecting");
     // Must run inside the user gesture for iOS to unlock playback.
     ensurePlayback();
@@ -358,6 +372,7 @@ export function useVoiceSession(
     transcript,
     reply,
     error,
+    lastTool,
     startTalking,
     stopTalking,
     resetContext,
@@ -454,6 +469,7 @@ export interface VoiceConfigView {
   system_prompt: string;
   history_turns: number;
   keep_audio_history: boolean;
+  tools_enabled: boolean;
   voices: string[];
 }
 
@@ -470,6 +486,7 @@ function configFromJson(j: Record<string, unknown>): VoiceConfigView {
     system_prompt: String(j.system_prompt ?? ""),
     history_turns: Number(j.history_turns ?? 0),
     keep_audio_history: Boolean(j.keep_audio_history),
+    tools_enabled: Boolean(j.tools_enabled),
     voices: Array.isArray(j.voices) ? (j.voices as string[]) : [],
   };
 }
