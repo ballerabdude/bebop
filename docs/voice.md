@@ -172,11 +172,12 @@ v1 — no motion:
 
 - `get_robot_state` — opens `ws://127.0.0.1:9090/ws`, sends `GetSnapshot`,
   formats mode / E-STOP / armed wheels / battery / odom as JSON.
-- `describe_scene` — fetches **both** cameras (`color_near` and `color_far`)
-  from `:9092/snapshot`, sends them as two labelled images to the model, and
-  returns the description as the tool result. If both cameras are down, it
-  asks the firmware to enable vision (`SetVisionEnabled(true)`) and retries for
-  up to ~25 s, so "what do you see?" turns its own eyes on.
+- `describe_scene {question?}` — fetches **both** cameras (`color_near` and
+  `color_far`) from `:9092/snapshot`, sends them as two labelled images to the
+  model, and returns the answer to `question` (or a general scene description
+  when omitted), as the tool result. If both cameras are down, it asks the
+  firmware to enable vision (`SetVisionEnabled(true)`) and retries for up to
+  ~30 s, so "what do you see?" turns its own eyes on.
 
 Unknown tool names are refused, never executed. Motion tools (heat/e-stop-aware)
 are a later phase and must go through a deterministic safety layer.

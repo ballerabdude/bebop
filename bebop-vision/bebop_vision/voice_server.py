@@ -321,10 +321,23 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "name": "describe_scene",
             "description": (
                 "Look through the robot's two cameras (near and far) and "
-                "describe the scene around it. Use when asked what is in "
-                "front of you or to look around."
+                "answer a question about what they see, or describe the scene. "
+                "Put what you want to know in `question`."
             ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": (
+                            "What to look for, e.g. 'what color shirt is the "
+                            "person wearing?'. Use 'describe the scene' for a "
+                            "general description."
+                        ),
+                    }
+                },
+                "required": [],
+            },
         },
     },
 ]
@@ -382,17 +395,21 @@ async def tool_get_robot_state() -> str:
     return "robot state unavailable: no snapshot"
 
 
-async def _fetch_snapshot(stream: str) -> bytes | None:
+async def _fetch_snapshot(stream: str, attempts: int = 2) -> bytes | None:
     import httpx
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{VISION_SNAPSHOT_BASE}{stream}")
-            r.raise_for_status()
-            return r.content
-    except Exception as exc:  # noqa: BLE001 - reported to the model below
-        _log(f"snapshot {stream} unavailable: {exc}")
-        return None
+    last: Exception | None = None
+    for _ in range(attempts):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(f"{VISION_SNAPSHOT_BASE}{stream}")
+                r.raise_for_status()
+                return r.content
+        except Exception as exc:  # noqa: BLE001 - retried, then reported
+            last = exc
+            await asyncio.sleep(0.3)
+    _log(f"snapshot {stream} unavailable: {last}")
+    return None
 
 
 async def _enable_vision() -> bool:
@@ -420,25 +437,27 @@ async def _enable_vision() -> bool:
 
 
 async def _snapshot_views() -> list[tuple[str, bytes]]:
-    frames = await asyncio.gather(*(_fetch_snapshot(s) for s in VISION_STREAMS))
-    return [
-        (stream, jpeg)
-        for stream, jpeg in zip(VISION_STREAMS, frames)
-        if jpeg is not None
-    ]
+    # Sequential: the snapshot endpoint is only lightly loaded, and serializing
+    # avoids piling concurrent grabs onto the vision process.
+    views: list[tuple[str, bytes]] = []
+    for stream in VISION_STREAMS:
+        jpeg = await _fetch_snapshot(stream)
+        if jpeg is not None:
+            views.append((stream, jpeg))
+    return views
 
 
-async def tool_describe_scene(server: "EdgeLLMServer") -> str:
+async def tool_describe_scene(server: "EdgeLLMServer", question: str = "") -> str:
     import httpx
 
-    # Grab both cameras concurrently; keep whichever frames arrive.
+    # Grab both cameras; keep whichever frames arrive.
     views = await _snapshot_views()
     if not views:
         # Vision may simply be off — turn it on and give the service time to
         # open the cameras (it takes ~15 s to start serving snapshots).
         if await _enable_vision():
-            for _ in range(25):
-                await asyncio.sleep(1.0)
+            for _ in range(20):
+                await asyncio.sleep(1.5)
                 views = await _snapshot_views()
                 if views:
                     break
@@ -459,28 +478,25 @@ async def tool_describe_scene(server: "EdgeLLMServer") -> str:
                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
             }
         )
-    content.append(
-        {
-            "type": "text",
-            "text": (
-                "What do you see in each camera? Describe the scene in one or "
-                "two short spoken sentences, noting anything close or far."
-            ),
-        }
+    ask = question.strip() or (
+        "Describe the scene in one or two short spoken sentences, noting "
+        "anything close or far."
     )
+    content.append({"type": "text", "text": ask})
     payload = {
         "messages": [
             {
                 "role": "system",
                 "content": (
                     "You are the eyes of a small robot with a near camera and a "
-                    "far camera. In one or two short sentences, describe what "
-                    "the cameras see."
+                    "far camera. Answer the question using what the cameras "
+                    "show, in one or two short spoken sentences. If the answer "
+                    "is not visible, say so."
                 ),
             },
             {"role": "user", "content": content},
         ],
-        "max_tokens": 128,
+        "max_tokens": 160,
         "temperature": 0.2,
     }
     try:
@@ -494,6 +510,19 @@ async def tool_describe_scene(server: "EdgeLLMServer") -> str:
         return f"could not analyse the images: {exc}"
 
 
+async def _tool_question(arguments: str) -> str:
+    """Pull the optional `question` string out of a tool-call's arguments."""
+    try:
+        args = json.loads(arguments) if arguments.strip() else {}
+    except json.JSONDecodeError:
+        return ""
+    if isinstance(args, dict):
+        value = args.get("question")
+        if isinstance(value, str):
+            return value
+    return ""
+
+
 async def execute_tool(
     name: str, arguments: str, server: "EdgeLLMServer | None"
 ) -> str:
@@ -503,7 +532,7 @@ async def execute_tool(
     if name == "describe_scene":
         if server is None:
             return "the model is not available"
-        return await tool_describe_scene(server)
+        return await tool_describe_scene(server, await _tool_question(arguments))
     return f"unknown tool {name!r}"
 
 

@@ -348,12 +348,26 @@ def test_describe_scene_uses_both_cameras(monkeypatch):
     monkeypatch.setattr(voice_server, "_fetch_snapshot", fake_fetch)
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
-    out = asyncio.run(voice_server.tool_describe_scene(FakeServer()))
+    out = asyncio.run(
+        voice_server.tool_describe_scene(FakeServer(), "what color is the shirt?")
+    )
     assert fetched == ["color_near", "color_far"]
     parts = captured["json"]["messages"][1]["content"]
     images = [p for p in parts if p.get("type") == "image_url"]
     assert len(images) == 2
+    # the caller's question is the prompt shown to the vision model
+    assert parts[-1]["text"] == "what color is the shirt?"
     assert "chair" in out
+
+
+def test_tool_question_parsing():
+    import asyncio
+
+    parse = voice_server._tool_question
+    assert asyncio.run(parse('{"question": "what color?"}')) == "what color?"
+    assert asyncio.run(parse("")) == ""
+    assert asyncio.run(parse("not json")) == ""
+    assert asyncio.run(parse('{"other": 1}')) == ""
 
 
 def test_describe_scene_errors_when_both_cameras_fail(monkeypatch):
