@@ -260,8 +260,11 @@ def test_tool_loop_executes_then_speaks(monkeypatch):
     history: list[dict] = []
     cfg = voice_server.VoiceConfig(history_turns=2, tools_enabled=True)
 
+    seen_speak: list[dict] = []
+
     async def fake_stream(server, messages, voice, tools, stub, *, audio=True):
-        if any(m.get("role") == "tool" for m in messages):
+        if audio:
+            seen_speak[:] = list(messages)
             yield {"type": "text", "delta": "Battery is at 88 percent."}
         else:
             yield {
@@ -291,6 +294,10 @@ def test_tool_loop_executes_then_speaks(monkeypatch):
         m["role"] == "assistant" and "Battery" in str(m.get("content")) for m in history
     )
     assert any('"type": "tool"' in s for _, s in ws.sent)
+    # The speaking pass must not replay tool_calls/tool messages (the model
+    # re-emits the XML if it sees them); the result is injected as text.
+    assert all(m.get("role") != "tool" for m in seen_speak)
+    assert "get_robot_state" in seen_speak[0]["content"]
 
 
 def test_unknown_tool_is_refused():

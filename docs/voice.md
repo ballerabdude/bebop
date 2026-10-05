@@ -157,9 +157,15 @@ OpenAI `tool_calls`.
 > 2. **Speak (`modalities:["text","audio"]`, no tools).** Make one final pass
 >    over the same conversation to produce the spoken answer streamed to the app.
 >
-> This costs an extra text pass (and re-prefills the user's audio) per turn vs.
-> the tools-off path. The Voice page's "Tool use" switch (`VoiceConfig.
-> tools_enabled`, `--no-tools`) turns it off for pure chit-chat.
+> The speaking pass must **not** replay the `tool_calls` / `tool` messages: with
+> no tool schemas in the request the model re-emits the tool-call XML
+> (`<tool_call>…</tool_call>`) instead of answering. Phase B rebuilds a clean
+> message list and injects the results as text into the system prompt
+> ("You just used your sensors. Here is what you found: …").
+>
+> This costs an extra text pass per turn vs. the tools-off path. The Voice
+> page's "Tool use" switch (`VoiceConfig.tools_enabled`, `--no-tools`) turns it
+> off for pure chit-chat.
 
 The allowlist (`TOOL_SCHEMAS` / `execute_tool`) is deliberately read-only in
 v1 — no motion:

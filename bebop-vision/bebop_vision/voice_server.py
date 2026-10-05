@@ -1150,7 +1150,8 @@ async def _run_turn(
         return calls
 
     # Phase A — plan and execute tools, text-only (the model server rejects
-    # `tools` combined with audio output). Phase B below speaks the answer.
+    # `tools` combined with audio output).
+    tool_results: list[tuple[str, str]] = []
     if tools:
         for _round in range(MAX_TOOL_ROUNDS):
             calls = await plan(
@@ -1184,13 +1185,35 @@ async def _run_turn(
                     result = await execute_tool(call["name"], call["arguments"], server)
                 except Exception as exc:  # noqa: BLE001
                     result = f"tool failed: {exc}"
+                tool_results.append((call["name"], result))
                 messages.append(
                     {"role": "tool", "tool_call_id": call_id, "content": result}
                 )
 
-    # Phase B — speak the final answer (audio on, no tools).
+    # Phase B — speak the answer (audio on, no tools). Do NOT replay the
+    # assistant `tool_calls` / `tool` messages here: with tool schemas absent
+    # the model tends to re-emit the tool-call XML instead of answering. Feed
+    # the results as plain text context instead.
+    speak_messages = messages
+    if tool_results:
+        notes = "\n".join(f"- {name}: {result}" for name, result in tool_results)
+        speak_messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"{config.system_prompt}\n\n"
+                    "You just used your sensors. Here is what you found:\n"
+                    f"{notes}\n\n"
+                    "Now answer the user's last message aloud, using these "
+                    "results. Do not mention tools or call any."
+                ),
+            },
+            *history,
+            user_msg,
+        ]
+
     final_text = ""
-    async for ev in _stream(server, messages, voice, None, stub, audio=True):
+    async for ev in _stream(server, speak_messages, voice, None, stub, audio=True):
         if ev["type"] == "text":
             final_text += ev["delta"]
             await ws.send_text(json.dumps({"type": "text", "delta": ev["delta"]}))
