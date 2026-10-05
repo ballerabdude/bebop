@@ -395,18 +395,58 @@ async def _fetch_snapshot(stream: str) -> bytes | None:
         return None
 
 
-async def tool_describe_scene(server: "EdgeLLMServer") -> str:
-    import httpx
+async def _enable_vision() -> bool:
+    """Ask the firmware to start the vision service (mirrors the app's toggle).
 
-    # Grab both cameras concurrently; keep whichever frames arrive.
+    Best-effort: used when `describe_scene` finds both cameras down. The
+    resulting state is reflected in telemetry, so the app's vision card follows.
+    """
+    import websockets
+    from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as rt
+
+    try:
+        async with websockets.connect(
+            ROBOT_WS_URL, open_timeout=5, close_timeout=2, max_size=None
+        ) as ws:
+            msg = rt.ClientRuntimeMessage(request_id=1)
+            msg.set_vision_enabled.enabled = True
+            await ws.send(msg.SerializeToString())
+            await asyncio.sleep(0.3)
+        _log("cameras down; asked firmware to enable vision")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _log(f"could not enable vision: {exc}")
+        return False
+
+
+async def _snapshot_views() -> list[tuple[str, bytes]]:
     frames = await asyncio.gather(*(_fetch_snapshot(s) for s in VISION_STREAMS))
-    views = [
+    return [
         (stream, jpeg)
         for stream, jpeg in zip(VISION_STREAMS, frames)
         if jpeg is not None
     ]
+
+
+async def tool_describe_scene(server: "EdgeLLMServer") -> str:
+    import httpx
+
+    # Grab both cameras concurrently; keep whichever frames arrive.
+    views = await _snapshot_views()
     if not views:
-        return "camera unavailable: could not read either camera"
+        # Vision may simply be off — turn it on and give the service time to
+        # open the cameras (it takes ~15 s to start serving snapshots).
+        if await _enable_vision():
+            for _ in range(25):
+                await asyncio.sleep(1.0)
+                views = await _snapshot_views()
+                if views:
+                    break
+    if not views:
+        return (
+            "the robot's cameras are not available right now, so I can't see "
+            "anything"
+        )
 
     content: list[dict[str, Any]] = []
     for stream, jpeg in views:

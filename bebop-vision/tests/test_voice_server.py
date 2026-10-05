@@ -355,13 +355,72 @@ def test_describe_scene_errors_when_both_cameras_fail(monkeypatch):
     async def fake_fetch(stream):
         return None
 
+    async def fake_enable():
+        return False
+
     monkeypatch.setattr(voice_server, "_fetch_snapshot", fake_fetch)
+    monkeypatch.setattr(voice_server, "_enable_vision", fake_enable)
 
     class FakeServer:
         base_url = "http://127.0.0.1:8000"
 
     out = asyncio.run(voice_server.tool_describe_scene(FakeServer()))
-    assert "camera unavailable" in out
+    assert "cameras are not available" in out
+
+
+def test_describe_scene_enables_vision_and_retries(monkeypatch):
+    import asyncio
+    import httpx
+
+    state = {"on": False}
+
+    async def fake_fetch(stream):
+        return b"\xff\xd8jpeg" if state["on"] else None
+
+    async def fake_enable():
+        state["on"] = True
+        return True
+
+    async def no_sleep(_seconds):
+        return None
+
+    captured: dict = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "A window and a desk."}}]}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json):
+            captured["json"] = json
+            return FakeResponse()
+
+    class FakeServer:
+        base_url = "http://127.0.0.1:8000"
+
+    monkeypatch.setattr(voice_server, "_fetch_snapshot", fake_fetch)
+    monkeypatch.setattr(voice_server, "_enable_vision", fake_enable)
+    monkeypatch.setattr(voice_server.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    out = asyncio.run(voice_server.tool_describe_scene(FakeServer()))
+    assert state["on"] is True
+    assert "window" in out
+    assert len(captured["json"]["messages"][1]["content"]) >= 2
 
 
 def test_config_tools_toggle(tmp_path, monkeypatch):
