@@ -294,6 +294,43 @@ def test_run_turn_injects_live_context(monkeypatch):
     assert any(m["role"] == "assistant" and "red" in m["content"] for m in history)
 
 
+def test_cloud_token_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_server, "CLOUD_TOKEN_DIR", tmp_path)
+    assert voice_server.read_cloud_token("openrouter") is None
+    voice_server.write_cloud_token("openrouter", "sk-abc")
+    assert voice_server.read_cloud_token("openrouter") == "sk-abc"
+    assert (tmp_path / "openrouter_token").stat().st_mode & 0o777 == 0o600
+    voice_server.write_cloud_token("openrouter", "")
+    assert voice_server.read_cloud_token("openrouter") is None
+
+
+def test_brain_reply_openrouter(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(voice_server, "read_cloud_token", lambda provider: "sk-test")
+    called: dict = {}
+
+    async def fake_openrouter(messages, model, key):
+        called["model"] = model
+        called["key"] = key
+        return "cloud reply"
+
+    monkeypatch.setattr(voice_server, "_openrouter_chat", fake_openrouter)
+    cfg = voice_server.VoiceConfig(brain="openrouter", openrouter_model="openai/gpt-5.6")
+    pipe = voice_server.CascadePipeline(
+        voice_server.StageServer("asr", "m", Path("/tmp"), 1, capability="transcription"),
+        None,  # no local brain
+        voice_server.StageServer("tts", "m", Path("/tmp"), 3, capability="speech"),
+        voice_server.VoiceStatus(),
+    )
+    out = asyncio.run(
+        voice_server.brain_reply(pipe, [{"role": "user", "content": "hi"}], cfg)
+    )
+    assert out == "cloud reply"
+    assert called["model"] == "openai/gpt-5.6"
+    assert called["key"] == "sk-test"
+
+
 def test_resolve_cascade_voice(monkeypatch):
     monkeypatch.setattr(voice_server, "cascade_voices", lambda tts: ["dylan", "serena"])
     assert voice_server.resolve_cascade_voice(None, "dylan") == "dylan"

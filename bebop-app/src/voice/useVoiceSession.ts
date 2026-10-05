@@ -476,8 +476,13 @@ export interface VoiceConfigView {
   keep_audio_history: boolean;
   tools_enabled: boolean;
   backend: string;
+  brain: string;
+  openrouter_model: string;
+  openrouter_set: boolean;
   backends: string[];
   voices: string[];
+  /** Write-only: sent in POST /config, never returned by the server. */
+  openrouter_key?: string;
 }
 
 export interface VoiceConfigState {
@@ -495,6 +500,9 @@ function configFromJson(j: Record<string, unknown>): VoiceConfigView {
     keep_audio_history: Boolean(j.keep_audio_history),
     tools_enabled: Boolean(j.tools_enabled),
     backend: String(j.backend ?? "omni"),
+    brain: String(j.brain ?? "local"),
+    openrouter_model: String(j.openrouter_model ?? ""),
+    openrouter_set: Boolean(j.openrouter_set),
     backends: Array.isArray(j.backends) ? (j.backends as string[]) : ["omni", "cascade"],
     voices: Array.isArray(j.voices) ? (j.voices as string[]) : [],
   };

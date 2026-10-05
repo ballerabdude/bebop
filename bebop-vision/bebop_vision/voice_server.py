@@ -193,6 +193,8 @@ class VoiceConfig:
     keep_audio_history: bool = False
     tools_enabled: bool = True
     backend: str = "omni"  # "omni" (end-to-end) | "cascade" (ASR->brain->TTS)
+    brain: str = "local"  # "local" (on-device VLM) | "openrouter" (cloud)
+    openrouter_model: str = ""  # e.g. "openai/gpt-5.6" (OpenRouter slug)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "VoiceConfig":
@@ -214,6 +216,10 @@ class VoiceConfig:
             cfg.tools_enabled = raw["tools_enabled"]
         if raw.get("backend") in ("omni", "cascade"):
             cfg.backend = raw["backend"]
+        if raw.get("brain") in ("local", "openrouter"):
+            cfg.brain = raw["brain"]
+        if isinstance(raw.get("openrouter_model"), str):
+            cfg.openrouter_model = raw["openrouter_model"]
         return cfg
 
     def save(self, path: Path | None = None) -> None:
@@ -231,6 +237,9 @@ class VoiceConfig:
             "keep_audio_history": self.keep_audio_history,
             "tools_enabled": self.tools_enabled,
             "backend": self.backend,
+            "brain": self.brain,
+            "openrouter_model": self.openrouter_model,
+            "openrouter_set": read_cloud_token("openrouter") is not None,
         }
 
 
@@ -452,6 +461,32 @@ CASCADE_ASR_PORT = 8011
 CASCADE_BRAIN_PORT = 8012
 CASCADE_TTS_PORT = 8013
 
+# Cloud brains go through OpenRouter (OpenAI-compatible), so one key unlocks
+# many models. The key is stored root-only and never returned to the app.
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+CLOUD_TOKEN_DIR = Path("/etc/bebop/cloud")
+
+
+def read_cloud_token(provider: str) -> str | None:
+    """Read a cloud provider API token (e.g. provider="openrouter")."""
+    try:
+        token = (CLOUD_TOKEN_DIR / f"{provider}_token").read_text().strip()
+    except OSError:
+        return None
+    return token or None
+
+
+def write_cloud_token(provider: str, token: str | None) -> None:
+    """Store (or clear) a cloud provider token root-only. Write-only secret."""
+    CLOUD_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+    path = CLOUD_TOKEN_DIR / f"{provider}_token"
+    if token and token.strip():
+        path.write_text(token.strip() + "\n")
+        os.chmod(path, 0o600)
+    else:
+        path.unlink(missing_ok=True)
+
+
 _TTS_VOICE_CACHE: dict[str, Any] = {"ts": 0.0, "voices": []}
 
 
@@ -583,12 +618,16 @@ class StageServer:
 
 
 class CascadePipeline:
-    """Owns the three stage servers and reports an aggregate status."""
+    """Owns the stage servers and reports an aggregate status.
+
+    `brain` is optional: when a cloud brain (OpenRouter) is selected we skip
+    the local VLM entirely, so no GPU memory is spent on it.
+    """
 
     def __init__(
         self,
         asr: StageServer,
-        brain: StageServer,
+        brain: StageServer | None,
         tts: StageServer,
         status: "VoiceStatus",
     ) -> None:
@@ -605,7 +644,8 @@ class CascadePipeline:
     def _run(self) -> None:
         self.status.set(phase="starting", detail="starting cascade")
         # Sequential: one engine build at a time keeps GPU memory bounded.
-        for stage in (self.asr, self.tts, self.brain):
+        stages = [s for s in (self.asr, self.tts, self.brain) if s is not None]
+        for stage in stages:
             self.status.set(detail=f"starting {stage.name} ({stage.model})")
             stage.start_and_wait()
             if not stage.ready:
@@ -618,14 +658,19 @@ class CascadePipeline:
 
     @property
     def ready(self) -> bool:
-        return self.asr.ready and self.brain.ready and self.tts.ready
+        return (
+            self.asr.ready
+            and self.tts.ready
+            and (self.brain is None or self.brain.ready)
+        )
 
     def stop(self) -> None:
         for stage in (self.asr, self.brain, self.tts):
-            stage.stop()
+            if stage is not None:
+                stage.stop()
 
     def model_ids(self) -> list[str]:
-        return [self.asr.model, self.brain.model, self.tts.model]
+        return [s.model for s in (self.asr, self.brain, self.tts) if s is not None]
 
 
 async def _cascade_transcribe(stage: StageServer, wav_bytes: bytes) -> str:
@@ -652,6 +697,39 @@ async def _cascade_chat(stage: StageServer, messages: list[dict[str, Any]]) -> s
         r.raise_for_status()
         msg = r.json()["choices"][0]["message"]
         return str(msg.get("content") or "").strip()
+
+
+async def _openrouter_chat(
+    messages: list[dict[str, Any]], model: str, key: str
+) -> str:
+    """Cloud brain via OpenRouter (OpenAI-compatible; one key, many models)."""
+    import httpx
+
+    async with httpx.AsyncClient(timeout=None) as client:
+        r = await client.post(
+            OPENROUTER_URL,
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": model, "messages": messages, "max_tokens": 512},
+        )
+        r.raise_for_status()
+        msg = r.json()["choices"][0]["message"]
+        return str(msg.get("content") or "").strip()
+
+
+async def brain_reply(
+    pipeline: "CascadePipeline", messages: list[dict[str, Any]], config: "VoiceConfig"
+) -> str:
+    """Pick the brain: cloud (OpenRouter) when configured, else the local VLM."""
+    if config.brain == "openrouter":
+        key = read_cloud_token("openrouter")
+        if key:
+            return await _openrouter_chat(
+                messages, config.openrouter_model or "openrouter/auto", key
+            )
+        _log("openrouter brain selected but no key is set; using the local brain")
+    if pipeline.brain is not None:
+        return await _cascade_chat(pipeline.brain, messages)
+    raise RuntimeError("no brain available (no local model and no cloud key)")
 
 
 async def _cascade_speak(
@@ -764,7 +842,7 @@ async def _run_turn_cascade(
         *history,
         {"role": "user", "content": content},
     ]
-    reply = await _cascade_chat(pipeline.brain, messages)
+    reply = await brain_reply(pipeline, messages, config)
 
     # 3) TTS — reply text to speech.
     voice = resolve_cascade_voice(pipeline.tts, voice_override or config.voice)
@@ -1331,6 +1409,20 @@ def build_app(
             config.tools_enabled = bool(body["tools_enabled"])
         if body.get("backend") in ("omni", "cascade"):
             config.backend = body["backend"]
+        if body.get("brain") in ("local", "openrouter"):
+            config.brain = body["brain"]
+        if isinstance(body.get("openrouter_model"), str):
+            config.openrouter_model = body["openrouter_model"].strip()
+        if "openrouter_key" in body:
+            value = body["openrouter_key"]
+            if isinstance(value, str):
+                try:
+                    write_cloud_token("openrouter", value)
+                except OSError as exc:
+                    return JSONResponse(
+                        {"error": f"store OpenRouter key failed: {exc}"},
+                        status_code=500,
+                    )
         try:
             config.save()
         except OSError as exc:
@@ -1642,15 +1734,19 @@ def main(argv: list[str] | None = None) -> int:
             "tts", CASCADE_TTS_MODEL, args.cache_dir / "tts", CASCADE_TTS_PORT,
             capability="speech", patched_launcher=True, status=status,
         )
-        brain = StageServer(
-            "brain", CASCADE_BRAIN_MODEL, args.cache_dir / "brain", CASCADE_BRAIN_PORT,
-            capability="chat",
-            extra_args=[
-                "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml",
-                "--max-input-len", "8192", "--max-kv-cache-capacity", "16384",
-            ],
-            status=status,
-        )
+        brain = None
+        if config.brain != "openrouter" or read_cloud_token("openrouter") is None:
+            brain = StageServer(
+                "brain", CASCADE_BRAIN_MODEL, args.cache_dir / "brain", CASCADE_BRAIN_PORT,
+                capability="chat",
+                extra_args=[
+                    "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml",
+                    "--max-input-len", "8192", "--max-kv-cache-capacity", "16384",
+                ],
+                status=status,
+            )
+        else:
+            _log("cascade brain: OpenRouter (local VLM not loaded)")
         pipeline = CascadePipeline(asr, brain, tts, status)
         pipeline.start_background()
     else:

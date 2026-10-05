@@ -70,6 +70,7 @@ export function VoiceScreen({
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string>(() => loadSessionId());
   const [personaDraft, setPersonaDraft] = useState("");
+  const [orkeyDraft, setOrkeyDraft] = useState("");
   const [savingCfg, setSavingCfg] = useState<string | null>(null);
   const [cfgError, setCfgError] = useState<string | null>(null);
 
@@ -425,6 +426,82 @@ export function VoiceScreen({
                     ))}
                   </select>
                 </Field>
+                <Field
+                  label="Brain"
+                  hint="Local = on-device VLM; OpenRouter = a cloud model you pick (needs an API key)."
+                >
+                  <select
+                    className={INPUT_CLASS}
+                    value={cfg.config.brain}
+                    disabled={savingCfg === "brain"}
+                    onChange={(e) =>
+                      void saveCfg("brain", { brain: e.currentTarget.value })
+                    }
+                  >
+                    <option value="local">Local (on-device)</option>
+                    <option value="openrouter">OpenRouter (cloud)</option>
+                  </select>
+                </Field>
+                {cfg.config.brain === "openrouter" && (
+                  <>
+                    <Field
+                      label="OpenRouter model"
+                      hint="Any OpenRouter slug, e.g. openai/gpt-5.6, anthropic/claude-opus-4.6, google/gemini-3-pro."
+                    >
+                      <input
+                        className={INPUT_CLASS}
+                        defaultValue={cfg.config.openrouter_model}
+                        placeholder="openrouter/auto"
+                        onBlur={(e) =>
+                          void saveCfg("ormodel", {
+                            openrouter_model: e.currentTarget.value,
+                          })
+                        }
+                      />
+                    </Field>
+                    <Field
+                      label="OpenRouter API key"
+                      hint={
+                        cfg.config.openrouter_set
+                          ? "A key is stored on the robot (write-only)."
+                          : "Not set. Paste your sk-or-… key."
+                      }
+                    >
+                      <div className="flex gap-2">
+                        <input
+                          type="password"
+                          className={INPUT_CLASS}
+                          value={orkeyDraft}
+                          placeholder={
+                            cfg.config.openrouter_set ? "•••••••• (set)" : "sk-or-…"
+                          }
+                          onChange={(e) => setOrkeyDraft(e.currentTarget.value)}
+                        />
+                        <button
+                          className="shrink-0 rounded border border-border px-3 text-[13px]"
+                          disabled={!orkeyDraft || savingCfg === "orkey"}
+                          onClick={() => {
+                            void saveCfg("orkey", { openrouter_key: orkeyDraft });
+                            setOrkeyDraft("");
+                          }}
+                        >
+                          Save
+                        </button>
+                        {cfg.config.openrouter_set && (
+                          <button
+                            className="shrink-0 rounded border border-border px-3 text-[13px]"
+                            disabled={savingCfg === "orkey"}
+                            onClick={() =>
+                              void saveCfg("orkey", { openrouter_key: "" })
+                            }
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    </Field>
+                  </>
+                )}
                 <Field
                   label="Personality"
                   hint="System prompt. Applies on the next turn."

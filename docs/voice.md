@@ -188,6 +188,16 @@ robot status + both camera frames → chat → synthesize, streaming a
 Because the brain is a text/VLM model, **native tool calling works** here (the
 omni server rejects tools combined with audio output).
 
+### Cloud brain (OpenRouter)
+
+`VoiceConfig.brain` selects the cascade's brain: `local` (the on-device VLM) or
+`openrouter` (a cloud model). With a cloud brain the local VLM is **not loaded**
+(no GPU spend). The app posts the write-only key to `POST /config`
+(`{openrouter_key}`); it is stored root-only at
+`/etc/bebop/cloud/openrouter_token` (0600) and only its presence is reported
+(`openrouter_set`). `openrouter_model` is any OpenRouter slug (e.g.
+`openai/gpt-5.6`). One key → many models.
+
 Two Edge-LLM 0.11.0 notes:
 - `tensorrt-edgellm-serve` forwards VLM-only `max_image_tokens*` kwargs to the
   standalone TTS runtime, which rejects them. `bebop_vision.edge_serve` is a
