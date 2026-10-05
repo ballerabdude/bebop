@@ -159,6 +159,12 @@ def pcm16_to_wav(pcm: bytes, rate: int) -> bytes:
     return buf.getvalue()
 
 
+def _silence_wav_b64(seconds: float = 0.2, rate: int = INPUT_RATE) -> str:
+    """A short silent WAV, base64, for the startup warm-up audio turn."""
+    pcm = b"\x00\x00" * int(rate * seconds)
+    return base64.b64encode(pcm16_to_wav(pcm, rate)).decode("ascii")
+
+
 # --- status ---------------------------------------------------------------
 
 
@@ -269,7 +275,7 @@ class EdgeLLMServer:
         self.status.beat()
         if self.health_ok():
             _log(f"Edge-LLM server already up on {self.base_url}")
-            self.status.set(phase="ready", detail="")
+            self._warmup_then_ready()
             return
         cmd = [
             resolve_edgellm_bin(),
@@ -312,14 +318,71 @@ class EdgeLLMServer:
                 _log(f"Edge-LLM server exited rc={proc.returncode}")
                 return
             if self.health_ok():
-                self.status.set(phase="ready", detail="")
                 _log("Edge-LLM server ready")
+                self._warmup_then_ready()
                 return
             time.sleep(2.0)
         self.status.set(
             phase="error",
             detail="timed out waiting for the Edge-LLM server to become healthy",
         )
+
+    def _warmup_then_ready(self) -> None:
+        """Prime the runtime, then mark ready.
+
+        The first Omni generation after engine load is garbled (observed on
+        Thor: repeated characters + runaway Talker audio); every turn after is
+        clean. A throwaway text turn plus a short silent audio turn settles it,
+        so the operator's first utterance is good.
+        """
+        self.status.set(phase="starting", detail="warming up the model")
+        self._warmup()
+        self.status.set(phase="ready", detail="")
+        _log("Edge-LLM warm-up complete; ready")
+
+    def _warmup(self) -> None:
+        import httpx
+
+        url = f"{self.base_url}/v1/chat/completions"
+        try:
+            httpx.post(
+                url,
+                json={
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 4,
+                    "temperature": 0.0,
+                },
+                timeout=180.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log(f"warm-up (text) failed: {exc}")
+        try:
+            httpx.post(
+                url,
+                json={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_audio",
+                                    "input_audio": {
+                                        "data": _silence_wav_b64(),
+                                        "format": "wav",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                    "modalities": ["text", "audio"],
+                    "audio": {"voice": DEFAULT_VOICE, "format": "pcm16"},
+                    "max_tokens": 4,
+                    "temperature": 0.0,
+                },
+                timeout=300.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log(f"warm-up (audio) failed: {exc}")
 
     def _read_output(self) -> None:
         with self._lock:
