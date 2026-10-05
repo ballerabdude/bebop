@@ -778,6 +778,8 @@ async def stream_completion(
     messages: list[dict[str, Any]],
     voice: str,
     tools: list[dict[str, Any]] | None = None,
+    *,
+    audio: bool = True,
 ) -> AsyncIterator[dict[str, Any]]:
     """Yield events from the Edge-LLM chat stream.
 
@@ -785,16 +787,24 @@ async def stream_completion(
     `{"type":"tool_call","index","id","name","arguments"}`. Parses the OpenAI
     SSE schema; audio rides in `delta.audio.data` (base64 PCM16), tool calls in
     `delta.tool_calls` (the server parses the model's XML via qwen3_xml).
+
+    `audio=False` requests a text-only turn — required for tool calls, because
+    the server rejects `tools` combined with audio output
+    (`unsupported_feature`). `_run_turn` therefore plans/executes tools
+    text-only, then does one audio pass (no tools) to speak the answer.
     """
     import httpx
 
     payload: dict[str, Any] = {
         "messages": messages,
-        "modalities": ["text", "audio"],
-        "audio": {"voice": voice, "format": "pcm16"},
         "stream": True,
         "max_tokens": 512,
     }
+    if audio:
+        payload["modalities"] = ["text", "audio"]
+        payload["audio"] = {"voice": voice, "format": "pcm16"}
+    else:
+        payload["modalities"] = ["text"]
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -867,11 +877,13 @@ def _stream(
     voice: str,
     tools: list[dict[str, Any]] | None,
     stub: bool,
+    *,
+    audio: bool = True,
 ) -> AsyncIterator[dict[str, Any]]:
     """Select the stub or the real model stream (monkeypatchable in tests)."""
     if stub or server is None:
         return stream_stub(messages, voice)
-    return stream_completion(server, messages, voice, tools)
+    return stream_completion(server, messages, voice, tools, audio=audio)
 
 
 # --- gateway app ----------------------------------------------------------
@@ -1079,62 +1091,71 @@ async def _run_turn(
     await ws.send_text(
         json.dumps({"type": "audio_start", "sample_rate": OUTPUT_RATE, "format": "pcm16"})
     )
-    final_text = ""
-    rounds = MAX_TOOL_ROUNDS if tools else 1
-    for _round in range(rounds):
-        round_text = ""
+
+    async def plan(stream: AsyncIterator[dict[str, Any]]) -> dict[int, dict[str, str]]:
+        """Consume a text-only tool round; return accumulated tool calls."""
         calls: dict[int, dict[str, str]] = {}
-        async for ev in _stream(server, messages, voice, tools, stub):
-            kind = ev["type"]
-            if kind == "text":
-                round_text += ev["delta"]
-                await ws.send_text(json.dumps({"type": "text", "delta": ev["delta"]}))
-            elif kind == "audio":
-                await ws.send_bytes(ev["data"])
-            elif kind == "tool_call":
-                slot = calls.setdefault(
-                    ev["index"], {"id": "", "name": "", "arguments": ""}
-                )
-                if ev["id"]:
-                    slot["id"] = ev["id"]
-                if ev["name"]:
-                    slot["name"] = ev["name"]
-                if ev["arguments"]:
-                    slot["arguments"] += ev["arguments"]
-        if not calls:
-            final_text = round_text
-            break
-        # A tool round: record the assistant's call(s), run them, feed the
-        # results back, and let the model speak the final answer.
-        ordered = [calls[i] for i in sorted(calls)]
-        messages.append(
-            {
-                "role": "assistant",
-                "content": round_text,
-                "tool_calls": [
-                    {
-                        "id": c["id"] or f"call_{i}",
-                        "type": "function",
-                        "function": {
-                            "name": c["name"],
-                            "arguments": c["arguments"] or "{}",
-                        },
-                    }
-                    for i, c in enumerate(ordered)
-                ],
-            }
-        )
-        for i, call in enumerate(ordered):
-            call_id = call["id"] or f"call_{i}"
-            _log(f"tool call: {call['name']}({call['arguments'][:120]})")
-            await ws.send_text(json.dumps({"type": "tool", "name": call["name"]}))
-            try:
-                result = await execute_tool(call["name"], call["arguments"], server)
-            except Exception as exc:  # noqa: BLE001
-                result = f"tool failed: {exc}"
-            messages.append(
-                {"role": "tool", "tool_call_id": call_id, "content": result}
+        async for ev in stream:
+            if ev["type"] != "tool_call":
+                continue
+            slot = calls.setdefault(
+                ev["index"], {"id": "", "name": "", "arguments": ""}
             )
+            if ev["id"]:
+                slot["id"] = ev["id"]
+            if ev["name"]:
+                slot["name"] = ev["name"]
+            if ev["arguments"]:
+                slot["arguments"] += ev["arguments"]
+        return calls
+
+    # Phase A — plan and execute tools, text-only (the model server rejects
+    # `tools` combined with audio output). Phase B below speaks the answer.
+    if tools:
+        for _round in range(MAX_TOOL_ROUNDS):
+            calls = await plan(
+                _stream(server, messages, voice, tools, stub, audio=False)
+            )
+            if not calls:
+                break
+            ordered = [calls[i] for i in sorted(calls)]
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": c["id"] or f"call_{i}",
+                            "type": "function",
+                            "function": {
+                                "name": c["name"],
+                                "arguments": c["arguments"] or "{}",
+                            },
+                        }
+                        for i, c in enumerate(ordered)
+                    ],
+                }
+            )
+            for i, call in enumerate(ordered):
+                call_id = call["id"] or f"call_{i}"
+                _log(f"tool call: {call['name']}({call['arguments'][:120]})")
+                await ws.send_text(json.dumps({"type": "tool", "name": call["name"]}))
+                try:
+                    result = await execute_tool(call["name"], call["arguments"], server)
+                except Exception as exc:  # noqa: BLE001
+                    result = f"tool failed: {exc}"
+                messages.append(
+                    {"role": "tool", "tool_call_id": call_id, "content": result}
+                )
+
+    # Phase B — speak the final answer (audio on, no tools).
+    final_text = ""
+    async for ev in _stream(server, messages, voice, None, stub, audio=True):
+        if ev["type"] == "text":
+            final_text += ev["delta"]
+            await ws.send_text(json.dumps({"type": "text", "delta": ev["delta"]}))
+        elif ev["type"] == "audio":
+            await ws.send_bytes(ev["data"])
 
     await ws.send_text(json.dumps({"type": "audio_end"}))
     await ws.send_text(json.dumps({"type": "done"}))

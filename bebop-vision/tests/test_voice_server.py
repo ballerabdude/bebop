@@ -260,7 +260,7 @@ def test_tool_loop_executes_then_speaks(monkeypatch):
     history: list[dict] = []
     cfg = voice_server.VoiceConfig(history_turns=2, tools_enabled=True)
 
-    async def fake_stream(server, messages, voice, tools, stub):
+    async def fake_stream(server, messages, voice, tools, stub, *, audio=True):
         if any(m.get("role") == "tool" for m in messages):
             yield {"type": "text", "delta": "Battery is at 88 percent."}
         else:

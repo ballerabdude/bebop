@@ -144,10 +144,22 @@ NemotronLabs VoiceChat-11B, or careful VAD + cancellation).
 
 The model server runs with `--enable-auto-tool-choice --tool-call-parser
 qwen3_xml`, so the `qwen3_xml` parser turns the model's XML tool calls into
-OpenAI `tool_calls`. The gateway runs the round-trip loop in `_run_turn`:
-stream the turn → if it produced tool calls, execute them against the robot's
-existing services, append `assistant(tool_calls)` + `tool` messages, and call
-the model again for the final spoken answer (bounded to `MAX_TOOL_ROUNDS`).
+OpenAI `tool_calls`.
+
+> **Constraint:** `/v1/chat/completions` rejects `tools` combined with audio
+> output (`400 unsupported_feature: tools cannot be combined with audio
+> output`). The gateway therefore runs **two phases** per turn when tools are
+> enabled (`_run_turn`):
+>
+> 1. **Plan (text-only, `modalities:["text"]`, tools offered).** Loop the model
+>    up to `MAX_TOOL_ROUNDS`: execute any tool calls against the robot's
+>    services, append `assistant(tool_calls)` + `tool` messages, repeat.
+> 2. **Speak (`modalities:["text","audio"]`, no tools).** Make one final pass
+>    over the same conversation to produce the spoken answer streamed to the app.
+>
+> This costs an extra text pass (and re-prefills the user's audio) per turn vs.
+> the tools-off path. The Voice page's "Tool use" switch (`VoiceConfig.
+> tools_enabled`, `--no-tools`) turns it off for pure chit-chat.
 
 The allowlist (`TOOL_SCHEMAS` / `execute_tool`) is deliberately read-only in
 v1 — no motion:
@@ -158,10 +170,8 @@ v1 — no motion:
   from `:9092/snapshot`, sends them as two labelled images to the model, and
   returns the description as the tool result.
 
-Toggle with the Voice page's "Tool use" switch (`VoiceConfig.tools_enabled`,
-`--no-tools`). Unknown tool names are refused, never executed. Motion tools
-(heating/e-stop-aware) are a later phase and must go through a deterministic
-safety layer.
+Unknown tool names are refused, never executed. Motion tools (heat/e-stop-aware)
+are a later phase and must go through a deterministic safety layer.
 
 ## Components and changes
 
