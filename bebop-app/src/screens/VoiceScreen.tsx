@@ -7,6 +7,7 @@ import {
 } from "../runtime";
 import { Banner, Button, Card, Field } from "../components/ui";
 import {
+  useDuplexSession,
   useVoiceConfig,
   useVoiceHealth,
   useVoiceSession,
@@ -77,6 +78,7 @@ export function VoiceScreen({
   const cfg = useVoiceConfig(robotIp, 9093, voice.running);
   const health = useVoiceHealth(robotIp, 9093, voice.running);
   const session = useVoiceSession(robotIp, 9093, { session: sessionId });
+  const duplex = useDuplexSession(robotIp, 9093);
 
   useEffect(() => {
     try {
@@ -242,6 +244,45 @@ export function VoiceScreen({
           </div>
         </Card>
       )}
+
+      <Card>
+        <div className="py-2 flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <div className="text-xs text-text-dim uppercase tracking-wider">
+              Duplex (live)
+            </div>
+            <span className="flex items-center gap-2 text-[12px] text-text-dim">
+              {duplex.active ? (
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    duplex.listening ? "bg-accent animate-pulse" : "bg-success"
+                  }`}
+                />
+              ) : null}
+              {duplex.active ? (duplex.listening ? "Listening…" : "Speaking") : "Off"}
+            </span>
+          </div>
+          <p className="text-[13px] text-text-dim">
+            Continuous, interruptible voice (MiniCPM-o). No tap-to-talk — just talk;
+            it listens and speaks at once and uses the robot's cameras.
+          </p>
+          <div className="flex items-center gap-2">
+            {duplex.active ? (
+              <Button onClick={() => duplex.stop()}>Stop duplex</Button>
+            ) : (
+              <Button onClick={() => void duplex.start()} disabled={!voice.running}>
+                Start duplex
+              </Button>
+            )}
+          </div>
+          {duplex.error ? <Banner tone="error">{duplex.error}</Banner> : null}
+          {duplex.reply ? (
+            <div className="text-[13px] text-text leading-snug whitespace-pre-wrap">
+              {duplex.reply}
+            </div>
+          ) : null}
+        </div>
+      </Card>
 
       <Card>
         <div className="py-2 flex flex-col gap-2">

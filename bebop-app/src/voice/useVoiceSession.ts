@@ -412,6 +412,229 @@ export interface VoiceHealth {
 /// service is systemd-running). Returns `null` until the first successful
 /// response — including during the window before the gateway's HTTP server is
 /// listening, or when the service is stopped.
+/// Full-duplex streaming client (`WS /duplex` on :9093, MiniCPM-o backend).
+///
+/// Unlike `useVoiceSession`, there is no turn: mic audio streams continuously and
+/// the model speaks whenever it wants, so the user can interrupt. Events:
+/// `duplex_info`/`duplex_ready`/`duplex_state` + `text` deltas; audio arrives as
+/// raw 24 kHz PCM16 frames.
+export interface DuplexSession {
+  /** True once the session is live (mic streaming + playback). */
+  active: boolean;
+  /** Model's listen/speak decision for the latest frame. */
+  listening: boolean;
+  /** Rolling assistant text. */
+  reply: string;
+  error: string | null;
+  start: () => Promise<void>;
+  stop: () => void;
+}
+
+export function useDuplexSession(host: string, port = 9093): DuplexSession {
+  const [active, setActive] = useState(false);
+  const [listening, setListening] = useState(true);
+  const [reply, setReply] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const captureCtxRef = useRef<AudioContext | null>(null);
+  const captureNodeRef = useRef<AudioWorkletNode | ScriptProcessorNode | null>(null);
+  const playbackCtxRef = useRef<AudioContext | null>(null);
+  const playHeadRef = useRef(0);
+  const activeRef = useRef(false);
+
+  const teardownCapture = useCallback(() => {
+    const node = captureNodeRef.current;
+    if (node) {
+      if ("port" in node) (node as AudioWorkletNode).port.onmessage = null;
+      if ("onaudioprocess" in node) (node as ScriptProcessorNode).onaudioprocess = null;
+      try {
+        node.disconnect();
+      } catch {
+        /* ignore */
+      }
+    }
+    captureNodeRef.current = null;
+    try {
+      captureCtxRef.current?.close();
+    } catch {
+      /* ignore */
+    }
+    captureCtxRef.current = null;
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      try {
+        wsRef.current?.close();
+      } catch {
+        /* ignore */
+      }
+      teardownCapture();
+    };
+  }, [host, port, teardownCapture]);
+
+  const ensurePlayback = useCallback(() => {
+    if (!playbackCtxRef.current) {
+      playbackCtxRef.current = createAudioContext(PLAYBACK_RATE);
+      playHeadRef.current = 0;
+    }
+    void playbackCtxRef.current.resume().catch(() => {});
+    return playbackCtxRef.current;
+  }, []);
+
+  const playChunk = useCallback(
+    (bytes: ArrayBuffer) => {
+      const ctx = ensurePlayback();
+      const samples = i16ToF32(bytes);
+      const buffer = ctx.createBuffer(1, samples.length, PLAYBACK_RATE);
+      buffer.copyToChannel(samples, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(ctx.destination);
+      const now = ctx.currentTime;
+      const startAt = Math.max(now, playHeadRef.current);
+      src.start(startAt);
+      playHeadRef.current = startAt + buffer.duration;
+    },
+    [ensurePlayback],
+  );
+
+  const handleMessage = useCallback(
+    (ev: MessageEvent) => {
+      if (ev.data instanceof ArrayBuffer) {
+        playChunk(ev.data);
+        return;
+      }
+      if (typeof ev.data !== "string") return;
+      let msg: { type?: string; delta?: string; message?: string; listening?: boolean };
+      try {
+        msg = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      switch (msg.type) {
+        case "duplex_ready":
+          setActive(true);
+          activeRef.current = true;
+          break;
+        case "text":
+          if (msg.delta) setReply((r) => (r + msg.delta).slice(-600));
+          break;
+        case "duplex_state":
+          if (typeof msg.listening === "boolean") setListening(msg.listening);
+          break;
+        case "error":
+          setError(msg.message ?? "duplex error");
+          break;
+        default:
+          break;
+      }
+    },
+    [playChunk],
+  );
+
+  const start = useCallback(async () => {
+    if (activeRef.current) return;
+    setError(null);
+    setReply("");
+    ensurePlayback();
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError(
+        "Microphone isn't available in this context. Open Bebop over HTTPS (or the native app).",
+      );
+      return;
+    }
+    try {
+      const ws = new WebSocket(wsUrl(host, port, "/duplex"));
+      ws.binaryType = "arraybuffer";
+      ws.onmessage = handleMessage;
+      await new Promise<void>((resolve, reject) => {
+        ws.onopen = () => resolve();
+        ws.onerror = () => reject(new Error(`duplex socket error (${host}:${port})`));
+      });
+      wsRef.current = ws;
+      ws.send(JSON.stringify({ type: "duplex_start", camera: true }));
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch (e) {
+        throw new Error(micErrorMessage(e));
+      }
+      streamRef.current = stream;
+      const ctx = createAudioContext(CAPTURE_RATE);
+      captureCtxRef.current = ctx;
+      await ctx.resume().catch(() => {});
+      const source = ctx.createMediaStreamSource(stream);
+      const mute = ctx.createGain();
+      mute.gain.value = 0;
+      mute.connect(ctx.destination);
+      const push = (frame: Float32Array) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(f32ToI16(frame));
+      };
+      if (ctx.audioWorklet) {
+        const blob = new Blob([CAPTURE_WORKLET], { type: "application/javascript" });
+        const url = URL.createObjectURL(blob);
+        try {
+          await ctx.audioWorklet.addModule(url);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+        const worklet = new AudioWorkletNode(ctx, "bebop-pcm-capture");
+        worklet.port.onmessage = (ev: MessageEvent<Float32Array>) => push(ev.data);
+        source.connect(worklet);
+        worklet.connect(mute);
+        captureNodeRef.current = worklet;
+      } else {
+        const proc = ctx.createScriptProcessor(4096, 1, 1);
+        proc.onaudioprocess = (ev) => push(ev.inputBuffer.getChannelData(0));
+        source.connect(proc);
+        proc.connect(mute);
+        captureNodeRef.current = proc;
+      }
+      setActive(true);
+      activeRef.current = true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      try {
+        wsRef.current?.close();
+      } catch {
+        /* ignore */
+      }
+      teardownCapture();
+      setActive(false);
+    }
+  }, [host, port, ensurePlayback, handleMessage, teardownCapture]);
+
+  const stop = useCallback(() => {
+    activeRef.current = false;
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ type: "duplex_stop" }));
+      } catch {
+        /* ignore */
+      }
+      ws.close();
+    }
+    wsRef.current = null;
+    teardownCapture();
+    setActive(false);
+  }, [teardownCapture]);
+
+  return { active, listening, reply, error, start, stop };
+}
+
 export function useVoiceHealth(
   host: string,
   port = 9093,
