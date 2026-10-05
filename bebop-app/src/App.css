@@ -35,3 +35,30 @@
 .animate-fade-in {
     animation: fade-in 200ms ease both;
 }
+
+/* --- Mobile / touch hardening -------------------------------------------- */
+/* The app runs in Tauri (desktop + mobile) and in mobile browsers. Kill
+   pinch/double-tap zoom, pull-to-refresh, and the long-press callout so the
+   push-to-talk button never gets interrupted or selects text mid-hold. */
+html,
+body,
+#root {
+    height: 100%;
+}
+
+body {
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-text);
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    touch-action: manipulation;
+}
+
+button,
+[role="button"] {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+}

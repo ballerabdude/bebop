@@ -175,6 +175,44 @@ NemotronLabs VoiceChat-11B, or careful VAD + cancellation).
 Knobs: `codec_chunk_frames` (smaller = sooner but rougher), `talker_top_k`,
 `max_audio_length`, and a short system prompt.
 
+## Mobile
+
+The Voice page is touch-first:
+
+- **Tap-to-talk toggle**, not press-and-hold. Hold fights the microphone
+  permission prompt (the prompt steals the pointer, so `pointerup` never
+  fires and the mic stays open) and touch `pointerleave` jitter. Tap starts
+  capture, tap again sends. `useVoiceSession` uses `AudioWorklet` with a
+  `ScriptProcessorNode` fallback for pre-AudioWorklet WebViews, reads back
+  `ctx.sampleRate` (mobile often ignores the requested 16 kHz), and maps
+  `getUserMedia` failures to actionable messages.
+- **No zoom / callout / pull-to-refresh** (`index.html` viewport +
+  `App.css` `touch-action`, `-webkit-touch-callout`, `overscroll-behavior`),
+  plus `env(safe-area-inset-bottom)` padding.
+
+### The secure-context problem (important)
+
+`getUserMedia` only works in a **secure context** — HTTPS or a native app.
+But the app talks to the robot over **cleartext** `ws://<ip>:9090`,
+`ws://<ip>:9093`, and `http://<ip>:9093/healthz`. So:
+
+- **Mobile browser over plain HTTP** (`http://<workstation>:1420`): mic is
+  blocked by the secure-context requirement.
+- **Served over HTTPS**: the cleartext robot sockets become *mixed content*
+  and are blocked.
+
+The clean path is **Tauri mobile**, whose webview is a secure custom scheme
+and can be configured to allow cleartext to the LAN. When adding mobile
+targets (`tauri android init` / `tauri ios init`):
+
+- **iOS** `Info.plist`: `NSMicrophoneUsageDescription`, and an ATS exception
+  (`NSAllowsLocalNetworking` or a per-host exception) for the robot.
+- **Android** `AndroidManifest.xml`: `RECORD_AUDIO`, and
+  `android:usesCleartextTraffic="true"` (or a network-security-config scoped
+  to the LAN).
+- The alternative, browser-only deployment would require terminating TLS on
+  the robot (self-signed) and using `wss://` / `https://`.
+
 ## Risks / open questions
 
 1. **Engine build time & disk.** First serve builds six engines; budget tens of

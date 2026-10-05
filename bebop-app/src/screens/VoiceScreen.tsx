@@ -116,8 +116,10 @@ export function VoiceScreen({
     }
   }
 
+  const talkActive = session.phase === "listening";
+
   return (
-    <div className="flex flex-col flex-1 gap-4">
+    <div className="flex flex-col flex-1 gap-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
       <h2 className="text-2xl font-bold mt-2">Voice</h2>
       <p className="text-text-dim leading-relaxed">
         Talk to the robot. Speech-to-speech runs on-device with Qwen3-Omni;
@@ -199,7 +201,10 @@ export function VoiceScreen({
             <div className="text-xs text-text-dim uppercase tracking-wider">
               Talk
             </div>
-            <span className="text-[12px] text-text-dim">
+            <span className="flex items-center gap-2 text-[12px] text-text-dim">
+              {talkActive ? (
+                <span className="w-2 h-2 rounded-full bg-danger animate-pulse" />
+              ) : null}
               {session.phase === "listening"
                 ? "Listening…"
                 : session.phase === "thinking"
@@ -215,36 +220,37 @@ export function VoiceScreen({
           </div>
           {session.error ? <Banner tone="error">{session.error}</Banner> : null}
           <Button
-            variant={session.phase === "listening" ? "primary" : "secondary"}
-            disabled={!ready || session.phase === "thinking" || session.phase === "speaking"}
-            onPointerDown={(e) => {
-              e.preventDefault();
-              if (!ready) return;
-              void session.startTalking();
-            }}
-            onPointerUp={() => session.stopTalking()}
-            onPointerLeave={() => session.stopTalking()}
-            onPointerCancel={() => session.stopTalking()}
+            variant={talkActive ? "primary" : "secondary"}
+            disabled={
+              !ready ||
+              session.phase === "thinking" ||
+              session.phase === "speaking"
+            }
+            onClick={() => (talkActive ? session.stopTalking() : void session.startTalking())}
             onContextMenu={(e) => e.preventDefault()}
-            style={{ touchAction: "none" }}
+            className="w-full py-5 text-base select-none touch-none"
           >
-            {session.phase === "listening" ? "Release to send" : "Hold to talk"}
+            {talkActive ? "Tap to send" : "Tap to talk"}
           </Button>
           {session.reply ? (
-            <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
+            <p className="text-[14px] leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
               {session.reply}
             </p>
           ) : (
             <p className="text-[13px] text-text-dim leading-relaxed">
               {ready
-                ? "Hold the button and speak. The robot replies with speech."
+                ? "Tap the button, speak, then tap again to send. The robot replies with speech."
                 : building
                   ? "Waiting for the engines to finish building…"
                   : failed
                     ? "The voice service reported an error — see the status above."
-                    : "Start the voice service above, then hold to talk."}
+                    : "Start the voice service above, then tap to talk."}
             </p>
           )}
+          <p className="text-[11px] text-text-dim leading-snug">
+            Microphone access needs a secure connection — use the app over
+            HTTPS or the native build on a phone.
+          </p>
         </div>
       </Card>
 

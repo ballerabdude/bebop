@@ -64,6 +64,41 @@ function i16ToF32(bytes: ArrayBuffer): Float32Array {
   return out;
 }
 
+/// `AudioContext` with a preferred rate, falling back to the device default.
+/// Mobile Safari/WebViews often ignore the requested `sampleRate` (or throw),
+/// so callers must read `ctx.sampleRate` back and report the real rate.
+function createAudioContext(preferredRate: number): AudioContext {
+  const w = window as unknown as {
+    AudioContext?: typeof AudioContext;
+    webkitAudioContext?: typeof AudioContext;
+  };
+  const Ctor = w.AudioContext ?? w.webkitAudioContext;
+  if (!Ctor) throw new Error("Web Audio isn't available in this browser.");
+  try {
+    return new Ctor({ sampleRate: preferredRate });
+  } catch {
+    return new Ctor();
+  }
+}
+
+/// Turn a `getUserMedia` rejection into an actionable message.
+function micErrorMessage(e: unknown): string {
+  const name = (e as { name?: string } | null)?.name ?? "";
+  switch (name) {
+    case "NotAllowedError":
+    case "SecurityError":
+      return "Microphone permission denied. Allow microphone access for Bebop, then try again.";
+    case "NotFoundError":
+    case "DevicesNotFoundError":
+      return "No microphone found on this device.";
+    case "NotReadableError":
+    case "TrackStartError":
+      return "The microphone is in use by another app.";
+    default:
+      return e instanceof Error ? e.message : String(e);
+  }
+}
+
 export function useVoiceSession(host: string, port = 9093): VoiceSession {
   const [phase, setPhase] = useState<VoicePhase>("idle");
   const [transcript, setTranscript] = useState("");
@@ -73,10 +108,11 @@ export function useVoiceSession(host: string, port = 9093): VoiceSession {
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const captureCtxRef = useRef<AudioContext | null>(null);
-  const workletRef = useRef<AudioWorkletNode | null>(null);
+  const captureNodeRef = useRef<AudioWorkletNode | ScriptProcessorNode | null>(null);
   const playbackCtxRef = useRef<AudioContext | null>(null);
   const playHeadRef = useRef(0);
-  const stopCaptureRef = useRef<() => void>(undefined);
+  const capturingRef = useRef(false);
+  const stopCaptureRef = useRef<() => void>(() => {});
 
   // Tear down any live capture/WS when the screen unmounts or host changes.
   useEffect(() => {
@@ -92,10 +128,11 @@ export function useVoiceSession(host: string, port = 9093): VoiceSession {
 
   const ensurePlayback = useCallback(() => {
     if (!playbackCtxRef.current) {
-      playbackCtxRef.current = new AudioContext({ sampleRate: PLAYBACK_RATE });
+      playbackCtxRef.current = createAudioContext(PLAYBACK_RATE);
       playHeadRef.current = 0;
     }
-    void playbackCtxRef.current.resume();
+    // iOS suspends the context until a gesture; resume() is a no-op elsewhere.
+    void playbackCtxRef.current.resume().catch(() => {});
     return playbackCtxRef.current;
   }, []);
 
@@ -171,12 +208,18 @@ export function useVoiceSession(host: string, port = 9093): VoiceSession {
   }, [host, port, handleMessage]);
 
   const stopCapture = useCallback(() => {
-    try {
-      workletRef.current?.port.close();
-    } catch {
-      /* ignore */
+    capturingRef.current = false;
+    const node = captureNodeRef.current;
+    if (node) {
+      if ("port" in node) (node as AudioWorkletNode).port.onmessage = null;
+      if ("onaudioprocess" in node) (node as ScriptProcessorNode).onaudioprocess = null;
+      try {
+        node.disconnect();
+      } catch {
+        /* ignore */
+      }
     }
-    workletRef.current = null;
+    captureNodeRef.current = null;
     try {
       captureCtxRef.current?.close();
     } catch {
@@ -189,48 +232,74 @@ export function useVoiceSession(host: string, port = 9093): VoiceSession {
   stopCaptureRef.current = stopCapture;
 
   const startTalking = useCallback(async () => {
+    if (capturingRef.current) return;
     setError(null);
     setReply("");
     setTranscript("");
     setPhase("connecting");
+    // Must run inside the user gesture for iOS to unlock playback.
     ensurePlayback();
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError(
+        "Microphone isn't available in this context. Open Bebop over HTTPS (or the native app) so the browser grants mic access.",
+      );
+      setPhase("error");
+      return;
+    }
     try {
       const ws = await openSocket();
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch (e) {
+        throw new Error(micErrorMessage(e));
+      }
       streamRef.current = stream;
 
-      // Capture at 16 kHz so the WAV the service builds is already at the
-      // model's expected rate (Chromium honours the requested rate; the
-      // actual rate is reported to the service either way).
-      const ctx = new AudioContext({ sampleRate: CAPTURE_RATE });
+      // Prefer 16 kHz so the WAV the service builds is already at the model's
+      // rate, but mobile may coerce the context rate — report the real one.
+      const ctx = createAudioContext(CAPTURE_RATE);
       captureCtxRef.current = ctx;
-      const blob = new Blob([CAPTURE_WORKLET], { type: "application/javascript" });
-      const url = URL.createObjectURL(blob);
-      await ctx.audioWorklet.addModule(url);
-      URL.revokeObjectURL(url);
-
+      await ctx.resume().catch(() => {});
       const source = ctx.createMediaStreamSource(stream);
-      const worklet = new AudioWorkletNode(ctx, "bebop-pcm-capture");
-      workletRef.current = worklet;
-      // A muted gain keeps the worklet in the render graph without echoing the
+      // A muted gain keeps the node in the render graph without echoing the
       // mic back to the speakers.
       const mute = ctx.createGain();
       mute.gain.value = 0;
-      source.connect(worklet);
-      worklet.connect(mute);
       mute.connect(ctx.destination);
-      worklet.port.onmessage = (ev: MessageEvent<Float32Array>) => {
-        if (ws.readyState !== WebSocket.OPEN) return;
-        ws.send(f32ToI16(ev.data));
+      const push = (frame: Float32Array) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(f32ToI16(frame));
       };
-
+      if (ctx.audioWorklet) {
+        const blob = new Blob([CAPTURE_WORKLET], { type: "application/javascript" });
+        const url = URL.createObjectURL(blob);
+        try {
+          await ctx.audioWorklet.addModule(url);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+        const worklet = new AudioWorkletNode(ctx, "bebop-pcm-capture");
+        worklet.port.onmessage = (ev: MessageEvent<Float32Array>) => push(ev.data);
+        source.connect(worklet);
+        worklet.connect(mute);
+        captureNodeRef.current = worklet;
+      } else {
+        // Pre-AudioWorklet WebViews (older iOS/Android) fall back to the
+        // deprecated ScriptProcessorNode.
+        const proc = ctx.createScriptProcessor(4096, 1, 1);
+        proc.onaudioprocess = (ev) => push(ev.inputBuffer.getChannelData(0));
+        source.connect(proc);
+        proc.connect(mute);
+        captureNodeRef.current = proc;
+      }
+      capturingRef.current = true;
       ws.send(
         JSON.stringify({
           type: "utterance_start",
@@ -247,15 +316,14 @@ export function useVoiceSession(host: string, port = 9093): VoiceSession {
   }, [ensurePlayback, openSocket, stopCapture]);
 
   const stopTalking = useCallback(() => {
-    if (phase === "listening" || phase === "connecting") {
-      setPhase("thinking");
-    }
+    if (!capturingRef.current) return;
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "utterance_end" }));
+      setPhase("thinking");
     }
     stopCapture();
-  }, [phase, stopCapture]);
+  }, [stopCapture]);
 
   return { phase, transcript, reply, error, startTalking, stopTalking };
 }
