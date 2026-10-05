@@ -19,6 +19,7 @@ import type {
   WheelView,
 } from "../runtime";
 import type { RuntimeTransport } from "../runtime";
+import { httpUrl } from "../runtime/urls";
 
 interface MotorBenchProps {
   /** IP address of the robot, as reported by `WifiStatus.ip_address` over BLE. */
@@ -1597,7 +1598,7 @@ function CaptureDownloads({
   runtimePort: number;
 }) {
   const baseUrl = useMemo(
-    () => `http://${robotIp}:${runtimePort}`,
+    () => httpUrl(robotIp, runtimePort),
     [robotIp, runtimePort],
   );
   const [files, setFiles] = useState<CaptureFile[] | null>(null);

@@ -4,6 +4,7 @@ import { VideoFeed } from "../components/VideoFeed";
 import { Banner, Button } from "../components/ui";
 import { getOrCreateRuntimeTransport } from "../runtime";
 import type { RuntimeConnectionState } from "../runtime";
+import { httpUrl } from "../runtime/urls";
 
 interface VideoScreenProps {
   /** IP address of the robot (LAN address of the bebop-linux runtime). */
@@ -63,7 +64,7 @@ export function VideoScreen({
     );
 
   const transport = getOrCreateRuntimeTransport(robotIp, runtimePort);
-  const url = `http://${robotIp}:9092/whep`;
+  const url = httpUrl(robotIp, 9092, "/whep");
 
   useEffect(() => {
     const offs = [transport.onConnectionStateChange(setConn)];
@@ -92,7 +93,7 @@ export function VideoScreen({
         {videoStreams.map((id) => (
           <VideoFeed
             key={id}
-            baseUrl={`http://${robotIp}:${runtimePort}`}
+            baseUrl={httpUrl(robotIp, runtimePort)}
             videoUrl={url}
             stream={id}
             reconnectKey={reconnectKey}

@@ -58,6 +58,7 @@ import { Banner, Button } from "../components/ui";
 import { useGamepad } from "../input";
 import { getOrCreateRuntimeTransport } from "../runtime";
 import type { RuntimeTransport } from "../runtime";
+import { httpUrl } from "../runtime/urls";
 import type {
   RuntimeConnectionState,
   RuntimeMode,
@@ -607,8 +608,8 @@ export function TeleopScreen({
         className={`relative aspect-video shrink-0 overflow-hidden rounded-[var(--radius-card)] border border-border bg-black transition-colors hover:border-white/40 ${sizeClasses}`}
       >
         <VideoFeed
-          baseUrl={`http://${robotIp}:${runtimePort}`}
-          videoUrl={`http://${robotIp}:9092/whep`}
+          baseUrl={httpUrl(robotIp, runtimePort)}
+          videoUrl={httpUrl(robotIp, 9092, "/whep")}
           stream={id}
           reconnectKey={reconnectKey}
           className="h-full w-full"
@@ -809,8 +810,8 @@ export function TeleopScreen({
           <div className="flex h-full min-h-0 flex-col-reverse gap-1 overflow-hidden sm:flex-row">
             <div className="relative min-h-0 min-w-0 flex-1">
               <VideoFeed
-                baseUrl={`http://${robotIp}:${runtimePort}`}
-                videoUrl={`http://${robotIp}:9092/whep`}
+                baseUrl={httpUrl(robotIp, runtimePort)}
+                videoUrl={httpUrl(robotIp, 9092, "/whep")}
                 stream={primaryStream}
                 reconnectKey={reconnectKey}
                 onStreamState={setStreamState}
@@ -844,8 +845,8 @@ export function TeleopScreen({
         ) : (
           <>
             <VideoFeed
-              baseUrl={`http://${robotIp}:${runtimePort}`}
-              videoUrl={`http://${robotIp}:9092/whep`}
+              baseUrl={httpUrl(robotIp, runtimePort)}
+              videoUrl={httpUrl(robotIp, 9092, "/whep")}
               stream={primaryStream}
               reconnectKey={reconnectKey}
               onStreamState={setStreamState}

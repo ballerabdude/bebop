@@ -78,6 +78,7 @@ import type {
   VoiceView,
   WheelView,
 } from "./types";
+import { wsUrl } from "./urls";
 
 const DEFAULT_PORT = 9090;
 const ACK_TIMEOUT_MS = 5_000;
@@ -208,7 +209,7 @@ export class RuntimeTransport {
     }
     this.setConnectionState("connecting");
     return new Promise((resolve, reject) => {
-      const url = `ws://${endpoint.host}:${endpoint.port}/ws`;
+      const url = wsUrl(endpoint.host, endpoint.port, "/ws");
       const ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
       this.ws = ws;

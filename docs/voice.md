@@ -213,6 +213,11 @@ targets (`tauri android init` / `tauri ios init`):
 - The alternative, browser-only deployment would require terminating TLS on
   the robot (self-signed) and using `wss://` / `https://`.
 
+For **dev**, see [`dev-https.md`](dev-https.md): the Chrome
+`unsafely-treat-insecure-origin-as-secure` flag (desktop), or a self-signed
+Caddy proxy (`Caddyfile.dev`). The app picks `wss`/`https` automatically when
+the page is HTTPS (`bebop-app/src/runtime/urls.ts`).
+
 ## Risks / open questions
 
 1. **Engine build time & disk.** First serve builds six engines; budget tens of

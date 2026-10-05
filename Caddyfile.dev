@@ -1,0 +1,49 @@
+# Dev TLS reverse proxy for the Bebop robot.
+#
+# Terminates TLS once in front of the robot's cleartext services so the app can
+# run in a secure context (getUserMedia / microphone) without making each Jetson
+# service secure. The app derives wss:// or https:// from the page origin
+# (bebop-app/src/runtime/urls.ts), so point it at THIS host.
+#
+#   ROBOT_IP=192.168.0.174 caddy run --config Caddyfile.dev
+#
+# Caddy issues the certs from its local CA. Trust that CA on each client:
+#   macOS:   ~/.local/share/caddy/pki/authorities/local/root.crt -> Keychain,
+#            "Always Trust".
+#   iPhone:  install the profile, then enable full trust under
+#            Settings > General > About > Certificate Trust Settings.
+#
+# Then open https://<this-host>:8443 and enter <this-host> in the app.
+
+{
+	admin off
+	# Local CA for self-signed dev certs.
+	local_certs
+}
+
+# The built app (npm run build in bebop-app/).
+https://:8443 {
+	tls internal
+	root * ./bebop-app/dist
+	encode gzip
+	try_files {path} /index.html
+	file_server
+}
+
+# Robot runtime WebSocket + captures (:9090, bebop-linux).
+https://:9090 {
+	tls internal
+	reverse_proxy {$ROBOT_IP:192.168.0.174}:9090
+}
+
+# Robot operator video / WHEP (:9092, bebop-vision).
+https://:9092 {
+	tls internal
+	reverse_proxy {$ROBOT_IP:192.168.0.174}:9092
+}
+
+# Robot voice gateway (:9093, bebop-voice).
+https://:9093 {
+	tls internal
+	reverse_proxy {$ROBOT_IP:192.168.0.174}:9093
+}

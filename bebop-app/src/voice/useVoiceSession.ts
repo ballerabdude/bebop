@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { httpUrl, wsUrl } from "../runtime/urls";
+
 /// Turn-based speech-to-speech client for `bebop-voice.service` (:9093).
 ///
 /// Push-to-talk: hold `startTalking()` to capture 16 kHz mono PCM16 from the
@@ -195,7 +197,7 @@ export function useVoiceSession(host: string, port = 9093): VoiceSession {
       return Promise.resolve(existing);
     }
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(`ws://${host}:${port}/voice`);
+      const ws = new WebSocket(wsUrl(host, port, "/voice"));
       ws.binaryType = "arraybuffer";
       ws.onopen = () => resolve(ws);
       ws.onerror = () => reject(new Error(`voice socket error (${host}:${port})`));
@@ -372,7 +374,7 @@ export function useVoiceHealth(
     let timer: ReturnType<typeof setTimeout> | null = null;
     const tick = async () => {
       try {
-        const res = await fetch(`http://${host}:${port}/healthz`, {
+        const res = await fetch(httpUrl(host, port, "/healthz"), {
           cache: "no-store",
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
