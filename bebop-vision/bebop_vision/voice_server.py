@@ -1234,6 +1234,7 @@ def build_app(
     sessions: SessionStore | None = None,
     status: VoiceStatus | None = None,
     pipeline: CascadePipeline | None = None,
+    pipeline_status: VoiceStatus | None = None,
 ) -> Any:
     """Construct the FastAPI app.
 
@@ -1263,20 +1264,40 @@ def build_app(
         allow_headers=["*"],
     )
 
+    def current_status() -> VoiceStatus:
+        """Status of the backend selected right now."""
+        active_cascade = (config.backend == "cascade" and pipeline is not None) or (
+            server is None and pipeline is not None
+        )
+        if active_cascade:
+            return pipeline_status or status
+        return status
+
     def voices_list() -> list[str]:
+        if config.backend == "cascade" and pipeline is not None:
+            return cascade_voices(pipeline.tts)
+        if server is not None:
+            return known_voices(server)
         if pipeline is not None:
             return cascade_voices(pipeline.tts)
-        return known_voices(server)
+        return known_voices(None)
 
     def config_view() -> dict[str, Any]:
         snap = config.snapshot()
         snap["voices"] = voices_list()
-        snap["backends"] = ["omni", "cascade"]
+        snap["backends"] = [
+            name
+            for name, ok in (("omni", server is not None), ("cascade", pipeline is not None))
+            if ok or stub
+        ]
         return snap
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
-        return JSONResponse(status.snapshot())
+        snap = current_status().snapshot()
+        snap["backend"] = config.backend
+        snap["available"] = {"omni": server is not None, "cascade": pipeline is not None}
+        return JSONResponse(snap)
 
     @app.get("/voices")
     async def voices() -> JSONResponse:
@@ -1322,12 +1343,12 @@ def build_app(
     @app.websocket("/voice")
     async def voice_ws(ws: WebSocket) -> None:
         await ws.accept()
-        if status.phase not in READY_PHASES:
+        if current_status().phase not in READY_PHASES:
             await ws.send_text(
                 json.dumps(
                     {
                         "type": "error",
-                        "message": f"voice service not ready ({status.phase}): {status.detail}",
+                        "message": f"voice service not ready ({current_status().phase}): {current_status().detail}",
                     }
                 )
             )
@@ -1358,7 +1379,10 @@ def build_app(
                     if not pcm:
                         await ws.send_text(json.dumps({"type": "done"}))
                         continue
-                    if pipeline is not None:
+                    use_cascade = (
+                        config.backend == "cascade" and pipeline is not None
+                    ) or (server is None and pipeline is not None)
+                    if use_cascade:
                         await _run_turn_cascade(
                             ws,
                             history,
@@ -1369,7 +1393,7 @@ def build_app(
                             config=config,
                             voice_override=requested_voice,
                         )
-                    else:
+                    elif server is not None or stub:
                         await _run_turn(
                             ws,
                             history,
@@ -1380,6 +1404,8 @@ def build_app(
                             config=config,
                             voice_override=requested_voice,
                         )
+                    else:
+                        raise RuntimeError("no voice backend available")
         except WebSocketDisconnect:
             pass
         except Exception as exc:  # noqa: BLE001 - report and close cleanly
@@ -1557,81 +1583,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Cascade backend: three stage servers, best model per stage.
     _saved = VoiceConfig.load() if CONFIG_PATH.exists() else None
-    backend = args.backend or (_saved.backend if _saved else "omni")
-    if backend == "cascade":
-        if _saved is not None:
-            config = _saved
-        else:
-            config = VoiceConfig(
-                voice=args.voice,
-                system_prompt=args.system_prompt,
-                history_turns=_clamp_turns(args.history_turns),
-                keep_audio_history=args.keep_audio_history,
-                tools_enabled=not args.no_tools,
-            )
-        config.backend = "cascade"
-        status = VoiceStatus(model="cascade", precision="mixed", model_downloaded=True)
-        asr = StageServer(
-            "asr", CASCADE_ASR_MODEL, args.cache_dir / "asr", CASCADE_ASR_PORT,
-            capability="transcription", status=status,
-        )
-        tts = StageServer(
-            "tts", CASCADE_TTS_MODEL, args.cache_dir / "tts", CASCADE_TTS_PORT,
-            capability="speech", patched_launcher=True, status=status,
-        )
-        brain = StageServer(
-            "brain", CASCADE_BRAIN_MODEL, args.cache_dir / "brain", CASCADE_BRAIN_PORT,
-            capability="chat",
-            extra_args=[
-                "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml",
-                "--max-input-len", "8192", "--max-kv-cache-capacity", "16384",
-            ],
-            status=status,
-        )
-        pipeline = CascadePipeline(asr, brain, tts, status)
-        sessions = SessionStore()
-        _log(f"voice backend: cascade ({', '.join(pipeline.model_ids())})")
-        if args.stub:
-            status.set(phase="stub", detail="stub mode (no models)")
-        else:
-            pipeline.start_background()
-        app = build_app(
-            None, stub=args.stub, config=config, sessions=sessions,
-            status=status, pipeline=pipeline,
-        )
-        import uvicorn
-
-        _log(f"listening (cascade) on ws://{args.host}:{args.port}/voice")
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
-        if not args.stub:
-            pipeline.stop()
-        return 0
-
-    spec = voice_spec()
-    if spec is None:
-        _log("no catalog entry serves purpose 'voice' — see config/models.yaml")
-        return 1
-    if not spec.is_snapshot:
-        _log(f"voice model {spec.id} must use download: snapshot")
-        return 1
-    model_dir = resolve_model_dir(spec)
-    quantized = model_dir != spec.target_dir
-    if quantized:
-        downloaded = (model_dir / "config.json").is_file()
-    else:
-        downloaded = (spec.target_dir / ".bebop-complete").is_file()
-    precision = "nvfp4" if quantized else "fp16"
-    _log(f"voice model {spec.id} -> {model_dir} ({precision})")
-
-    status = VoiceStatus(
-        model=spec.id, precision=precision, model_downloaded=downloaded
-    )
-
-    # Operator settings persist under the state dir; CLI flags seed a first run.
-    if CONFIG_PATH.exists():
-        config = VoiceConfig.load()
+    if _saved is not None:
+        config = _saved
     else:
         config = VoiceConfig(
             voice=args.voice,
@@ -1640,16 +1594,27 @@ def main(argv: list[str] | None = None) -> int:
             keep_audio_history=args.keep_audio_history,
             tools_enabled=not args.no_tools,
         )
+    if args.backend:
+        config.backend = args.backend
     sessions = SessionStore()
-    _log(f"voice settings: voice={config.voice} turns={config.history_turns} "
-         f"keep_audio={config.keep_audio_history}")
+
+    spec = voice_spec()
+    model_dir = resolve_model_dir(spec) if spec is not None else None
+    quantized = bool(spec is not None and model_dir != spec.target_dir)
+    if spec is None:
+        downloaded = False
+    elif quantized:
+        downloaded = (model_dir / "config.json").is_file()
+    else:
+        downloaded = (spec.target_dir / ".bebop-complete").is_file()
+    precision = "nvfp4" if quantized else "fp16"
 
     if args.check:
         print(
             json.dumps(
                 {
-                    "model": spec.id,
-                    "model_dir": str(model_dir),
+                    "model": spec.id if spec else "",
+                    "model_dir": str(model_dir) if model_dir else "",
                     "precision": precision,
                     "downloaded": downloaded,
                     "stub": args.stub,
@@ -1660,27 +1625,69 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    # Both backends run at once and are selected per turn by `config.backend`,
+    # so the app's Engine switch takes effect without a service restart.
+    omni_status = VoiceStatus(
+        model=spec.id if spec else "qwen3-omni-30b",
+        precision=precision,
+        model_downloaded=downloaded,
+    )
+    cascade_status = VoiceStatus(
+        model="cascade", precision="mixed", model_downloaded=True
+    )
+
     server: EdgeLLMServer | None = None
+    pipeline: CascadePipeline | None = None
     if args.stub:
-        status.set(phase="stub", detail="stub mode (no model)")
-    elif not downloaded:
-        status.set(
-            phase="error",
-            detail=(
-                f"checkpoint not ready at {model_dir}; download it from the "
-                "Models page and run the NVFP4 quantization step (docs/voice.md)"
-            ),
-        )
+        omni_status.set(phase="stub", detail="stub mode (no model)")
+        cascade_status.set(phase="stub", detail="stub mode (no models)")
     else:
-        server = EdgeLLMServer(
-            str(model_dir), args.cache_dir, status, extra_args=args.edgellm_arg
+        # omni — only when its checkpoint is provisioned
+        if spec is not None and downloaded:
+            server = EdgeLLMServer(
+                str(model_dir), args.cache_dir, omni_status, extra_args=args.edgellm_arg
+            )
+            server.start_background()
+        else:
+            omni_status.set(
+                phase="error",
+                detail="omni checkpoint not provisioned (see docs/voice.md)",
+            )
+
+        # cascade — engines are cached/auto-built by each stage server
+        asr = StageServer(
+            "asr", CASCADE_ASR_MODEL, args.cache_dir / "asr", CASCADE_ASR_PORT,
+            capability="transcription", status=cascade_status,
         )
-        # Non-blocking: the gateway serves /healthz immediately and reports
-        # build progress while the engines compile.
-        server.start_background()
+        tts = StageServer(
+            "tts", CASCADE_TTS_MODEL, args.cache_dir / "tts", CASCADE_TTS_PORT,
+            capability="speech", patched_launcher=True, status=cascade_status,
+        )
+        brain = StageServer(
+            "brain", CASCADE_BRAIN_MODEL, args.cache_dir / "brain", CASCADE_BRAIN_PORT,
+            capability="chat",
+            extra_args=[
+                "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml",
+                "--max-input-len", "8192", "--max-kv-cache-capacity", "16384",
+            ],
+            status=cascade_status,
+        )
+        pipeline = CascadePipeline(asr, brain, tts, cascade_status)
+        pipeline.start_background()
+
+    _log(
+        f"voice backends: omni={server is not None} cascade={pipeline is not None}; "
+        f"active={config.backend} voice={config.voice} turns={config.history_turns}"
+    )
 
     app = build_app(
-        server, stub=args.stub, config=config, sessions=sessions, status=status
+        server,
+        stub=args.stub,
+        config=config,
+        sessions=sessions,
+        status=omni_status,
+        pipeline=pipeline,
+        pipeline_status=cascade_status,
     )
     import uvicorn
 
@@ -1688,6 +1695,8 @@ def main(argv: list[str] | None = None) -> int:
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     if server is not None:
         server.stop()
+    if pipeline is not None:
+        pipeline.stop()
     return 0
 
 

@@ -403,7 +403,7 @@ export function VoiceScreen({
                 </label>
                 <Field
                   label="Engine"
-                  hint="omni = one end-to-end model; cascade = ASR → Qwen3.8 brain → TTS. Restart the voice service to apply."
+                  hint="omni = one end-to-end model; cascade = ASR → Qwen3.8 brain → TTS. Switches live."
                 >
                   <select
                     className={INPUT_CLASS}
