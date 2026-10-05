@@ -1285,11 +1285,8 @@ def build_app(
     def config_view() -> dict[str, Any]:
         snap = config.snapshot()
         snap["voices"] = voices_list()
-        snap["backends"] = [
-            name
-            for name, ok in (("omni", server is not None), ("cascade", pipeline is not None))
-            if ok or stub
-        ]
+        # Both are selectable; the service loads only the chosen one.
+        snap["backends"] = ["omni", "cascade"]
         return snap
 
     @app.get("/healthz")
@@ -1625,43 +1622,25 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    # Both backends run at once and are selected per turn by `config.backend`,
-    # so the app's Engine switch takes effect without a service restart.
-    omni_status = VoiceStatus(
-        model=spec.id if spec else "qwen3-omni-30b",
-        precision=precision,
-        model_downloaded=downloaded,
-    )
-    cascade_status = VoiceStatus(
-        model="cascade", precision="mixed", model_downloaded=True
-    )
-
+    # Start ONLY the selected backend — the other model is not loaded, so no
+    # GPU memory or compute is spent on it. The app's Engine selector saves
+    # `config.backend`; restart the voice service (Voice toggle) to apply.
+    backend = config.backend
     server: EdgeLLMServer | None = None
     pipeline: CascadePipeline | None = None
-    if args.stub:
-        omni_status.set(phase="stub", detail="stub mode (no model)")
-        cascade_status.set(phase="stub", detail="stub mode (no models)")
-    else:
-        # omni — only when its checkpoint is provisioned
-        if spec is not None and downloaded:
-            server = EdgeLLMServer(
-                str(model_dir), args.cache_dir, omni_status, extra_args=args.edgellm_arg
-            )
-            server.start_background()
-        else:
-            omni_status.set(
-                phase="error",
-                detail="omni checkpoint not provisioned (see docs/voice.md)",
-            )
 
-        # cascade — engines are cached/auto-built by each stage server
+    if args.stub:
+        status = VoiceStatus(model="stub", model_downloaded=False)
+        status.set(phase="stub", detail="stub mode (no models)")
+    elif backend == "cascade":
+        status = VoiceStatus(model="cascade", precision="mixed", model_downloaded=True)
         asr = StageServer(
             "asr", CASCADE_ASR_MODEL, args.cache_dir / "asr", CASCADE_ASR_PORT,
-            capability="transcription", status=cascade_status,
+            capability="transcription", status=status,
         )
         tts = StageServer(
             "tts", CASCADE_TTS_MODEL, args.cache_dir / "tts", CASCADE_TTS_PORT,
-            capability="speech", patched_launcher=True, status=cascade_status,
+            capability="speech", patched_launcher=True, status=status,
         )
         brain = StageServer(
             "brain", CASCADE_BRAIN_MODEL, args.cache_dir / "brain", CASCADE_BRAIN_PORT,
@@ -1670,14 +1649,29 @@ def main(argv: list[str] | None = None) -> int:
                 "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml",
                 "--max-input-len", "8192", "--max-kv-cache-capacity", "16384",
             ],
-            status=cascade_status,
+            status=status,
         )
-        pipeline = CascadePipeline(asr, brain, tts, cascade_status)
+        pipeline = CascadePipeline(asr, brain, tts, status)
         pipeline.start_background()
+    else:
+        status = VoiceStatus(
+            model=spec.id if spec else "qwen3-omni-30b",
+            precision=precision,
+            model_downloaded=downloaded,
+        )
+        if spec is not None and downloaded:
+            server = EdgeLLMServer(
+                str(model_dir), args.cache_dir, status, extra_args=args.edgellm_arg
+            )
+            server.start_background()
+        else:
+            status.set(
+                phase="error",
+                detail="omni checkpoint not provisioned (see docs/voice.md)",
+            )
 
     _log(
-        f"voice backends: omni={server is not None} cascade={pipeline is not None}; "
-        f"active={config.backend} voice={config.voice} turns={config.history_turns}"
+        f"voice backend: {backend} voice={config.voice} turns={config.history_turns}"
     )
 
     app = build_app(
@@ -1685,9 +1679,9 @@ def main(argv: list[str] | None = None) -> int:
         stub=args.stub,
         config=config,
         sessions=sessions,
-        status=omni_status,
+        status=status,
         pipeline=pipeline,
-        pipeline_status=cascade_status,
+        pipeline_status=status,
     )
     import uvicorn
 
