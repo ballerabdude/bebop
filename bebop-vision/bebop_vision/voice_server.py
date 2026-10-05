@@ -882,6 +882,132 @@ async def _run_turn_cascade(
         del history[:-keep]
 
 
+# --- duplex bridge (MiniCPM-o via the Comni worker) -----------------------
+#
+# Full-duplex streaming: the app sends continuous 16 kHz PCM and receives text +
+# 24 kHz PCM without turn-taking. We proxy the Comni worker's protocol and add
+# the robot's cameras as optional JPEG frames, so the app stays on :9093.
+
+DUPLEX_WORKER_WS = "ws://127.0.0.1:22400/ws/duplex"
+
+
+async def _robot_frames_b64(limit: int = 2) -> list[str]:
+    views = await _snapshot_views()
+    return [base64.b64encode(jpeg).decode("ascii") for _, jpeg in views[:limit]]
+
+
+async def _duplex_bridge(ws: Any, config: "VoiceConfig") -> None:
+    import numpy as np
+    import websockets as wsc
+
+    first = await ws.receive()
+    if first.get("type") == "websocket.disconnect":
+        return
+    ctl = json.loads(first.get("text") or "{}")
+    if ctl.get("type") != "duplex_start":
+        await ws.send_text(json.dumps({"type": "error", "message": "expected duplex_start"}))
+        return
+    system_prompt = ctl.get("system_prompt") or config.system_prompt
+    want_camera = bool(ctl.get("camera", True))
+    stop = asyncio.Event()
+    total_out = 0
+
+    async with wsc.connect(DUPLEX_WORKER_WS, max_size=None, open_timeout=15) as worker:
+        await worker.send(json.dumps({"type": "prepare", "system_prompt": system_prompt}))
+
+        async def pump_app_to_worker() -> None:
+            chunk_n = 0
+            try:
+                while not stop.is_set():
+                    m = await ws.receive()
+                    if m.get("type") == "websocket.disconnect":
+                        break
+                    if m.get("bytes") is not None:
+                        f32 = (
+                            np.frombuffer(m["bytes"], dtype="<i2").astype(np.float32)
+                            / 32768.0
+                        )
+                        chunk = {
+                            "type": "audio_chunk",
+                            "audio_base64": base64.b64encode(f32.tobytes()).decode("ascii"),
+                        }
+                        if want_camera and chunk_n % 2 == 0:
+                            try:
+                                frames = await _robot_frames_b64()
+                                if frames:
+                                    chunk["frame_base64_list"] = frames
+                            except Exception:  # noqa: BLE001
+                                pass
+                        await worker.send(json.dumps(chunk))
+                        chunk_n += 1
+                    elif m.get("text"):
+                        c = json.loads(m["text"])
+                        if c.get("type") == "duplex_stop":
+                            break
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                stop.set()
+
+        async def pump_worker_to_app() -> None:
+            nonlocal total_out
+            try:
+                while not stop.is_set():
+                    raw = await worker.recv()
+                    try:
+                        msg = json.loads(raw)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    kind = msg.get("type")
+                    if kind == "prepared":
+                        await ws.send_text(json.dumps({"type": "duplex_ready"}))
+                    elif kind == "error":
+                        await ws.send_text(
+                            json.dumps({"type": "error", "message": msg.get("error", "")})
+                        )
+                    elif kind == "timeout":
+                        await ws.send_text(json.dumps({"type": "duplex_state", "state": "timeout"}))
+                    elif kind == "audio_only":
+                        b64 = msg.get("audio_data")
+                        if b64:
+                            af = np.frombuffer(base64.b64decode(b64), dtype=np.float32)
+                            pcm = (np.clip(af, -1, 1) * 32767).astype("<i2").tobytes()
+                            total_out += len(pcm)
+                            await ws.send_bytes(pcm)
+                    else:
+                        text = msg.get("text") or ""
+                        if text:
+                            await ws.send_text(json.dumps({"type": "text", "delta": text}))
+                        if "is_listen" in msg:
+                            await ws.send_text(
+                                json.dumps(
+                                    {"type": "duplex_state", "listening": bool(msg.get("is_listen"))}
+                                )
+                            )
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                stop.set()
+
+        await ws.send_text(
+            json.dumps(
+                {
+                    "type": "duplex_info",
+                    "input_rate": INPUT_RATE,
+                    "output_rate": OUTPUT_RATE,
+                    "format": "pcm16",
+                }
+            )
+        )
+        await asyncio.gather(
+            pump_app_to_worker(), pump_worker_to_app(), return_exceptions=True
+        )
+        try:
+            await worker.send(json.dumps({"type": "stop"}))
+        except Exception:  # noqa: BLE001
+            pass
+
+
 # --- status ---------------------------------------------------------------
 
 
@@ -1502,6 +1628,24 @@ def build_app(
                 await ws.send_text(
                     json.dumps({"type": "error", "message": str(exc)})
                 )
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    @app.websocket("/duplex")
+    async def duplex_ws(ws: WebSocket) -> None:
+        await ws.accept()
+        try:
+            await _duplex_bridge(ws, config)
+        except WebSocketDisconnect:
+            pass
+        except Exception as exc:  # noqa: BLE001 - report and close cleanly
+            try:
+                await ws.send_text(json.dumps({"type": "error", "message": str(exc)}))
             except Exception:  # noqa: BLE001
                 pass
         finally:
