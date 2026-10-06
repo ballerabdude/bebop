@@ -21,6 +21,7 @@ The last row is the shipped configuration (reproduced twice). It is what
 ```
 --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 14}'
 --kernel-config              '{"enable_flashinfer_autotune": false}'
+--enable-sleep-mode
 # bind-mounts: .cache/{vllm,huggingface,flashinfer,torch_extensions,torch} and .triton
 ```
 
@@ -84,11 +85,18 @@ trade-off: Edge-LLM's first start *builds* those engines (tens of minutes) and
 its Talker is NVFP4 (worse audio), which is why vLLM-Omni is preferred.
 
 ## Remaining levers (not yet done)
-1. **Keep it resident / sleep mode.** `ModelConfig.enable_sleep_mode` is
-   available on CUDA; the process could stay up and `/sleep` (offload weights to
-   CPU RAM) to hand the GPU to vision/VLA, then `/wake_up` in seconds. Removes
-   the 6 min from the operator's path entirely. Needs `enable_sleep_mode` +
-   `VLLM_SERVER_DEV_MODE=1`; the supervisor should own start-at-boot/idle-sleep.
+1. **Keep it resident / sleep mode — validated (2026-10-06).**
+   `POST /v1/omni/sleep {"stage_ids":[0,1,2],"level":2}` returns in **1 s** and
+   frees **~84 GB** (unified `Mem used` 100 → 16 GB); `POST /v1/omni/wakeup`
+   restores state `WARM` in **242 s (~4 min)**. Requires `--enable-sleep-mode`.
+   This is how to hand the GPU to vision/VLA without a cold start: the
+   supervisor starts `omni-vllm` at boot (or on app open) and sleeps it when
+   idle. Caveats measured:
+   - **Use level 2.** Level 1 (offload to CPU) only freed ~18 GB on Thor's
+     *unified* memory — it parked 67 GB in shared memory, effectively doubling
+     the footprint, and its wake did not complete.
+   - Wake (~4 min) is shorter than a cold start but not instant; pre-wake on app
+     open so it's warm by the time the operator talks.
 2. **`talker` init is now the biggest item (~90–150 s)** — the code_predictor
    warmup over buckets `[1,2,4,8,16,32,64]`. Worth seeing if its `torch.compile`
    artifact can be cached.

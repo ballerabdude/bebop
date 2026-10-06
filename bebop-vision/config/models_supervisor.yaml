@@ -31,6 +31,8 @@ backends:
       # Disable the flaky sm_110 flashinfer/TRT-LLM MoE autotuner.
       - "--kernel-config"
       - '{"enable_flashinfer_autotune": false}'
+      # Sleep/wake so the supervisor can free the GPU when idle (level 2).
+      - "--enable-sleep-mode"
 
   - id: omni-edge
     purpose: voice

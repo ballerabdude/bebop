@@ -69,6 +69,8 @@ DEFAULT_REGISTRY: list[dict[str, Any]] = [
             # Disable the flaky sm_110 MoE autotuner (it can fatally crash).
             "--kernel-config",
             '{"enable_flashinfer_autotune": false}',
+            # Sleep/wake: free the GPU when idle (level 2: ~84 GB in 1 s).
+            "--enable-sleep-mode",
         ],
     },
     {

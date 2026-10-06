@@ -1274,6 +1274,9 @@ class ContainerServer:
         args += [
             "--host", "0.0.0.0", "--port", str(self.port),
             "--init-timeout", "3600", "--stage-init-timeout", "3600",
+            # Enable sleep/wake so the supervisor can free the GPU when idle
+            # (POST /v1/omni/sleep level 2 frees ~84 GB in 1 s; wake ~4 min).
+            "--enable-sleep-mode",
             # vLLM loads safetensors single-threaded by default, so the 46 GiB
             # checkpoint reads on one core while 13 sit idle. Parallelise it:
             # measured 507 s -> ~50 s on Thor. See docs/vllm-omni.md.
