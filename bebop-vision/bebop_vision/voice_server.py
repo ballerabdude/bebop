@@ -196,6 +196,14 @@ class VoiceConfig:
     # When set, the omni backend uses this already-running OpenAI-compatible
     # server (e.g. a vLLM-Omni container) instead of supervising Edge-LLM.
     omni_url: str = ""
+    # When true, the omni backend *manages* a Docker container (start/stop with
+    # the voice service) instead of pointing at an external URL. Used for the
+    # vLLM-Omni image; also the pattern for future VLA containers.
+    omni_container: bool = False
+    omni_image: str = "bebop-vllm-omni-thor"
+    omni_model_dir: str = "/home/bebop/qwen3-omni-talker-safe"
+    omni_deploy_config: str = "/home/bebop/qwen3_omni_1gpu.yaml"
+    omni_port: int = 8101
 
     @classmethod
     def load(cls, path: Path | None = None) -> "VoiceConfig":
@@ -219,6 +227,13 @@ class VoiceConfig:
             cfg.backend = raw["backend"]
         if isinstance(raw.get("omni_url"), str):
             cfg.omni_url = raw["omni_url"].strip()
+        if isinstance(raw.get("omni_container"), bool):
+            cfg.omni_container = raw["omni_container"]
+        for key in ("omni_image", "omni_model_dir", "omni_deploy_config"):
+            if isinstance(raw.get(key), str) and raw[key].strip():
+                setattr(cfg, key, raw[key].strip())
+        if isinstance(raw.get("omni_port"), int):
+            cfg.omni_port = raw["omni_port"]
         return cfg
 
     def save(self, path: Path | None = None) -> None:
@@ -237,6 +252,11 @@ class VoiceConfig:
             "tools_enabled": self.tools_enabled,
             "backend": self.backend,
             "omni_url": self.omni_url,
+            "omni_container": self.omni_container,
+            "omni_image": self.omni_image,
+            "omni_model_dir": self.omni_model_dir,
+            "omni_deploy_config": self.omni_deploy_config,
+            "omni_port": self.omni_port,
         }
 
 
@@ -1148,6 +1168,100 @@ class ExternalServer:
         return
 
 
+class ContainerServer:
+    """Supervises a model server running in a Docker container.
+
+    Unlike `EdgeLLMServer` (a child process), the server runs detached via
+    `docker run -d`; `stop()` removes it. Used for the vLLM-Omni image and the
+    pattern for future VLA containers. Requires the gateway to run as root (it
+    does, under `bebop-voice.service`).
+    """
+
+    NAME = "bebop-model-serve"
+    CACHE_DIR = "/home/bebop/.cache"
+
+    def __init__(
+        self,
+        image: str,
+        port: int,
+        status: "VoiceStatus",
+        *,
+        model_dir: str,
+        deploy_config: str = "",
+        extra_args: list[str] | None = None,
+    ) -> None:
+        self.image = image
+        self.port = port
+        self.status = status
+        self.model_dir = model_dir
+        self.deploy_config = deploy_config
+        self.extra_args = extra_args or []
+        self.base_url = f"http://127.0.0.1:{port}"
+
+    def _docker(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["docker", *args], capture_output=True, text=True, check=False
+        )
+
+    def health_ok(self) -> bool:
+        import httpx
+
+        try:
+            return httpx.get(
+                f"{self.base_url}/v1/models", timeout=3.0
+            ).status_code == 200
+        except Exception:  # noqa: BLE001
+            return False
+
+    def start_background(self) -> None:
+        threading.Thread(
+            target=self._run, name="container-supervisor", daemon=True
+        ).start()
+
+    def _run(self) -> None:
+        atexit.register(self.stop)
+        self.status.set(phase="starting", detail=f"starting {self.image}")
+        self._docker("rm", "-f", self.NAME)  # replace a stale container
+        args = [
+            "run", "-d", "--name", self.NAME,
+            "--runtime", "nvidia", "--network", "host",
+            "-v", f"{self.model_dir}:/models/model:ro",
+            "-v", f"{self.CACHE_DIR}/vllm:/root/.cache/vllm",
+            "-v", f"{self.CACHE_DIR}/huggingface:/root/.cache/huggingface",
+        ]
+        if self.deploy_config:
+            args += ["-v", f"{self.deploy_config}:/cfg/deploy.yaml:ro"]
+        args += [self.image, "/models/model", "--omni"]
+        if self.deploy_config:
+            args += ["--deploy-config", "/cfg/deploy.yaml"]
+        args += [
+            "--host", "0.0.0.0", "--port", str(self.port),
+            "--init-timeout", "3600", "--stage-init-timeout", "3600",
+            *self.extra_args,
+        ]
+        res = self._docker(*args)
+        if res.returncode != 0:
+            self.status.set(
+                phase="error", detail=f"docker run failed: {res.stderr.strip()[:180]}"
+            )
+            return
+        # vLLM-Omni cold start is long (model load + compile); poll generously.
+        for _ in range(720):
+            if self.health_ok():
+                self.status.set(phase="ready", detail="container ready")
+                self.status.beat()
+                return
+            running = self._docker("ps", "-q", "-f", f"name={self.NAME}").stdout.strip()
+            if not running:
+                self.status.set(phase="error", detail="container exited during startup")
+                return
+            time.sleep(5.0)
+        self.status.set(phase="error", detail="container did not become ready in time")
+
+    def stop(self) -> None:
+        self._docker("rm", "-f", self.NAME)
+
+
 def _friendly_detail(line: str) -> str:
     """Trim a raw builder log line for display in the app."""
     text = line.strip()
@@ -1410,6 +1524,13 @@ def build_app(
             config.backend = body["backend"]
         if isinstance(body.get("omni_url"), str):
             config.omni_url = body["omni_url"].strip()
+        if isinstance(body.get("omni_container"), bool):
+            config.omni_container = body["omni_container"]
+        for key in ("omni_image", "omni_model_dir", "omni_deploy_config"):
+            if isinstance(body.get(key), str) and body[key].strip():
+                setattr(config, key, body[key].strip())
+        if isinstance(body.get("omni_port"), int):
+            config.omni_port = body["omni_port"]
         try:
             config.save()
         except OSError as exc:
@@ -1740,6 +1861,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         pipeline = CascadePipeline(asr, brain, tts, status)
         pipeline.start_background()
+    elif config.omni_container:
+        # bebop-voice owns the container: start on service start, remove on stop.
+        status = VoiceStatus(
+            model="qwen3-omni (container)", precision=precision, model_downloaded=True
+        )
+        server = ContainerServer(
+            config.omni_image,
+            config.omni_port,
+            status,
+            model_dir=config.omni_model_dir,
+            deploy_config=config.omni_deploy_config,
+        )
+        server.start_background()
     elif config.omni_url:
         # External omni backend (e.g. a vLLM-Omni container) — no supervision.
         status = VoiceStatus(
