@@ -1,5 +1,6 @@
 .env
 .venv/
+.venv-voice/
 weights/
 datasets/
 runs/
