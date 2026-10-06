@@ -7,7 +7,6 @@ import {
 } from "../runtime";
 import { Banner, Button, Card, Field } from "../components/ui";
 import {
-  useDuplexSession,
   useVoiceConfig,
   useVoiceHealth,
   useVoiceSession,
@@ -71,14 +70,12 @@ export function VoiceScreen({
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string>(() => loadSessionId());
   const [personaDraft, setPersonaDraft] = useState("");
-  const [orkeyDraft, setOrkeyDraft] = useState("");
   const [savingCfg, setSavingCfg] = useState<string | null>(null);
   const [cfgError, setCfgError] = useState<string | null>(null);
 
   const cfg = useVoiceConfig(robotIp, 9093, voice.running);
   const health = useVoiceHealth(robotIp, 9093, voice.running);
   const session = useVoiceSession(robotIp, 9093, { session: sessionId });
-  const duplex = useDuplexSession(robotIp, 9093);
 
   useEffect(() => {
     try {
@@ -244,45 +241,6 @@ export function VoiceScreen({
           </div>
         </Card>
       )}
-
-      <Card>
-        <div className="py-2 flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <div className="text-xs text-text-dim uppercase tracking-wider">
-              Duplex (live)
-            </div>
-            <span className="flex items-center gap-2 text-[12px] text-text-dim">
-              {duplex.active ? (
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    duplex.listening ? "bg-accent animate-pulse" : "bg-success"
-                  }`}
-                />
-              ) : null}
-              {duplex.active ? (duplex.listening ? "Listening…" : "Speaking") : "Off"}
-            </span>
-          </div>
-          <p className="text-[13px] text-text-dim">
-            Continuous, interruptible voice (MiniCPM-o). No tap-to-talk — just talk;
-            it listens and speaks at once and uses the robot's cameras.
-          </p>
-          <div className="flex items-center gap-2">
-            {duplex.active ? (
-              <Button onClick={() => duplex.stop()}>Stop duplex</Button>
-            ) : (
-              <Button onClick={() => void duplex.start()} disabled={!voice.running}>
-                Start duplex
-              </Button>
-            )}
-          </div>
-          {duplex.error ? <Banner tone="error">{duplex.error}</Banner> : null}
-          {duplex.reply ? (
-            <div className="text-[13px] text-text leading-snug whitespace-pre-wrap">
-              {duplex.reply}
-            </div>
-          ) : null}
-        </div>
-      </Card>
 
       <Card>
         <div className="py-2 flex flex-col gap-2">
@@ -467,82 +425,6 @@ export function VoiceScreen({
                     ))}
                   </select>
                 </Field>
-                <Field
-                  label="Brain"
-                  hint="Local = on-device VLM; OpenRouter = a cloud model you pick (needs an API key)."
-                >
-                  <select
-                    className={INPUT_CLASS}
-                    value={cfg.config.brain}
-                    disabled={savingCfg === "brain"}
-                    onChange={(e) =>
-                      void saveCfg("brain", { brain: e.currentTarget.value })
-                    }
-                  >
-                    <option value="local">Local (on-device)</option>
-                    <option value="openrouter">OpenRouter (cloud)</option>
-                  </select>
-                </Field>
-                {cfg.config.brain === "openrouter" && (
-                  <>
-                    <Field
-                      label="OpenRouter model"
-                      hint="Any OpenRouter slug, e.g. openai/gpt-5.6, anthropic/claude-opus-4.6, google/gemini-3-pro."
-                    >
-                      <input
-                        className={INPUT_CLASS}
-                        defaultValue={cfg.config.openrouter_model}
-                        placeholder="openrouter/auto"
-                        onBlur={(e) =>
-                          void saveCfg("ormodel", {
-                            openrouter_model: e.currentTarget.value,
-                          })
-                        }
-                      />
-                    </Field>
-                    <Field
-                      label="OpenRouter API key"
-                      hint={
-                        cfg.config.openrouter_set
-                          ? "A key is stored on the robot (write-only)."
-                          : "Not set. Paste your sk-or-… key."
-                      }
-                    >
-                      <div className="flex gap-2">
-                        <input
-                          type="password"
-                          className={INPUT_CLASS}
-                          value={orkeyDraft}
-                          placeholder={
-                            cfg.config.openrouter_set ? "•••••••• (set)" : "sk-or-…"
-                          }
-                          onChange={(e) => setOrkeyDraft(e.currentTarget.value)}
-                        />
-                        <button
-                          className="shrink-0 rounded border border-border px-3 text-[13px]"
-                          disabled={!orkeyDraft || savingCfg === "orkey"}
-                          onClick={() => {
-                            void saveCfg("orkey", { openrouter_key: orkeyDraft });
-                            setOrkeyDraft("");
-                          }}
-                        >
-                          Save
-                        </button>
-                        {cfg.config.openrouter_set && (
-                          <button
-                            className="shrink-0 rounded border border-border px-3 text-[13px]"
-                            disabled={savingCfg === "orkey"}
-                            onClick={() =>
-                              void saveCfg("orkey", { openrouter_key: "" })
-                            }
-                          >
-                            Clear
-                          </button>
-                        )}
-                      </div>
-                    </Field>
-                  </>
-                )}
                 <Field
                   label="Personality"
                   hint="System prompt. Applies on the next turn."
