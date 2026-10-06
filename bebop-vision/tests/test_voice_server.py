@@ -375,6 +375,19 @@ def test_run_turn_skips_context_when_disabled(monkeypatch):
     assert called["n"] == 0
 
 
+def test_wav_bytes_to_pcm16():
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        w.writeframes(b"\x01\x02\x03\x04")
+    assert voice_server.wav_bytes_to_pcm16(buf.getvalue()) == b"\x01\x02\x03\x04"
+
+
 def test_config_tools_toggle(tmp_path, monkeypatch):
     monkeypatch.setattr(voice_server, "CONFIG_PATH", tmp_path / "c.json")
     monkeypatch.setattr(voice_server, "_VOICE_CACHE", {"ts": 0.0, "voices": []})

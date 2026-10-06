@@ -193,6 +193,9 @@ class VoiceConfig:
     keep_audio_history: bool = False
     tools_enabled: bool = True
     backend: str = "omni"  # "omni" (end-to-end) | "cascade" (ASR->brain->TTS)
+    # When set, the omni backend uses this already-running OpenAI-compatible
+    # server (e.g. a vLLM-Omni container) instead of supervising Edge-LLM.
+    omni_url: str = ""
 
     @classmethod
     def load(cls, path: Path | None = None) -> "VoiceConfig":
@@ -214,6 +217,8 @@ class VoiceConfig:
             cfg.tools_enabled = raw["tools_enabled"]
         if raw.get("backend") in ("omni", "cascade"):
             cfg.backend = raw["backend"]
+        if isinstance(raw.get("omni_url"), str):
+            cfg.omni_url = raw["omni_url"].strip()
         return cfg
 
     def save(self, path: Path | None = None) -> None:
@@ -231,6 +236,7 @@ class VoiceConfig:
             "keep_audio_history": self.keep_audio_history,
             "tools_enabled": self.tools_enabled,
             "backend": self.backend,
+            "omni_url": self.omni_url,
         }
 
 
@@ -1104,6 +1110,44 @@ class EdgeLLMServer:
             proc.kill()
 
 
+class ExternalServer:
+    """A backend that is already running (e.g. a vLLM-Omni container).
+
+    Unlike `EdgeLLMServer`, it does not supervise a child process; it just
+    points the gateway at an OpenAI-compatible base URL.
+    """
+
+    def __init__(self, base_url: str, status: "VoiceStatus") -> None:
+        self.base_url = base_url.rstrip("/")
+        self.status = status
+
+    def health_ok(self) -> bool:
+        import httpx
+
+        try:
+            return httpx.get(f"{self.base_url}/v1/models", timeout=3.0).status_code == 200
+        except Exception:  # noqa: BLE001
+            return False
+
+    def start_background(self) -> None:
+        def _run() -> None:
+            self.status.set(phase="starting", detail=f"connecting to {self.base_url}")
+            for _ in range(300):
+                if self.health_ok():
+                    self.status.set(phase="ready", detail="external server ready")
+                    self.status.beat()
+                    return
+                time.sleep(2.0)
+            self.status.set(
+                phase="error", detail=f"external server not reachable at {self.base_url}"
+            )
+
+        threading.Thread(target=_run, name="external-server", daemon=True).start()
+
+    def stop(self) -> None:
+        return
+
+
 def _friendly_detail(line: str) -> str:
     """Trim a raw builder log line for display in the app."""
     text = line.strip()
@@ -1119,6 +1163,17 @@ def _friendly_detail(line: str) -> str:
 
 
 # --- generation -----------------------------------------------------------
+
+
+def wav_bytes_to_pcm16(wav_bytes: bytes) -> bytes:
+    """Extract raw PCM16 frames from a WAV container.
+
+    vLLM-Omni streams audio as a base64 WAV inside `delta.content` (tagged
+    `modality: "audio"`), unlike Edge-LLM which sends raw PCM in
+    `delta.audio.data`. We normalize both to raw PCM16 for the app.
+    """
+    with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+        return w.readframes(w.getnframes())
 
 
 async def stream_completion(
@@ -1172,11 +1227,22 @@ async def stream_completion(
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                modality = chunk.get("modality")
                 for choice in chunk.get("choices", []):
                     delta = choice.get("delta") or choice.get("message") or {}
                     text = delta.get("content")
                     if text:
-                        yield {"type": "text", "delta": text}
+                        if modality == "audio":
+                            # vLLM-Omni: base64 WAV in content.
+                            try:
+                                yield {
+                                    "type": "audio",
+                                    "data": wav_bytes_to_pcm16(base64.b64decode(text)),
+                                }
+                            except Exception:  # noqa: BLE001 - skip a bad chunk
+                                pass
+                        else:
+                            yield {"type": "text", "delta": text}
                     audio = delta.get("audio")
                     if isinstance(audio, dict) and audio.get("data"):
                         try:
@@ -1342,6 +1408,8 @@ def build_app(
             config.tools_enabled = bool(body["tools_enabled"])
         if body.get("backend") in ("omni", "cascade"):
             config.backend = body["backend"]
+        if isinstance(body.get("omni_url"), str):
+            config.omni_url = body["omni_url"].strip()
         try:
             config.save()
         except OSError as exc:
@@ -1589,6 +1657,12 @@ def main(argv: list[str] | None = None) -> int:
         help="voice backend: 'omni' (end-to-end Qwen3-Omni) or 'cascade' "
         "(ASR -> VLM brain -> TTS). Defaults to the saved config.",
     )
+    parser.add_argument(
+        "--omni-url",
+        default="",
+        help="use an already-running OpenAI-compatible omni server (e.g. a "
+        "vLLM-Omni container) instead of supervising Edge-LLM",
+    )
     args = parser.parse_args(argv)
 
     _saved = VoiceConfig.load() if CONFIG_PATH.exists() else None
@@ -1604,6 +1678,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.backend:
         config.backend = args.backend
+    if args.omni_url:
+        config.omni_url = args.omni_url
     sessions = SessionStore()
 
     spec = voice_spec()
@@ -1664,6 +1740,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         pipeline = CascadePipeline(asr, brain, tts, status)
         pipeline.start_background()
+    elif config.omni_url:
+        # External omni backend (e.g. a vLLM-Omni container) — no supervision.
+        status = VoiceStatus(
+            model="qwen3-omni (external)", precision=precision, model_downloaded=True
+        )
+        server = ExternalServer(config.omni_url, status)
+        server.start_background()
     else:
         status = VoiceStatus(
             model=spec.id if spec else "qwen3-omni-30b",
