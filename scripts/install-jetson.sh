@@ -171,6 +171,9 @@ QUANTIZE_VOICE_ONLY=0
 # (.github/workflows/vllm-omni-thor.yml).
 PULL_VLLM_OMNI=0
 VLLM_OMNI_IMAGE="${VLLM_OMNI_IMAGE:-ghcr.io/ballerabdude/bebop-vllm-omni-thor:latest}"
+# --setup-models: install + enable bebop-models.service (the GPU/model
+# supervisor). Opt-in.
+SETUP_MODELS=0
 # Calibration samples for --quantize-voice (default 512, as upstream). The
 # docs floor is ~128; lower is faster, higher is better quality.
 VOICE_QUANT_SAMPLES="${VOICE_QUANT_SAMPLES:-512}"
@@ -238,6 +241,7 @@ while [[ $# -gt 0 ]]; do
         --quantize-voice-only) QUANTIZE_VOICE=1; QUANTIZE_VOICE_ONLY=1; shift ;;
         --pull-vllm-omni)    PULL_VLLM_OMNI=1; shift ;;
         --vllm-omni-image)   VLLM_OMNI_IMAGE="$2"; shift 2 ;;
+        --setup-models)      SETUP_MODELS=1; shift ;;
         --num-samples)       VOICE_QUANT_SAMPLES="$2"; shift 2 ;;
         --config-yaml)    CONFIG_YAML="$2"; shift 2 ;;
         *)                echo "unknown arg: $1" >&2; exit 2 ;;
@@ -866,6 +870,24 @@ pull_vllm_omni() {
     echo "    done; bebop-voice's ContainerServer uses this image"
 }
 
+# --setup-models: install + enable the model supervisor unit.
+setup_models() {
+    echo "==> installing bebop-models.service (GPU/model supervisor)"
+    local src=""
+    for cand in "${LOCAL_REPO_ROOT}/bebop-vision/deploy/systemd/bebop-models.service" \
+                "/home/bebop/bebop/bebop-vision/deploy/systemd/bebop-models.service"; do
+        if [[ -n "${cand}" && -f "${cand}" ]]; then src="${cand}"; break; fi
+    done
+    if [[ -z "${src}" ]]; then
+        echo "    ERROR: bebop-models.service not found (run from the repo with --local, or git pull)" >&2
+        return 1
+    fi
+    install -m 0644 "${src}" /etc/systemd/system/bebop-models.service
+    systemctl daemon-reload
+    systemctl enable --now bebop-models.service
+    echo "    bebop-models.service: $(systemctl is-active bebop-models.service)"
+}
+
 if [[ "${EUID}" -ne 0 ]]; then
     echo "install-jetson.sh must be run as root (sudo)" >&2
     exit 1
@@ -1478,6 +1500,10 @@ fi
 
 if [[ "${PULL_VLLM_OMNI}" -eq 1 ]]; then
     pull_vllm_omni
+fi
+
+if [[ "${SETUP_MODELS}" -eq 1 ]]; then
+    setup_models
 fi
 
 # ---------------------------------------------------------------------------

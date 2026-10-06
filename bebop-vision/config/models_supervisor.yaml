@@ -1,0 +1,42 @@
+# bebop-models supervisor registry.
+#
+# Each backend is one of:
+#   container - a Docker image the supervisor starts/stops (vLLM-Omni, VLA)
+#   external  - an already-running OpenAI-compatible server (base_url)
+#   tracked   - runs inside another process (bebop-vision); counted, not managed
+#
+# footprint_gb informs the GPU budget; before loading, the supervisor evicts
+# ready residents until the new backend fits (see GPU_BUDGET_GB).
+backends:
+  - id: omni-vllm
+    purpose: voice
+    kind: container
+    footprint_gb: 50
+    image: ghcr.io/ballerabdude/bebop-vllm-omni-thor:latest
+    model_dir: /home/bebop/qwen3-omni-talker-safe
+    deploy_config: /home/bebop/qwen3_omni_1gpu.yaml
+    port: 8101
+    container_name: bebop-model-omni-vllm
+    serve_args: ["--omni", "--init-timeout", "3600", "--stage-init-timeout", "3600"]
+
+  - id: omni-edge
+    purpose: voice
+    kind: external
+    footprint_gb: 20
+    base_url: http://127.0.0.1:8000
+    note: "TensorRT Edge-LLM Qwen3-Omni (currently supervised by bebop-voice)"
+
+  - id: vision
+    purpose: vision
+    kind: tracked
+    footprint_gb: 6
+    note: "navd/SAM inside bebop-vision (camera-coupled; not managed here)"
+
+  # Future VLA — a placeholder showing how one slots in:
+  # - id: vla-pi05
+  #   purpose: action
+  #   kind: container
+  #   footprint_gb: 10
+  #   image: ghcr.io/ballerabdude/bebop-vla-thor:latest
+  #   model_dir: /home/bebop/vla-pi05
+  #   port: 8020

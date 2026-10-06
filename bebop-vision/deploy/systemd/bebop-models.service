@@ -1,0 +1,30 @@
+[Unit]
+Description=Bebop model supervisor — GPU budget + model lifecycle on :9094
+Documentation=https://github.com/ballerabdude/bebop
+# Runs alongside the firmware and (root) starts/stops model backends — Docker
+# containers (vLLM-Omni, future VLA) and Edge-LLM children. Ordering keeps it
+# from racing the runtime at boot.
+After=network-online.target docker.service bebop-linux.service
+Wants=network-online.target
+# Not a hard dependency: the supervisor is useful even with docker absent
+# (external/tracked backends still report), so we only soft-order.
+After=docker.service
+
+[Service]
+Type=simple
+# Root is deliberate: it drives `docker` to start/stop model containers.
+User=root
+Group=root
+WorkingDirectory=/home/bebop/bebop/bebop-vision
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/bebop/bebop/bebop-vision
+# Uses the voice venv (fastapi/uvicorn/httpx already present). Registry at
+# config/models_supervisor.yaml (falls back to built-in defaults).
+ExecStart=/home/bebop/bebop/bebop-vision/.venv-voice/bin/python -u -m bebop_vision.models_supervisor
+Restart=on-failure
+RestartSec=5
+
+[Install]
+# Enabled by `install-jetson.sh --setup-models` (opt-in). It is a control
+# plane, so keeping it up is cheap; model backends are still started on demand.
+WantedBy=multi-user.target
