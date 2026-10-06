@@ -21,10 +21,12 @@ connectors:
       # (~2 s of codec at ~12.5 Hz) the first audio only lands ~2 s in, well
       # after the (fast MoE) thinker has streamed all its text. Measured first
       # audio: 25 -> 1.96 s, 8 -> 0.91 s, 5 -> 0.70 s, 3 -> 0.55 s, 1 -> 0.41 s.
-      # But chunk=1 generates at 0.86x real-time, so playback would underrun;
-      # 5 keeps ~1.32x headroom. `codec_left_context_frames` gives the decoder
-      # 25 frames of context regardless. See docs/vllm-omni.md.
-      codec_chunk_frames: 5
+      # But chunk=1 generates at 0.86x real-time, so playback would underrun.
+      # 8 keeps the most real-time headroom (~1.38x) and was judged better
+      # sounding than 5; 5 is a slightly-lower-latency alternative.
+      # `codec_left_context_frames` gives the decoder 25 frames of context
+      # regardless. See docs/vllm-omni.md.
+      codec_chunk_frames: 8
       codec_left_context_frames: 25
 
 stages:

@@ -1310,7 +1310,12 @@ class ContainerServer:
         self.status.set(phase="error", detail="container did not become ready in time")
 
     def stop(self) -> None:
-        self._docker("rm", "-f", self.NAME)
+        _log(f"stopping container {self.NAME}")
+        res = self._docker("rm", "-f", self.NAME)
+        if res.returncode != 0:
+            _log(f"docker rm -f {self.NAME} failed: {res.stderr.strip()[:160]}")
+        else:
+            _log(f"container {self.NAME} removed")
 
 
 class SupervisedServer:
@@ -1592,6 +1597,18 @@ def build_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.on_event("shutdown")
+    async def _teardown_backend() -> None:
+        # uvicorn runs lifespan shutdown on SIGTERM (systemctl stop / the app's
+        # Voice toggle), which is the one place that reliably fires — the code
+        # after uvicorn.run() and atexit did not. Tear down whatever this
+        # service owns so stopping Voice frees the GPU: remove the model
+        # container, or kill the Edge-LLM child / cascade stages.
+        if server is not None:
+            await asyncio.to_thread(server.stop)
+        if pipeline is not None:
+            await asyncio.to_thread(pipeline.stop)
 
     def current_status() -> VoiceStatus:
         """Status of the backend selected right now."""
@@ -2089,11 +2106,18 @@ def main(argv: list[str] | None = None) -> int:
     import uvicorn
 
     _log(f"listening on ws://{args.host}:{args.port}/voice")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
-    if server is not None:
-        server.stop()
-    if pipeline is not None:
-        pipeline.stop()
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    finally:
+        # systemd stops this unit with SIGTERM. uvicorn traps SIGTERM and shuts
+        # down gracefully, but may exit via SystemExit, so tear our children
+        # down here rather than relying on the lines after run() (and on
+        # atexit, which was not firing). This is what removes the model
+        # container / child process when Voice is toggled off.
+        if server is not None:
+            server.stop()
+        if pipeline is not None:
+            pipeline.stop()
     return 0
 
 
