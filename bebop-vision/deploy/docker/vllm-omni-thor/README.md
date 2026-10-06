@@ -7,7 +7,18 @@ future option**, not the shipping stack — see the notes at the bottom.
 Verified on the Thor: `vllm serve … --omni` reaches `ready`, and a chat request
 returns text *and* a 24 kHz audio payload.
 
-## Build
+## Get the image
+
+Built in CI (`.github/workflows/vllm-omni-thor.yml`) on a native arm64 runner and
+published to GHCR, so the Thor **pulls** instead of building:
+
+```bash
+docker pull ghcr.io/ballerabdude/bebop-vllm-omni-thor:latest
+# or, on the robot:
+sudo ./scripts/install-jetson.sh --pull-vllm-omni
+```
+
+To build locally (only if you change the Dockerfile):
 
 ```bash
 docker build -t bebop-vllm-omni-thor bebop-vision/deploy/docker/vllm-omni-thor

@@ -200,7 +200,7 @@ class VoiceConfig:
     # the voice service) instead of pointing at an external URL. Used for the
     # vLLM-Omni image; also the pattern for future VLA containers.
     omni_container: bool = False
-    omni_image: str = "bebop-vllm-omni-thor"
+    omni_image: str = "ghcr.io/ballerabdude/bebop-vllm-omni-thor:latest"
     omni_model_dir: str = "/home/bebop/qwen3-omni-talker-safe"
     omni_deploy_config: str = "/home/bebop/qwen3_omni_1gpu.yaml"
     omni_port: int = 8101
@@ -1222,6 +1222,11 @@ class ContainerServer:
         atexit.register(self.stop)
         self.status.set(phase="starting", detail=f"starting {self.image}")
         self._docker("rm", "-f", self.NAME)  # replace a stale container
+        # Pull from the registry when the image is a registry path; a bare
+        # local tag (e.g. built on-box) is used as-is.
+        if "/" in self.image:
+            self.status.set(phase="starting", detail=f"pulling {self.image}")
+            self._docker("pull", self.image)  # best-effort; run still tries
         args = [
             "run", "-d", "--name", self.NAME,
             "--runtime", "nvidia", "--network", "host",

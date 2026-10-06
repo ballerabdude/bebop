@@ -166,6 +166,11 @@ SETUP_VOICE_ONLY=0
 # from the FP16 snapshot downloaded via the app's Models page.
 QUANTIZE_VOICE=0
 QUANTIZE_VOICE_ONLY=0
+# --pull-vllm-omni: pull the custom vLLM-Omni (sm_110) image from GHCR instead
+# of building it on the Thor. The image is built in CI
+# (.github/workflows/vllm-omni-thor.yml).
+PULL_VLLM_OMNI=0
+VLLM_OMNI_IMAGE="${VLLM_OMNI_IMAGE:-ghcr.io/ballerabdude/bebop-vllm-omni-thor:latest}"
 # Calibration samples for --quantize-voice (default 512, as upstream). The
 # docs floor is ~128; lower is faster, higher is better quality.
 VOICE_QUANT_SAMPLES="${VOICE_QUANT_SAMPLES:-512}"
@@ -231,6 +236,8 @@ while [[ $# -gt 0 ]]; do
         --setup-voice-only)  SETUP_VOICE=1; SETUP_VOICE_ONLY=1; shift ;;
         --quantize-voice)    QUANTIZE_VOICE=1; shift ;;
         --quantize-voice-only) QUANTIZE_VOICE=1; QUANTIZE_VOICE_ONLY=1; shift ;;
+        --pull-vllm-omni)    PULL_VLLM_OMNI=1; shift ;;
+        --vllm-omni-image)   VLLM_OMNI_IMAGE="$2"; shift 2 ;;
         --num-samples)       VOICE_QUANT_SAMPLES="$2"; shift 2 ;;
         --config-yaml)    CONFIG_YAML="$2"; shift 2 ;;
         *)                echo "unknown arg: $1" >&2; exit 2 ;;
@@ -846,6 +853,19 @@ quantize_voice() {
 # Sanity checks
 # ---------------------------------------------------------------------------
 
+# --pull-vllm-omni: fetch the custom vLLM-Omni (sm_110) image built in CI
+# (see .github/workflows/vllm-omni-thor.yml) so the Thor never builds it.
+pull_vllm_omni() {
+    echo "==> pulling the vLLM-Omni (sm_110) image"
+    echo "    image: ${VLLM_OMNI_IMAGE}"
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "    ERROR: docker not found (install Docker + nvidia-container-toolkit)" >&2
+        return 1
+    fi
+    docker pull "${VLLM_OMNI_IMAGE}"
+    echo "    done; bebop-voice's ContainerServer uses this image"
+}
+
 if [[ "${EUID}" -ne 0 ]]; then
     echo "install-jetson.sh must be run as root (sudo)" >&2
     exit 1
@@ -1454,6 +1474,10 @@ fi
 
 if [[ "${QUANTIZE_VOICE}" -eq 1 ]]; then
     quantize_voice
+fi
+
+if [[ "${PULL_VLLM_OMNI}" -eq 1 ]]; then
+    pull_vllm_omni
 fi
 
 # ---------------------------------------------------------------------------
