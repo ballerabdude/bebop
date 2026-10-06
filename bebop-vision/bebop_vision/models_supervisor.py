@@ -66,6 +66,9 @@ DEFAULT_REGISTRY: list[dict[str, Any]] = [
             # Parallel safetensors load (vLLM defaults to one reader).
             "--model-loader-extra-config",
             '{"enable_multithread_load": true, "num_threads": 14}',
+            # Disable the flaky sm_110 MoE autotuner (it can fatally crash).
+            "--kernel-config",
+            '{"enable_flashinfer_autotune": false}',
         ],
     },
     {
@@ -140,7 +143,10 @@ class Backend:
             return
         # container
         cache = Path("/home/bebop/.cache")
-        for sub in ("vllm", "huggingface", "flashinfer", "torch_extensions"):
+        for sub in (
+            "vllm", "huggingface", "flashinfer",
+            "torch_extensions", "torch", "triton",
+        ):
             (cache / sub).mkdir(parents=True, exist_ok=True)
         _docker("rm", "-f", self.container)
         img = self.spec["image"]
@@ -153,9 +159,11 @@ class Backend:
             "-v", f"{cache}/vllm:/root/.cache/vllm",
             "-v", f"{cache}/huggingface:/root/.cache/huggingface",
             # Persist kernel/JIT caches: otherwise a fresh container re-JITs
-            # flashinfer and re-runs autotune (minutes) on every start.
+            # flashinfer/Triton (minutes) on every start. See docs/vllm-omni.md.
             "-v", f"{cache}/flashinfer:/root/.cache/flashinfer",
             "-v", f"{cache}/torch_extensions:/root/.cache/torch_extensions",
+            "-v", f"{cache}/torch:/root/.cache/torch",
+            "-v", f"{cache}/triton:/root/.triton",
         ]
         if self.spec.get("deploy_config"):
             args += ["-v", f"{self.spec['deploy_config']}:/cfg/deploy.yaml:ro"]

@@ -17,8 +17,8 @@ backends:
     deploy_config: /home/bebop/qwen3_omni_1gpu.yaml
     port: 8101
     container_name: bebop-model-omni-vllm
-    # Add "-O0" here to skip flashinfer autotune (~4 min of the cold start) at
-    # a modest decode-throughput cost. See docs/vllm-omni.md.
+    # Measured on Thor (docs/vllm-omni.md): multithread load + autotune off +
+    # warm Triton/flashinfer caches => ~6 min warm start (vs ~29 min cold).
     serve_args:
       - "--omni"
       - "--init-timeout"
@@ -28,6 +28,9 @@ backends:
       # Parallel safetensors load (vLLM defaults to a single reader core).
       - "--model-loader-extra-config"
       - '{"enable_multithread_load": true, "num_threads": 14}'
+      # Disable the flaky sm_110 flashinfer/TRT-LLM MoE autotuner.
+      - "--kernel-config"
+      - '{"enable_flashinfer_autotune": false}'
 
   - id: omni-edge
     purpose: voice

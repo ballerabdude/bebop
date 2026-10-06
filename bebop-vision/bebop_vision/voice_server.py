@@ -1238,7 +1238,10 @@ class ContainerServer:
         atexit.register(self.stop)
         self.status.set(phase="starting", detail=f"starting {self.image}")
         # Host dirs for the persistent caches we bind-mount below.
-        for sub in ("vllm", "huggingface", "flashinfer", "torch_extensions"):
+        for sub in (
+            "vllm", "huggingface", "flashinfer",
+            "torch_extensions", "torch", "triton",
+        ):
             Path(self.CACHE_DIR, sub).mkdir(parents=True, exist_ok=True)
         self._docker("rm", "-f", self.NAME)  # replace a stale container
         # Pull from the registry when the image is a registry path; a bare
@@ -1254,10 +1257,14 @@ class ContainerServer:
             "-v", f"{self.CACHE_DIR}/huggingface:/root/.cache/huggingface",
             # Persist the kernel/JIT caches to the host. They live in the
             # container's writable layer otherwise, which `docker rm -f` wipes
-            # on every start, forcing a full flashinfer JIT + autotune (several
-            # minutes) each boot. See docs/vllm-omni.md.
+            # on every start, forcing a full flashinfer/Triton JIT + autotune
+            # (several minutes) each boot. Measured on Thor: a warm Triton cache
+            # alone cut the code2wav stage from ~130-590 s to ~19 s. See
+            # docs/vllm-omni.md.
             "-v", f"{self.CACHE_DIR}/flashinfer:/root/.cache/flashinfer",
             "-v", f"{self.CACHE_DIR}/torch_extensions:/root/.cache/torch_extensions",
+            "-v", f"{self.CACHE_DIR}/torch:/root/.cache/torch",
+            "-v", f"{self.CACHE_DIR}/triton:/root/.triton",
         ]
         if self.deploy_config:
             args += ["-v", f"{self.deploy_config}:/cfg/deploy.yaml:ro"]
@@ -1268,9 +1275,16 @@ class ContainerServer:
             "--host", "0.0.0.0", "--port", str(self.port),
             "--init-timeout", "3600", "--stage-init-timeout", "3600",
             # vLLM loads safetensors single-threaded by default, so the 46 GiB
-            # checkpoint reads on one core while 13 sit idle. Parallelise it.
+            # checkpoint reads on one core while 13 sit idle. Parallelise it:
+            # measured 507 s -> ~50 s on Thor. See docs/vllm-omni.md.
             "--model-loader-extra-config",
             '{"enable_multithread_load": true, "num_threads": 14}',
+            # The sm_110 flashinfer/TRT-LLM MoE autotuner intermittently throws
+            # a fatal `dispatchMoeGemmSelectClusterShapeTmaWarpSpecialized` when
+            # profiling an unsupported tactic, killing the stage. Disabling it
+            # is both safe and as fast here (its ~1-2 min is offset elsewhere).
+            "--kernel-config",
+            '{"enable_flashinfer_autotune": false}',
             *self.extra_args,
         ]
         res = self._docker(*args)
