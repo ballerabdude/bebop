@@ -31,6 +31,47 @@ Two conclusions:
    `docker rm -f` on every start, so the writable-layer cache is discarded and
    the JIT/autotune is redone (~4-8 min, counted across all stages).
 
+## Why Edge-LLM started so much faster
+
+Measured warm start of the *same* Qwen3-Omni model under TensorRT Edge-LLM
+(`bebop-voice` journal, 2026-10-05 23:48):
+
+| | Edge-LLM | vLLM-Omni |
+|---|---|---|
+| process start → ready | **~40 s** (23:48:01 → 23:48:40) | ~29 min |
+| what start does | deserialize TRT engines + load external weights | Python engine init ×3 + weight load + KV profile + JIT + autotune |
+
+Edge-LLM is fast because its six engines are **ahead-of-time compiled,
+serialized TensorRT artifacts** cached at
+`/var/lib/bebop-voice/edgellm/engines/…/{llm,audio,kv8192…}` (thinker, talker,
+code_predictor, audio, code2wav, visual; ~1.9 GB). Start-up is just:
+
+```
+23:48:02  Loading runtime bundle …
+23:48:28  thinker engine loaded (787 I/O tensors)
+23:48:32  talker engine loaded
+23:48:36  code_predictor engine loaded
+23:48:38  Engine loaded and ready
+23:48:40  warm-up complete; ready
+```
+
+No graph tracing, no kernel JIT, no tactic autotune — **all of that happened
+once, at engine-build time**. vLLM-Omni instead does a full Python engine init
+per stage *every* cold start: `profile_run` to size the KV cache, flashinfer
+CUDA-kernel JIT, and MoE tactic autotuning (the very work TensorRT baked into
+the `.engine` files).
+
+The trade-offs are why we still prefer vLLM-Omni:
+- Edge-LLM's **first** start builds those engines (tens of minutes), and the
+  build is host-venv, not containerised.
+- To fit/quantize, Edge-LLM ran the Talker in **NVFP4**, which is why its audio
+  was worse; vLLM-Omni's talker-safe checkpoint keeps the Talker at higher
+  precision.
+
+The startup levers below are the closest vLLM analog to Edge-LLM's cached
+engines: cache the JIT/autotune results (lever 1) or skip autotune (lever 3),
+and keep the model resident so the cost never lands in front of the operator.
+
 ## What is already in our favour
 - `enforce_eager: true` on every stage → **torch.compile and CUDA-graph capture
   are off**, so there is no compile step (the one exception is `code2wav`,
