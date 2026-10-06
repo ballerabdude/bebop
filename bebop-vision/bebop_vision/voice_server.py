@@ -1267,6 +1267,10 @@ class ContainerServer:
         args += [
             "--host", "0.0.0.0", "--port", str(self.port),
             "--init-timeout", "3600", "--stage-init-timeout", "3600",
+            # vLLM loads safetensors single-threaded by default, so the 46 GiB
+            # checkpoint reads on one core while 13 sit idle. Parallelise it.
+            "--model-loader-extra-config",
+            '{"enable_multithread_load": true, "num_threads": 14}',
             *self.extra_args,
         ]
         res = self._docker(*args)

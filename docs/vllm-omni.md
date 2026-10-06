@@ -80,20 +80,30 @@ and keep the model resident so the cost never lands in front of the operator.
 
 ## Levers, best first
 
-1. **Persist the kernel/JIT caches on the host (done).**
-   `ContainerServer` and `bebop-models` now bind-mount
+1. **Parallelise weight loading (done, needs a timed restart to confirm).**
+   vLLM's `DefaultModelLoader` reads safetensors **single-threaded** by default
+   (`enable_multithread_load` is off), so the 46 GiB checkpoint is parsed on one
+   of the Thor's 14 cores. Both container paths now pass
+   `--model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 14}'`.
+   This targets the **504 s** thinker weight load (the single biggest item).
+
+2. **Keep it resident and use vLLM sleep mode rather than stop/start.**
+   The real fix: don't cold-start on demand. `ModelConfig.enable_sleep_mode`
+   is available on CUDA, so the process can stay up and `/sleep` (offload
+   weights to CPU RAM) to hand the GPU to vision/VLA, then `/wake_up` in
+   seconds. That removes the ~29 min from the operator's path entirely and
+   addresses the "don't waste the GPU" concern at the same time. Have the
+   supervisor own this (start at boot / on app open, sleep when idle).
+
+3. **Persist the kernel/JIT caches on the host (done).**
+   `ContainerServer` and `bebop-models` bind-mount
    `/home/bebop/.cache/flashinfer` → `/root/.cache/flashinfer` and
    `…/.cache/torch_extensions`. The second start reuses the compiled kernels
    and tuning results instead of redoing them. No inference cost.
    - Verify the host dir is populated after a run:
      `sudo du -sh /home/bebop/.cache/flashinfer`.
 
-2. **Keep it resident; don't cold-start on demand.** The real UX fix. Have the
-   supervisor start `omni-vllm` at boot (or when the app opens) and idle-stop
-   only after a long timeout — a ~28 min start is invisible if it happens
-   before the operator needs it. See `docs/models.md`.
-
-3. **Skip flashinfer autotune** when startup matters more than peak throughput:
+4. **Skip flashinfer autotune** when startup matters more than peak throughput:
    pass `-O0` (`--optimization-level 0`) to the server. vLLM maps O0 to
    `kernel_config.enable_flashinfer_autotune: false` (see
    `vllm/config/vllm.py`), which removes the ~4 min autotune. It also turns off
@@ -101,17 +111,17 @@ and keep the model resident so the cost never lands in front of the operator.
    with a voice turn before committing.
    - In `config/models_supervisor.yaml` add `-O0` to the backend's `serve_args`.
 
-4. **Shrink the warmup window.** `thinker` uses `max_num_batched_tokens: 32768`
+5. **Shrink the warmup window.** `thinker` uses `max_num_batched_tokens: 32768`
    in `qwen3_omni_1gpu.yaml`; the profile/warmup scales with it. Voice turns
    are short, so dropping it (e.g. 8192-16384) cuts the 307 s profile phase at
    the cost of long-prompt prefill latency. Similarly `gpu_memory_utilization`
    drives the KV-cache profiling.
 
-5. **Warm the page cache before start.** `vmtouch`/`cat` the checkpoint after
+6. **Warm the page cache before start.** `vmtouch`/`cat` the checkpoint after
    boot so the first stage's read is warm. Bounded by free RAM (~12 GB here),
    so only partial.
 
-6. **Do not enable torch.compile/CUDA graphs** to "speed up" startup — they add
+7. **Do not enable torch.compile/CUDA graphs** to "speed up" startup — they add
    a first-run compile. They help steady-state inference, not bring-up; if you
    ever enable them, keep `~/.cache/vllm` mounted (it already is) so the compile
    cache survives.

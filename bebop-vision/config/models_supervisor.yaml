@@ -19,7 +19,15 @@ backends:
     container_name: bebop-model-omni-vllm
     # Add "-O0" here to skip flashinfer autotune (~4 min of the cold start) at
     # a modest decode-throughput cost. See docs/vllm-omni.md.
-    serve_args: ["--omni", "--init-timeout", "3600", "--stage-init-timeout", "3600"]
+    serve_args:
+      - "--omni"
+      - "--init-timeout"
+      - "3600"
+      - "--stage-init-timeout"
+      - "3600"
+      # Parallel safetensors load (vLLM defaults to a single reader core).
+      - "--model-loader-extra-config"
+      - '{"enable_multithread_load": true, "num_threads": 14}'
 
   - id: omni-edge
     purpose: voice

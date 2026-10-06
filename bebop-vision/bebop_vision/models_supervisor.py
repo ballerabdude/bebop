@@ -59,7 +59,14 @@ DEFAULT_REGISTRY: list[dict[str, Any]] = [
         "model_dir": "/home/bebop/qwen3-omni-talker-safe",
         "deploy_config": "/home/bebop/qwen3_omni_1gpu.yaml",
         "port": 8101,
-        "serve_args": ["--omni", "--init-timeout", "3600", "--stage-init-timeout", "3600"],
+        "serve_args": [
+            "--omni",
+            "--init-timeout", "3600",
+            "--stage-init-timeout", "3600",
+            # Parallel safetensors load (vLLM defaults to one reader).
+            "--model-loader-extra-config",
+            '{"enable_multithread_load": true, "num_threads": 14}',
+        ],
     },
     {
         "id": "vision",
