@@ -70,6 +70,7 @@ export function VoiceScreen({
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string>(() => loadSessionId());
   const [personaDraft, setPersonaDraft] = useState("");
+  const [supervisorDraft, setSupervisorDraft] = useState("");
   const [savingCfg, setSavingCfg] = useState<string | null>(null);
   const [cfgError, setCfgError] = useState<string | null>(null);
 
@@ -89,6 +90,11 @@ export function VoiceScreen({
   useEffect(() => {
     if (systemPrompt !== undefined) setPersonaDraft(systemPrompt);
   }, [systemPrompt]);
+
+  const supervisorUrl = cfg.config?.omni_supervisor_url;
+  useEffect(() => {
+    if (supervisorUrl !== undefined) setSupervisorDraft(supervisorUrl);
+  }, [supervisorUrl]);
 
   // Telemetry: service lifecycle state from the runtime WS.
   useEffect(() => {
@@ -425,6 +431,30 @@ export function VoiceScreen({
                     ))}
                   </select>
                 </Field>
+                {cfg.config.backend === "omni" && (
+                  <Field
+                    label="Omni source (supervisor)"
+                    hint="Optional. If set, the bebop-models supervisor owns the omni backend (GPU budget + lifecycle). Leave empty to supervise Edge-LLM locally. Applies on the next Voice toggle."
+                  >
+                    <input
+                      className={INPUT_CLASS}
+                      placeholder="http://127.0.0.1:9094"
+                      spellCheck={false}
+                      value={supervisorDraft}
+                      onChange={(e) =>
+                        setSupervisorDraft(e.currentTarget.value)
+                      }
+                      onBlur={() => {
+                        const next = supervisorDraft.trim();
+                        if (next !== (cfg.config?.omni_supervisor_url ?? "")) {
+                          void saveCfg("supervisor", {
+                            omni_supervisor_url: next,
+                          });
+                        }
+                      }}
+                    />
+                  </Field>
+                )}
                 <Field
                   label="Personality"
                   hint="System prompt. Applies on the next turn."

@@ -195,6 +195,29 @@ Two Edge-LLM 0.11.0 notes:
 - TTS voices differ from omni voices (`aiden`, `dylan`, `eric`, `serena`, …);
   `resolve_cascade_voice` maps the configured voice or falls back to `aiden`.
 
+## Omni backend sources
+
+The `omni` backend is one end-to-end Qwen3-Omni model, but the service can get
+it three ways — only the selected source is loaded (one big model resident):
+
+| Source | Config | Who owns the lifecycle |
+|---|---|---|
+| **Supervisor** (preferred) | `omni_supervisor_url` (+ `omni_backend_id`) | `bebop-models` (:9094) — GPU budget + eviction |
+| External URL | `omni_url` | someone else (e.g. a hand-run container) |
+| Edge-LLM child | (both empty) | `bebop-voice` itself (`EdgeLLMServer`) |
+
+With `omni_supervisor_url` set, `SupervisedServer` POSTs
+`/models/{id}/load` to the supervisor on start (which blocks until the backend
+is ready — cold start can be long) and uses the `base_url` it returns; on stop
+it optionally `unload`s (`omni_unload_on_stop`). The supervisor is the single
+control plane for voice, vision, navigation and a future VLA; see
+[`models.md`](models.md). Set it from the app's Voice page (**Omni source
+(supervisor)**) or the Models page (**GPU budget** card).
+
+`ContainerServer` remains the direct container mode (bebop-voice starts/stops
+the vLLM-Omni image itself, pulled from
+`ghcr.io/ballerabdude/bebop-vllm-omni-thor`).
+
 ## Components and changes
 
 | Area | Files | State |

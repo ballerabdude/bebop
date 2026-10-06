@@ -478,6 +478,9 @@ export interface VoiceConfigView {
   backend: string;
   backends: string[];
   voices: string[];
+  /** When set, the bebop-models supervisor owns the omni backend. */
+  omni_supervisor_url: string;
+  omni_backend_id: string;
 }
 
 export interface VoiceConfigState {
@@ -497,6 +500,8 @@ function configFromJson(j: Record<string, unknown>): VoiceConfigView {
     backend: String(j.backend ?? "omni"),
     backends: Array.isArray(j.backends) ? (j.backends as string[]) : ["omni", "cascade"],
     voices: Array.isArray(j.voices) ? (j.voices as string[]) : [],
+    omni_supervisor_url: String(j.omni_supervisor_url ?? ""),
+    omni_backend_id: String(j.omni_backend_id ?? "omni-vllm"),
   };
 }
 

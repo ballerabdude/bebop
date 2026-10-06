@@ -233,6 +233,29 @@ def test_config_post_and_get(tmp_path, monkeypatch):
     assert client.post("/config", json={"voice": "nope"}).status_code == 400
 
 
+def test_config_supervisor_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_server, "CONFIG_PATH", tmp_path / "voice-config.json")
+    monkeypatch.setattr(voice_server, "_VOICE_CACHE", {"ts": 0.0, "voices": []})
+    app = voice_server.build_app(None, stub=True)
+    client = TestClient(app)
+    r = client.post(
+        "/config",
+        json={
+            "omni_supervisor_url": "http://127.0.0.1:9094",
+            "omni_backend_id": "omni-vllm",
+            "omni_unload_on_stop": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["omni_supervisor_url"] == "http://127.0.0.1:9094"
+    assert body["omni_backend_id"] == "omni-vllm"
+    assert body["omni_unload_on_stop"] is True
+    # Persisted and reloaded.
+    reloaded = voice_server.VoiceConfig.load(tmp_path / "voice-config.json")
+    assert reloaded.omni_supervisor_url == "http://127.0.0.1:9094"
+
+
 def test_config_clamps_history_turns(tmp_path, monkeypatch):
     monkeypatch.setattr(voice_server, "CONFIG_PATH", tmp_path / "voice-config.json")
     monkeypatch.setattr(voice_server, "_VOICE_CACHE", {"ts": 0.0, "voices": []})

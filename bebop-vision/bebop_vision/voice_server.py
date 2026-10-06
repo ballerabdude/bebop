@@ -204,6 +204,13 @@ class VoiceConfig:
     omni_model_dir: str = "/home/bebop/qwen3-omni-talker-safe"
     omni_deploy_config: str = "/home/bebop/qwen3_omni_1gpu.yaml"
     omni_port: int = 8101
+    # When set, the omni backend is owned by the `bebop-models` supervisor: on
+    # start the voice service asks the supervisor to `load` this backend and
+    # uses the URL it returns. Preferred long-term mode (one control plane owns
+    # the GPU budget + eviction); `omni_url`/`omni_container` remain direct modes.
+    omni_supervisor_url: str = ""
+    omni_backend_id: str = "omni-vllm"
+    omni_unload_on_stop: bool = False
 
     @classmethod
     def load(cls, path: Path | None = None) -> "VoiceConfig":
@@ -234,6 +241,12 @@ class VoiceConfig:
                 setattr(cfg, key, raw[key].strip())
         if isinstance(raw.get("omni_port"), int):
             cfg.omni_port = raw["omni_port"]
+        if isinstance(raw.get("omni_supervisor_url"), str):
+            cfg.omni_supervisor_url = raw["omni_supervisor_url"].strip()
+        if isinstance(raw.get("omni_backend_id"), str) and raw["omni_backend_id"].strip():
+            cfg.omni_backend_id = raw["omni_backend_id"].strip()
+        if isinstance(raw.get("omni_unload_on_stop"), bool):
+            cfg.omni_unload_on_stop = raw["omni_unload_on_stop"]
         return cfg
 
     def save(self, path: Path | None = None) -> None:
@@ -257,6 +270,9 @@ class VoiceConfig:
             "omni_model_dir": self.omni_model_dir,
             "omni_deploy_config": self.omni_deploy_config,
             "omni_port": self.omni_port,
+            "omni_supervisor_url": self.omni_supervisor_url,
+            "omni_backend_id": self.omni_backend_id,
+            "omni_unload_on_stop": self.omni_unload_on_stop,
         }
 
 
@@ -1267,6 +1283,93 @@ class ContainerServer:
         self._docker("rm", "-f", self.NAME)
 
 
+class SupervisedServer:
+    """Omni backend whose lifecycle is owned by the `bebop-models` supervisor.
+
+    On start it asks the supervisor to `load` a backend and uses that backend's
+    `base_url`; on stop it optionally `unload`s it. The supervisor handles the
+    GPU budget and eviction, so the voice service no longer manages the
+    container/child itself.
+    """
+
+    def __init__(
+        self,
+        supervisor_url: str,
+        backend_id: str,
+        status: "VoiceStatus",
+        *,
+        port: int = 0,
+        unload_on_stop: bool = False,
+    ) -> None:
+        self.supervisor_url = supervisor_url.rstrip("/")
+        self.backend_id = backend_id
+        self.status = status
+        self.port = port
+        self.unload_on_stop = unload_on_stop
+        self._base_url = ""
+
+    @property
+    def base_url(self) -> str:
+        if self._base_url:
+            return self._base_url
+        if self.port:
+            return f"http://127.0.0.1:{self.port}"
+        return self.supervisor_url
+
+    def health_ok(self) -> bool:
+        import httpx
+
+        try:
+            return httpx.get(
+                f"{self.base_url}/v1/models", timeout=3.0
+            ).status_code == 200
+        except Exception:  # noqa: BLE001
+            return False
+
+    def start_background(self) -> None:
+        threading.Thread(
+            target=self._run, name="supervisor-client", daemon=True
+        ).start()
+
+    def _run(self) -> None:
+        import httpx
+
+        atexit.register(self.stop)
+        self.status.set(
+            phase="starting", detail=f"supervisor: loading {self.backend_id}"
+        )
+        try:
+            # `load` blocks until the backend is ready (cold start can be long).
+            r = httpx.post(
+                f"{self.supervisor_url}/models/{self.backend_id}/load", timeout=None
+            )
+            data = r.json()
+            if isinstance(data, dict) and data.get("base_url"):
+                self._base_url = str(data["base_url"])
+        except Exception as exc:  # noqa: BLE001
+            self.status.set(
+                phase="error", detail=f"supervisor load failed: {exc}"
+            )
+            return
+        if self.health_ok():
+            self.status.set(phase="ready", detail="supervisor backend ready")
+            self.status.beat()
+        else:
+            self.status.set(phase="error", detail="backend not reachable after load")
+
+    def stop(self) -> None:
+        if not self.unload_on_stop:
+            return
+        import httpx
+
+        try:
+            httpx.post(
+                f"{self.supervisor_url}/models/{self.backend_id}/unload", timeout=30.0
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _friendly_detail(line: str) -> str:
     """Trim a raw builder log line for display in the app."""
     text = line.strip()
@@ -1536,6 +1639,12 @@ def build_app(
                 setattr(config, key, body[key].strip())
         if isinstance(body.get("omni_port"), int):
             config.omni_port = body["omni_port"]
+        if isinstance(body.get("omni_supervisor_url"), str):
+            config.omni_supervisor_url = body["omni_supervisor_url"].strip()
+        if isinstance(body.get("omni_backend_id"), str) and body["omni_backend_id"].strip():
+            config.omni_backend_id = body["omni_backend_id"].strip()
+        if isinstance(body.get("omni_unload_on_stop"), bool):
+            config.omni_unload_on_stop = body["omni_unload_on_stop"]
         try:
             config.save()
         except OSError as exc:
@@ -1789,6 +1898,17 @@ def main(argv: list[str] | None = None) -> int:
         help="use an already-running OpenAI-compatible omni server (e.g. a "
         "vLLM-Omni container) instead of supervising Edge-LLM",
     )
+    parser.add_argument(
+        "--omni-supervisor-url",
+        default="",
+        help="URL of the bebop-models supervisor (e.g. http://127.0.0.1:9094); "
+        "its lifecycle owns the omni backend",
+    )
+    parser.add_argument(
+        "--omni-backend-id",
+        default="",
+        help="backend id to load from the supervisor (default omni-vllm)",
+    )
     args = parser.parse_args(argv)
 
     _saved = VoiceConfig.load() if CONFIG_PATH.exists() else None
@@ -1806,6 +1926,10 @@ def main(argv: list[str] | None = None) -> int:
         config.backend = args.backend
     if args.omni_url:
         config.omni_url = args.omni_url
+    if args.omni_supervisor_url:
+        config.omni_supervisor_url = args.omni_supervisor_url
+    if args.omni_backend_id:
+        config.omni_backend_id = args.omni_backend_id
     sessions = SessionStore()
 
     spec = voice_spec()
@@ -1866,6 +1990,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         pipeline = CascadePipeline(asr, brain, tts, status)
         pipeline.start_background()
+    elif config.omni_supervisor_url:
+        # Preferred long-term mode: the bebop-models supervisor owns the backend
+        # lifecycle + GPU budget. We ask it to load the backend and use its URL.
+        status = VoiceStatus(
+            model=f"qwen3-omni (supervised:{config.omni_backend_id})",
+            precision=precision,
+            model_downloaded=True,
+        )
+        server = SupervisedServer(
+            config.omni_supervisor_url,
+            config.omni_backend_id,
+            status,
+            port=config.omni_port,
+            unload_on_stop=config.omni_unload_on_stop,
+        )
+        server.start_background()
     elif config.omni_container:
         # bebop-voice owns the container: start on service start, remove on stop.
         status = VoiceStatus(

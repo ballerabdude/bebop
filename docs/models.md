@@ -54,13 +54,13 @@ sudo ./scripts/install-jetson.sh --pull-vllm-omni    # pre-pull the vLLM-Omni im
 
 ## Migration path
 
-- **Today:** the supervisor can own the vLLM-Omni container. `bebop-voice`
-  already supports three omni sources — an Edge-LLM child (`omni_container`
-  off / `omni_url` empty), a managed container (`omni_container`), or an
-  external URL (`omni_url`). Pointing it at the supervisor's backend is the next
-  step.
-- **Next:** have `bebop-voice` (and `bebop-vision`, for VLA) call the supervisor
-  API to `load`/`unload` instead of managing lifecycle themselves; the app's
-  Models page reads/writes it as the unified view.
+- **Today:** the supervisor owns the vLLM-Omni container, and `bebop-voice` can
+  delegate to it — set **Omni source (supervisor)** on the Voice page
+  (`omni_supervisor_url`, e.g. `http://127.0.0.1:9094`) and the voice service
+  `load`s `omni-vllm` through the supervisor (`SupervisedServer`) instead of
+  managing lifecycle itself. The app's Models page (**GPU budget** card) shows
+  what is resident and loads/unloads backends.
+- **Next:** have `bebop-vision` (for VLA) call the supervisor too, and add
+  idle-stop (unload after N minutes unused).
 - **VLA:** registered as just another backend; the robot loads it when it needs
   to *act*, and omni when it needs to *talk* — time-shared on the one GPU.

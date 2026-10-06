@@ -1,4 +1,5 @@
 import { AIModelCard } from "../components/AIModelCard";
+import { ModelSupervisorCard } from "../components/ModelSupervisorCard";
 import { Button } from "../components/ui";
 
 /// Dedicated model provisioning + purpose-configuration screen. Reached from
@@ -21,6 +22,8 @@ export function ModelsScreen({
       </p>
 
       <AIModelCard robotIp={robotIp} runtimePort={runtimePort} showWhenUnavailable />
+
+      <ModelSupervisorCard robotIp={robotIp} />
 
       <div className="mt-auto pt-4">
         <Button variant="ghost" onClick={onBack}>
