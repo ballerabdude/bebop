@@ -84,6 +84,40 @@ caching the JIT/autotune artifacts (levers 1–3) is the closest analog. The
 trade-off: Edge-LLM's first start *builds* those engines (tens of minutes) and
 its Talker is NVFP4 (worse audio), which is why vLLM-Omni is preferred.
 
+## Speech lags the text (`codec_chunk_frames`)
+
+With the stock config, speech started ~2 s after the text and arrived in ~2 s
+blocks, so it *felt* like the text streamed first and the voice came after —
+unlike Edge-LLM, whose talker pairs audio frames with the thinker's tokens.
+
+Cause: the Talker->Code2Wav stage (`qwen3_omni.talker2code2wav_async_chunk`)
+buffers `codec_chunk_frames` codec frames before emitting **any** waveform:
+
+```python
+chunk_size_config = int(cfg.get("codec_chunk_frames", 25))
+chunk_length = length % chunk_size_config
+if chunk_length != 0 and not is_finished:
+    return None       # nothing emitted until a full chunk is ready
+```
+
+Qwen3-Omni's codec is ~12.5 Hz, so 25 frames ≈ 2 s of audio. Measured on Thor
+(same prompt):
+
+| `codec_chunk_frames` | first audio | audio chunks |
+|---|---|---|
+| 25 (stock) | **1.96 s** | 13 |
+| **8 (shipped)** | **0.91 s** | 37 |
+
+`codec_left_context_frames: 25` still gives the decoder 25 frames of context, so
+quality is preserved; smaller values trade a little chunk-boundary quality for
+lower latency (try 5 for ~0.5 s). Set in
+`deploy/docker/vllm-omni-thor/qwen3_omni_1gpu.yaml` (`connectors →
+connector_of_shared_memory → extra`); it is read at startup.
+
+Note this does not stop text from finishing first — the MoE thinker is simply
+much faster than speech (~4 s of text vs ~23 s of audio here). It only removes
+the *initial* delay before the voice starts.
+
 ## Remaining levers (not yet done)
 1. **Keep it resident / sleep mode — validated (2026-10-06).**
    `POST /v1/omni/sleep {"stage_ids":[0,1,2],"level":2}` returns in **1 s** and

@@ -17,7 +17,12 @@ connectors:
   connector_of_shared_memory:
     name: SharedMemoryConnector
     extra:
-      codec_chunk_frames: 25
+      # Frames the Talker->Code2Wav stage buffers before emitting audio. At 25
+      # (~2 s of codec at ~12.5 Hz) the first audio only lands ~2 s in, well
+      # after the (fast MoE) thinker has streamed all its text. 8 -> first audio
+      # in ~0.6 s. `codec_left_context_frames` still gives the decoder 25 frames
+      # of context. See docs/vllm-omni.md ("speech lags the text").
+      codec_chunk_frames: 8
       codec_left_context_frames: 25
 
 stages:
