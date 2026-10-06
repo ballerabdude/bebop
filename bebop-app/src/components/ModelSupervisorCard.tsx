@@ -69,16 +69,17 @@ export function ModelSupervisorCard({ robotIp }: { robotIp: string }) {
   }, [refresh]);
 
   const act = useCallback(
-    async (id: string, op: "load" | "unload") => {
+    async (id: string, op: "load" | "unload" | "sleep" | "wake") => {
       setBusy(id);
       setError(null);
       try {
-        // `load` blocks until the backend is ready (cold start can be long),
-        // so don't apply a request timeout here.
-        const res = await fetch(
-          httpUrl(robotIp, SUPERVISOR_PORT, `/models/${id}/${op}`),
-          { method: "POST" },
-        );
+        // `load`/`wake` can block a while (cold start / weight reload), so
+        // don't apply a request timeout.
+        const path =
+          op === "sleep" ? `/models/${id}/sleep?level=2` : `/models/${id}/${op}`;
+        const res = await fetch(httpUrl(robotIp, SUPERVISOR_PORT, path), {
+          method: "POST",
+        });
         const body = (await res.json()) as { error?: string };
         if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       } catch (e) {
@@ -113,6 +114,7 @@ export function ModelSupervisorCard({ robotIp }: { robotIp: string }) {
         {backends.map((b) => {
           const tracked = b.kind === "tracked";
           const active = b.state === "ready" || b.state === "tracked";
+          const sleeping = b.state === "sleeping";
           return (
             <div
               key={b.id}
@@ -140,15 +142,41 @@ export function ModelSupervisorCard({ robotIp }: { robotIp: string }) {
                 <span className="text-xs text-text-dim">
                   {b.footprint_gb.toFixed(0)} GB
                 </span>
-                {!tracked && (
-                  <Button
-                    variant={active ? "ghost" : "secondary"}
-                    disabled={busy === b.id}
-                    onClick={() => void act(b.id, active ? "unload" : "load")}
-                  >
-                    {busy === b.id ? "…" : active ? "Unload" : "Load"}
-                  </Button>
-                )}
+                {!tracked &&
+                  (sleeping ? (
+                    <Button
+                      variant="secondary"
+                      disabled={busy === b.id}
+                      onClick={() => void act(b.id, "wake")}
+                    >
+                      {busy === b.id ? "…" : "Wake"}
+                    </Button>
+                  ) : active ? (
+                    <>
+                      <Button
+                        variant="ghost"
+                        disabled={busy === b.id}
+                        onClick={() => void act(b.id, "sleep")}
+                      >
+                        {busy === b.id ? "…" : "Sleep"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        disabled={busy === b.id}
+                        onClick={() => void act(b.id, "unload")}
+                      >
+                        {busy === b.id ? "…" : "Unload"}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      variant="secondary"
+                      disabled={busy === b.id}
+                      onClick={() => void act(b.id, "load")}
+                    >
+                      {busy === b.id ? "…" : "Load"}
+                    </Button>
+                  ))}
               </div>
             </div>
           );

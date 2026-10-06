@@ -33,3 +33,34 @@ def test_supervisor_api(monkeypatch, tmp_path):
 
     # Unknown backend -> 400.
     assert client.post("/models/nope/load").status_code == 400
+
+
+def test_supervisor_sleep_wake(monkeypatch, tmp_path):
+    monkeypatch.setattr(ms, "REGISTRY_PATH", tmp_path / "absent.yaml")
+    app = ms.build_app(ms.Supervisor())
+    client = TestClient(app)
+
+    calls: list[tuple[str, dict]] = []
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+    def fake_post(url, json=None, timeout=None):  # noqa: A002 - httpx signature
+        calls.append((url, json or {}))
+        return _Resp()
+
+    monkeypatch.setattr("httpx.post", fake_post)
+
+    r = client.post("/models/omni-vllm/sleep?level=2")
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "sleeping"
+    assert calls[-1][0].endswith("/v1/omni/sleep") and calls[-1][1]["level"] == 2
+
+    r = client.post("/models/omni-vllm/wake")
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "ready"
+    assert calls[-1][0].endswith("/v1/omni/wakeup")
+
+    # A tracked backend (lives in bebop-vision) can't be slept.
+    assert client.post("/models/vision/sleep").status_code == 400

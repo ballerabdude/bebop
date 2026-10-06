@@ -119,7 +119,61 @@ class Backend:
             self.base_url = f"http://127.0.0.1:{self.port}"
         self.state = "stopped" if self.kind != "tracked" else "tracked"
         self.detail = ""
+        self.last_used = time.time()
         self._lock = threading.Lock()
+
+    @property
+    def _stage_ids(self) -> list[int]:
+        ids = self.spec.get("stage_ids")
+        return [int(i) for i in ids] if ids else [0, 1, 2]
+
+    def sleep(self, level: int = 2) -> dict[str, Any]:
+        """Ask a running OpenAI-compatible omni server to release the GPU.
+
+        vLLM-Omni exposes `/v1/omni/sleep`; level 2 frees the weights (~84 GB on
+        Thor in ~1 s) and wake reloads them (~4 min). Requires the server to
+        have been started with `--enable-sleep-mode`.
+        """
+        if self.kind not in ("container", "external"):
+            return {"error": f"{self.id} does not support sleep"}
+        import httpx
+
+        try:
+            r = httpx.post(
+                f"{self.base_url}/v1/omni/sleep",
+                json={"stage_ids": self._stage_ids, "level": level},
+                timeout=180.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+        if r.status_code != 200:
+            return {"error": f"HTTP {r.status_code}: {r.text[:120]}"}
+        with self._lock:
+            self.state = "sleeping"
+            self.detail = f"asleep (level {level})"
+            self.last_used = time.time()
+        return self.snapshot()
+
+    def wake(self) -> dict[str, Any]:
+        if self.kind not in ("container", "external"):
+            return {"error": f"{self.id} does not support wake"}
+        import httpx
+
+        try:
+            r = httpx.post(
+                f"{self.base_url}/v1/omni/wakeup",
+                json={"stage_ids": self._stage_ids},
+                timeout=900.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+        if r.status_code != 200:
+            return {"error": f"HTTP {r.status_code}: {r.text[:120]}"}
+        with self._lock:
+            self.state = "ready"
+            self.detail = "awake"
+            self.last_used = time.time()
+        return self.snapshot()
 
     def health_ok(self) -> bool:
         if self.kind == "tracked":
@@ -217,6 +271,7 @@ class Backend:
             "detail": self.detail,
             "footprint_gb": self.footprint_gb,
             "base_url": self.base_url or None,
+            "idle_s": round(max(0.0, time.time() - self.last_used), 1),
         }
 
 
@@ -272,6 +327,18 @@ class Supervisor:
         b.stop()
         return b.snapshot()
 
+    def sleep(self, backend_id: str, level: int = 2) -> dict[str, Any]:
+        b = self.backends.get(backend_id)
+        if b is None:
+            return {"error": f"unknown backend {backend_id!r}"}
+        return b.sleep(level=level)
+
+    def wake(self, backend_id: str) -> dict[str, Any]:
+        b = self.backends.get(backend_id)
+        if b is None:
+            return {"error": f"unknown backend {backend_id!r}"}
+        return b.wake()
+
 
 def build_app(supervisor: Supervisor | None = None) -> Any:
     sup = supervisor or Supervisor()
@@ -303,6 +370,16 @@ def build_app(supervisor: Supervisor | None = None) -> Any:
     @app.post("/models/{backend_id}/unload")
     async def unload(backend_id: str) -> JSONResponse:
         res = await asyncio.to_thread(sup.unload, backend_id)
+        return JSONResponse(res, status_code=400 if "error" in res else 200)
+
+    @app.post("/models/{backend_id}/sleep")
+    async def sleep(backend_id: str, level: int = 2) -> JSONResponse:
+        res = await asyncio.to_thread(sup.sleep, backend_id, level)
+        return JSONResponse(res, status_code=400 if "error" in res else 200)
+
+    @app.post("/models/{backend_id}/wake")
+    async def wake(backend_id: str) -> JSONResponse:
+        res = await asyncio.to_thread(sup.wake, backend_id)
         return JSONResponse(res, status_code=400 if "error" in res else 200)
 
     return app

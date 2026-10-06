@@ -30,7 +30,15 @@ GET  /healthz            budget, resident, MemAvailable
 GET  /models             registry + live state
 POST /models/{id}/load   start (evict ready residents until it fits the budget)
 POST /models/{id}/unload stop
+POST /models/{id}/sleep  ask an omni server to release the GPU (level 2)
+POST /models/{id}/wake   restore a slept backend
 ```
+
+`sleep`/`wake` proxy vLLM-Omni's `/v1/omni/sleep|wakeup`. Measured on Thor:
+level 2 frees **~84 GB in ~1 s**; wake reloads and returns `WARM` in **~4 min**.
+Requires the server started with `--enable-sleep-mode` (the container paths add
+it). Use level 2 — level 1 only freed ~18 GB on unified memory and its wake
+hung. See [`vllm-omni.md`](vllm-omni.md).
 
 Registry: `bebop-vision/config/models_supervisor.yaml` (falls back to built-in
 defaults). A backend is `container` (Docker image), `external` (already-running
@@ -49,7 +57,9 @@ sudo ./scripts/install-jetson.sh --pull-vllm-omni    # pre-pull the vLLM-Omni im
 
 1. **One big model resident at a time.** Loading a backend evicts ready backends
    until `resident + new ≤ budget`.
-2. **Idle-stop** (planned): unload a backend after N minutes unused.
+2. **Sleep, don't stop.** An idle backend can be `sleep`-ed (frees the GPU in
+   ~1 s, wake ~4 min) instead of `unload`-ed (full cold start). Idle-sleep in the
+   supervisor is the next step; today it's driven by the API/app.
 3. **Small models may co-reside** (e.g. navd + a small VLA) when footprints fit.
 
 ## Migration path
