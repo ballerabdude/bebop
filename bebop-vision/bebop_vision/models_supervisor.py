@@ -132,6 +132,9 @@ class Backend:
             self.detail = f"unsupported kind {self.kind}"
             return
         # container
+        cache = Path("/home/bebop/.cache")
+        for sub in ("vllm", "huggingface", "flashinfer", "torch_extensions"):
+            (cache / sub).mkdir(parents=True, exist_ok=True)
         _docker("rm", "-f", self.container)
         img = self.spec["image"]
         if "/" in img:
@@ -140,8 +143,12 @@ class Backend:
             "run", "-d", "--name", self.container,
             "--runtime", "nvidia", "--network", "host",
             "-v", f"{self.spec['model_dir']}:/models/model:ro",
-            "-v", "/home/bebop/.cache/vllm:/root/.cache/vllm",
-            "-v", "/home/bebop/.cache/huggingface:/root/.cache/huggingface",
+            "-v", f"{cache}/vllm:/root/.cache/vllm",
+            "-v", f"{cache}/huggingface:/root/.cache/huggingface",
+            # Persist kernel/JIT caches: otherwise a fresh container re-JITs
+            # flashinfer and re-runs autotune (minutes) on every start.
+            "-v", f"{cache}/flashinfer:/root/.cache/flashinfer",
+            "-v", f"{cache}/torch_extensions:/root/.cache/torch_extensions",
         ]
         if self.spec.get("deploy_config"):
             args += ["-v", f"{self.spec['deploy_config']}:/cfg/deploy.yaml:ro"]

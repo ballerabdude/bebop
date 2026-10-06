@@ -1237,6 +1237,9 @@ class ContainerServer:
     def _run(self) -> None:
         atexit.register(self.stop)
         self.status.set(phase="starting", detail=f"starting {self.image}")
+        # Host dirs for the persistent caches we bind-mount below.
+        for sub in ("vllm", "huggingface", "flashinfer", "torch_extensions"):
+            Path(self.CACHE_DIR, sub).mkdir(parents=True, exist_ok=True)
         self._docker("rm", "-f", self.NAME)  # replace a stale container
         # Pull from the registry when the image is a registry path; a bare
         # local tag (e.g. built on-box) is used as-is.
@@ -1249,6 +1252,12 @@ class ContainerServer:
             "-v", f"{self.model_dir}:/models/model:ro",
             "-v", f"{self.CACHE_DIR}/vllm:/root/.cache/vllm",
             "-v", f"{self.CACHE_DIR}/huggingface:/root/.cache/huggingface",
+            # Persist the kernel/JIT caches to the host. They live in the
+            # container's writable layer otherwise, which `docker rm -f` wipes
+            # on every start, forcing a full flashinfer JIT + autotune (several
+            # minutes) each boot. See docs/vllm-omni.md.
+            "-v", f"{self.CACHE_DIR}/flashinfer:/root/.cache/flashinfer",
+            "-v", f"{self.CACHE_DIR}/torch_extensions:/root/.cache/torch_extensions",
         ]
         if self.deploy_config:
             args += ["-v", f"{self.deploy_config}:/cfg/deploy.yaml:ro"]

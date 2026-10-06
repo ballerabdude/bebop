@@ -17,6 +17,8 @@ backends:
     deploy_config: /home/bebop/qwen3_omni_1gpu.yaml
     port: 8101
     container_name: bebop-model-omni-vllm
+    # Add "-O0" here to skip flashinfer autotune (~4 min of the cold start) at
+    # a modest decode-throughput cost. See docs/vllm-omni.md.
     serve_args: ["--omni", "--init-timeout", "3600", "--stage-init-timeout", "3600"]
 
   - id: omni-edge
