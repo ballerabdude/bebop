@@ -100,18 +100,23 @@ if chunk_length != 0 and not is_finished:
     return None       # nothing emitted until a full chunk is ready
 ```
 
-Qwen3-Omni's codec is ~12.5 Hz, so 25 frames ≈ 2 s of audio. Measured on Thor
+Qwen3-Omni's codec is ~12.5 Hz, so 25 frames ≈ 2 s of audio. Swept on Thor
 (same prompt):
 
-| `codec_chunk_frames` | first audio | audio chunks |
-|---|---|---|
-| 25 (stock) | **1.96 s** | 13 |
-| **8 (shipped)** | **0.91 s** | 37 |
+| `codec_chunk_frames` | first audio | audio chunks | generation speed |
+|---|---|---|---|
+| 25 (stock) | 1.96 s | 13 | — |
+| 8 | 0.91 s | 37 | 1.38× real-time |
+| **5 (shipped)** | **0.70 s** | 64 | 1.32× real-time |
+| 3 | 0.55 s | 97 | 1.23× real-time |
+| 1 | 0.41 s | 289 | **0.86× — too slow** |
 
-`codec_left_context_frames: 25` still gives the decoder 25 frames of context, so
-quality is preserved; smaller values trade a little chunk-boundary quality for
-lower latency (try 5 for ~0.5 s). Set in
-`deploy/docker/vllm-omni-thor/qwen3_omni_1gpu.yaml` (`connectors →
+The floor is throughput, not latency: at chunk=1 the pipeline produces audio
+*slower* than real-time, so the app's playback buffer would underrun (stutter).
+5 is the knee — first audio under a second with ~1.3× headroom (the vision
+recorder also shares the GPU). `codec_left_context_frames: 25` gives the decoder
+25 frames of context regardless, so quality should hold; confirm by ear.
+Set in `deploy/docker/vllm-omni-thor/qwen3_omni_1gpu.yaml` (`connectors →
 connector_of_shared_memory → extra`); it is read at startup.
 
 Note this does not stop text from finishing first — the MoE thinker is simply
