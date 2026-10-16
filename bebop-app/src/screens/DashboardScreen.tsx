@@ -22,6 +22,8 @@ interface DashboardProps {
   onOpenModels: () => void;
   /** Open the speech-to-speech voice screen. */
   onOpenVoice: () => void;
+  /** Open the semantic place-memory screen (rooms the robot remembers). */
+  onOpenPlaces: () => void;
 }
 
 /// Live dashboard shown after setup. Stays connected to the provisioning
@@ -35,6 +37,7 @@ export function DashboardScreen({
   onOpenTeleop,
   onOpenModels,
   onOpenVoice,
+  onOpenPlaces,
 }: DashboardProps) {
   const [info, setInfo] = useState<DeviceInfo | null>(null);
   const [wifi, setWifi] = useState<WifiStatus | null>(null);
@@ -238,6 +241,9 @@ export function DashboardScreen({
         </Button>
         <Button variant="secondary" onClick={onOpenVoice} disabled={!reachable}>
           Talk to robot
+        </Button>
+        <Button variant="secondary" onClick={onOpenPlaces} disabled={!reachable}>
+          Places &amp; rooms
         </Button>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           <Button variant="secondary" onClick={onReconfigure}>

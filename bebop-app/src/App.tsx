@@ -6,6 +6,7 @@ import { ConnectByIpScreen } from "./screens/ConnectByIpScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { MotorBenchScreen } from "./screens/MotorBenchScreen";
 import { ModelsScreen } from "./screens/ModelsScreen";
+import { PlacesScreen } from "./screens/PlacesScreen";
 import { TeleopScreen } from "./screens/TeleopScreen";
 import { VideoScreen } from "./screens/VideoScreen";
 import { VoiceScreen } from "./screens/VoiceScreen";
@@ -32,8 +33,10 @@ type Step =
   | "video"
   | "voice"
   | "models"
+  | "places"
   | "direct-models"
-  | "direct-voice";
+  | "direct-voice"
+  | "direct-places";
 
 function containerWidth(step: Step): string {
   if (step === "motors" || step === "direct-motors") return "max-w-6xl";
@@ -41,6 +44,7 @@ function containerWidth(step: Step): string {
   if (step === "dashboard") return "max-w-3xl";
   if (step === "models" || step === "direct-models") return "max-w-3xl";
   if (step === "voice" || step === "direct-voice") return "max-w-3xl";
+  if (step === "places" || step === "direct-places") return "max-w-3xl";
   return "max-w-[520px]";
 }
 
@@ -162,6 +166,7 @@ function App() {
             }}
             onOpenModels={() => setStep("models")}
             onOpenVoice={() => setStep("voice")}
+            onOpenPlaces={() => setStep("places")}
           />
         ) : null}
 
@@ -176,6 +181,7 @@ function App() {
             }}
             onOpenModels={() => setStep("models")}
             onOpenVoice={() => setStep("voice")}
+            onOpenPlaces={() => setStep("places")}
           />
         ) : null}
 
@@ -191,6 +197,7 @@ function App() {
             }}
             onOpenModels={() => setStep("direct-models")}
             onOpenVoice={() => setStep("direct-voice")}
+            onOpenPlaces={() => setStep("direct-places")}
           />
         ) : null}
 
@@ -220,6 +227,18 @@ function App() {
 
         {step === "direct-voice" && directIp ? (
           <VoiceScreen
+            robotIp={directIp.ip}
+            runtimePort={directIp.port}
+            onBack={() => setStep("direct-motors")}
+          />
+        ) : null}
+
+        {step === "places" && robotIp ? (
+          <PlacesScreen robotIp={robotIp} onBack={() => setStep("dashboard")} />
+        ) : null}
+
+        {step === "direct-places" && directIp ? (
+          <PlacesScreen
             robotIp={directIp.ip}
             runtimePort={directIp.port}
             onBack={() => setStep("direct-motors")}

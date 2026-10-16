@@ -115,6 +115,26 @@ def run_record_navd(args):
         vserver = VideoServer(rig, port=args.video_port)
         vserver.start()
 
+    # Semantic place memory (bebop_vision/places): teaches named rooms from
+    # the live view and recognises them by DINOv3 appearance. Shares the rig
+    # read-only; the encoder warms on a background thread so a slow first
+    # load never stalls recording or the drive loop.
+    places = None
+    if not args.no_places:
+        from bebop_vision.places import (DinoV3Encoder, PlaceStore,
+                                         PlacesService, RigCapture)
+        pstore = PlaceStore(args.places_root)
+        penc = DinoV3Encoder()
+        places = PlacesService(
+            pstore,
+            capture=RigCapture(rig, roles=tuple(rig.cameras.keys())),
+            encoder=penc,
+            port=args.places_port,
+        )
+        places.start()
+        threading.Thread(target=penc.warmup, name="places-warmup",
+                         daemon=True).start()
+
 
     out_dir = Path(args.record_navd).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -168,6 +188,8 @@ def run_record_navd(args):
             pass
         finally:
             close_segment(rec, path)
+            if places is not None:
+                places.stop()
             if vserver is not None:
                 vserver.stop()
             rig.stop()
@@ -229,6 +251,8 @@ def run_record_navd(args):
                 close_segment(seg, seg_path)
             except OSError as exc:
                 print(f"\n[record-navd] error closing final segment: {exc}")
+        if places is not None:
+            places.stop()
         if vserver is not None:
             vserver.stop()
         rig.stop()
@@ -272,6 +296,14 @@ def main():
                         help="comma-separated camera roles to open "
                              "(default: all configured, e.g. 'near' while "
                              "the far camera's USB cable is unfixed)")
+    parser.add_argument("--no-places", action="store_true",
+                        help="do not start the semantic place-memory service "
+                             "(see bebop_vision/places; default: started)")
+    parser.add_argument("--places-port", type=int, default=9095,
+                        help="port for the places HTTP service (default: 9095)")
+    parser.add_argument("--places-root", default="/var/lib/bebop-places",
+                        help="directory for the place DB + keyframes "
+                             "(default: /var/lib/bebop-places)")
     parser.add_argument("--robot-url", default=DEFAULT_URL)
     args = parser.parse_args()
 

@@ -38,6 +38,8 @@ interface MotorBenchProps {
   onOpenModels?: () => void;
   /** When provided, render a "Voice" link to the speech-to-speech screen. */
   onOpenVoice?: () => void;
+  /** When provided, render a "Places" link to the place-memory screen. */
+  onOpenPlaces?: () => void;
 }
 
 const MODE_LABEL: Record<RuntimeMode, string> = {
@@ -64,6 +66,7 @@ export function MotorBenchScreen({
   onOpenTeleop,
   onOpenModels,
   onOpenVoice,
+  onOpenPlaces,
 }: MotorBenchProps) {
   const transportRef = useRef<RuntimeTransport | null>(null);
   const [connecting, setConnecting] = useState(true);
@@ -994,6 +997,11 @@ export function MotorBenchScreen({
         {onOpenVoice ? (
           <Button variant="ghost" onClick={onOpenVoice}>
             Voice
+          </Button>
+        ) : null}
+        {onOpenPlaces ? (
+          <Button variant="ghost" onClick={onOpenPlaces}>
+            Places
           </Button>
         ) : null}
         <Button variant="ghost" onClick={onBack}>
