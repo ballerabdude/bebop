@@ -24,8 +24,8 @@ wheels:
     # to -1 when a wheel's motor is wired reversed (a passive spin-back
     # check on the bench confirms the sign).
     direction: 1.0
-    # Wheel angular-velocity hard limit (rad/s). 20 rad/s on a 0.05 m wheel
-    # ≈ 1 m/s. E-STOP trips if a commanded speed ever exceeds this.
+    # Wheel angular-velocity hard limit (rad/s). 20 rad/s on a 0.0855 m
+    # wheel ≈ 1.7 m/s. E-STOP trips if a commanded speed ever exceeds this.
     vel_max: 20.0
     # Optional torque feed-forward clamp (Nm) — currently unused (0).
     torque_limit: 0.0
@@ -45,8 +45,16 @@ wheels:
 drive:
   left_wheel: left
   right_wheel: right
-  wheel_radius: 0.05       # m
-  track_width: 0.30        # m
+  # ODrive BotWheel: 171 mm diameter -> 0.0855 m radius. The old 0.05 m
+  # (4-inch) value made wheel odometry read low on both distance and yaw.
+  wheel_radius: 0.0855     # m
+  # Effective rear-wheel track. The geometric center-to-center is 369 mm
+  # (409.05 mm outside-to-outside minus ~40 mm wheel width), but the
+  # passive front casters scrub during turns, so the value that makes the
+  # wheel-encoder odometry match the camera-IMU yaw is ~402 mm. Calibrated
+  # from two drives (gain x track = 0.402). The front wheels are casters
+  # and are not part of the differential-drive model (wheelbase 464.5 mm).
+  track_width: 0.402       # m
 
 # ============================================================================
 # Power board (Robstride PowerBoard) — battery / rail telemetry

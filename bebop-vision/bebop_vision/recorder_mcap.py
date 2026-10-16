@@ -76,6 +76,10 @@ class NavdRecorder:
         # sample older than this.
         self._t0 = time.monotonic()
         self.rate_hz = rate_hz
+        # _pair_frames accepts the freshest anchor whose cross-camera partner
+        # is within one frame period; older-but-better-aligned pairs are only
+        # used when the freshest is a full frame off. See _pair_frames.
+        self._pair_slack_s = 1.0 / max(float(rate_hz), 1.0)
         self.jpeg_quality = jpeg_quality
         self.max_frame_age_s = max_frame_age_s
         # Hardware (NVENC) color video: store H.265/H.264 access units in
@@ -115,6 +119,13 @@ class NavdRecorder:
                                         thread_name_prefix="navd-rec")
         # role -> (stamp_us, {"png", "jpg"}) for the last encoded frame
         self._cache = {}
+        # role -> last successfully produced color payload, so a frame the far
+        # camera handed us without a color image (the Orbbec SDK drops far
+        # color frames under load — measured ~27-35% of frames) still emits a
+        # color message instead of leaving a hole in the H.265 GOP (a hole
+        # freezes/garbles playback until the next IDR). See _write_video_color.
+        self._last_color = {}
+        self._last_jpg = {}
         self._file = open(out_path, "wb")
         # No chunk compression: payloads are already-compressed JPEG/PNG,
         # and the zstd chunk path has proven lossy with this mcap build.
@@ -268,6 +279,16 @@ class NavdRecorder:
         if len(hists) == 1:
             role, h = next(iter(hists.items()))
             return {role: h[-1]}, {}
+        # Freshest adequately-aligned pair wins. The previous rule was
+        # "minimise the worst cross-camera delta over the whole history" with
+        # a hard 2 ms cut-off: under arrival jitter no candidate beat 2 ms,
+        # so it kept returning the same well-aligned *older* pair for up to
+        # `_history` ticks (measured 2026-10-11: only ~10 distinct depth
+        # frames/s per camera recorded while the cameras delivered 30, i.e.
+        # 61% duplicate payloads / ~3x the needed file size). Now the
+        # freshest anchor whose partner is within one frame period wins; only
+        # when the freshest is a full frame out of alignment (e.g. a genuinely
+        # stale partner slot) do we step back for a better-aligned pair.
         anchor_role, anchor_hist = next(iter(hists.items()))
         best, best_pair, best_deltas = None, None, {}
         for nf in reversed(anchor_hist):  # freshest anchor first
@@ -281,7 +302,8 @@ class NavdRecorder:
             worst = max(deltas.values(), default=0.0)
             if best is None or worst < best:
                 best, best_pair, best_deltas = worst, pair, deltas
-            if best < 0.002:  # sub-2 ms: freshest such pair wins
+            if worst <= self._pair_slack_s:  # freshest good-enough pair
+                best, best_pair, best_deltas = worst, pair, deltas
                 break
         pair_ms = {role: d * 1e3 for role, d in best_deltas.items()}
         return best_pair, pair_ms
@@ -373,12 +395,18 @@ class NavdRecorder:
             if self._video_codec:
                 self._write_video_color(role, job.get("color"),
                                         job.get("color_kind"), log_ns, meta)
-            elif job.get("jpg") is not None:
-                self._add(self._ch[f"color_{role}"],
-                          self._compressed_msg(
-                              foxglove_proto.CompressedImage,
-                              f"{role}_color", "jpeg", job["jpg"], log_ns),
-                          log_ns)
+            else:
+                jpg = job.get("jpg")
+                if jpg is not None:
+                    self._last_jpg[role] = jpg
+                else:
+                    jpg = self._last_jpg.get(role)  # hold-last, see _last_color
+                if jpg is not None:
+                    self._add(self._ch[f"color_{role}"],
+                              self._compressed_msg(
+                                  foxglove_proto.CompressedImage,
+                                  f"{role}_color", "jpeg", jpg, log_ns),
+                              log_ns)
 
     def _drain_imu(self, wall_off):
         """Write all buffered camera IMU samples at their own log times.
@@ -421,7 +449,16 @@ class NavdRecorder:
         a BGR ndarray (`kind="bgr"`).
         """
         if payload is None:
-            return
+            held = self._last_color.get(role)
+            if held is None:
+                return
+            # The camera handed us no color this tick (the Orbbec SDK drops
+            # far color frames under load — measured ~27-35%). Re-push the
+            # last payload so the H.265 stream has no hole; a missing AU
+            # freezes/garbles playback until the next IDR.
+            payload, kind = held
+        else:
+            self._last_color[role] = (payload, kind)
         enc = self._encoders.get(role)
         if enc is None:
             try:
