@@ -1,0 +1,63 @@
+# Bebop-vision project dependencies — ONE venv for the whole project.
+#
+# Target: Jetson AGX Thor, JetPack 7.2 / L4T 39.2, CUDA 13.2, Python 3.12.
+# The recorder/perception/places stack AND the voice stack (Qwen3-Omni via
+# TensorRT Edge-LLM) share `bebop-vision/.venv`.
+#
+# The venv is created with --system-site-packages so JetPack's TensorRT
+# Python bindings (system dist-packages) are visible to the voice stack.
+# numpy/scipy/pandas are pinned HERE so their venv-local numpy-2 builds
+# SHADOW the system numpy-1-built copies. The venv-local scipy matters:
+# without it, transformers' optional `from scipy.optimize import ...`
+# resolves to the system scipy and dies on `from numpy import Inf`.
+#
+# Do NOT pin system-provided packages here (tensorrt, Jetson.GPIO, PyGObject,
+# ...): --system-site-packages already exposes them, and pinning would try to
+# fetch them from PyPI.
+#
+# Bootstrap (from bebop-vision/), also done by
+# `scripts/install-jetson.sh --setup-voice`:
+#   1. python3 -m venv --system-site-packages .venv
+#   2. .venv/bin/pip install --upgrade pip
+#   3. .venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cu132 \
+#        'torch==2.13.0+cu132' 'torchvision==0.28.0+cu132'
+#   4. .venv/bin/pip install -e .
+#   5. .venv/bin/pip install -r requirements.txt
+
+# --- ABI-critical: must shadow the system numpy-1 copies ------------------
+numpy==2.2.6
+scipy==1.18.1
+pandas==3.0.6
+
+# --- torch (Jetson Thor / CUDA 13.2; needs the cu132 index) ---------------
+torch==2.13.0+cu132
+torchvision==0.28.0+cu132
+
+# --- perception / recording / places -------------------------------------
+transformers==5.14.1
+tokenizers==0.22.2
+av==17.1.0
+opencv-python==5.0.0.93
+pyorbbecsdk2==2.1.2
+mcap==1.5.0
+protobuf==7.36.2
+PyYAML>=6
+huggingface_hub==1.33.0
+safetensors==0.8.0
+websockets==17.2
+
+# --- student-model runtime (--navd-model) ---------------------------------
+# GPU build: CUDA EP ~60 ms/inference vs ~750 ms on the CPU EP. Never install
+# plain `onnxruntime` alongside it — they share the import name.
+onnxruntime-gpu==1.29.0
+onnx==1.19.0
+
+# --- voice (TensorRT Edge-LLM) --------------------------------------------
+# The aarch64 wheel covers Jetson Thor (JetPack 7.x, CUDA 13, SM110, platform
+# TensorRT 10). `server-tools` pulls the Transformers the checkpoint-direct
+# builder needs; `tools` pulls the NVFP4 quantization toolchain.
+tensorrt-edgellm[server,server-tools,tools]==0.11.0
+httpx==0.28.1
+
+# --- dev / test -----------------------------------------------------------
+pytest>=8

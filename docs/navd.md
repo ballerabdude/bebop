@@ -73,7 +73,7 @@ bebop_vision/planner.py::SectorPlanner        (15 vertical bands → clearance �
 bebop_vision/planner.py::DriveNode            (10 Hz, mode/estop/deadman gating)
   → SetVelocityCommand {linear_x, angular_z}  (proto field 14, over ws://:9090/ws)
 firmware supervisor.rs::drive_command         (operator arbitration + watchdogs)
-  → differential drive (2x ODrive S1, wheel r=0.05 m, track 0.30 m)
+  → differential drive (2x ODrive S1, wheel r=0.0855 m, track 0.402 m)
 ```
 
 - `SectorPlanner` semantics (planner.py:33-72): navigable = label 1 only
@@ -772,11 +772,12 @@ app screens, jetson-agent, `bebop_v2.yaml` (never had `video:`).
    under hardware sync, phase-locked (`9bc3e63`,
    `tools/orbbec_sync_test.py`). Occasional bus drops remain — degraded
    runs use `--roles near`.
-2. ~~Jetson venv ML deps~~ — **done** 2026-09-06/07:
-   `requirements-jetson.txt` pins torch **2.8.0** (Jetson AI Lab index
-   `pypi.jetson-ai-lab.io/jp6/cu126` — the old `.dev` host is dead) +
-   transformers 4.55.4; numpy stays 1.26.4. Verified installed on the
-   Jetson 2026-09-07.
+2. ~~Jetson venv ML deps~~ — **done** 2026-09-06/07, **superseded
+   2026-10-15** by the single project venv (`bebop-vision/requirements.txt`):
+   torch **2.13.0+cu132** (Thor / JetPack 7.2 / CUDA 13.2), transformers
+   5.17.0, numpy 2.5.3 with a venv-local scipy. (The old Orin/JetPack-6
+   `requirements-jetson.txt` pins — torch 2.8.0 from
+   `pypi.jetson-ai-lab.io/jp6/cu126`, numpy 1.26.4 — no longer apply.)
 3. Extrinsics **measured from live floor fits** (2026-09-05, auto-estimator):
    near `CPBLC53000PE` = 1.27 m / pitch −66°; far `CPBLC53000ED` = 1.32 m /
    pitch −17.4°; written to `config/orbbec_rig.yaml` (the doc's earlier
@@ -828,7 +829,7 @@ app screens, jetson-agent, `bebop_v2.yaml` (never had `video:`).
   `bebop_vision/navd_runtime.py` (runtime swap),
   `tools/export_navd_onnx.py` (export), `tools/{yolo_autolabel,
   sam_floor_label,fuse_navd_labels}.py` (teacher labels),
-  `requirements-jetson.txt` (Jetson ML pins).
+  `requirements.txt` (single project venv: perception + voice).
 - `firmware/bebop-linux/src/`: `nav.rs` / `video.rs` / `ptz.rs` were
   **deleted** by §9 Stage 2 (`1334218`) — consult git history for the ORT
   / V4L2 patterns; `nav_goal.rs` + `server/{ws,handlers}.rs` (goal

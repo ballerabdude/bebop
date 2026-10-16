@@ -18,10 +18,11 @@ User=root
 Group=root
 WorkingDirectory=/home/bebop/bebop/bebop-vision
 Environment=PYTHONUNBUFFERED=1
-# Dedicated venv: the recorder's .venv pins numpy 1.26.4 for pyorbbecsdk,
-# while TensorRT Edge-LLM pulls its own numpy/GPU stack. Bootstrap it with
-# `install-jetson.sh --setup-voice` (see docs/voice.md).
-ExecStart=/home/bebop/bebop/bebop-vision/.venv-voice/bin/python -u -m bebop_vision.voice_server
+# Shares the project's single venv with the recorder/vision stack
+# (bebop-vision/.venv, created with --system-site-packages so JetPack's
+# TensorRT bindings are visible; see bebop-vision/requirements.txt).
+# Bootstrap it with `install-jetson.sh --setup-voice` (see docs/voice.md).
+ExecStart=/home/bebop/bebop/bebop-vision/.venv/bin/python -u -m bebop_vision.voice_server
 
 # First start builds the checkpoint's TensorRT engines, which can take
 # several minutes; give shutdown room to release the GPU and reap the

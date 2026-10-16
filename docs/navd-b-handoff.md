@@ -134,7 +134,7 @@ live only here:
 - Jetson venv `bebop-vision/.venv`: pyorbbecsdk2 2.1.2, numpy **1.26.4
   (pinned — 2.x breaks pyorbbecsdk)**, opencv 4.11, pyyaml, websockets,
   protobuf 7.35.1, mcap, pytest, **torch 2.8.0 + transformers 4.55.4**
-  (installed 2026-09-06/07; pin file `bebop-vision/requirements-jetson.txt`
+  (installed 2026-09-06/07; superseded by `bebop-vision/requirements.txt`
   — torch must come from `pypi.jetson-ai-lab.io/jp6/cu126`, the old `.dev`
   host is dead). Verified on-device 2026-09-07.
 - Hardware: near cam `CPBLC53000PE`, far cam `CPBLC53000ED`, both running
@@ -166,7 +166,7 @@ In order; 1–4 are data plumbing, 5–7 are the model. **Statuses updated
 2026-09-07** (original plan text kept):
 
 1. **DONE** — torch 2.8.0 + transformers 4.55.4 installed on the Jetson
-   venv (via `requirements-jetson.txt`).
+   venv (via `requirements.txt`).
 2. **DONE** (`9bc3e63`) — `tools/yolo_autolabel.py`, `yolo26l-seg`
    over near+far color.
 3. **NOT BUILT** — grid-level (60×60) review/paint over fused labels;

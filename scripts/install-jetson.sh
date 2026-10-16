@@ -75,11 +75,11 @@
 #   sudo ./install-jetson.sh --setup-orbbec-only
 #                                             # just the Orbbec setup; don't
 #                                             # download or install binaries
-#   sudo ./install-jetson.sh --setup-voice    # also bootstrap the on-device
-#                                             # speech-to-speech env: a
-#                                             # dedicated .venv-voice with
-#                                             # TensorRT Edge-LLM (aarch64
-#                                             # wheel) for bebop-voice.service
+#   sudo ./install-jetson.sh --setup-voice    # bootstrap/refresh the single
+#                                             # bebop-vision/.venv (recorder +
+#                                             # perception + places + voice);
+#                                             # installs TensorRT Edge-LLM
+#                                             # (aarch64 wheel)
 #   sudo ./install-jetson.sh --setup-voice-only
 #                                             # just the voice env; don't
 #                                             # download or install binaries
@@ -158,8 +158,8 @@ SETUP_IMU=0
 SETUP_IMU_ONLY=0
 SETUP_ORBBEC=0
 SETUP_ORBBEC_ONLY=0
-# --setup-voice: bootstrap the dedicated TensorRT Edge-LLM venv used by
-# bebop-voice.service (speech-to-speech). Opt-in because the wheel is large.
+# --setup-voice: bootstrap/refresh the single bebop-vision/.venv (recorder,
+# perception, places, and voice). Opt-in because the wheels are large.
 SETUP_VOICE=0
 SETUP_VOICE_ONLY=0
 # --quantize-voice: produce the NVFP4 Qwen3-Omni checkpoint the runtime needs
@@ -704,14 +704,15 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Voice (speech-to-speech) env setup helper
+# Python env setup (single venv for the whole project)
 # ---------------------------------------------------------------------------
 #
-# bebop-voice.service runs the on-device speech-to-speech stack (Qwen3-Omni
-# served by TensorRT Edge-LLM). The wheel is large and pulls its own
-# numpy/CUDA stack, so it lives in a DEDICATED venv
-# (bebop-vision/.venv-voice) rather than the recorder's .venv (which pins
-# numpy 1.26.4 for pyorbbecsdk). This function only bootstraps that venv:
+# bebop-vision runs EVERYTHING from one venv (bebop-vision/.venv): the
+# recorder/perception/places stack AND the voice stack (Qwen3-Omni served by
+# TensorRT Edge-LLM). It is created with --system-site-packages so JetPack's
+# TensorRT bindings are visible, while numpy/scipy/pandas are pinned inside
+# the venv so their numpy-2 builds shadow the system numpy-1 copies.
+#
 #   * the checkpoint is downloaded through the app's Models page like every
 #     other model (catalog entry `qwen3-omni-30b`, snapshot download);
 #   * the systemd unit is installed by the normal install path.
@@ -719,14 +720,14 @@ EOF
 # SM110, platform TensorRT 10) — nothing compiles on the robot.
 # See docs/voice.md.
 setup_voice() {
-    echo "==> bootstrapping the voice (TensorRT Edge-LLM) Python env"
+    echo "==> bootstrapping the bebop-vision Python env (single venv)"
     local checkout_root="${LOCAL_REPO_ROOT}"
     if [[ -z "${checkout_root}" ]]; then
         checkout_root="$(cd "${SCRIPT_DIR}/.." && pwd)"
     fi
     local vision_dir="${checkout_root}/bebop-vision"
-    local venv="${vision_dir}/.venv-voice"
-    local req="${vision_dir}/requirements-voice.txt"
+    local venv="${vision_dir}/.venv"
+    local req="${vision_dir}/requirements.txt"
     if [[ ! -f "${req}" ]]; then
         echo "    ERROR: missing ${req}" >&2
         exit 1
@@ -750,6 +751,13 @@ setup_voice() {
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-venv
     fi
 
+    # A pre-existing venv without system site packages cannot see JetPack's
+    # TensorRT; recreate it (the old dedicated .venv-voice is superseded).
+    if [[ -x "${venv}/bin/python" ]] \
+        && ! grep -q "include-system-site-packages = true" "${venv}/pyvenv.cfg" 2>/dev/null; then
+        echo "    ${venv} lacks --system-site-packages (TensorRT invisible); recreating"
+        run_voice "rm -rf '${venv}'"
+    fi
     if [[ ! -x "${venv}/bin/python" ]]; then
         # --system-site-packages exposes the platform's TensorRT Python
         # bindings (shipped by JetPack in the system Python); Edge-LLM needs
@@ -760,11 +768,11 @@ setup_voice() {
     run_voice "'${venv}/bin/pip' install --upgrade pip"
     # PyTorch must be the CUDA 13.2 aarch64 build for the quantization
     # toolchain (ModelOpt needs CUDA). PyPI's aarch64 torch is CPU-only, so
-    # install the cu132 wheels first and let the [tools] resolution below see
-    # them already satisfied.
-    echo "    installing CUDA torch (cu132) for the quantization toolchain"
+    # install the cu132 wheels first and let the resolution below see them
+    # already satisfied.
+    echo "    installing CUDA torch (cu132)"
     run_voice "'${venv}/bin/pip' install --extra-index-url https://download.pytorch.org/whl/cu132 'torch==2.13.0+cu132' 'torchvision==0.28.0+cu132'"
-    echo "    installing voice requirements (downloads a large wheel)"
+    echo "    installing project requirements (downloads large wheels)"
     run_voice "'${venv}/bin/pip' install -r '${req}'"
 
     # Validate the wheel's native payload selection, not just the import: a
@@ -810,7 +818,7 @@ quantize_voice() {
         checkout_root="$(cd "${SCRIPT_DIR}/.." && pwd)"
     fi
     local vision_dir="${checkout_root}/bebop-vision"
-    local venv="${vision_dir}/.venv-voice"
+    local venv="${vision_dir}/.venv"
     local src="${vision_dir}/weights/qwen3-omni-30b"
     local dst="${vision_dir}/weights/qwen3-omni-30b-nvfp4"
     local run_user="${SUDO_USER:-root}"
@@ -1296,8 +1304,8 @@ fi
 
 # Voice (speech-to-speech) service unit: root, started on demand by the app
 # (firmware runs `systemctl start bebop-voice.service`). Installed but not
-# enabled. Ships as a static file referencing the robot's repo path; its
-# Python env is bootstrapped separately by `--setup-voice`.
+# enabled. Ships as a static file referencing the robot's repo path; it shares
+# the project venv, bootstrapped by `--setup-voice`.
 VOICE_UNIT=""
 if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
     if [[ "${LOCAL}" -eq 1 ]]; then
@@ -1466,8 +1474,8 @@ EOF
     install -m 0644 "${MODEL_UNIT}" "/etc/systemd/system/bebop-model-download@.service"
 
     # Voice service unit. Not enabled: the operator starts it from the app
-    # (firmware calls `systemctl start bebop-voice.service`). Its dedicated
-    # Python env is bootstrapped by `--setup-voice`.
+    # (firmware calls `systemctl start bebop-voice.service`). It shares the
+    # project venv, bootstrapped by `--setup-voice`.
     echo "==> installing bebop-voice.service (not enabled)"
     install -m 0644 "${VOICE_UNIT}" /etc/systemd/system/bebop-voice.service
 fi

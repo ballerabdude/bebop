@@ -12,9 +12,15 @@
   numbering does **not** carry over (see the GPIO gotcha below). On-device
   training env for this box lives in `sim/setup/thor/`.
 - Repo on the robot: `~/bebop` (same monorepo layout as here).
-- Python env: `~/bebop/bebop-vision/.venv` — run as
-  `/home/bebop/bebop/bebop-vision/.venv/bin/python`. numpy is pinned to
-  1.26.4 (numpy 2.x breaks pyorbbecsdk) — never upgrade it.
+- Python env: ONE venv for the whole project, `~/bebop/bebop-vision/.venv`
+  (created `--system-site-packages` so JetPack's TensorRT bindings are
+  visible), run as `/home/bebop/bebop/bebop-vision/.venv/bin/python`.
+  Dependencies are pinned in `bebop-vision/requirements.txt` (torch
+  2.13.0+cu132, transformers 5.17.0, numpy 2.5.3, venv-local scipy). The old
+  "numpy pinned 1.26.4, never upgrade" note is **stale**: pyorbbecsdk2 2.1.2
+  works under numpy 2.5.3 (verified). The venv-local scipy matters — without
+  it, transformers' optional scipy import falls back to the system
+  numpy-1-built scipy and dies on `from numpy import Inf`.
 - Firmware: `bebop-linux.service` runs as root from
   `/usr/local/bin/bebop-linux`; config `/etc/bebop/bebop_wheeled.yaml`.
 - Other services: `bebop-agent` owns port 9091 (its `/healthz` + setup

@@ -23,7 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 # Student-model runtime (§7.3): ONNX inference for --navd-model. CPU build
 # on workstation/CI; on the Jetson use the GPU build instead
-# (requirements-jetson.txt) — the two distributions share the
+# (requirements.txt) — the two distributions share the
 # site-packages/onnxruntime dir, so never install both into one venv.
 runtime = [
     "onnxruntime>=1.20",
