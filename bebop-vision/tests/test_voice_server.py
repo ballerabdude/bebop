@@ -356,10 +356,10 @@ def test_run_turn_cascade(monkeypatch):
 
     seen: dict = {}
 
-    async def fake_chat_stream(stage, messages):
+    async def fake_chat_stream(stage, messages, tools=None):
         seen["messages"] = messages
         for delta in ("Hi ", "there!", " Bye", " now."):
-            yield delta
+            yield {"type": "text", "delta": delta}
 
     spoken: list[str] = []
 
@@ -395,6 +395,81 @@ def test_run_turn_cascade(monkeypatch):
     assert history[0]["content"] == "Hi there! Bye now."
     # the transcript is what the brain sees as the user turn
     assert seen["messages"][-1]["content"][0]["text"] == "hello robot"
+
+
+def test_run_turn_cascade_runs_a_places_tool(monkeypatch):
+    """A tool-calling round is executed and its result fed back to the brain."""
+    import asyncio
+
+    ws = _FakeWS()
+    history: list[dict] = []
+    cfg = voice_server.VoiceConfig(voice="aiden", tools_enabled=True)
+    asr = voice_server.StageServer("asr", "m", Path("/tmp"), 1, capability="transcription")
+    brain = voice_server.StageServer("brain", "m", Path("/tmp"), 2, capability="chat")
+    tts = voice_server.StageServer("tts", "m", Path("/tmp"), 3, capability="speech")
+    pipe = voice_server.CascadePipeline(asr, brain, tts, voice_server.VoiceStatus(phase="ready"))
+
+    async def fake_transcribe(stage, wav):
+        return "where are we"
+
+    async def fake_context(status=None):
+        return "", []
+
+    rounds = {"n": 0}
+    advertised: list = []
+
+    async def fake_chat_stream(stage, messages, tools=None):
+        rounds["n"] += 1
+        advertised.append(tools)
+        if rounds["n"] == 1:
+            yield {"type": "tool_call", "index": 0, "id": "c1",
+                   "name": "where_am_i", "arguments": ""}
+            return
+        # the tool result must have been handed back to the model
+        assert any(m.get("role") == "tool" for m in messages)
+        yield {"type": "text", "delta": "You are in the office room."}
+
+    async def fake_speak(stage, text, voice):
+        yield b"\x00\x01"
+
+    ran: dict = {}
+
+    async def fake_tool(name, arguments):
+        ran["name"] = name
+        return "Recognised place: office room"
+
+    monkeypatch.setattr(voice_server, "_cascade_transcribe", fake_transcribe)
+    monkeypatch.setattr(voice_server, "live_context", fake_context)
+    monkeypatch.setattr(voice_server, "_cascade_chat_stream", fake_chat_stream)
+    monkeypatch.setattr(voice_server, "_cascade_speak", fake_speak)
+    monkeypatch.setattr(voice_server, "_run_places_tool", fake_tool)
+
+    asyncio.run(
+        voice_server._run_turn_cascade(
+            ws, history, b"\x00\x00" * 100, 16000, pipe, stub=False, config=cfg
+        )
+    )
+    assert ran["name"] == "where_am_i"
+    assert advertised[0] == voice_server.PLACES_TOOLS  # offered on the first pass
+    assert rounds["n"] == 2  # tool round, then the spoken answer
+    events = [json.loads(p) for k, p in ws.sent if k == "text"]
+    assert [e["name"] for e in events if e.get("type") == "tool"] == ["where_am_i"]
+    said = "".join(e["delta"] for e in events if e.get("type") == "text")
+    assert said == "You are in the office room."
+    assert history[-1]["content"] == "You are in the office room."
+
+
+def test_places_tool_reports_unavailable(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    def boom(*args, **kwargs):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "AsyncClient", boom)
+    out = asyncio.run(voice_server._run_places_tool("list_places", ""))
+    assert "unavailable" in out
 
 
 def test_robot_state_text_is_cached(monkeypatch):

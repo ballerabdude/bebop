@@ -718,9 +718,14 @@ async def _cascade_transcribe(stage: StageServer, wav_bytes: bytes) -> str:
 
 
 async def _cascade_chat_stream(
-    stage: StageServer, messages: list[dict[str, Any]]
-) -> AsyncIterator[str]:
-    """Yield the brain's reply as it is generated (SSE content deltas).
+    stage: StageServer,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Yield the brain's stream as events.
+
+    Events: `{"type":"text","delta"}` and `{"type":"tool_call","index","id",
+    "name","arguments"}` (the server parses the model's XML via `qwen3_xml`).
 
     The cascade used to wait for the whole reply before synthesising, so the
     first audio lagged "user stopped talking" by the entire generation time
@@ -728,12 +733,15 @@ async def _cascade_chat_stream(
     """
     import httpx
 
-    payload = {
+    payload: dict[str, Any] = {
         "messages": messages,
         "max_tokens": 512,
         "temperature": 0.7,
         "stream": True,
     }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
     async with httpx.AsyncClient(timeout=None) as client:
         async with client.stream(
             "POST", f"{stage.base_url}/v1/chat/completions", json=payload
@@ -752,9 +760,19 @@ async def _cascade_chat_stream(
                 choices = chunk.get("choices") or []
                 if not choices:
                     continue
-                text = (choices[0].get("delta") or {}).get("content")
+                delta = choices[0].get("delta") or {}
+                text = delta.get("content")
                 if text:
-                    yield text
+                    yield {"type": "text", "delta": text}
+                for tc in delta.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    yield {
+                        "type": "tool_call",
+                        "index": int(tc.get("index", 0) or 0),
+                        "id": tc.get("id") or "",
+                        "name": fn.get("name") or "",
+                        "arguments": fn.get("arguments") or "",
+                    }
 
 
 def _sentence_chunks(buf: str) -> tuple[list[str], str]:
@@ -770,6 +788,94 @@ def _sentence_chunks(buf: str) -> tuple[list[str], str]:
         ready.append(buf[start:match.end()].strip())
         start = match.end()
     return [s for s in ready if s], buf[start:]
+
+
+# --- read-only place-memory tools -------------------------------------------
+# The places service lives inside `bebop-vision` (:9095) — a different process —
+# so the brain reaches it over the same HTTP API the app uses. Read-only on
+# purpose: the brain answers about memory, it does not write to it (that is the
+# router's job, under the operator's cooldown/dupe guards).
+PLACES_URL = "http://127.0.0.1:9095"
+
+PLACES_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "where_am_i",
+            "description": (
+                "Recognise which remembered room the robot is in right now, by "
+                "appearance. Use when asked where you are, or whether you "
+                "recognise the current room."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_places",
+            "description": "List the rooms/places the robot has been taught.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "place_facts",
+            "description": "What the robot knows about one remembered place.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Place name, e.g. 'office room'.",
+                    }
+                },
+                "required": ["name"],
+            },
+        },
+    },
+]
+
+
+async def _run_places_tool(name: str, arguments: str) -> str:
+    """Run one read-only places tool; return a short result for the model."""
+    import httpx
+
+    try:
+        args = json.loads(arguments) if arguments.strip() else {}
+    except ValueError:
+        args = {}
+    if not isinstance(args, dict):
+        args = {}
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            if name == "where_am_i":
+                d = (await client.get(f"{PLACES_URL}/whereami")).json()
+                if not d.get("matched"):
+                    return "The current room is not recognised (no taught place matches)."
+                place = d["place"]
+                facts = "; ".join(f["text"] for f in place.get("facts", []))
+                return (f"Recognised place: {place['name']} "
+                        f"(appearance match {d.get('score')}). "
+                        f"Facts: {facts or 'none recorded'}.")
+            if name == "list_places":
+                d = (await client.get(f"{PLACES_URL}/places")).json()
+                names = [p["name"] for p in d.get("places", [])]
+                return "Remembered places: " + (", ".join(names) or "none")
+            if name == "place_facts":
+                target = str(args.get("name") or "").strip()
+                if not target:
+                    return "No place name was given."
+                r = await client.get(f"{PLACES_URL}/places/{target}")
+                if r.status_code != 200:
+                    return f"No place called {target!r} is remembered."
+                place = r.json()["place"]
+                facts = "; ".join(f["text"] for f in place.get("facts", []))
+                return f"{place['name']} — {facts or 'no facts recorded'}."
+    except Exception as exc:  # noqa: BLE001 - report, never break the turn
+        return f"The places service is unavailable ({exc})."
+    return f"Unknown tool {name!r}."
 
 
 async def _cascade_speak(
@@ -890,16 +996,64 @@ async def _run_turn_cascade(
     await ws.send_text(
         json.dumps({"type": "audio_start", "sample_rate": OUTPUT_RATE, "format": "pcm16"})
     )
+    # Read-only place-memory tools ride the same switch as live context, so the
+    # brain can answer "where are we?" / "what do you know about the office?".
+    tools = PLACES_TOOLS if config.tools_enabled else None
     spoken = ""
     pending = ""
-    async for delta in _cascade_chat_stream(pipeline.brain, messages):
-        spoken += delta
-        pending += delta
-        await ws.send_text(json.dumps({"type": "text", "delta": delta}))
-        ready, pending = _sentence_chunks(pending)
-        for sentence in ready:
-            async for chunk in _cascade_speak(pipeline.tts, sentence, voice):
+    convo = list(messages)
+    for _round in range(3):  # at most: tool call(s), then the spoken answer
+        calls: dict[int, dict[str, str]] = {}
+        round_text = ""
+        async for ev in _cascade_chat_stream(pipeline.brain, convo, tools):
+            if ev["type"] == "tool_call":
+                slot = calls.setdefault(
+                    ev["index"], {"id": "", "name": "", "arguments": ""}
+                )
+                if ev["id"]:
+                    slot["id"] = ev["id"]
+                if ev["name"]:
+                    slot["name"] = ev["name"]
+                slot["arguments"] += ev["arguments"]
+                continue
+            delta = ev["delta"]
+            round_text += delta
+            spoken += delta
+            pending += delta
+            await ws.send_text(json.dumps({"type": "text", "delta": delta}))
+            ready, pending = _sentence_chunks(pending)
+            for sentence in ready:
+                async for chunk in _cascade_speak(pipeline.tts, sentence, voice):
+                    await ws.send_bytes(chunk)
+        if not calls:
+            break
+        # Anything said before the tool call ("let me check…") is its own
+        # utterance; flush it so it does not merge with the final answer.
+        if pending.strip():
+            async for chunk in _cascade_speak(pipeline.tts, pending.strip(), voice):
                 await ws.send_bytes(chunk)
+            pending = ""
+        ordered = [calls[i] for i in sorted(calls)]
+        convo.append({
+            "role": "assistant",
+            "content": round_text or None,
+            "tool_calls": [
+                {
+                    "id": c["id"] or f"call_{i}",
+                    "type": "function",
+                    "function": {"name": c["name"], "arguments": c["arguments"]},
+                }
+                for i, c in enumerate(ordered)
+            ],
+        })
+        for i, c in enumerate(ordered):
+            await ws.send_text(json.dumps({"type": "tool", "name": c["name"]}))
+            result = await _run_places_tool(c["name"], c["arguments"])
+            convo.append({
+                "role": "tool",
+                "tool_call_id": c["id"] or f"call_{i}",
+                "content": result,
+            })
     tail = pending.strip()
     if tail:
         async for chunk in _cascade_speak(pipeline.tts, tail, voice):
