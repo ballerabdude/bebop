@@ -57,6 +57,9 @@ pub struct BusPool {
     /// leaves the old socket dead, so entries get replaced by
     /// [`BusPool::refresh_if_due`].
     by_iface: RwLock<HashMap<String, Arc<CanInterface>>>,
+    /// Every bus we were asked to serve, whether or not it is open right now,
+    /// so `refresh_if_due` keeps looking for one that is missing.
+    configured: Vec<String>,
     last_refresh: Mutex<Instant>,
 }
 
@@ -68,10 +71,12 @@ impl BusPool {
     /// either way so the rest of the runtime (telemetry, `BusEntry.healthy`,
     /// the operator's UI) can tell the operator about the situation.
     ///
-    /// Hard failure (returning `Err`) is reserved for cases where the
-    /// SocketCAN socket can't be opened at all (interface doesn't exist,
-    /// permissions, kernel module missing). A bus stuck in `ERROR-PASSIVE`
-    /// is *not* such a case — the kernel will happily hand us a socket.
+    /// A bus that cannot be opened at all (interface missing, permissions,
+    /// kernel module absent) is **not** fatal: we log it loudly and carry on,
+    /// so a robot whose USB-CAN hub is unplugged — or has re-enumerated under
+    /// different names — still serves its API and can report what is missing,
+    /// instead of crash-looping. The bus stays absent until
+    /// [`BusPool::refresh_if_due`] finds it.
     pub fn open(interfaces: &[String]) -> Result<Self> {
         let mut by_iface = HashMap::new();
         for iface in interfaces {
@@ -111,11 +116,30 @@ impl BusPool {
                     );
                 }
             }
-            let can = CanInterface::open(iface)?;
-            by_iface.insert(iface.clone(), Arc::new(can));
+            match CanInterface::open(iface) {
+                Ok(can) => {
+                    by_iface.insert(iface.clone(), Arc::new(can));
+                }
+                Err(e) => {
+                    // NOT fatal. A wheeled robot whose USB-CAN hub is unplugged
+                    // — or has come back under different interface names —
+                    // should still come up, serve the API and *say* which bus
+                    // is missing, rather than crash-loop. The bus is simply
+                    // absent until `refresh_if_due` finds it, and the
+                    // supervisor already refuses to arm anything on a bus it
+                    // cannot see.
+                    warn!(
+                        can_interface = %iface,
+                        error = %e,
+                        "CAN bus unavailable at startup; starting anyway \
+                         (it will be picked up if it appears)"
+                    );
+                }
+            }
         }
         Ok(Self {
             by_iface: RwLock::new(by_iface),
+            configured: interfaces.to_vec(),
             last_refresh: Mutex::new(Instant::now()),
         })
     }
@@ -133,11 +157,10 @@ impl BusPool {
         }
     }
 
+    /// Every configured bus, open or not — so `refresh_if_due` keeps retrying
+    /// one that is missing.
     pub fn interfaces(&self) -> Vec<String> {
-        let mut v: Vec<String> = match self.by_iface.read() {
-            Ok(g) => g.keys().cloned().collect(),
-            Err(_) => Vec::new(),
-        };
+        let mut v = self.configured.clone();
         v.sort();
         v
     }
