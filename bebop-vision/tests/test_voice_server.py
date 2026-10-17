@@ -442,7 +442,7 @@ def test_run_turn_cascade_runs_a_places_tool(monkeypatch):
     monkeypatch.setattr(voice_server, "live_context", fake_context)
     monkeypatch.setattr(voice_server, "_cascade_chat_stream", fake_chat_stream)
     monkeypatch.setattr(voice_server, "_cascade_speak", fake_speak)
-    monkeypatch.setattr(voice_server, "_run_places_tool", fake_tool)
+    monkeypatch.setattr(voice_server, "_run_tool", fake_tool)
 
     asyncio.run(
         voice_server._run_turn_cascade(
@@ -450,13 +450,235 @@ def test_run_turn_cascade_runs_a_places_tool(monkeypatch):
         )
     )
     assert ran["name"] == "where_am_i"
-    assert advertised[0] == voice_server.PLACES_TOOLS  # offered on the first pass
+    names = [t["function"]["name"] for t in advertised[0]]  # first pass
+    assert "where_am_i" in names and "robot_status" in names
+    assert "move_relative" not in names  # motion is its own switch
     assert rounds["n"] == 2  # tool round, then the spoken answer
     events = [json.loads(p) for k, p in ws.sent if k == "text"]
     assert [e["name"] for e in events if e.get("type") == "tool"] == ["where_am_i"]
     said = "".join(e["delta"] for e in events if e.get("type") == "text")
     assert said == "You are in the office room."
     assert history[-1]["content"] == "You are in the office room."
+
+
+class _Resp:
+    def __init__(self, status=200, payload=None):
+        self.status_code = status
+        self._payload = payload if payload is not None else {}
+        self.headers = {"content-type": "application/json"}
+
+    def json(self):
+        return self._payload
+
+
+class _FakePlaces:
+    """Minimal httpx.AsyncClient stand-in that records what the tool sent."""
+
+    def __init__(self, monkeypatch, responses):
+        self.calls = []
+        self.bodies = []
+        self.responses = responses
+        monkeypatch.setattr("httpx.AsyncClient", lambda *a, **k: self)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    def _dispatch(self, method, url):
+        self.calls.append((method, url))
+        for (m, frag), resp in self.responses.items():
+            if m == method and frag in url:
+                return resp
+        return _Resp(404, {"error": "no such place"})
+
+    async def get(self, url, **kwargs):
+        return self._dispatch("GET", url)
+
+    async def post(self, url, json=None, **kwargs):
+        self.bodies.append(json)
+        return self._dispatch("POST", url)
+
+    async def delete(self, url, **kwargs):
+        return self._dispatch("DELETE", url)
+
+
+def test_places_write_tools_are_advertised():
+    names = {t["function"]["name"] for t in voice_server.PLACES_TOOLS}
+    assert {"where_am_i", "list_places", "place_facts",
+            "remember_place", "add_place_fact",
+            "rename_place", "forget_place"} <= names
+
+
+def test_remember_place_posts_and_reports_capture(monkeypatch):
+    import asyncio
+
+    fake = _FakePlaces(monkeypatch, {
+        ("POST", "/places"): _Resp(201, {"views": 2, "descriptors": 2}),
+    })
+    out = asyncio.run(voice_server._run_tool(
+        "remember_place", json.dumps({"name": "the study",
+                                      "facts": ["has a standing desk"]})))
+    assert "the study" in out and "2 appearance descriptor" in out
+    assert fake.calls == [("POST", f"{voice_server.PLACES_URL}/places")]
+    assert fake.bodies[0] == {"name": "the study",
+                              "facts": ["has a standing desk"]}
+
+
+def test_remember_place_warns_when_no_usable_view(monkeypatch):
+    import asyncio
+
+    _FakePlaces(monkeypatch, {
+        ("POST", "/places"): _Resp(201, {"views": 0, "descriptors": 0}),
+    })
+    out = asyncio.run(voice_server._run_tool(
+        "remember_place", json.dumps({"name": "nowhere"})))
+    assert "could not take a usable view" in out
+
+
+def test_places_write_requires_a_name(monkeypatch):
+    import asyncio
+
+    fake = _FakePlaces(monkeypatch, {})
+    for tool in ("remember_place", "forget_place", "add_place_fact"):
+        out = asyncio.run(voice_server._run_tool(tool, "{}"))
+        assert "required" in out or "No place name" in out or "No name" in out
+    assert fake.calls == []  # nothing was sent without a name
+
+
+class _FakeState:
+    def __init__(self):
+        self.connected = True
+        self.mode = voice_server.pb.MODE_IDLE
+        self.estop_latched = False
+        self.estop_reason = ""
+        self.odom = (0.0, 0.0, 0.0)
+        self.wheel_armed = {"left": False, "right": False}
+
+
+class _FakeRobot:
+    """Simulates a chassis that converges ~0.25 m per commanded twist."""
+
+    def __init__(self, monkeypatch, *, estop=False, arm=True):
+        self.state = _FakeState()
+        self.state.estop_latched = estop
+        self._arm = arm
+        self.twists = []
+        self.armed_calls = []
+        self.modes = []
+        self.estop_resets = []
+        self.stopped = False
+
+    def start(self):
+        return self
+
+    def await_connection(self, timeout=5.0):
+        return True
+
+    def set_mode(self, mode):
+        self.modes.append(mode)
+        self.state.mode = mode
+        return True
+
+    def arm_wheels(self, enabled):
+        self.armed_calls.append(enabled)
+        if enabled and self._arm:
+            self.state.wheel_armed = {"left": True, "right": True}
+        elif not enabled:
+            self.state.wheel_armed = {"left": False, "right": False}
+        return True
+
+    def send_twist(self, vx, wz):
+        self.twists.append((round(vx, 4), round(wz, 4)))
+        x, y, th = self.state.odom
+        self.state.odom = (x + vx * 0.25, y, th + wz * 0.25)
+        return True
+
+    def reset_estop(self):
+        self.estop_resets.append(True)
+        return True
+
+    def stop(self, timeout=3.0):
+        self.stopped = True
+
+
+def _fake_robot(monkeypatch, **kwargs):
+    fake = _FakeRobot(monkeypatch, **kwargs)
+    monkeypatch.setattr("bebop_vision.robot.RobotClient",
+                        lambda *a, **k: fake)
+    return fake
+
+
+def test_move_relative_refuses_when_estop_latched(monkeypatch):
+    import asyncio
+
+    fake = _fake_robot(monkeypatch, estop=True)
+    out = asyncio.run(voice_server._move_relative({"forward_m": 1.0}))
+    assert "E-STOP" in out
+    assert fake.modes == []          # never even changed mode
+    assert fake.armed_calls == []    # never armed
+    assert fake.estop_resets == []   # an E-STOP is the operator's to clear
+    assert fake.stopped is True
+
+
+def test_move_relative_requires_armed_wheels(monkeypatch):
+    import asyncio
+
+    fake = _fake_robot(monkeypatch, arm=False)
+    out = asyncio.run(voice_server._move_relative({"forward_m": 1.0}))
+    assert "did not arm" in out
+    assert fake.modes[0] == voice_server.pb.MODE_DIAL_IN
+    assert not [t for t in fake.twists if t != (0.0, 0.0)]  # nothing driven
+
+
+def test_move_relative_drives_clamped_and_always_stops(monkeypatch):
+    import asyncio
+
+    fake = _fake_robot(monkeypatch)
+    out = asyncio.run(voice_server._move_relative({"forward_m": 99.0}))
+    # clamped to the envelope, and the reply reports what telemetry showed
+    assert "m forward" in out, out
+    moved_m = float(out.split("Moved ")[1].split(" m")[0])
+    assert 1.9 <= moved_m <= voice_server.MOTION_MAX_FORWARD_M, out
+    assert fake.modes[0] == voice_server.pb.MODE_DIAL_IN
+    assert True in fake.armed_calls and fake.armed_calls[-1] is False  # disarmed
+    assert fake.twists[-1] == (0.0, 0.0)                              # stopped
+    drove_forward = [t for t in fake.twists if t[0] > 0]
+    assert drove_forward and max(t[0] for t in drove_forward) <= \
+        voice_server.MOTION_LINEAR_MS
+
+
+def test_no_model_tool_can_control_the_estop():
+    """E-STOP control is operator-only; the model gets no tool for it."""
+    every_tool = (voice_server.PLACES_TOOLS
+                  + [voice_server.ROBOT_STATUS_TOOL, voice_server.MOVE_TOOL])
+    names = [t["function"]["name"] for t in every_tool]
+    forbidden = ("estop", "e_stop", "reset", "clear", "arm_wheels", "arm")
+    for name in names:
+        assert not any(bad in name for bad in forbidden), name
+    assert "move_relative" in names      # motion exists...
+    assert "robot_status" in names       # ...reading it does
+
+
+def test_move_relative_no_op(monkeypatch):
+    import asyncio
+
+    fake = _fake_robot(monkeypatch)
+    out = asyncio.run(voice_server._move_relative({}))
+    assert "No movement" in out
+    assert fake.twists == []
+
+
+def test_robot_status_is_routed(monkeypatch):
+    import asyncio
+
+    async def fake_state():
+        return '{"mode": "IDLE"}'
+
+    monkeypatch.setattr(voice_server, "robot_state_text", fake_state)
+    assert asyncio.run(voice_server._run_tool("robot_status", "")) == \
+        '{"mode": "IDLE"}'
 
 
 def test_places_tool_reports_unavailable(monkeypatch):
@@ -468,7 +690,7 @@ def test_places_tool_reports_unavailable(monkeypatch):
         raise httpx.ConnectError("refused")
 
     monkeypatch.setattr(httpx, "AsyncClient", boom)
-    out = asyncio.run(voice_server._run_places_tool("list_places", ""))
+    out = asyncio.run(voice_server._run_tool("list_places", ""))
     assert "unavailable" in out
 
 

@@ -49,6 +49,7 @@ import atexit
 import base64
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -67,6 +68,7 @@ from fastapi.responses import JSONResponse
 
 from . import models
 from .edge_serve import resolve_edgellm_bin
+from .proto.bebop.runtime.v1 import bebop_runtime_pb2 as pb
 
 # --- defaults -------------------------------------------------------------
 
@@ -184,6 +186,10 @@ class VoiceConfig:
     history_turns: int = DEFAULT_HISTORY_TURNS
     keep_audio_history: bool = False
     tools_enabled: bool = True
+    # Let the brain move the robot (`move_relative`). Deliberately
+    # separate from `tools_enabled`: that switch is the app's "live
+    # context" toggle, and arming wheels should not ride on it.
+    motion_enabled: bool = False
     backend: str = "omni"  # "omni" (end-to-end) | "cascade" (ASR->brain->TTS)
     # When set, the omni backend uses this already-running OpenAI-compatible
     # server instead of supervising an Edge-LLM child. A debug escape hatch.
@@ -214,6 +220,8 @@ class VoiceConfig:
             cfg.keep_audio_history = raw["keep_audio_history"]
         if isinstance(raw.get("tools_enabled"), bool):
             cfg.tools_enabled = raw["tools_enabled"]
+        if isinstance(raw.get("motion_enabled"), bool):
+            cfg.motion_enabled = raw["motion_enabled"]
         if raw.get("backend") in ("omni", "cascade"):
             cfg.backend = raw["backend"]
         if isinstance(raw.get("omni_url"), str):
@@ -253,6 +261,7 @@ class VoiceConfig:
             "history_turns": self.history_turns,
             "keep_audio_history": self.keep_audio_history,
             "tools_enabled": self.tools_enabled,
+            "motion_enabled": self.motion_enabled,
             "backend": self.backend,
             "omni_url": self.omni_url,
             "omni_supervisor_url": self.omni_supervisor_url,
@@ -790,11 +799,12 @@ def _sentence_chunks(buf: str) -> tuple[list[str], str]:
     return [s for s in ready if s], buf[start:]
 
 
-# --- read-only place-memory tools -------------------------------------------
+# --- place-memory tools -----------------------------------------------------
 # The places service lives inside `bebop-vision` (:9095) — a different process —
-# so the brain reaches it over the same HTTP API the app uses. Read-only on
-# purpose: the brain answers about memory, it does not write to it (that is the
-# router's job, under the operator's cooldown/dupe guards).
+# so the brain reaches it over the same HTTP API the app uses. Reads answer
+# questions about memory; writes (remember/fact/rename/forget) act only on an
+# explicit request, and reuse that API's guards (name uniqueness, cooldown,
+# per-place growth caps) instead of the router's autonomous path.
 PLACES_URL = "http://127.0.0.1:9095"
 
 PLACES_TOOLS: list[dict[str, Any]] = [
@@ -835,11 +845,97 @@ PLACES_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember_place",
+            "description": (
+                "Create a new place from what the robot can see right now. Use "
+                "when the user asks to remember/save the room they are in or "
+                "the current view, e.g. 'remember this as the study'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name to save it under.",
+                    },
+                    "facts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional facts to record with it.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_place_fact",
+            "description": (
+                "Record something about a place the robot already knows, e.g. "
+                "'the office has a whiteboard'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Place name."},
+                    "text": {"type": "string", "description": "The fact."},
+                },
+                "required": ["name", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rename_place",
+            "description": "Give a remembered place a different name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Current name."},
+                    "new_name": {"type": "string", "description": "New name."},
+                },
+                "required": ["name", "new_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forget_place",
+            "description": (
+                "Delete a remembered place and its keyframes. Only when the "
+                "user asks to forget/remove it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Place name."}
+                },
+                "required": ["name"],
+            },
+        },
+    },
 ]
 
 
-async def _run_places_tool(name: str, arguments: str) -> str:
-    """Run one read-only places tool; return a short result for the model."""
+def _place_arg(args: dict[str, Any]) -> str:
+    return str(args.get("name") or "").strip()
+
+
+async def _run_tool(name: str, arguments: str) -> str:
+    """Run one voice tool; return a short result for the model.
+
+    Reads answer questions about memory; writes act on an explicit request
+    ("remember this as the study"). The write path is the same one the app and
+    the router use, so it inherits their guards (name uniqueness, cooldown,
+    per-place growth caps) rather than inventing new ones.
+    """
     import httpx
 
     try:
@@ -848,8 +944,63 @@ async def _run_places_tool(name: str, arguments: str) -> str:
         args = {}
     if not isinstance(args, dict):
         args = {}
+    # Robot tools do not go through the places HTTP API.
+    if name == "robot_status":
+        return await _robot_status_text()
+    if name == "move_relative":
+        return await _move_relative(args)
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            if name == "remember_place":
+                label = _place_arg(args)
+                if not label:
+                    return "No name was given for the new place."
+                facts = args.get("facts") or []
+                if isinstance(facts, str):
+                    facts = [facts]
+                r = await client.post(f"{PLACES_URL}/places",
+                                      json={"name": label,
+                                            "facts": [str(f) for f in facts]})
+                if r.status_code not in (200, 201):
+                    body = r.json() if r.headers.get("content-type", "").startswith(
+                        "application/json") else {}
+                    return (f"Could not save {label!r}: "
+                            f"{body.get('error') or r.status_code}")
+                saved = r.json()
+                views = saved.get("views", 0)
+                desc = saved.get("descriptors", 0)
+                note = ("" if desc else
+                        " (I could not take a usable view just now, so I "
+                        "cannot recognise it later without another look.)")
+                return (f"Saved {label!r} from {views} camera view(s), "
+                        f"{desc} appearance descriptor(s){note}.")
+            if name == "add_place_fact":
+                label, text = _place_arg(args), str(args.get("text") or "").strip()
+                if not label or not text:
+                    return "Both a place name and a fact are required."
+                r = await client.post(f"{PLACES_URL}/places/{label}/facts",
+                                      json={"text": text})
+                if r.status_code not in (200, 201):
+                    return f"No place called {label!r} is remembered."
+                return f"Noted about {label!r}: {text}"
+            if name == "rename_place":
+                label = _place_arg(args)
+                new_name = str(args.get("new_name") or "").strip()
+                if not label or not new_name:
+                    return "Both the current and the new name are required."
+                r = await client.post(f"{PLACES_URL}/places/{label}/rename",
+                                      json={"name": new_name})
+                if r.status_code != 200:
+                    return f"Could not rename {label!r} (no such place, or {new_name!r} is taken)."
+                return f"Renamed {label!r} to {new_name!r}."
+            if name == "forget_place":
+                label = _place_arg(args)
+                if not label:
+                    return "No place name was given."
+                r = await client.delete(f"{PLACES_URL}/places/{label}")
+                if r.status_code != 200:
+                    return f"No place called {label!r} is remembered."
+                return f"Forgot {label!r}."
             if name == "where_am_i":
                 d = (await client.get(f"{PLACES_URL}/whereami")).json()
                 if not d.get("matched"):
@@ -876,6 +1027,229 @@ async def _run_places_tool(name: str, arguments: str) -> str:
     except Exception as exc:  # noqa: BLE001 - report, never break the turn
         return f"The places service is unavailable ({exc})."
     return f"Unknown tool {name!r}."
+
+
+# --- motion -----------------------------------------------------------------
+# Moving the robot is the one capability here that cannot be undone, so it is
+# deliberately narrow:
+#   * its own config switch (`motion_enabled`), NOT the casual "live context"
+#     toggle — nobody should arm a robot by flipping a context setting;
+#   * hard clamps on what a single call may ask for;
+#   * arming is explicit and temporary: mode -> DIAL_IN (arming requires it,
+#     supervisor.rs:544), enable all wheels, move, then stop + disarm + restore
+#     the mode. Every exit path stops the wheels.
+#   * the firmware is the backstop, not this code: its watchdog zeroes a stale
+#     twist (so a crashed tool coasts to a stop, it does not run away), it
+#     slews/clamps every command, `vel_max` trips E-STOP, and at most one WS
+#     client may hold the drive assignment.
+#   * NO E-STOP control, deliberately. There is no tool to latch, clear or
+#     reset one: an E-STOP means a person must go and look at the robot, so the
+#     brain may only *report* it and refuse to move (`move_relative` bails
+#     before arming; the mode ends at IDLE and the wheels stay disarmed).
+#     `RobotClient.reset_estop()` exists but is for the operator app, not the
+#     model. Do not wire it up here — a misheard "clear the e-stop" that
+#     actually clears one defeats the whole mechanism.
+# It is odom-relative only. There is no map: "move to the door" needs metric
+# localisation this robot does not have (see bebop_vision/places/__init__.py).
+MOTION_MAX_FORWARD_M = 2.0
+MOTION_MAX_TURN_DEG = 180.0
+MOTION_LINEAR_MS = 0.2          # gentle; 1 m takes ~5 s
+MOTION_ANGULAR_RAD_S = 0.6
+MOTION_TOL_M = 0.03
+MOTION_TOL_RAD = 0.06           # ~3.5 deg
+MOTION_ARM_WAIT_S = 4.0
+
+ROBOT_STATUS_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "robot_status",
+        "description": (
+            "The robot's own state: drive mode, whether the E-STOP is latched, "
+            "which wheels are armed, battery voltage, and its odometry pose. "
+            "Use before or after moving, or when asked how the robot is doing. "
+            "A latched E-STOP can only be cleared by a person at the robot — "
+            "you cannot reset it."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+MOVE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "move_relative",
+        "description": (
+            "Drive the robot relative to where it is now: forward/back by a "
+            "distance, and/or turn on the spot. There is no map, so it cannot "
+            "accept a destination like 'the door' or a room name — use small "
+            "bounded moves plus what you can see. Only when the user asks the "
+            "robot to move. It refuses if the E-STOP is latched or the wheels "
+            "will not arm; both need a person to sort out."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "forward_m": {
+                    "type": "number",
+                    "description": (f"Metres forward (negative = back); "
+                                    f"magnitude ≤ {MOTION_MAX_FORWARD_M}."),
+                },
+                "turn_deg": {
+                    "type": "number",
+                    "description": (f"Degrees to turn on the spot, + = left; "
+                                    f"magnitude ≤ {MOTION_MAX_TURN_DEG}."),
+                },
+            },
+        },
+    },
+}
+
+
+def _wrap_pi(a: float) -> float:
+    while a > math.pi:
+        a -= 2 * math.pi
+    while a < -math.pi:
+        a += 2 * math.pi
+    return a
+
+
+async def _robot_status_text() -> str:
+    """Read-only robot state (mode, estop, armed wheels, odom, battery)."""
+    text = await robot_state_text()
+    return text or "Robot status is unavailable."
+
+
+async def _move_relative(args: dict[str, Any]) -> str:
+    """Drive a bounded odom-relative move: forward/back then turn, or a turn.
+
+    Arms the chassis for the duration and always stops + disarms afterwards.
+    """
+    forward_m = float(args.get("forward_m") or 0.0)
+    turn_deg = float(args.get("turn_deg") or 0.0)
+    if abs(forward_m) < 0.01 and abs(turn_deg) < 0.5:
+        return "No movement was requested."
+    forward_m = max(-MOTION_MAX_FORWARD_M, min(MOTION_MAX_FORWARD_M, forward_m))
+    turn_deg = max(-MOTION_MAX_TURN_DEG, min(MOTION_MAX_TURN_DEG, turn_deg))
+
+    from .robot import RobotClient
+
+    robot = RobotClient(url=ROBOT_WS_URL, name="bebop-voice-move").start()
+    before_mode = None
+    changed_mode = False
+    armed = False
+    try:
+        if not robot.await_connection(5.0):
+            return "I cannot reach the robot's runtime, so I did not move."
+        st = robot.state
+        before_mode = st.mode
+        if st.estop_latched:
+            return (f"Not moving: the E-STOP is latched "
+                    f"({st.estop_reason or 'no reason given'}).")
+
+        # Arming requires DIAL_IN (or RUN_POLICY); DIAL_IN is the bring-up /
+        # teleop mode with the slew limit and watchdog enforced.
+        if before_mode != pb.MODE_DIAL_IN:
+            robot.set_mode(pb.MODE_DIAL_IN)
+            changed_mode = True
+        deadline = time.monotonic() + MOTION_ARM_WAIT_S
+        while time.monotonic() < deadline and st.mode != pb.MODE_DIAL_IN:
+            await asyncio.sleep(0.05)
+        if st.mode != pb.MODE_DIAL_IN:
+            return "Could not switch to dial-in mode, so I did not move."
+
+        robot.arm_wheels(True)
+        deadline = time.monotonic() + MOTION_ARM_WAIT_S
+        while time.monotonic() < deadline:
+            if st.wheel_armed and all(st.wheel_armed.values()):
+                armed = True
+                break
+            if st.estop_latched:
+                return "Not moving: the E-STOP latched while arming."
+            await asyncio.sleep(0.05)
+        if not armed:
+            return "The wheels did not arm, so I did not move."
+
+        start = tuple(st.odom)
+        moved = await _run_move(robot, forward_m, turn_deg)
+        if moved is None:
+            return "I stopped: the E-STOP latched, or the link dropped."
+        dist, turned, secs = moved
+        # Report honestly from telemetry, not from what was asked for.
+        direction = "forward" if forward_m > 0 else "back"
+        if abs(forward_m) >= 0.01:
+            body = f"{dist:.2f} m {direction}"
+        else:
+            body = f"{abs(turned):.0f} deg {'left' if turn_deg > 0 else 'right'}"
+        return (f"Moved {body} in {secs:.1f}s "
+                f"(now at x={st.odom[0]:.2f} m, y={st.odom[1]:.2f} m, "
+                f"heading {math.degrees(st.odom[2]):.0f} deg).")
+    finally:
+        try:
+            robot.send_twist(0.0, 0.0)
+            await asyncio.sleep(0.1)
+            if armed:
+                robot.arm_wheels(False)
+            if changed_mode and before_mode is not None:
+                robot.set_mode(before_mode)
+            await asyncio.sleep(0.1)
+        finally:
+            robot.stop()
+
+
+async def _run_move(
+    robot: Any, forward_m: float, turn_deg: float
+) -> tuple[float, float, float] | None:
+    """Closed loop on wheel odometry. Returns (distance, turned_rad, seconds).
+
+    None when it had to abort (E-STOP or lost link).
+    """
+    st = robot.state
+    t0 = time.monotonic()
+    start = tuple(st.odom)
+
+    async def settle(axis: str, target: float) -> bool:
+        """Drive one axis to `target` from where this phase starts."""
+        ref_x, ref_y, ref_th = st.odom
+        budget = (abs(target) / max(MOTION_LINEAR_MS, 1e-6)) + 8.0
+        end = time.monotonic() + budget
+        while time.monotonic() < end:
+            if st.estop_latched or not st.connected:
+                return False
+            x, y, th = st.odom
+            if axis == "turn":
+                err = _wrap_pi(ref_th + target - th)
+                if abs(err) <= MOTION_TOL_RAD:
+                    return True
+                robot.send_twist(0.0, max(-MOTION_ANGULAR_RAD_S,
+                                          min(MOTION_ANGULAR_RAD_S, 1.5 * err)))
+            else:
+                # Distance along the heading this phase set out on.
+                travelled = (x - ref_x) * math.cos(ref_th) + \
+                            (y - ref_y) * math.sin(ref_th)
+                err = target - travelled
+                if abs(err) <= MOTION_TOL_M:
+                    return True
+                # A small heading hold keeps it straight.
+                hold = _wrap_pi(ref_th - th)
+                robot.send_twist(
+                    max(-MOTION_LINEAR_MS, min(MOTION_LINEAR_MS, 1.2 * err)),
+                    max(-0.4, min(0.4, 1.5 * hold)),
+                )
+            await asyncio.sleep(0.05)
+        return True  # out of time: report what actually happened
+
+    try:
+        if abs(turn_deg) >= 0.5:
+            if not await settle("turn", math.radians(turn_deg)):
+                return None
+        if abs(forward_m) >= 0.01:
+            if not await settle("forward", forward_m):
+                return None
+    finally:
+        robot.send_twist(0.0, 0.0)
+    x, y, th = st.odom
+    dist = math.hypot(x - start[0], y - start[1])
+    return dist, _wrap_pi(th - start[2]), time.monotonic() - t0
 
 
 async def _cascade_speak(
@@ -998,7 +1372,12 @@ async def _run_turn_cascade(
     )
     # Read-only place-memory tools ride the same switch as live context, so the
     # brain can answer "where are we?" / "what do you know about the office?".
-    tools = PLACES_TOOLS if config.tools_enabled else None
+    tools: list[dict[str, Any]] = []
+    if config.tools_enabled:
+        tools += PLACES_TOOLS + [ROBOT_STATUS_TOOL]
+    if config.motion_enabled:
+        tools += [MOVE_TOOL]
+    tools = tools or None
     spoken = ""
     pending = ""
     convo = list(messages)
@@ -1048,7 +1427,7 @@ async def _run_turn_cascade(
         })
         for i, c in enumerate(ordered):
             await ws.send_text(json.dumps({"type": "tool", "name": c["name"]}))
-            result = await _run_places_tool(c["name"], c["arguments"])
+            result = await _run_tool(c["name"], c["arguments"])
             convo.append({
                 "role": "tool",
                 "tool_call_id": c["id"] or f"call_{i}",
@@ -1780,6 +2159,8 @@ def build_app(
             config.keep_audio_history = bool(body["keep_audio_history"])
         if "tools_enabled" in body:
             config.tools_enabled = bool(body["tools_enabled"])
+        if isinstance(body.get("motion_enabled"), bool):
+            config.motion_enabled = body["motion_enabled"]
         if body.get("backend") in ("omni", "cascade"):
             config.backend = body["backend"]
         if isinstance(body.get("omni_url"), str):

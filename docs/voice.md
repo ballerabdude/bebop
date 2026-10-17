@@ -313,3 +313,50 @@ the page is HTTPS (`bebop-app/src/runtime/urls.ts`).
    envelope (precedent: `NavMaskFrame.grid`), at the cost of a firmware relay.
 5. **Model license/gating.** Qwen3-Omni is Apache-2.0; verify the HF repo is
    not gated (if it is, flip `gated: true` and the token flow already works).
+
+## Tools the voice brain can call
+
+The cascade brain is served with OpenAI tools from `voice_server.py`. The brain
+plans a tool call, the service executes it, the result goes back, and the
+answer is spoken — text streams and TTS is synthesised per sentence throughout.
+
+| Tool | Does | Switch |
+|---|---|---|
+| `where_am_i`, `list_places`, `place_facts` | read place memory (HTTP `:9095`) | `tools_enabled` |
+| `remember_place`, `add_place_fact`, `rename_place`, `forget_place` | write it | `tools_enabled` |
+| `robot_status` | read mode / E-STOP / armed wheels / odom / battery | `tools_enabled` |
+| `move_relative` | bounded odom-relative motion | **`motion_enabled`** |
+
+The place tools go over HTTP because the places service lives in the
+`bebop-vision` process; the robot tools talk to the runtime WS (`:9090`).
+
+### Motion is deliberately narrow
+
+`move_relative` takes `forward_m` and/or `turn_deg` and is **odom-relative
+only** — there is no map, so it cannot accept "the door" or a room name (see
+the localisation note in `bebop_vision/places/__init__.py`). It:
+
+- is gated by its own `motion_enabled` switch, **not** the app's casual
+  "live context" toggle;
+- clamps a single call to ≤2 m and ≤180°;
+- arms the chassis for the duration only — mode → `DIAL_IN` (arming requires
+  it), enable the wheels, move, then **stop, disarm and restore the mode on
+  every exit path**;
+- closes the loop on wheel odometry and reports the distance telemetry
+  actually showed, not the distance requested;
+- relies on the firmware as the backstop: the operator-link watchdog zeroes a
+  stale twist (a crashed tool coasts to a stop, it does not run away), every
+  command is slewed/clamped, and one WS client holds the drive assignment.
+
+### E-STOP is operator-only
+
+**No tool can latch, clear or reset an E-STOP.** A latched one means a person
+has to go and look at the robot, so the brain may only *report* the state and
+reason (`robot_status`) and refuse to move — `move_relative` bails before it
+arms anything, leaving the mode at `IDLE` with the wheels disarmed. A test
+asserts that no advertised tool name contains estop/reset/arm, so this cannot
+regress by accident.
+
+`RobotClient.reset_estop()` exists but is for the **operator app**
+(`bebop-app` binds `ResetEStop`), never the model. A misheard "clear the
+e-stop" that actually cleared one would defeat the whole mechanism.
