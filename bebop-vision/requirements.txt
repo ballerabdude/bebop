@@ -24,6 +24,10 @@
 #   4. .venv/bin/pip install -e . --no-deps      # registers the package only
 #   5. .venv/bin/pip install -r requirements.txt
 #   6. .venv/bin/pip install --no-deps 'pyorbbecsdk2==2.1.2'   # see below
+#
+# `requirements.lock.txt` is the exact verified set (generated on the robot).
+# `--setup-voice` installs it in preference to the floors below, so a rebuilt
+# venv reproduces the deployed robot.
 
 # --- ABI-critical: venv-local numpy-2 builds must shadow the system --------
 # JetPack ships numpy 1.x in dist-packages, so a venv-local numpy 2 (with a

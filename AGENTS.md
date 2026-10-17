@@ -28,6 +28,9 @@
   2.1.2 works under numpy 2.2.6 (verified). The venv-local scipy matters —
   without it, transformers' optional scipy import falls back to the system
   numpy-1-built scipy and dies on `from numpy import Inf`.
+  `requirements.lock.txt` (generated; see its header) pins the exact verified
+  set and `--setup-voice` prefers it over the floors — regenerate it after any
+  deliberate upgrade, or the robot and the lock drift apart.
 - Firmware: `bebop-linux.service` runs as root from
   `/usr/local/bin/bebop-linux`; config `/etc/bebop/bebop_wheeled.yaml`.
 - Other services: `bebop-agent` owns port 9091 (its `/healthz` + setup
