@@ -14,6 +14,12 @@ memory over a small JSON API:
     GET    /places/{id}/keyframes/{file} the keyframe JPEG
     GET    /whereami                     recognise the current room
 
+When a System 1 router is attached (`router=`), it also proxies that:
+
+    GET    /router/status                router state + rolling event list
+    GET    /router/decisions?limit=N     recent routing decisions
+    POST   /router/assess {instruction}  one assessment now (blocking)
+
 The same operations are public methods, so the LLM tool layer can call them
 directly without a second HTTP hop.
 """
@@ -50,10 +56,12 @@ class PlacesService:
         min_score: float = 0.5,
         min_margin: float = 0.05,
         capture_roles=("near", "far"),
+        router=None,
     ):
         self.store = store
         self.capture = capture
         self.encoder = encoder
+        self.router = router
         self.host = host
         self.port = int(port)
         self.min_score = float(min_score)
@@ -263,6 +271,8 @@ class PlacesService:
             "capture": self.capture is not None,
             "min_score": self.min_score,
             "min_margin": self.min_margin,
+            "router": self.router.status() if self.router is not None
+            else {"enabled": False},
         }
 
 
@@ -305,6 +315,14 @@ class _PlacesHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         return parts, query
 
+    def _router(self):
+        """The attached System 1 router, or None after sending a 503."""
+        router = self.svc.router
+        if router is None:
+            self._err(503, "router not configured")
+            return None
+        return router
+
     # -- routes -----------------------------------------------------------
 
     def do_GET(self):
@@ -322,6 +340,20 @@ class _PlacesHandler(BaseHTTPRequestHandler):
             if parts == ["whereami"]:
                 k = int((query.get("k") or ["3"])[0])
                 return self._json(svc.whereami(k=k))
+            if parts == ["router", "status"]:
+                router = self._router()
+                if router is None:
+                    return
+                return self._json(router.status())
+            if parts == ["router", "decisions"]:
+                router = self._router()
+                if router is None:
+                    return
+                limit = int((query.get("limit") or ["20"])[0])
+                return self._json({
+                    "decisions": router.decisions(limit=limit),
+                    "events": router.events(),
+                })
             if len(parts) == 2 and parts[0] == "places":
                 place = svc.get_place(parts[1])
                 if place is None:
@@ -340,6 +372,14 @@ class _PlacesHandler(BaseHTTPRequestHandler):
         svc = self.svc
         try:
             body = self._body()
+            if parts == ["router", "assess"]:
+                router = self._router()
+                if router is None:
+                    return
+                instruction = body.get("instruction") or None
+                return self._json(
+                    router.assess_once(instruction=instruction, source="http")
+                )
             if parts == ["places"]:
                 name = body.get("name")
                 if not name:

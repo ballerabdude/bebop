@@ -135,6 +135,23 @@ def run_record_navd(args):
         threading.Thread(target=penc.warmup, name="places-warmup",
                          daemon=True).start()
 
+        # System 1 router: a fast VLM decides whether the current view is
+        # worth remembering (first skill), and the executor writes the
+        # decision into the same place store. Off unless --place-router.
+        if args.place_router:
+            from bebop_vision.router import (ChatVLMClient, PlaceMemoryExecutor,
+                                             PlaceMemorySkill, RouterService)
+            vlm = ChatVLMClient(args.router_url, args.router_model,
+                                timeout=args.router_timeout)
+            rskill = PlaceMemorySkill(pstore, penc, vlm)
+            rexec = PlaceMemoryExecutor(pstore, penc,
+                                        cooldown_s=args.router_cooldown)
+            places.router = RouterService(
+                rskill, rexec, capture=places.capture,
+                interval_s=args.router_interval,
+            )
+            places.router.start()
+
 
     out_dir = Path(args.record_navd).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -189,6 +206,8 @@ def run_record_navd(args):
         finally:
             close_segment(rec, path)
             if places is not None:
+                if places.router is not None:
+                    places.router.stop()
                 places.stop()
             if vserver is not None:
                 vserver.stop()
@@ -252,6 +271,8 @@ def run_record_navd(args):
             except OSError as exc:
                 print(f"\n[record-navd] error closing final segment: {exc}")
         if places is not None:
+            if places.router is not None:
+                places.router.stop()
             places.stop()
         if vserver is not None:
             vserver.stop()
@@ -304,8 +325,28 @@ def main():
     parser.add_argument("--places-root", default="/var/lib/bebop-places",
                         help="directory for the place DB + keyframes "
                              "(default: /var/lib/bebop-places)")
+    parser.add_argument("--place-router", action="store_true",
+                        help="enable the System 1 place-memory router (a fast "
+                             "VLM decides when to remember; needs --places and "
+                             "an OpenAI-compatible VLM at --router-url)")
+    parser.add_argument("--router-url", default="http://127.0.0.1:8012",
+                        help="OpenAI-compatible VLM base URL for the router "
+                             "(default: the voice cascade brain on :8012)")
+    parser.add_argument("--router-model", default="RadixArk/Qwen3.8-27B-NVFP4",
+                        help="model name sent to --router-url")
+    parser.add_argument("--router-interval", type=float, default=20.0,
+                        help="seconds between background router assessments "
+                             "(default: 20)")
+    parser.add_argument("--router-cooldown", type=float, default=180.0,
+                        help="seconds during which a second remember folds into "
+                             "the place just created (default: 180)")
+    parser.add_argument("--router-timeout", type=float, default=120.0,
+                        help="VLM request timeout in seconds (default: 120)")
     parser.add_argument("--robot-url", default=DEFAULT_URL)
     args = parser.parse_args()
+
+    if args.place_router and args.no_places:
+        parser.error("--place-router needs the place store; drop --no-places")
 
     if not args.record_navd:
         parser.error(
