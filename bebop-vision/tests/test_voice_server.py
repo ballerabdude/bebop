@@ -340,16 +340,20 @@ def test_run_turn_cascade(monkeypatch):
 
     seen: dict = {}
 
-    async def fake_chat(stage, messages):
+    async def fake_chat_stream(stage, messages):
         seen["messages"] = messages
-        return "Hi there!"
+        for delta in ("Hi ", "there!", " Bye", " now."):
+            yield delta
+
+    spoken: list[str] = []
 
     async def fake_speak(stage, text, voice):
+        spoken.append(text)
         for chunk in (b"\x00\x01", b"\x02\x03"):
             yield chunk
 
     monkeypatch.setattr(voice_server, "_cascade_transcribe", fake_transcribe)
-    monkeypatch.setattr(voice_server, "_cascade_chat", fake_chat)
+    monkeypatch.setattr(voice_server, "_cascade_chat_stream", fake_chat_stream)
     monkeypatch.setattr(voice_server, "_cascade_speak", fake_speak)
 
     asyncio.run(
@@ -367,11 +371,50 @@ def test_run_turn_cascade(monkeypatch):
                 text_deltas.append(ev["delta"])
     audio_bytes = sum(n for kind, n in ws.sent if kind == "bytes")
     assert "transcript" in kinds
-    assert any("Hi there" in d for d in text_deltas)
-    assert audio_bytes == 4
-    assert history and history[0]["role"] == "assistant" and history[0]["content"] == "Hi there!"
+    assert "".join(text_deltas) == "Hi there! Bye now."
+    # pipelined: one TTS call per finished sentence, not one for the whole reply
+    assert spoken == ["Hi there!", "Bye now."]
+    assert audio_bytes == 8  # 2 sentences x 2 chunks x 2 bytes
+    assert history and history[0]["role"] == "assistant"
+    assert history[0]["content"] == "Hi there! Bye now."
     # the transcript is what the brain sees as the user turn
     assert seen["messages"][-1]["content"][0]["text"] == "hello robot"
+
+
+def test_robot_state_text_is_cached(monkeypatch):
+    """The firmware round trip costs ~2 s; it must not run once per turn."""
+    import asyncio
+
+    from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as rt
+
+    calls = {"n": 0}
+
+    class FakeWS:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def send(self, data):
+            pass
+
+        async def recv(self):
+            env = rt.ServerRuntimeMessage(request_id=1)
+            env.snapshot.SetInParent()
+            return env.SerializeToString()
+
+    def fake_connect(*args, **kwargs):
+        calls["n"] += 1
+        return FakeWS()
+
+    monkeypatch.setattr("websockets.connect", fake_connect)
+    monkeypatch.setattr(voice_server, "_STATE_CACHE", {"ts": 0.0, "text": ""})
+
+    first = asyncio.run(voice_server.robot_state_text())
+    second = asyncio.run(voice_server.robot_state_text())
+    assert first and first == second
+    assert calls["n"] == 1  # the second call is served from the cache
 
 
 def test_run_turn_skips_context_when_disabled(monkeypatch):

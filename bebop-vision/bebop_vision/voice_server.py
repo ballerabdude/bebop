@@ -50,6 +50,7 @@ import base64
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -342,11 +343,28 @@ def _format_snapshot(snapshot: Any) -> str:
     return json.dumps(state)
 
 
-async def robot_state_text() -> str:
-    """One-line robot status for the system prompt; '' when unavailable."""
+# `robot_state_text()` opens a fresh WebSocket to the firmware, which measured a
+# flat ~2 s (the snapshot reply is tied to the firmware's telemetry tick). That
+# one call dominated a voice turn — more than ASR, vision prefill and the first
+# sentence combined — so it is cached and kept warm by `_refresh_state_loop`.
+_STATE_TTL_S = 15.0
+_STATE_REFRESH_S = 5.0
+_STATE_CACHE: dict[str, Any] = {"ts": 0.0, "text": ""}
+
+
+async def robot_state_text(*, refresh: bool = False) -> str:
+    """One-line robot status for the system prompt; '' when unavailable.
+
+    Served from a short-lived cache; `refresh=True` forces a firmware round
+    trip (used by the background refresher).
+    """
     import websockets
     from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as rt
 
+    if not refresh and _STATE_CACHE["text"] and (
+        time.monotonic() - _STATE_CACHE["ts"] < _STATE_TTL_S
+    ):
+        return _STATE_CACHE["text"]
     try:
         async with websockets.connect(
             ROBOT_WS_URL, open_timeout=5, close_timeout=2, max_size=None
@@ -362,10 +380,24 @@ async def robot_state_text() -> str:
                 env = rt.ServerRuntimeMessage()
                 env.ParseFromString(data)
                 if env.request_id == 1 and env.WhichOneof("payload") == "snapshot":
-                    return _format_snapshot(env.snapshot)
+                    text = _format_snapshot(env.snapshot)
+                    _STATE_CACHE["text"] = text
+                    _STATE_CACHE["ts"] = time.monotonic()
+                    return text
     except Exception as exc:  # noqa: BLE001 - status is best-effort
         _log(f"robot state unavailable: {exc}")
-    return ""
+    # A stale status line beats none.
+    return str(_STATE_CACHE["text"])
+
+
+async def _refresh_state_loop() -> None:
+    """Keep `robot_state_text()` warm so a turn never pays the ~2 s fetch."""
+    while True:
+        try:
+            await robot_state_text(refresh=True)
+        except Exception as exc:  # noqa: BLE001 - never let the loop die
+            _log(f"state refresh failed: {exc}")
+        await asyncio.sleep(_STATE_REFRESH_S)
 
 
 async def _fetch_snapshot(stream: str, attempts: int = 2) -> bytes | None:
@@ -667,17 +699,59 @@ async def _cascade_transcribe(stage: StageServer, wav_bytes: bytes) -> str:
         return str(r.json().get("text", "")).strip()
 
 
-async def _cascade_chat(stage: StageServer, messages: list[dict[str, Any]]) -> str:
+async def _cascade_chat_stream(
+    stage: StageServer, messages: list[dict[str, Any]]
+) -> AsyncIterator[str]:
+    """Yield the brain's reply as it is generated (SSE content deltas).
+
+    The cascade used to wait for the whole reply before synthesising, so the
+    first audio lagged "user stopped talking" by the entire generation time
+    (~5.8 s measured). Streaming lets TTS start on the first sentence.
+    """
     import httpx
 
+    payload = {
+        "messages": messages,
+        "max_tokens": 512,
+        "temperature": 0.7,
+        "stream": True,
+    }
     async with httpx.AsyncClient(timeout=None) as client:
-        r = await client.post(
-            f"{stage.base_url}/v1/chat/completions",
-            json={"messages": messages, "max_tokens": 512, "temperature": 0.7},
-        )
-        r.raise_for_status()
-        msg = r.json()["choices"][0]["message"]
-        return str(msg.get("content") or "").strip()
+        async with client.stream(
+            "POST", f"{stage.base_url}/v1/chat/completions", json=payload
+        ) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    chunk = json.loads(data)
+                except ValueError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                text = (choices[0].get("delta") or {}).get("content")
+                if text:
+                    yield text
+
+
+def _sentence_chunks(buf: str) -> tuple[list[str], str]:
+    """Split finished sentences off a streaming buffer.
+
+    Returns ``(sentences, remainder)``. A sentence ends at `.`/`!`/`?`
+    followed by whitespace, so the remainder always holds an unfinished
+    sentence (or the tail after the last terminator).
+    """
+    ready: list[str] = []
+    start = 0
+    for match in re.finditer(r"(?<=[.!?])\s+", buf):
+        ready.append(buf[start:match.end()].strip())
+        start = match.end()
+    return [s for s in ready if s], buf[start:]
 
 
 async def _cascade_speak(
@@ -790,20 +864,31 @@ async def _run_turn_cascade(
         *history,
         {"role": "user", "content": content},
     ]
-    reply = await _cascade_chat(pipeline.brain, messages)
-
-    # 3) TTS — reply text to speech.
+    # 3) TTS — stream the reply as it is generated, synthesising one finished
+    # sentence at a time, so the first audio does not wait for the whole reply.
+    # Measured on the Thor: first audio 5.8-6.7 s waiting for the full text vs
+    # ~2 s pipelined. TTS runs ~2x faster than playback, so it stays ahead.
     voice = resolve_cascade_voice(pipeline.tts, voice_override or config.voice)
-    await ws.send_text(
-        json.dumps({"type": "text", "delta": reply})
-    )
     await ws.send_text(
         json.dumps({"type": "audio_start", "sample_rate": OUTPUT_RATE, "format": "pcm16"})
     )
-    async for chunk in _cascade_speak(pipeline.tts, reply, voice):
-        await ws.send_bytes(chunk)
+    spoken = ""
+    pending = ""
+    async for delta in _cascade_chat_stream(pipeline.brain, messages):
+        spoken += delta
+        pending += delta
+        await ws.send_text(json.dumps({"type": "text", "delta": delta}))
+        ready, pending = _sentence_chunks(pending)
+        for sentence in ready:
+            async for chunk in _cascade_speak(pipeline.tts, sentence, voice):
+                await ws.send_bytes(chunk)
+    tail = pending.strip()
+    if tail:
+        async for chunk in _cascade_speak(pipeline.tts, tail, voice):
+            await ws.send_bytes(chunk)
     await ws.send_text(json.dumps({"type": "audio_end"}))
     await ws.send_text(json.dumps({"type": "done"}))
+    reply = spoken
 
     if reply:
         history.append({"role": "assistant", "content": reply})
@@ -1438,6 +1523,13 @@ def build_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.on_event("startup")
+    async def _start_state_refresher() -> None:
+        # Keep the per-turn robot status warm: the firmware round trip costs
+        # ~2 s, which otherwise lands in front of every turn's first audio.
+        if not stub:
+            asyncio.create_task(_refresh_state_loop())
 
     @app.on_event("shutdown")
     async def _teardown_backend() -> None:
