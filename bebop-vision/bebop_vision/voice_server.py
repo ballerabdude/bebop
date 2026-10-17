@@ -159,6 +159,11 @@ def _silence_wav_b64(seconds: float = 0.2, rate: int = INPUT_RATE) -> str:
 # Persisted operator settings (voice, persona, context). Written by the app
 # via `POST /config`; root-owned under the service's state dir.
 CONFIG_PATH = Path("/var/lib/bebop-voice/config.json")
+
+# Saved config values that no longer name anything. `omni-vllm` was the
+# vLLM-Omni container (removed with the vLLM runtime); the same model is now
+# registered by `bebop-models` as `omni-edgellm`. Rewritten on load.
+_BACKEND_ID_MIGRATIONS = {"omni-vllm": "omni-edgellm"}
 MAX_SESSIONS = 32
 
 
@@ -217,6 +222,19 @@ class VoiceConfig:
             cfg.omni_supervisor_url = raw["omni_supervisor_url"].strip()
         if isinstance(raw.get("omni_backend_id"), str) and raw["omni_backend_id"].strip():
             cfg.omni_backend_id = raw["omni_backend_id"].strip()
+        # Forward old backend ids. `omni-vllm` was the vLLM-Omni container,
+        # removed with the vLLM runtime (58fd661); robots provisioned before
+        # that still carry the dead id, which would misdirect a
+        # supervisor-delegated omni start at the backend that actually exists.
+        migrated = _BACKEND_ID_MIGRATIONS.get(cfg.omni_backend_id)
+        if migrated is not None:
+            _log(f"config: migrating omni_backend_id "
+                 f"{cfg.omni_backend_id!r} -> {migrated!r}")
+            cfg.omni_backend_id = migrated
+            try:
+                cfg.save(path)
+            except OSError as exc:  # noqa: BLE001 - migration is best-effort
+                _log(f"config: could not persist migration: {exc}")
         if isinstance(raw.get("omni_unload_on_stop"), bool):
             cfg.omni_unload_on_stop = raw["omni_unload_on_stop"]
         return cfg

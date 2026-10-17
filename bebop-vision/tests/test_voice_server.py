@@ -256,6 +256,22 @@ def test_config_supervisor_roundtrip(tmp_path, monkeypatch):
     assert reloaded.omni_supervisor_url == "http://127.0.0.1:9094"
 
 
+def test_config_migrates_dead_omni_backend_id(tmp_path):
+    """`omni-vllm` (the removed vLLM container) becomes the live omni-edgellm."""
+    p = tmp_path / "voice-config.json"
+    p.write_text(json.dumps({"backend": "omni", "omni_backend_id": "omni-vllm"}))
+    cfg = voice_server.VoiceConfig.load(p)
+    assert cfg.omni_backend_id == "omni-edgellm"
+    # persisted, so the fix is durable and the file stops carrying a dead id
+    assert json.loads(p.read_text())["omni_backend_id"] == "omni-edgellm"
+
+
+def test_config_keeps_other_backend_ids(tmp_path):
+    p = tmp_path / "voice-config.json"
+    p.write_text(json.dumps({"omni_backend_id": "some-other-backend"}))
+    assert voice_server.VoiceConfig.load(p).omni_backend_id == "some-other-backend"
+
+
 def test_config_clamps_history_turns(tmp_path, monkeypatch):
     monkeypatch.setattr(voice_server, "CONFIG_PATH", tmp_path / "voice-config.json")
     monkeypatch.setattr(voice_server, "_VOICE_CACHE", {"ts": 0.0, "voices": []})
