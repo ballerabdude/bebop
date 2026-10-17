@@ -341,7 +341,7 @@ pub fn handle_client_message(
                     ),
                 )
             } else {
-                ack(
+                let reply = ack(
                     request_id,
                     format!("restarting {RUNTIME_SERVICE}; this link will drop"),
                 );
@@ -352,6 +352,7 @@ pub fn handle_client_message(
                     warn!(error = %e, service = RUNTIME_SERVICE,
                           "could not queue runtime restart");
                 }
+                reply
             }
         }
         P::SetHfToken(req) => {

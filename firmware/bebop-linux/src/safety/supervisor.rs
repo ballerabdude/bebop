@@ -811,7 +811,7 @@ impl Supervisor {
         for wheel in &self.cfg.wheels {
             if let Some(can) = self.bus_pool.get(&wheel.can_interface) {
                 let axis = ODriveWheel::new(wheel.node_id);
-                if let Err(e) = axis.clear_errors(can) {
+                if let Err(e) = axis.clear_errors(&can) {
                     debug!(wheel = %wheel.name, error = %e, "clear_errors on reset_estop failed");
                 }
             }
@@ -1229,7 +1229,7 @@ impl Supervisor {
             let cfg = &self.cfg.joints[idx];
             if let Some(can) = self.bus_pool.get(&cfg.can_bus) {
                 if let Ok(g) = self.motors[idx].lock() {
-                    let _ = g.motor.disable(can);
+                    let _ = g.motor.disable(&can);
                 }
             }
             if let Ok(mut g) = self.motors[idx].lock() {
@@ -1245,13 +1245,13 @@ impl Supervisor {
         for joint in &self.cfg.joints {
             if let Some(can) = self.bus_pool.get(&joint.can_bus) {
                 let motor = crate::robstride::RobstrideMotor::new(joint.can_id, joint.model);
-                let _ = motor.disable(can);
+                let _ = motor.disable(&can);
             }
         }
         for wheel in &self.cfg.wheels {
             if let Some(can) = self.bus_pool.get(&wheel.can_interface) {
                 let axis = ODriveWheel::new(wheel.node_id);
-                let _ = axis.disable(can);
+                let _ = axis.disable(&can);
             }
         }
     }
@@ -1337,7 +1337,7 @@ impl Supervisor {
         };
         let send_result = {
             let g = entry.lock().unwrap();
-            g.motor.send_command(can, &cmd)
+            g.motor.send_command(&can, &cmd)
         };
         if let Err(e) = send_result {
             self.trigger_estop(BreachReason::BusError {
@@ -1921,7 +1921,7 @@ impl Supervisor {
             }
             if let Some(can) = self.bus_pool.get(&can_bus) {
                 if let Ok(g) = self.motors[idx].lock() {
-                    let _ = g.motor.disable(can);
+                    let _ = g.motor.disable(&can);
                 }
             }
             if let Ok(mut g) = self.motors[idx].lock() {
