@@ -6,6 +6,7 @@
 use crate::config::RobstrideSpecs;
 use anyhow::{Context, Result};
 use socketcan::{CanFrame, CanSocket, EmbeddedFrame, ExtendedId, Socket, StandardId};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{debug, trace, warn};
 
@@ -13,6 +14,12 @@ use tracing::{debug, trace, warn};
 pub struct CanInterface {
     socket: CanSocket,
     interface_name: String,
+    /// Set when a send fails. The interesting case is the USB-CAN adapter
+    /// being unplugged and coming back with a *different* ifindex: the kernel
+    /// then reports the replacement netdev as perfectly `ERROR-ACTIVE`, but
+    /// this socket still points at the netdev that went away, so every write
+    /// fails forever. `BusPool::refresh_if_due` watches this to notice.
+    io_error: AtomicBool,
 }
 
 impl std::fmt::Debug for CanInterface {
@@ -43,7 +50,14 @@ impl CanInterface {
         Ok(Self {
             socket,
             interface_name: interface.to_string(),
+            io_error: AtomicBool::new(false),
         })
+    }
+
+    /// True when a send has failed on this socket since the last successful
+    /// one. Cleared by any successful send and when the socket is replaced.
+    pub fn io_error(&self) -> bool {
+        self.io_error.load(Ordering::Relaxed)
     }
 
     /// Send an extended frame (29-bit ID) - used by Robstride
@@ -54,9 +68,15 @@ impl CanInterface {
         let frame = CanFrame::new(extended_id, data)
             .ok_or_else(|| anyhow::anyhow!("Failed to create CAN frame"))?;
 
-        self.socket
-            .write_frame(&frame)
-            .with_context(|| format!("Failed to send extended frame to {}", self.interface_name))?;
+        match self.socket.write_frame(&frame) {
+            Ok(()) => self.io_error.store(false, Ordering::Relaxed),
+            Err(e) => {
+                self.io_error.store(true, Ordering::Relaxed);
+                return Err(e).with_context(|| {
+                    format!("Failed to send extended frame to {}", self.interface_name)
+                });
+            }
+        }
 
         trace!("TX EXT [0x{:08X}]: {:02X?}", id, data);
 
@@ -71,9 +91,15 @@ impl CanInterface {
         let frame = CanFrame::new(standard_id, data)
             .ok_or_else(|| anyhow::anyhow!("Failed to create CAN frame"))?;
 
-        self.socket
-            .write_frame(&frame)
-            .with_context(|| format!("Failed to send standard frame to {}", self.interface_name))?;
+        match self.socket.write_frame(&frame) {
+            Ok(()) => self.io_error.store(false, Ordering::Relaxed),
+            Err(e) => {
+                self.io_error.store(true, Ordering::Relaxed);
+                return Err(e).with_context(|| {
+                    format!("Failed to send standard frame to {}", self.interface_name)
+                });
+            }
+        }
 
         trace!("TX STD [0x{:03X}]: {:02X?}", id, data);
 

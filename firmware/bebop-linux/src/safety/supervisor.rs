@@ -288,6 +288,13 @@ impl Supervisor {
         &self.cfg
     }
 
+    /// The CAN bus pool. The telemetry tick calls
+    /// [`BusPool::refresh_if_due`] through this so a USB-CAN adapter that was
+    /// unplugged and replugged recovers without a restart.
+    pub fn bus_pool(&self) -> &Arc<BusPool> {
+        &self.bus_pool
+    }
+
     /// Shared handle to the power-board monitor (or `None` when no
     /// `power:` block was configured). Cloning the `Arc` is cheap and
     /// safe to do from background tasks.
@@ -2038,7 +2045,7 @@ pub fn spawn_rx_threads(
         .as_ref()
         .map(|m| (m.cfg.can_interface.clone(), m.board.power_id));
 
-    for (iface, can) in bus_pool.iter() {
+    for (iface, can) in bus_pool.snapshot() {
         let iface = iface.clone();
         let can = can.clone();
         let sup = sup.clone();

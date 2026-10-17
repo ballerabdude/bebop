@@ -13,8 +13,14 @@ use crate::can_interface::CanInterface;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+/// How often `refresh_if_due` is allowed to probe (and possibly re-open) the
+/// buses. The callers are per-telemetry-tick, i.e. tens of Hz, so the throttle
+/// is what keeps this to a couple of `ip` calls a minute.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Read the current CAN controller state for `interface` by parsing
 /// `ip -details link show <iface>`.
@@ -47,7 +53,11 @@ pub fn is_state_healthy(state: Option<&str>) -> bool {
 }
 
 pub struct BusPool {
-    by_iface: HashMap<String, Arc<CanInterface>>,
+    /// Re-openable: a USB-CAN adapter that comes back with a new ifindex
+    /// leaves the old socket dead, so entries get replaced by
+    /// [`BusPool::refresh_if_due`].
+    by_iface: RwLock<HashMap<String, Arc<CanInterface>>>,
+    last_refresh: Mutex<Instant>,
 }
 
 impl BusPool {
@@ -104,21 +114,99 @@ impl BusPool {
             let can = CanInterface::open(iface)?;
             by_iface.insert(iface.clone(), Arc::new(can));
         }
-        Ok(Self { by_iface })
+        Ok(Self {
+            by_iface: RwLock::new(by_iface),
+            last_refresh: Mutex::new(Instant::now()),
+        })
     }
 
-    pub fn get(&self, iface: &str) -> Option<&Arc<CanInterface>> {
-        self.by_iface.get(iface)
+    pub fn get(&self, iface: &str) -> Option<Arc<CanInterface>> {
+        self.by_iface.read().ok()?.get(iface).cloned()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Arc<CanInterface>)> {
-        self.by_iface.iter()
+    /// Every bus as `(interface, socket)`. Used by the supervisor to spawn one
+    /// RX thread per bus.
+    pub fn snapshot(&self) -> Vec<(String, Arc<CanInterface>)> {
+        match self.by_iface.read() {
+            Ok(g) => g.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect(),
+            Err(_) => Vec::new(),
+        }
     }
 
     pub fn interfaces(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.by_iface.keys().cloned().collect();
+        let mut v: Vec<String> = match self.by_iface.read() {
+            Ok(g) => g.keys().cloned().collect(),
+            Err(_) => Vec::new(),
+        };
         v.sort();
         v
+    }
+
+    /// Re-open any bus that is missing, not `ERROR-ACTIVE`, or whose socket has
+    /// recorded an I/O error. Returns the interfaces it re-opened.
+    ///
+    /// This automates the remediation `open` prints. The case that matters is a
+    /// USB-CAN adapter unplugged and replugged: systemd-networkd re-applies the
+    /// link config on hotplug (so `ip` reports the *new* netdev as
+    /// `ERROR-ACTIVE`), but the socket this process holds still refers to the
+    /// netdev that went away — every send fails forever, the supervisor latches
+    /// an E-STOP, and only a restart used to clear it.
+    ///
+    /// Throttled to [`REFRESH_INTERVAL`], so it is cheap to call on every
+    /// telemetry tick.
+    pub fn refresh_if_due(&self) -> Vec<String> {
+        {
+            let mut last = match self.last_refresh.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if last.elapsed() < REFRESH_INTERVAL {
+                return Vec::new();
+            }
+            *last = Instant::now();
+        }
+
+        let mut reopened = Vec::new();
+        for iface in self.interfaces() {
+            let state = read_can_state(&iface);
+            let healthy = is_state_healthy(state.as_deref());
+            let broken_socket = self.get(&iface).map(|c| c.io_error()).unwrap_or(true);
+            if healthy && !broken_socket {
+                continue;
+            }
+            // Bounce the link only for a wedged controller: a restart is the
+            // documented recovery from BUS-OFF, while a merely-passive bus
+            // (peer unpowered) should not be flapped every few seconds.
+            let wedged = matches!(state.as_deref(), Some("BUS-OFF")) || broken_socket;
+            if wedged {
+                for args in [
+                    ["link", "set", iface.as_str(), "down"],
+                    ["link", "set", iface.as_str(), "up"],
+                ] {
+                    let _ = Command::new("ip").args(args).output();
+                }
+            }
+            match CanInterface::open(&iface) {
+                Ok(can) => {
+                    if let Ok(mut g) = self.by_iface.write() {
+                        g.insert(iface.clone(), Arc::new(can));
+                    }
+                    warn!(
+                        can_interface = %iface,
+                        state = state.as_deref().unwrap_or("gone"),
+                        bounced = wedged,
+                        "CAN bus re-opened (adapter came back / controller recovered)"
+                    );
+                    reopened.push(iface);
+                }
+                Err(e) => {
+                    // Still absent, or unopenable — the next tick retries.
+                    info!(can_interface = %iface, error = %e,
+                          "CAN bus not openable yet; will retry");
+                }
+            }
+        }
+        reopened
     }
 
     /// Live re-read the controller state for `iface`. Cheap (~1 ms via `ip`)

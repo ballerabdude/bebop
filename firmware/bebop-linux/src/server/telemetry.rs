@@ -81,6 +81,11 @@ fn build_drive_state(sup: &Arc<Supervisor>, conn_id: u64) -> proto::DriveState {
 }
 
 fn collect_buses(sup: &Arc<Supervisor>) -> Vec<proto::BusEntry> {
+    // Recover a bus whose socket has died — e.g. the USB-CAN adapter was
+    // unplugged and came back with a different ifindex, leaving this process
+    // holding a socket for a netdev that no longer exists. Throttled
+    // internally, so this is cheap on every telemetry tick.
+    sup.bus_pool().refresh_if_due();
     sup.cfg()
         .can_interfaces
         .iter()
