@@ -32,7 +32,8 @@ Restart=on-failure
 RestartSec=5
 
 [Install]
-# Deliberately NOT enabled by install-jetson.sh: the operator starts and
-# stops the voice service from the app (firmware drives systemd).
-# `systemctl enable bebop-voice` opts into auto-start at boot.
+# Not enabled by install-jetson.sh by default: the operator starts and stops
+# the voice service from the app (firmware drives systemd), because its first
+# start builds TensorRT engines. `install-jetson.sh --enable-autostart` (or a
+# bare `systemctl enable bebop-voice`) opts into auto-start at boot.
 WantedBy=multi-user.target

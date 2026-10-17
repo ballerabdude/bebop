@@ -94,6 +94,11 @@
 #   sudo ./install-jetson.sh --quantize-voice --num-samples 128
 #                                             # fewer calibration samples
 #                                             # (faster; 512 default, ~128 floor)
+#   sudo ./install-jetson.sh --enable-autostart
+#                                             # opt bebop-vision and
+#                                             # bebop-voice into boot; both
+#                                             # ship un-enabled so the
+#                                             # operator owns the GPU
 #
 # Requires:
 #   * `gh` CLI authenticated (`gh auth login`) — needed to list/download
@@ -120,10 +125,11 @@
 # when it detects that). The udev rules make Orbbec devices 0666, so no
 # group membership or sudo is needed at runtime, and a udevadm trigger
 # applies them to the already-plugged camera without a replug or reboot.
-# The Python bindings are NOT installed by this script: `pyorbbecsdk2`
-# is declared in bebop-vision/pyproject.toml, so the bebop-vision venv
-# owns it like every other Python dependency (bootstrap, from
-# bebop-vision/: `python3 -m venv .venv && .venv/bin/pip install -e .`).
+# The Python bindings are installed by `--setup-voice`, on their own with
+# `--no-deps`: `pyorbbecsdk2` pins av==12.3.0 (py<3.13) while
+# tensorrt-edgellm[server] pins av==17.1.0, so the two cannot share a
+# resolution. It is declared in bebop-vision/pyproject.toml under the
+# `jetson` extra; see bebop-vision/requirements.txt for the full story.
 # The wheel bundles the OrbbecSDK v2 shared libs — nothing compiles on
 # the Jetson — and its manylinux aarch64 wheels cover both JetPack 6.x
 # (python3.10) and 7.x (python3.12). When a bebop-vision/.venv exists
@@ -169,6 +175,11 @@ QUANTIZE_VOICE_ONLY=0
 # --setup-models: install + enable bebop-models.service (the GPU/model
 # supervisor). Opt-in.
 SETUP_MODELS=0
+# --enable-autostart: opt bebop-vision + bebop-voice into boot. Both units
+# ship un-enabled so the operator owns the GPU (voice's first start builds
+# TensorRT engines); this flips that for a robot that should come up on its
+# own. Opt-in.
+ENABLE_AUTOSTART=0
 # Calibration samples for --quantize-voice (default 512, as upstream). The
 # docs floor is ~128; lower is faster, higher is better quality.
 VOICE_QUANT_SAMPLES="${VOICE_QUANT_SAMPLES:-512}"
@@ -235,6 +246,7 @@ while [[ $# -gt 0 ]]; do
         --quantize-voice)    QUANTIZE_VOICE=1; shift ;;
         --quantize-voice-only) QUANTIZE_VOICE=1; QUANTIZE_VOICE_ONLY=1; shift ;;
         --setup-models)      SETUP_MODELS=1; shift ;;
+        --enable-autostart)  ENABLE_AUTOSTART=1; shift ;;
         --num-samples)       VOICE_QUANT_SAMPLES="$2"; shift 2 ;;
         --config-yaml)    CONFIG_YAML="$2"; shift 2 ;;
         *)                echo "unknown arg: $1" >&2; exit 2 ;;
@@ -897,21 +909,40 @@ setup_models() {
     echo "    bebop-models.service: $(systemctl is-active bebop-models.service)"
 }
 
+# --enable-autostart: opt bebop-vision + bebop-voice into boot. Both units
+# ship deliberately un-enabled so the operator owns the GPU (and so voice's
+# first start — which builds TensorRT engines — is a conscious act). This
+# flag flips that; enable-only, so nothing starts building mid-install.
+enable_autostart() {
+    echo "==> enabling bebop-vision + bebop-voice at boot"
+    local rc=0
+    for unit in bebop-vision.service bebop-voice.service; do
+        if systemctl enable "${unit}" >/dev/null 2>&1; then
+            echo "    ${unit}: $(systemctl is-enabled "${unit}" 2>/dev/null)"
+        else
+            echo "    WARN: could not enable ${unit} (is it installed?)" >&2
+            rc=1
+        fi
+    done
+    echo "    (enabled only — start with 'systemctl start bebop-vision bebop-voice', or reboot)"
+    return "${rc}"
+}
+
 if [[ "${EUID}" -ne 0 ]]; then
     echo "install-jetson.sh must be run as root (sudo)" >&2
     exit 1
 fi
 
-# --setup-can-only / --setup-imu-only / --setup-orbbec-only short-circuit
-# before we touch gh / artifacts so an operator can run them from a
-# freshly-cloned checkout without needing a CI build artifact to be
-# available.
-if [[ "${SETUP_CAN_ONLY}" -eq 1 || "${SETUP_IMU_ONLY}" -eq 1 || "${SETUP_ORBBEC_ONLY}" -eq 1 || "${SETUP_VOICE_ONLY}" -eq 1 || "${QUANTIZE_VOICE_ONLY}" -eq 1 ]]; then
+# --setup-can-only / --setup-imu-only / --setup-orbbec-only / --enable-autostart
+# short-circuit before we touch gh / artifacts so an operator can run them from
+# a freshly-cloned checkout without needing a CI build artifact to be available.
+if [[ "${SETUP_CAN_ONLY}" -eq 1 || "${SETUP_IMU_ONLY}" -eq 1 || "${SETUP_ORBBEC_ONLY}" -eq 1 || "${SETUP_VOICE_ONLY}" -eq 1 || "${QUANTIZE_VOICE_ONLY}" -eq 1 || "${ENABLE_AUTOSTART}" -eq 1 ]]; then
     [[ "${SETUP_CAN_ONLY}" -eq 1 ]] && setup_can
     [[ "${SETUP_IMU_ONLY}" -eq 1 ]] && setup_imu
     [[ "${SETUP_ORBBEC_ONLY}" -eq 1 ]] && setup_orbbec
     [[ "${SETUP_VOICE_ONLY}" -eq 1 ]] && setup_voice
     [[ "${QUANTIZE_VOICE_ONLY}" -eq 1 ]] && quantize_voice
+    [[ "${ENABLE_AUTOSTART}" -eq 1 ]] && enable_autostart
     exit 0
 fi
 
@@ -1509,6 +1540,10 @@ fi
 
 if [[ "${SETUP_MODELS}" -eq 1 ]]; then
     setup_models
+fi
+
+if [[ "${ENABLE_AUTOSTART}" -eq 1 ]]; then
+    enable_autostart
 fi
 
 # ---------------------------------------------------------------------------

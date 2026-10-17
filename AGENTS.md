@@ -37,9 +37,11 @@
   WebSocket) — do NOT use 9091 for anything new. Firmware WS/HTTP is 9090,
   the bebop-vision videoserver is 9092, the places service is 9095, voice is
   9093, and the `bebop-models` supervisor is 9094. `bebop-vision.service`
-  (root, installed but NOT enabled) runs the Python recorder; start/stop it
-  from the app's Teleop vision card — the firmware shells out to `systemctl`
-  and mirrors the unit state in telemetry (`VisionState`).
+  (root) runs the Python recorder; it and `bebop-voice.service` ship
+  un-enabled so the operator owns the GPU and can start/stop them from the app
+  (the firmware shells out to `systemctl` and mirrors the unit state in
+  telemetry, `VisionState`). `install-jetson.sh --enable-autostart` opts both
+  into boot, which this robot has.
 - **TensorRT Edge-LLM is the only generative runtime.** Every generative
   model (omni, or the cascade's ASR + brain + TTS, or a future VLA) is a
   `tensorrt-edgellm-serve` child — a checkpoint + an engine cache + a port.

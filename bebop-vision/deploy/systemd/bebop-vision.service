@@ -33,7 +33,7 @@ Restart=on-failure
 RestartSec=3
 
 [Install]
-# Deliberately NOT enabled by install-jetson.sh: the operator starts and
-# stops the recorder from the app. `systemctl enable bebop-vision` opts
-# into auto-start at boot.
+# Not enabled by install-jetson.sh by default: the operator starts and stops
+# the recorder from the app. `install-jetson.sh --enable-autostart` (or a bare
+# `systemctl enable bebop-vision`) opts into auto-start at boot.
 WantedBy=multi-user.target
