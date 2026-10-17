@@ -136,6 +136,13 @@ message ClientRuntimeMessage {
     // Audio itself does not travel over this socket — the app talks to the
     // voice service's own WebSocket on :9093 (see docs/voice.md).
     SetVoiceEnabled      set_voice_enabled     = 28;
+    // Restart the Linux runtime service itself (`bebop-linux.service`) —
+    // the operator's escape hatch when something is wedged and no amount
+    // of re-plugging helps (a dead CAN socket, say). The ack is sent
+    // first, then the unit restarts: this connection drops and the client
+    // must reconnect. Refused while anything is armed, so it can never be
+    // a way to bypass the disarm/E-STOP rules.
+    RestartRuntime       restart_runtime       = 29;
   }
   reserved 12;
   reserved "set_policy_capture";
@@ -544,6 +551,10 @@ message EmergencyStop {
 }
 
 message ResetEStop {}
+
+// Restart `bebop-linux.service` (see the ClientRuntimeMessage field of the
+// same name). Empty: the target is always this service.
+message RestartRuntime {}
 
 // Set the hold-target for a single armed motor (DialIn mode only). The
 // supervisor clamps to the joint's hard_limits and slews from the previous

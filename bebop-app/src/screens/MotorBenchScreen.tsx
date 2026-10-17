@@ -549,6 +549,33 @@ export function MotorBenchScreen({
     [refreshAfter],
   );
 
+  // Restart the runtime service itself. Confirmed, because it drops this link
+  // and stales every reading on the screen for a few seconds; the transport
+  // reconnects by itself. The firmware refuses while anything is armed.
+  const restartRuntime = useCallback(async () => {
+    const ok = await requestConfirm({
+      title: "Restart the robot runtime?",
+      confirmLabel: "Restart",
+      tone: "danger",
+      body: (
+        <>
+          <p>
+            <span className="font-mono text-text">bebop-linux.service</span> will
+            stop and start again. Everything on this screen goes stale for a few
+            seconds and this link drops, then reconnects on its own.
+          </p>
+          <p>
+            Use it when the runtime is wedged — most often a dead CAN socket
+            after the USB-CAN hub was disconnected. Motors are left disarmed;
+            the firmware refuses the restart while anything is armed.
+          </p>
+        </>
+      ),
+    });
+    if (!ok) return;
+    await refreshAfter("restart", () => transportRef.current!.restartRuntime());
+  }, [requestConfirm, refreshAfter]);
+
   // -------------------------------------------------------------- render
   if (connecting) {
     return (
@@ -708,6 +735,16 @@ export function MotorBenchScreen({
               >
                 Disable all
               </Button>
+              <Button
+                variant="ghost"
+                onClick={() => void restartRuntime()}
+                loading={busy === "restart"}
+                disabled={!!busy}
+                className="flex-1 lg:flex-none py-2.5! text-sm!"
+                title="Restart bebop-linux.service — for a wedged runtime (e.g. after a USB-CAN hub disconnect)"
+              >
+                Restart runtime
+              </Button>
             </div>
             <Button
               onClick={eStop}
@@ -732,6 +769,38 @@ export function MotorBenchScreen({
             </div>
             <Button variant="secondary" onClick={resetEStop} loading={busy === "reset"}>
               Reset
+            </Button>
+          </div>
+        </Banner>
+      ) : null}
+
+      {/* CAN bus health. A disconnected USB-CAN hub is the usual reason a
+          wheeled robot will not drive, and it used to need a service restart
+          to recover. The runtime now re-opens the bus by itself once the
+          adapter is back, so this banner says what it is waiting for rather
+          than claiming the robot is broken. */}
+      {buses.some((b) => !b.healthy) ? (
+        <Banner tone="error">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="font-semibold mb-0.5">CAN bus not healthy</div>
+              <div className="text-xs leading-relaxed">
+                {buses
+                  .filter((b) => !b.healthy)
+                  .map((b) => `${b.canInterface}: ${b.state || "not present"}`)
+                  .join(", ")}
+                {" — check the USB-CAN hub is plugged in. The runtime re-opens "
+                  + "the bus by itself once it is back; if it does not recover, "
+                  + "use Restart runtime."}
+              </div>
+            </div>
+            <Button
+              variant="secondary"
+              onClick={() => void restartRuntime()}
+              loading={busy === "restart"}
+              disabled={!!busy}
+            >
+              Restart runtime
             </Button>
           </div>
         </Banner>

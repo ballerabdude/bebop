@@ -18,7 +18,12 @@ use crate::voice::{VoiceShared, VOICE_SERVICE};
 use bebop_proto::runtime::v1 as proto;
 use bebop_proto::Message;
 use bytes::Bytes;
+use std::process::Command;
 use std::sync::Arc;
+use tracing::warn;
+
+/// The unit `RestartRuntime` targets: this service.
+pub const RUNTIME_SERVICE: &str = "bebop-linux.service";
 
 /// Format an anyhow chain for the operator. Without the alternate
 /// formatter, `e.to_string()` only returns the outermost context message
@@ -303,6 +308,50 @@ pub fn handle_client_message(
                         if req.enabled { "start" } else { "stop" }
                     ),
                 )
+            }
+        }
+        P::RestartRuntime(_) => {
+            // Operator escape hatch: restart this very service. Ack first,
+            // then let systemd do it detached — that restart job is what stops
+            // us, so we must not wait on it (and `--no-block` returns as soon
+            // as the job is queued). The app's socket drops and reconnects.
+            //
+            // Refused while anything is armed: a restart is not a way around
+            // the disarm / E-STOP rules, and it should never yank power from a
+            // motor that is holding a position.
+            let armed: Vec<String> = sup
+                .snapshot_wheels()
+                .into_iter()
+                .filter(|w| w.armed)
+                .map(|w| w.name)
+                .chain(
+                    sup.snapshot_motors()
+                        .into_iter()
+                        .filter(|m| m.armed)
+                        .map(|m| m.joint_name),
+                )
+                .collect();
+            if !armed.is_empty() {
+                error_response(
+                    request_id,
+                    format!(
+                        "refusing to restart {RUNTIME_SERVICE}: still armed: {}. \
+                         Disarm first.",
+                        armed.join(", ")
+                    ),
+                )
+            } else {
+                ack(
+                    request_id,
+                    format!("restarting {RUNTIME_SERVICE}; this link will drop"),
+                );
+                if let Err(e) = Command::new("systemctl")
+                    .args(["restart", "--no-block", RUNTIME_SERVICE])
+                    .spawn()
+                {
+                    warn!(error = %e, service = RUNTIME_SERVICE,
+                          "could not queue runtime restart");
+                }
             }
         }
         P::SetHfToken(req) => {

@@ -25,6 +25,7 @@ import {
   GetSnapshotSchema,
   Mode,
   ResetEStopSchema,
+  RestartRuntimeSchema,
   ServerRuntimeMessageSchema,
   SetAllMotorsEnabledSchema,
   SetMechanicalZeroSchema,
@@ -503,6 +504,18 @@ export class RuntimeTransport {
     await this.requestAck({
       case: "resetEstop",
       value: create(ResetEStopSchema, {}),
+    });
+  }
+
+  /// Restart `bebop-linux.service` — the operator's escape hatch when the
+  /// runtime is wedged and no amount of re-plugging helps (a dead CAN socket
+  /// is the usual cause). The firmware refuses while anything is armed, so
+  /// disarm first. The ack lands before the restart, then this socket drops
+  /// and the transport reconnects on its own.
+  async restartRuntime(): Promise<void> {
+    await this.requestAck({
+      case: "restartRuntime",
+      value: create(RestartRuntimeSchema, {}),
     });
   }
 
