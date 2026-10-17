@@ -1,4 +1,4 @@
-"""Tests for the model supervisor registry/API (no docker/GPU needed)."""
+"""Tests for the model supervisor registry/API (no docker/GPU/Edge-LLM needed)."""
 
 import pytest
 
@@ -7,6 +7,45 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from bebop_vision import models_supervisor as ms  # noqa: E402
+
+
+class FakeProc:
+    """Stand-in for a `tensorrt-edgellm-serve` child."""
+
+    def __init__(self, *args, **kwargs):
+        self.pid = 4242
+        self.terminated = False
+        self.killed = False
+        self.returncode = None
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        self.killed = True
+
+
+@pytest.fixture()
+def spawned(monkeypatch):
+    """Capture spawned processes; a backend becomes healthy once spawned."""
+    procs: list[FakeProc] = []
+    health = {"up": False}
+
+    def fake_popen(*args, **kwargs):
+        proc = FakeProc(*args, **kwargs)
+        procs.append(proc)
+        health["up"] = True
+        return proc
+
+    monkeypatch.setattr(ms.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ms.Backend, "health_ok", lambda self: health["up"])
+    return procs
 
 
 def test_supervisor_api(monkeypatch, tmp_path):
@@ -21,9 +60,10 @@ def test_supervisor_api(monkeypatch, tmp_path):
 
     backends = client.get("/models").json()["backends"]
     ids = {b["id"] for b in backends}
-    assert {"omni-vllm", "vision"} <= ids
-    omni = next(b for b in backends if b["id"] == "omni-vllm")
-    assert omni["kind"] == "container" and omni["state"] == "stopped"
+    assert {"omni-edgellm", "vision"} <= ids
+    omni = next(b for b in backends if b["id"] == "omni-edgellm")
+    assert omni["kind"] == "edgellm" and omni["state"] == "stopped"
+    assert omni["base_url"] == "http://127.0.0.1:8000"
     vision = next(b for b in backends if b["id"] == "vision")
     assert vision["kind"] == "tracked"
 
@@ -35,32 +75,78 @@ def test_supervisor_api(monkeypatch, tmp_path):
     assert client.post("/models/nope/load").status_code == 400
 
 
-def test_supervisor_sleep_wake(monkeypatch, tmp_path):
+def test_edgellm_argv(monkeypatch):
+    monkeypatch.setattr(ms, "resolve_edgellm_bin", lambda: "/opt/fake-serve")
+    b = ms.Backend(
+        {
+            "id": "brain",
+            "kind": "edgellm",
+            "model": "RadixArk/Qwen3.8-27B-NVFP4",
+            "cache_dir": "/var/lib/bebop-voice/edgellm",
+            "port": 8012,
+            "serve_args": ["--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml"],
+        }
+    )
+    argv = b.argv()
+    assert argv[0] == "/opt/fake-serve"
+    assert argv[1] == "RadixArk/Qwen3.8-27B-NVFP4"
+    assert "--cache-dir" in argv and "/var/lib/bebop-voice/edgellm" in argv
+    assert argv[argv.index("--port") + 1] == "8012"
+    assert argv[-2:] == ["--tool-call-parser", "qwen3_xml"]
+
+
+def test_edgellm_load_start_and_unload_stop(spawned, monkeypatch, tmp_path):
     monkeypatch.setattr(ms, "REGISTRY_PATH", tmp_path / "absent.yaml")
-    app = ms.build_app(ms.Supervisor())
+    sup = ms.Supervisor()
+    backend = ms.Backend(
+        {"id": "omni", "kind": "edgellm", "model": "m", "port": 8000}
+    )
+    sup.backends = {"omni": backend}
+
+    app = ms.build_app(sup)
     client = TestClient(app)
 
-    calls: list[tuple[str, dict]] = []
-
-    class _Resp:
-        status_code = 200
-        text = "ok"
-
-    def fake_post(url, json=None, timeout=None):  # noqa: A002 - httpx signature
-        calls.append((url, json or {}))
-        return _Resp()
-
-    monkeypatch.setattr("httpx.post", fake_post)
-
-    r = client.post("/models/omni-vllm/sleep?level=2")
+    r = client.post("/models/omni/load")
     assert r.status_code == 200, r.text
-    assert r.json()["state"] == "sleeping"
-    assert calls[-1][0].endswith("/v1/omni/sleep") and calls[-1][1]["level"] == 2
+    body = r.json()
+    assert body["state"] == "ready" and body["pid"] == 4242
+    assert len(spawned) == 1
 
-    r = client.post("/models/omni-vllm/wake")
-    assert r.status_code == 200, r.text
-    assert r.json()["state"] == "ready"
-    assert calls[-1][0].endswith("/v1/omni/wakeup")
+    # Loading an already-ready backend is a no-op (no second spawn).
+    client.post("/models/omni/load")
+    assert len(spawned) == 1
 
-    # A tracked backend (lives in bebop-vision) can't be slept.
-    assert client.post("/models/vision/sleep").status_code == 400
+    r = client.post("/models/omni/unload")
+    assert r.status_code == 200 and r.json()["state"] == "stopped"
+    assert spawned[0].terminated is True
+
+
+def test_unsupported_kind_is_an_error():
+    b = ms.Backend({"id": "x", "kind": "quantum", "port": 9000})
+    b.start()
+    assert b.state == "error" and "unsupported kind" in b.detail
+
+
+def test_sleep_endpoint_is_gone(monkeypatch, tmp_path):
+    """The vLLM-Omni sleep/wake API was removed with the container runtime."""
+    monkeypatch.setattr(ms, "REGISTRY_PATH", tmp_path / "absent.yaml")
+    client = TestClient(ms.build_app(ms.Supervisor()))
+    assert client.post("/models/omni-edgellm/sleep").status_code == 404
+    assert client.post("/models/omni-edgellm/wake").status_code == 404
+
+
+def test_load_evicts_when_the_budget_is_tight(spawned, monkeypatch, tmp_path):
+    monkeypatch.setattr(ms, "REGISTRY_PATH", tmp_path / "absent.yaml")
+    monkeypatch.setattr(ms, "GPU_BUDGET_GB", 30.0)
+    monkeypatch.setattr(ms, "_mem", lambda: {"MemAvailable": 100.0})
+    sup = ms.Supervisor()
+    sup.backends = {
+        "first": ms.Backend({"id": "first", "kind": "edgellm", "footprint_gb": 25, "port": 8001}),
+        "second": ms.Backend({"id": "second", "kind": "edgellm", "footprint_gb": 25, "port": 8002}),
+    }
+    sup.load("first")
+    assert sup.backends["first"].state == "ready"
+
+    sup.load("second")  # 25 + 25 > 30 -> evict `first`
+    assert sup.backends["first"].state == "stopped"
+    assert sup.backends["second"].state == "ready"

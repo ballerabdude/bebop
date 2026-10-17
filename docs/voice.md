@@ -198,25 +198,24 @@ Two Edge-LLM 0.11.0 notes:
 ## Omni backend sources
 
 The `omni` backend is one end-to-end Qwen3-Omni model, but the service can get
-it three ways — only the selected source is loaded (one big model resident):
+it three ways — only the selected source is loaded:
 
 | Source | Config | Who owns the lifecycle |
 |---|---|---|
-| **Supervisor** (preferred) | `omni_supervisor_url` (+ `omni_backend_id`) | `bebop-models` (:9094) — GPU budget + eviction |
-| External URL | `omni_url` | someone else (e.g. a hand-run container) |
-| Edge-LLM child | (both empty) | `bebop-voice` itself (`EdgeLLMServer`) |
+| **Supervisor** | `omni_supervisor_url` (+ `omni_backend_id`) | `bebop-models` (:9094) — GPU budget + eviction |
+| Edge-LLM child (default) | (both empty) | `bebop-voice` itself (`EdgeLLMServer`) |
+| External URL | `omni_url` | someone else — debug escape hatch |
+
+Every one of these is a **TensorRT Edge-LLM** process: Edge-LLM is the robot's
+only generative runtime (see [`models.md`](models.md)).
 
 With `omni_supervisor_url` set, `SupervisedServer` POSTs
 `/models/{id}/load` to the supervisor on start (which blocks until the backend
-is ready — cold start can be long) and uses the `base_url` it returns; on stop
-it optionally `unload`s (`omni_unload_on_stop`). The supervisor is the single
-control plane for voice, vision, navigation and a future VLA; see
-[`models.md`](models.md). Set it from the app's Voice page (**Omni source
-(supervisor)**) or the Models page (**GPU budget** card).
-
-`ContainerServer` remains the direct container mode (bebop-voice starts/stops
-the vLLM-Omni image itself, pulled from
-`ghcr.io/ballerabdude/bebop-vllm-omni-thor`).
+is ready — the first start builds TensorRT engines, which is slow) and uses the
+`base_url` it returns; on stop it optionally `unload`s
+(`omni_unload_on_stop`). The supervisor is the single control plane for voice,
+vision, navigation and a future VLA. Set it from the app's Voice page
+(**Omni source (supervisor)**) or the Models page (**GPU budget** card).
 
 ## Components and changes
 

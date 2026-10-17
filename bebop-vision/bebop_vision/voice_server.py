@@ -50,7 +50,6 @@ import base64
 import io
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -66,10 +65,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import models
+from .edge_serve import resolve_edgellm_bin
 
 # --- defaults -------------------------------------------------------------
 
-EDGELLM_BIN = "tensorrt-edgellm-serve"
 EDGELLM_HOST = "127.0.0.1"
 EDGELLM_PORT = 8000
 EDGELLM_CACHE_DIR = Path("/var/lib/bebop-voice/edgellm")
@@ -137,19 +136,6 @@ def resolve_model_dir(spec: models.ModelSpec) -> Path:
     return spec.target_dir
 
 
-def resolve_edgellm_bin() -> str:
-    """Locate the `tensorrt-edgellm-serve` console script.
-
-    Under systemd the venv's `bin/` is not on `PATH`, so prefer the sibling of
-    the running interpreter (the venv that owns this process), then fall back
-    to `PATH`.
-    """
-    sibling = Path(sys.executable).parent / EDGELLM_BIN
-    if sibling.exists():
-        return str(sibling)
-    return shutil.which(EDGELLM_BIN) or EDGELLM_BIN
-
-
 def pcm16_to_wav(pcm: bytes, rate: int) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -194,22 +180,14 @@ class VoiceConfig:
     tools_enabled: bool = True
     backend: str = "omni"  # "omni" (end-to-end) | "cascade" (ASR->brain->TTS)
     # When set, the omni backend uses this already-running OpenAI-compatible
-    # server (e.g. a vLLM-Omni container) instead of supervising Edge-LLM.
+    # server instead of supervising an Edge-LLM child. A debug escape hatch.
     omni_url: str = ""
-    # When true, the omni backend *manages* a Docker container (start/stop with
-    # the voice service) instead of pointing at an external URL. Used for the
-    # vLLM-Omni image; also the pattern for future VLA containers.
-    omni_container: bool = False
-    omni_image: str = "ghcr.io/ballerabdude/bebop-vllm-omni-thor:latest"
-    omni_model_dir: str = "/home/bebop/qwen3-omni-talker-safe"
-    omni_deploy_config: str = "/home/bebop/qwen3_omni_1gpu.yaml"
-    omni_port: int = 8101
     # When set, the omni backend is owned by the `bebop-models` supervisor: on
     # start the voice service asks the supervisor to `load` this backend and
-    # uses the URL it returns. Preferred long-term mode (one control plane owns
-    # the GPU budget + eviction); `omni_url`/`omni_container` remain direct modes.
+    # uses the URL it returns — one control plane owns the GPU budget, eviction
+    # and the child process.
     omni_supervisor_url: str = ""
-    omni_backend_id: str = "omni-vllm"
+    omni_backend_id: str = "omni-edgellm"
     omni_unload_on_stop: bool = False
 
     @classmethod
@@ -234,13 +212,6 @@ class VoiceConfig:
             cfg.backend = raw["backend"]
         if isinstance(raw.get("omni_url"), str):
             cfg.omni_url = raw["omni_url"].strip()
-        if isinstance(raw.get("omni_container"), bool):
-            cfg.omni_container = raw["omni_container"]
-        for key in ("omni_image", "omni_model_dir", "omni_deploy_config"):
-            if isinstance(raw.get(key), str) and raw[key].strip():
-                setattr(cfg, key, raw[key].strip())
-        if isinstance(raw.get("omni_port"), int):
-            cfg.omni_port = raw["omni_port"]
         if isinstance(raw.get("omni_supervisor_url"), str):
             cfg.omni_supervisor_url = raw["omni_supervisor_url"].strip()
         if isinstance(raw.get("omni_backend_id"), str) and raw["omni_backend_id"].strip():
@@ -265,11 +236,6 @@ class VoiceConfig:
             "tools_enabled": self.tools_enabled,
             "backend": self.backend,
             "omni_url": self.omni_url,
-            "omni_container": self.omni_container,
-            "omni_image": self.omni_image,
-            "omni_model_dir": self.omni_model_dir,
-            "omni_deploy_config": self.omni_deploy_config,
-            "omni_port": self.omni_port,
             "omni_supervisor_url": self.omni_supervisor_url,
             "omni_backend_id": self.omni_backend_id,
             "omni_unload_on_stop": self.omni_unload_on_stop,
@@ -1147,10 +1113,12 @@ class EdgeLLMServer:
 
 
 class ExternalServer:
-    """A backend that is already running (e.g. a vLLM-Omni container).
+    """A backend that is already running, at an OpenAI-compatible base URL.
 
     Unlike `EdgeLLMServer`, it does not supervise a child process; it just
-    points the gateway at an OpenAI-compatible base URL.
+    points the gateway at an existing server (a hand-run Edge-LLM child, or one
+    on the workstation). An escape hatch for debugging — the normal path is
+    `edgellm` (voice) or `SupervisedServer` (the `bebop-models` supervisor).
     """
 
     def __init__(self, base_url: str, status: "VoiceStatus") -> None:
@@ -1184,147 +1152,13 @@ class ExternalServer:
         return
 
 
-class ContainerServer:
-    """Supervises a model server running in a Docker container.
-
-    Unlike `EdgeLLMServer` (a child process), the server runs detached via
-    `docker run -d`; `stop()` removes it. Used for the vLLM-Omni image and the
-    pattern for future VLA containers. Requires the gateway to run as root (it
-    does, under `bebop-voice.service`).
-    """
-
-    NAME = "bebop-model-serve"
-    CACHE_DIR = "/home/bebop/.cache"
-
-    def __init__(
-        self,
-        image: str,
-        port: int,
-        status: "VoiceStatus",
-        *,
-        model_dir: str,
-        deploy_config: str = "",
-        extra_args: list[str] | None = None,
-    ) -> None:
-        self.image = image
-        self.port = port
-        self.status = status
-        self.model_dir = model_dir
-        self.deploy_config = deploy_config
-        self.extra_args = extra_args or []
-        self.base_url = f"http://127.0.0.1:{port}"
-
-    def _docker(self, *args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["docker", *args], capture_output=True, text=True, check=False
-        )
-
-    def health_ok(self) -> bool:
-        import httpx
-
-        try:
-            return httpx.get(
-                f"{self.base_url}/v1/models", timeout=3.0
-            ).status_code == 200
-        except Exception:  # noqa: BLE001
-            return False
-
-    def start_background(self) -> None:
-        threading.Thread(
-            target=self._run, name="container-supervisor", daemon=True
-        ).start()
-
-    def _run(self) -> None:
-        atexit.register(self.stop)
-        self.status.set(phase="starting", detail=f"starting {self.image}")
-        # Host dirs for the persistent caches we bind-mount below.
-        for sub in (
-            "vllm", "huggingface", "flashinfer",
-            "torch_extensions", "torch", "triton",
-        ):
-            Path(self.CACHE_DIR, sub).mkdir(parents=True, exist_ok=True)
-        self._docker("rm", "-f", self.NAME)  # replace a stale container
-        # Pull from the registry when the image is a registry path; a bare
-        # local tag (e.g. built on-box) is used as-is.
-        if "/" in self.image:
-            self.status.set(phase="starting", detail=f"pulling {self.image}")
-            self._docker("pull", self.image)  # best-effort; run still tries
-        args = [
-            "run", "-d", "--name", self.NAME,
-            "--runtime", "nvidia", "--network", "host",
-            "-v", f"{self.model_dir}:/models/model:ro",
-            "-v", f"{self.CACHE_DIR}/vllm:/root/.cache/vllm",
-            "-v", f"{self.CACHE_DIR}/huggingface:/root/.cache/huggingface",
-            # Persist the kernel/JIT caches to the host. They live in the
-            # container's writable layer otherwise, which `docker rm -f` wipes
-            # on every start, forcing a full flashinfer/Triton JIT + autotune
-            # (several minutes) each boot. Measured on Thor: a warm Triton cache
-            # alone cut the code2wav stage from ~130-590 s to ~19 s. See
-            # docs/vllm-omni.md.
-            "-v", f"{self.CACHE_DIR}/flashinfer:/root/.cache/flashinfer",
-            "-v", f"{self.CACHE_DIR}/torch_extensions:/root/.cache/torch_extensions",
-            "-v", f"{self.CACHE_DIR}/torch:/root/.cache/torch",
-            "-v", f"{self.CACHE_DIR}/triton:/root/.triton",
-        ]
-        if self.deploy_config:
-            args += ["-v", f"{self.deploy_config}:/cfg/deploy.yaml:ro"]
-        args += [self.image, "/models/model", "--omni"]
-        if self.deploy_config:
-            args += ["--deploy-config", "/cfg/deploy.yaml"]
-        args += [
-            "--host", "0.0.0.0", "--port", str(self.port),
-            "--init-timeout", "3600", "--stage-init-timeout", "3600",
-            # Enable sleep/wake so the supervisor can free the GPU when idle
-            # (POST /v1/omni/sleep level 2 frees ~84 GB in 1 s; wake ~4 min).
-            "--enable-sleep-mode",
-            # vLLM loads safetensors single-threaded by default, so the 46 GiB
-            # checkpoint reads on one core while 13 sit idle. Parallelise it:
-            # measured 507 s -> ~50 s on Thor. See docs/vllm-omni.md.
-            "--model-loader-extra-config",
-            '{"enable_multithread_load": true, "num_threads": 14}',
-            # The sm_110 flashinfer/TRT-LLM MoE autotuner intermittently throws
-            # a fatal `dispatchMoeGemmSelectClusterShapeTmaWarpSpecialized` when
-            # profiling an unsupported tactic, killing the stage. Disabling it
-            # is both safe and as fast here (its ~1-2 min is offset elsewhere).
-            "--kernel-config",
-            '{"enable_flashinfer_autotune": false}',
-            *self.extra_args,
-        ]
-        res = self._docker(*args)
-        if res.returncode != 0:
-            self.status.set(
-                phase="error", detail=f"docker run failed: {res.stderr.strip()[:180]}"
-            )
-            return
-        # vLLM-Omni cold start is long (model load + compile); poll generously.
-        for _ in range(720):
-            if self.health_ok():
-                self.status.set(phase="ready", detail="container ready")
-                self.status.beat()
-                return
-            running = self._docker("ps", "-q", "-f", f"name={self.NAME}").stdout.strip()
-            if not running:
-                self.status.set(phase="error", detail="container exited during startup")
-                return
-            time.sleep(5.0)
-        self.status.set(phase="error", detail="container did not become ready in time")
-
-    def stop(self) -> None:
-        _log(f"stopping container {self.NAME}")
-        res = self._docker("rm", "-f", self.NAME)
-        if res.returncode != 0:
-            _log(f"docker rm -f {self.NAME} failed: {res.stderr.strip()[:160]}")
-        else:
-            _log(f"container {self.NAME} removed")
-
-
 class SupervisedServer:
     """Omni backend whose lifecycle is owned by the `bebop-models` supervisor.
 
     On start it asks the supervisor to `load` a backend and uses that backend's
     `base_url`; on stop it optionally `unload`s it. The supervisor handles the
-    GPU budget and eviction, so the voice service no longer manages the
-    container/child itself.
+    GPU budget and eviction, so the voice service does not manage the child
+    process itself.
     """
 
     def __init__(
@@ -1425,9 +1259,9 @@ def _friendly_detail(line: str) -> str:
 def wav_bytes_to_pcm16(wav_bytes: bytes) -> bytes:
     """Extract raw PCM16 frames from a WAV container.
 
-    vLLM-Omni streams audio as a base64 WAV inside `delta.content` (tagged
-    `modality: "audio"`), unlike Edge-LLM which sends raw PCM in
-    `delta.audio.data`. We normalize both to raw PCM16 for the app.
+    Some OpenAI-compatible servers stream audio as a base64 WAV inside
+    `delta.content` (tagged `modality: "audio"`), whereas Edge-LLM sends raw PCM
+    in `delta.audio.data`. Normalize both to raw PCM16 for the app.
     """
     with wave.open(io.BytesIO(wav_bytes), "rb") as w:
         return w.readframes(w.getnframes())
@@ -1490,7 +1324,7 @@ async def stream_completion(
                     text = delta.get("content")
                     if text:
                         if modality == "audio":
-                            # vLLM-Omni: base64 WAV in content.
+                            # Base64 WAV in content.
                             try:
                                 yield {
                                     "type": "audio",
@@ -1603,8 +1437,8 @@ def build_app(
         # uvicorn runs lifespan shutdown on SIGTERM (systemctl stop / the app's
         # Voice toggle), which is the one place that reliably fires — the code
         # after uvicorn.run() and atexit did not. Tear down whatever this
-        # service owns so stopping Voice frees the GPU: remove the model
-        # container, or kill the Edge-LLM child / cascade stages.
+        # service owns so stopping Voice frees the GPU: kill the Edge-LLM child
+        # / cascade stages (or ask the supervisor to unload).
         if server is not None:
             await asyncio.to_thread(server.stop)
         if pipeline is not None:
@@ -1679,13 +1513,6 @@ def build_app(
             config.backend = body["backend"]
         if isinstance(body.get("omni_url"), str):
             config.omni_url = body["omni_url"].strip()
-        if isinstance(body.get("omni_container"), bool):
-            config.omni_container = body["omni_container"]
-        for key in ("omni_image", "omni_model_dir", "omni_deploy_config"):
-            if isinstance(body.get(key), str) and body[key].strip():
-                setattr(config, key, body[key].strip())
-        if isinstance(body.get("omni_port"), int):
-            config.omni_port = body["omni_port"]
         if isinstance(body.get("omni_supervisor_url"), str):
             config.omni_supervisor_url = body["omni_supervisor_url"].strip()
         if isinstance(body.get("omni_backend_id"), str) and body["omni_backend_id"].strip():
@@ -1942,8 +1769,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--omni-url",
         default="",
-        help="use an already-running OpenAI-compatible omni server (e.g. a "
-        "vLLM-Omni container) instead of supervising Edge-LLM",
+        help="use an already-running OpenAI-compatible omni server instead of "
+        "supervising an Edge-LLM child (debug escape hatch)",
     )
     parser.add_argument(
         "--omni-supervisor-url",
@@ -1954,7 +1781,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--omni-backend-id",
         default="",
-        help="backend id to load from the supervisor (default omni-vllm)",
+        help="backend id to load from the supervisor (default omni-edgellm)",
     )
     args = parser.parse_args(argv)
 
@@ -2049,25 +1876,11 @@ def main(argv: list[str] | None = None) -> int:
             config.omni_supervisor_url,
             config.omni_backend_id,
             status,
-            port=config.omni_port,
             unload_on_stop=config.omni_unload_on_stop,
         )
         server.start_background()
-    elif config.omni_container:
-        # bebop-voice owns the container: start on service start, remove on stop.
-        status = VoiceStatus(
-            model="qwen3-omni (container)", precision=precision, model_downloaded=True
-        )
-        server = ContainerServer(
-            config.omni_image,
-            config.omni_port,
-            status,
-            model_dir=config.omni_model_dir,
-            deploy_config=config.omni_deploy_config,
-        )
-        server.start_background()
     elif config.omni_url:
-        # External omni backend (e.g. a vLLM-Omni container) — no supervision.
+        # External omni backend — no supervision (debug escape hatch).
         status = VoiceStatus(
             model="qwen3-omni (external)", precision=precision, model_downloaded=True
         )

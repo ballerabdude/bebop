@@ -1,5 +1,10 @@
 """Launcher for the TensorRT Edge-LLM OpenAI server, with small runtime patches.
 
+Edge-LLM is the robot's **only** generative runtime: every generative model
+(omni / ASR / brain / TTS, and later a VLA) is a `tensorrt-edgellm-serve`
+process. This module holds the shared bits of launching one, so the voice
+gateway and the `bebop-models` supervisor resolve the binary the same way.
+
 Drop-in replacement for the ``tensorrt-edgellm-serve`` console script: it takes
 the same arguments and runs the same server, but first applies compatibility
 patches for bugs in the installed Edge-LLM build.
@@ -22,6 +27,25 @@ Usage::
 """
 
 from __future__ import annotations
+
+import shutil
+import sys
+from pathlib import Path
+
+EDGELLM_BIN = "tensorrt-edgellm-serve"
+
+
+def resolve_edgellm_bin() -> str:
+    """Locate the ``tensorrt-edgellm-serve`` console script.
+
+    Under systemd the venv's ``bin/`` is not on ``PATH``, so prefer the sibling
+    of the running interpreter (the venv that owns this process), then fall
+    back to ``PATH``.
+    """
+    sibling = Path(sys.executable).parent / EDGELLM_BIN
+    if sibling.exists():
+        return str(sibling)
+    return shutil.which(EDGELLM_BIN) or EDGELLM_BIN
 
 
 def _patch_tts_kwargs() -> None:

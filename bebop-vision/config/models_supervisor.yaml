@@ -1,57 +1,41 @@
 # bebop-models supervisor registry.
 #
+# Edge-LLM is the robot's only generative runtime: every generative backend is
+# a `tensorrt-edgellm-serve` process (a checkpoint + an engine cache + a port).
+# See docs/models.md and bebop_vision/edge_serve.py.
+#
 # Each backend is one of:
-#   container - a Docker image the supervisor starts/stops (vLLM-Omni, VLA)
-#   external  - an already-running OpenAI-compatible server (base_url)
-#   tracked   - runs inside another process (bebop-vision); counted, not managed
+#   edgellm  - a `tensorrt-edgellm-serve` child this service starts/stops
+#   external - an already-running OpenAI-compatible server (base_url); debug only
+#   tracked  - runs inside another process (bebop-vision); counted, not managed
 #
 # footprint_gb informs the GPU budget; before loading, the supervisor evicts
 # ready residents until the new backend fits (see GPU_BUDGET_GB).
 backends:
-  - id: omni-vllm
+  - id: omni-edgellm
     purpose: voice
-    kind: container
-    footprint_gb: 50
-    image: ghcr.io/ballerabdude/bebop-vllm-omni-thor:latest
-    model_dir: /home/bebop/qwen3-omni-talker-safe
-    deploy_config: /home/bebop/qwen3_omni_1gpu.yaml
-    port: 8101
-    container_name: bebop-model-omni-vllm
-    # Measured on Thor (docs/vllm-omni.md): multithread load + autotune off +
-    # warm Triton/flashinfer caches => ~6 min warm start (vs ~29 min cold).
-    serve_args:
-      - "--omni"
-      - "--init-timeout"
-      - "3600"
-      - "--stage-init-timeout"
-      - "3600"
-      # Parallel safetensors load (vLLM defaults to a single reader core).
-      - "--model-loader-extra-config"
-      - '{"enable_multithread_load": true, "num_threads": 14}'
-      # Disable the flaky sm_110 flashinfer/TRT-LLM MoE autotuner.
-      - "--kernel-config"
-      - '{"enable_flashinfer_autotune": false}'
-      # Sleep/wake so the supervisor can free the GPU when idle (level 2).
-      - "--enable-sleep-mode"
-
-  - id: omni-edge
-    purpose: voice
-    kind: external
+    kind: edgellm
     footprint_gb: 20
-    base_url: http://127.0.0.1:8000
-    note: "TensorRT Edge-LLM Qwen3-Omni (currently supervised by bebop-voice)"
+    # The NVFP4 checkpoint the `--quantize-voice` installer step produces from
+    # the catalog's `qwen3-omni-30b` snapshot.
+    model: /home/bebop/bebop/bebop-vision/weights/qwen3-omni-30b-nvfp4
+    # Ahead-of-time TensorRT engines. The first start builds them (tens of
+    # minutes); later starts are deserialization (~40 s).
+    cache_dir: /var/lib/bebop-voice/edgellm
+    port: 8000
+    serve_args:
+      # Parse the model's XML tool calls into OpenAI `tool_calls`.
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_xml"
+
+  # A second generative backend slots in the same way — e.g. the cascade's
+  # brain: `kind: edgellm`, `model: RadixArk/Qwen3.8-27B-NVFP4`, `port: 8012`.
+  # The voice service supervises the cascade stages itself today (`StageServer`);
+  # registering them here hands their lifecycle to this service.
 
   - id: vision
     purpose: vision
     kind: tracked
     footprint_gb: 6
-    note: "navd/SAM inside bebop-vision (camera-coupled; not managed here)"
-
-  # Future VLA — a placeholder showing how one slots in:
-  # - id: vla-pi05
-  #   purpose: action
-  #   kind: container
-  #   footprint_gb: 10
-  #   image: ghcr.io/ballerabdude/bebop-vla-thor:latest
-  #   model_dir: /home/bebop/vla-pi05
-  #   port: 8020
+    note: "navd/DINOv3 inside bebop-vision (camera-coupled; not managed here)"

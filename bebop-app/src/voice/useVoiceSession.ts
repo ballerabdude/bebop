@@ -501,7 +501,7 @@ function configFromJson(j: Record<string, unknown>): VoiceConfigView {
     backends: Array.isArray(j.backends) ? (j.backends as string[]) : ["omni", "cascade"],
     voices: Array.isArray(j.voices) ? (j.voices as string[]) : [],
     omni_supervisor_url: String(j.omni_supervisor_url ?? ""),
-    omni_backend_id: String(j.omni_backend_id ?? "omni-vllm"),
+    omni_backend_id: String(j.omni_backend_id ?? "omni-edgellm"),
   };
 }
 

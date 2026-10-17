@@ -7,7 +7,7 @@ import { Banner, Button, Card } from "./ui";
 interface BackendView {
   id: string;
   purpose: string;
-  kind: "container" | "external" | "tracked" | string;
+  kind: "edgellm" | "external" | "tracked" | string;
   state: string;
   detail: string;
   footprint_gb: number;
@@ -69,17 +69,16 @@ export function ModelSupervisorCard({ robotIp }: { robotIp: string }) {
   }, [refresh]);
 
   const act = useCallback(
-    async (id: string, op: "load" | "unload" | "sleep" | "wake") => {
+    async (id: string, op: "load" | "unload") => {
       setBusy(id);
       setError(null);
       try {
-        // `load`/`wake` can block a while (cold start / weight reload), so
-        // don't apply a request timeout.
-        const path =
-          op === "sleep" ? `/models/${id}/sleep?level=2` : `/models/${id}/${op}`;
-        const res = await fetch(httpUrl(robotIp, SUPERVISOR_PORT, path), {
-          method: "POST",
-        });
+        // `load` can block a while (an Edge-LLM backend's first start builds
+        // its TensorRT engines), so don't apply a request timeout.
+        const res = await fetch(
+          httpUrl(robotIp, SUPERVISOR_PORT, `/models/${id}/${op}`),
+          { method: "POST" },
+        );
         const body = (await res.json()) as { error?: string };
         if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       } catch (e) {
@@ -106,15 +105,14 @@ export function ModelSupervisorCard({ robotIp }: { robotIp: string }) {
         </span>
       </div>
       <p className="mt-1 text-sm text-text-dim leading-relaxed">
-        The supervisor keeps one large model resident at a time. Loading a
-        backend evicts others until it fits the budget.
+        Every generative model runs as a TensorRT Edge-LLM backend. Loading one
+        evicts others until it fits the budget.
       </p>
 
       <div className="mt-3 flex flex-col gap-2">
         {backends.map((b) => {
           const tracked = b.kind === "tracked";
           const active = b.state === "ready" || b.state === "tracked";
-          const sleeping = b.state === "sleeping";
           return (
             <div
               key={b.id}
@@ -143,31 +141,14 @@ export function ModelSupervisorCard({ robotIp }: { robotIp: string }) {
                   {b.footprint_gb.toFixed(0)} GB
                 </span>
                 {!tracked &&
-                  (sleeping ? (
+                  (active ? (
                     <Button
-                      variant="secondary"
+                      variant="ghost"
                       disabled={busy === b.id}
-                      onClick={() => void act(b.id, "wake")}
+                      onClick={() => void act(b.id, "unload")}
                     >
-                      {busy === b.id ? "…" : "Wake"}
+                      {busy === b.id ? "…" : "Unload"}
                     </Button>
-                  ) : active ? (
-                    <>
-                      <Button
-                        variant="ghost"
-                        disabled={busy === b.id}
-                        onClick={() => void act(b.id, "sleep")}
-                      >
-                        {busy === b.id ? "…" : "Sleep"}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        disabled={busy === b.id}
-                        onClick={() => void act(b.id, "unload")}
-                      >
-                        {busy === b.id ? "…" : "Unload"}
-                      </Button>
-                    </>
                   ) : (
                     <Button
                       variant="secondary"
