@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// How often `refresh_if_due` is allowed to probe (and possibly re-open) the
 /// buses. The callers are per-telemetry-tick, i.e. tens of Hz, so the throttle
@@ -142,8 +142,8 @@ impl BusPool {
         v
     }
 
-    /// Re-open any bus that is missing, not `ERROR-ACTIVE`, or whose socket has
-    /// recorded an I/O error. Returns the interfaces it re-opened.
+    /// Re-open a bus whose socket can no longer be the one the kernel is
+    /// using. Returns the interfaces it re-opened.
     ///
     /// This automates the remediation `open` prints. The case that matters is a
     /// USB-CAN adapter unplugged and replugged: systemd-networkd re-applies the
@@ -152,8 +152,23 @@ impl BusPool {
     /// netdev that went away — every send fails forever, the supervisor latches
     /// an E-STOP, and only a restart used to clear it.
     ///
-    /// Throttled to [`REFRESH_INTERVAL`], so it is cheap to call on every
-    /// telemetry tick.
+    /// Triggered only by:
+    ///   * the netdev being gone (`read_can_state` → `None`); the next tick
+    ///     retries and succeeds once it is back, or
+    ///   * a send failing *while the controller still reads `ERROR-ACTIVE`* —
+    ///     the stale-socket signature, since a socket on the right netdev
+    ///     cannot both fail and look healthy, or
+    ///   * `BUS-OFF`, the one state a fresh socket does not fix and only a
+    ///     link restart does.
+    ///
+    /// Deliberately *not* triggered by `ERROR-PASSIVE`, nor by a send failure
+    /// on a bus that is already unhealthy. An unpowered peer — the documented
+    /// common case, and the normal state of a partly-wired robot — produces
+    /// exactly that, and bouncing the link there flaps a bus that is fine apart
+    /// from having nobody on the other end.
+    ///
+    /// Throttled to [`REFRESH_INTERVAL`], so it is cheap on every telemetry
+    /// tick.
     pub fn refresh_if_due(&self) -> Vec<String> {
         {
             let mut last = match self.last_refresh.lock() {
@@ -171,14 +186,12 @@ impl BusPool {
             let state = read_can_state(&iface);
             let healthy = is_state_healthy(state.as_deref());
             let broken_socket = self.get(&iface).map(|c| c.io_error()).unwrap_or(true);
-            if healthy && !broken_socket {
+            let stale_socket = broken_socket && healthy;
+            let bus_off = matches!(state.as_deref(), Some("BUS-OFF"));
+            if !stale_socket && !bus_off && state.is_some() {
                 continue;
             }
-            // Bounce the link only for a wedged controller: a restart is the
-            // documented recovery from BUS-OFF, while a merely-passive bus
-            // (peer unpowered) should not be flapped every few seconds.
-            let wedged = matches!(state.as_deref(), Some("BUS-OFF")) || broken_socket;
-            if wedged {
+            if bus_off {
                 for args in [
                     ["link", "set", iface.as_str(), "down"],
                     ["link", "set", iface.as_str(), "up"],
@@ -194,15 +207,18 @@ impl BusPool {
                     warn!(
                         can_interface = %iface,
                         state = state.as_deref().unwrap_or("gone"),
-                        bounced = wedged,
+                        bounced = bus_off,
                         "CAN bus re-opened (adapter came back / controller recovered)"
                     );
                     reopened.push(iface);
                 }
                 Err(e) => {
-                    // Still absent, or unopenable — the next tick retries.
-                    info!(can_interface = %iface, error = %e,
-                          "CAN bus not openable yet; will retry");
+                    // Still absent (or unopenable) — the next tick retries.
+                    // `debug`, not `info`: a robot whose hub is unplugged for
+                    // hours should not write a line every few seconds. The bus
+                    // state is in telemetry and the app banner shows it.
+                    debug!(can_interface = %iface, error = %e,
+                           "CAN bus not openable yet; will retry");
                 }
             }
         }
