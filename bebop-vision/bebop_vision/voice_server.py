@@ -455,6 +455,13 @@ async def live_context(
 
 CASCADE_ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
 CASCADE_BRAIN_MODEL = "RadixArk/Qwen3.8-27B-NVFP4"
+# Multi-token prediction for the brain. `mtp` uses the checkpoint's own MTP
+# layers, so no draft model is needed (per the server CLI: "MTP is the only
+# method that legitimately has none"). The mode is baked into the engine
+# bundle profile name (the `<spec_type>` slot), so enabling it triggers ONE
+# rebuild; the previous bundle is kept, so removing the flag reverts instantly.
+# `num_speculative_tokens` is the number of tokens drafted per step.
+CASCADE_BRAIN_SPECULATIVE = '{"method": "mtp", "num_speculative_tokens": 3}'
 CASCADE_TTS_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 CASCADE_ASR_PORT = 8011
 CASCADE_BRAIN_PORT = 8012
@@ -1859,6 +1866,7 @@ def main(argv: list[str] | None = None) -> int:
             extra_args=[
                 "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml",
                 "--max-input-len", "8192", "--max-kv-cache-capacity", "16384",
+                "--speculative-config", CASCADE_BRAIN_SPECULATIVE,
             ],
             status=status,
         )
