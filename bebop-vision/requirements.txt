@@ -6,10 +6,10 @@
 #
 # The venv is created with --system-site-packages so JetPack's TensorRT
 # Python bindings (system dist-packages) are visible to the voice stack.
-# numpy/scipy/pandas are pinned HERE so their venv-local numpy-2 builds
-# SHADOW the system numpy-1-built copies. The venv-local scipy matters:
-# without it, transformers' optional `from scipy.optimize import ...`
-# resolves to the system scipy and dies on `from numpy import Inf`.
+#
+# Pinning policy: pin ONLY where a specific version is required — a CUDA
+# build, a vendor ABI, an engine format. Everything else is a floor, and
+# transitive dependencies are not repeated here.
 #
 # Do NOT pin system-provided packages here (tensorrt, Jetson.GPIO, PyGObject,
 # ...): --system-site-packages already exposes them, and pinning would try to
@@ -21,43 +21,70 @@
 #   2. .venv/bin/pip install --upgrade pip
 #   3. .venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cu132 \
 #        'torch==2.13.0+cu132' 'torchvision==0.28.0+cu132'
-#   4. .venv/bin/pip install -e .
+#   4. .venv/bin/pip install -e . --no-deps      # registers the package only
 #   5. .venv/bin/pip install -r requirements.txt
+#   6. .venv/bin/pip install --no-deps 'pyorbbecsdk2==2.1.2'   # see below
 
-# --- ABI-critical: must shadow the system numpy-1 copies ------------------
-numpy==2.2.6
-scipy==1.18.1
-pandas==3.0.6
+# --- ABI-critical: venv-local numpy-2 builds must shadow the system --------
+# JetPack ships numpy 1.x in dist-packages, so a venv-local numpy 2 (with a
+# scipy/pandas built against it) has to win. scipy matters because
+# transformers does an optional `from scipy.optimize import ...` that would
+# otherwise resolve to the system scipy and die on `from numpy import Inf`.
+# pandas is needed by the NVFP4 quantizer (modelopt) for the same reason.
+numpy>=2
+scipy>=1.14
+pandas>=2.2
 
-# --- torch (Jetson Thor / CUDA 13.2; needs the cu132 index) ---------------
+# --- torch -----------------------------------------------------------------
+# Pinned: the cu132 aarch64 build is mandatory (PyPI's aarch64 torch is
+# CPU-only), and torchvision must match torch's minor version exactly.
 torch==2.13.0+cu132
 torchvision==0.28.0+cu132
 
 # --- perception / recording / places -------------------------------------
-transformers==5.14.1
-tokenizers==0.22.2
-av==17.1.0
-opencv-python==5.0.0.93
-pyorbbecsdk2==2.1.2
-mcap==1.5.0
-protobuf==7.36.2
+transformers>=5.14
+opencv-python>=4.10
+mcap>=1.4
+protobuf>=4.25
 PyYAML>=6
-huggingface_hub==1.33.0
-safetensors==0.8.0
-websockets==17.2
+huggingface_hub>=0.26
+websockets>=12
 
 # --- student-model runtime (--navd-model) ---------------------------------
-# GPU build: CUDA EP ~60 ms/inference vs ~750 ms on the CPU EP. Never install
+# Pinned: the CUDA-EP build must match the platform's CUDA 13. Never install
 # plain `onnxruntime` alongside it — they share the import name.
 onnxruntime-gpu==1.29.0
-onnx==1.19.0
+onnx>=1.16
 
 # --- voice (TensorRT Edge-LLM) --------------------------------------------
-# The aarch64 wheel covers Jetson Thor (JetPack 7.x, CUDA 13, SM110, platform
-# TensorRT 10). `server-tools` pulls the Transformers the checkpoint-direct
-# builder needs; `tools` pulls the NVFP4 quantization toolchain.
+# Pinned exactly: the compiled engines AND the `edge_serve.py` compatibility
+# patch are specific to this build. The aarch64 wheel covers Jetson Thor
+# (JetPack 7.x, CUDA 13, SM110, platform TensorRT 10). `server-tools` pulls
+# the Transformers the checkpoint-direct builder needs; `tools` pulls the
+# NVFP4 quantization toolchain.
 tensorrt-edgellm[server,server-tools,tools]==0.11.0
-httpx==0.28.1
+httpx>=0.27
 
 # --- dev / test -----------------------------------------------------------
 pytest>=8
+
+# ===========================================================================
+# Deliberately NOT listed here
+# ===========================================================================
+#
+# pyorbbecsdk2  — the Orbbec camera SDK. It is a real runtime dependency, but
+#   it cannot live in this file: it hard-pins `av==12.3.0` (py<3.13) while
+#   `tensorrt-edgellm[server]` hard-pins `av==17.1.0`. No single av satisfies
+#   both, so any resolution containing both is impossible. We use the SDK for
+#   *capture* only (its av-based recording helpers are unused), so the camera
+#   works fine on av 17.1.0. Install it with `--no-deps` (step 6 above).
+#   Consequence: `pip check` always reports that one conflict. It is expected
+#   and harmless — do not chase it.
+#
+# av (PyAV)     — not pinned here because `tensorrt-edgellm[server]` already
+#   requires (and pins) it. Pinning something newer breaks the resolution
+#   above; it is also unused by our runtime code (the recorder encodes through
+#   GStreamer/nvv4l2 — bebop_vision/hw_video.py), and only the offline tools
+#   under tools/ import it.
+#
+# tokenizers, safetensors — pulled by transformers itself.

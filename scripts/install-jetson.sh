@@ -765,8 +765,19 @@ setup_voice() {
     # already satisfied.
     echo "    installing CUDA torch (cu132)"
     run_voice "'${venv}/bin/pip' install --extra-index-url https://download.pytorch.org/whl/cu132 'torch==2.13.0+cu132' 'torchvision==0.28.0+cu132'"
+    # Register the project itself without resolving its metadata deps:
+    # requirements.txt is the authority for versions, and one of pyproject's
+    # deps (pyorbbecsdk2) cannot share a resolution — see the "Deliberately
+    # NOT listed" block in requirements.txt.
+    echo "    installing the project itself (editable, --no-deps)"
+    run_voice "'${venv}/bin/pip' install -e '${vision_dir}' --no-deps"
     echo "    installing project requirements (downloads large wheels)"
     run_voice "'${venv}/bin/pip' install -r '${req}'"
+    # The camera SDK on its own: it pins av==12.3.0 while the Edge-LLM server
+    # pins av==17.1.0, so the two can never be resolved together. We use the
+    # SDK for capture only; the Edge-LLM av is the one we keep.
+    echo "    installing the Orbbec camera SDK (--no-deps)"
+    run_voice "'${venv}/bin/pip' install --no-deps 'pyorbbecsdk2==2.1.2'"
 
     # Validate the wheel's native payload selection, not just the import: a
     # matching wheel filename does not guarantee a matching CUDA/TensorRT/SM
