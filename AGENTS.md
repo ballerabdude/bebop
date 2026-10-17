@@ -15,20 +15,37 @@
 - Python env: ONE venv for the whole project, `~/bebop/bebop-vision/.venv`
   (created `--system-site-packages` so JetPack's TensorRT bindings are
   visible), run as `/home/bebop/bebop/bebop-vision/.venv/bin/python`.
-  Dependencies are pinned in `bebop-vision/requirements.txt` (torch
-  2.13.0+cu132, transformers 5.17.0, numpy 2.5.3, venv-local scipy). The old
-  "numpy pinned 1.26.4, never upgrade" note is **stale**: pyorbbecsdk2 2.1.2
-  works under numpy 2.5.3 (verified). The venv-local scipy matters — without
-  it, transformers' optional scipy import falls back to the system
+  Versions live in `bebop-vision/requirements.txt` (torch 2.13.0+cu132,
+  transformers 5.14.1, numpy 2.2.6, venv-local scipy); it pins a version only
+  where one is actually required — the cu132 torch/torchvision pair, the
+  pyorbbecsdk2 SDK build, onnxruntime-gpu's CUDA-13 build, tensorrt-edgellm's
+  engine format — and uses floors otherwise. `pyorbbecsdk2` is deliberately
+  **not** in that file: it hard-pins `av==12.3.0` while
+  `tensorrt-edgellm[server]` hard-pins `av==17.1.0`, so `--setup-voice`
+  installs it with `--no-deps` (capture only). That is why `pip check` always
+  reports that one conflict — expected, do not chase it.
+  The old "numpy pinned 1.26.4, never upgrade" note is **stale**: pyorbbecsdk2
+  2.1.2 works under numpy 2.2.6 (verified). The venv-local scipy matters —
+  without it, transformers' optional scipy import falls back to the system
   numpy-1-built scipy and dies on `from numpy import Inf`.
 - Firmware: `bebop-linux.service` runs as root from
   `/usr/local/bin/bebop-linux`; config `/etc/bebop/bebop_wheeled.yaml`.
 - Other services: `bebop-agent` owns port 9091 (its `/healthz` + setup
   WebSocket) — do NOT use 9091 for anything new. Firmware WS/HTTP is 9090,
-  the bebop-vision videoserver is 9092. `bebop-vision.service` (root,
-  installed but NOT enabled) runs the Python recorder; start/stop it from
-  the app's Teleop vision card — the firmware shells out to `systemctl` and
-  mirrors the unit state in telemetry (`VisionState`).
+  the bebop-vision videoserver is 9092, the places service is 9095, voice is
+  9093, and the `bebop-models` supervisor is 9094. `bebop-vision.service`
+  (root, installed but NOT enabled) runs the Python recorder; start/stop it
+  from the app's Teleop vision card — the firmware shells out to `systemctl`
+  and mirrors the unit state in telemetry (`VisionState`).
+- **TensorRT Edge-LLM is the only generative runtime.** Every generative
+  model (omni, or the cascade's ASR + brain + TTS, or a future VLA) is a
+  `tensorrt-edgellm-serve` child — a checkpoint + an engine cache + a port.
+  There is no vLLM/Docker path (removed; see `docs/models.md`).
+  `bebop-models` (:9094, root, installed by `install-jetson.sh --setup-models`)
+  owns the GPU budget and that lifecycle (`kind: edgellm|external|tracked`);
+  `bebop-voice` (:9093, root, operator-toggled from the app) is a client that
+  either supervises its own Edge-LLM child or delegates to the supervisor
+  (`omni_supervisor_url`).
 - `bebop-agent` is provisioning-only: Wi-Fi (nmcli) + a Hosted Network
   hotspot (`Bebop-<machine-id>`, WPA2 passphrase `bebopbebop`, gateway
   `192.168.42.1:9091`) + the setup server. It no longer does BLE,
@@ -91,9 +108,10 @@
 ## Testing on the Jetson
 
 - Python tests: `cd ~/bebop/bebop-vision && .venv/bin/python -m pytest
-  tests/ -q` (40 tests, no hardware needed). Run after every deploy.
-- Firmware tests are CI-side (108 tests); on-Jetson builds are for
-  deploy only.
+  tests/ -q` (135 tests, no hardware needed). Run after every deploy.
+- Rust tests are CI-side (fmt + clippy + `cargo test`: the workspace in
+  `jetson-agent`, and `firmware/bebop-linux`); on-Jetson builds are for
+  deploy only, never for testing.
 - Camera exclusivity: ONE process per camera. The recorder
   (`--record-navd`) and goal-drive (`--goal-drive`) each open the rig;
   OrbbecViewer or a stray test process holding a camera surfaces as
