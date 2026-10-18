@@ -36,7 +36,14 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import os
 import time
+
+# Keep OpenBLAS/OpenMP from leaving a spinning pool behind; see main.py.
+for _thread_var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS",
+                    "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                    "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_thread_var, "1")
 
 import numpy as np
 

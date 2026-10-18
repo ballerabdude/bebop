@@ -13,8 +13,14 @@ can be checked against the object that produced it.
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
+
+for _thread_var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS",
+                    "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                    "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_thread_var, "1")
 
 import cv2
 import numpy as np

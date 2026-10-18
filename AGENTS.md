@@ -194,6 +194,12 @@
   NOT from the flat proto root.
 - GIL: pyorbbecsdk capture must stay serial (§2.8 of docs/navd.md);
   thread pools are fine for numpy/cv2 work only.
+- OpenBLAS/OpenMP: on the Thor, numpy's OpenBLAS worker pool spin-waits
+  after even tiny matmuls. A standalone `--bev` run measured 429% CPU with
+  five BLAS threads at 70-90% each; the actual BEV tick was ~35 ms. `main.py`
+  and `master_bev.py` set `OPENBLAS_NUM_THREADS`/`OMP_NUM_THREADS`/`MKL_*`/
+  `NUMEXPR_*`/`VECLIB_*` to 1 **before** numpy is imported. Keep that at the
+  top of any new entry point; otherwise the idle pool burns cores.
 - Dual cameras run matched 30 fps under hardware sync (both cams negotiate
   848x480@30 on the Thor). The old "matched 15 fps / 30+30 starves the GIL"
   rule was measured on the Orin Nano with the old BEV worker; without a BEV

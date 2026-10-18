@@ -152,6 +152,30 @@ image into the same grid and check occupied cells against the objects
 (the first run showed the clear floor free, boxes/bags/desk/wall occupied,
 and the thin orange streak matching a red cable on the floor).
 
+## CPU
+
+The first on-robot measurement looked alarming: a standalone `--bev`
+process used 429% CPU. `gdb` showed five threads in
+`libscipy_openblas ... blas_thread_server` at 70-90% each — the Thor's
+OpenBLAS build spin-waits after tiny matmuls. The actual BEV tick was only
+~35 ms (prepare ~10 ms, fuse ~22 ms, render+JPEG ~3 ms).
+
+`main.py` and `master_bev.py` now set
+`OPENBLAS_NUM_THREADS`/`OMP_NUM_THREADS`/`MKL_NUM_THREADS`/
+`NUMEXPR_NUM_THREADS`/`VECLIB_MAXIMUM_THREADS` to 1 before numpy is
+imported. Measured after the fix:
+
+| Run | Before | After |
+|---|---|---|
+| standalone `--bev` | 429% | 84% |
+| full `bebop-vision` service | 612% | 172-179% |
+
+The app's several WHEP video streams account for a large part of the
+remaining process CPU; the BEV geometry itself is ~0.35 core. Further easy
+wins if needed: 5 Hz instead of 10, reuse floor planes for several ticks,
+and close unused video tiles (or draw `/bev` JSON on a canvas instead of a
+WHEP stream).
+
 ## Known limits / next
 
 - No temporal filter: one noisy frame can still flicker a cell.  The

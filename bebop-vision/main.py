@@ -11,8 +11,19 @@ Drive the robot from the app (manual teleop only — this file carries no
 driving; the model/drive stack lives on the exp/navd-ai branch).
 """
 
-import argparse
 import os
+
+# The Thor's OpenBLAS build keeps a spinning worker pool alive after even a
+# tiny matmul.  The BEV/recorder use small matrices where one thread is
+# faster, and the idle pool otherwise burns several cores (measured: 5 BLAS
+# threads at 70-90% each in a standalone --bev run).  Set these before numpy
+# is imported anywhere in this process.
+for _thread_var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS",
+                    "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                    "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_thread_var, "1")
+
+import argparse
 import sys
 import threading
 import time
