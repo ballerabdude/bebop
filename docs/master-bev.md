@@ -33,16 +33,22 @@ Per tick:
    x/y offset).  Invalid/out-of-range samples are dropped, then the body-frame
    dead disc (`min_range_m`) and self-view box are applied.  No floor decision
    is made here.
-2. **Joint floor plane** (`fuse`): one RANSAC plane over both cameras' points,
-   gated to an almost-vertical normal and a plane height at the body origin
-   inside `[-0.20, +0.20] m`.  Per-camera residual and inlier fraction are
-   reported.  If the fit fails, the z=0 prior is used and `plane_ok` is false.
+2. **Per-camera floor plane** (`_fit_camera_plane`): a RANSAC plane fitted on
+   points within `floor_band_m` of the body floor (default 0.40 m), gated to
+   a normal within `plane_normal_deg` of vertical (default 10°) and an origin
+   height inside `[-0.20, +0.20] m`; then refined on every point close to the
+   fitted plane.  This keeps walls, desks and tall boxes out of the sample.
+   A joint plane is still fitted for diagnostics.  A camera whose own fit
+   fails uses the joint plane at `fallback_weight` (0.5) and contributes no
+   drop hazards; `plane_ok` is false for it.
 3. **Per-camera evidence**: points are classified against the joint plane:
    - `occupied`: height `[occ_min_m, occ_max_m]` (default 3–30 cm), with the
      lower bound raised by `noise_scale × range` at distance;
    - `free`: floor within 2 cm below the lower bound;
-   - `hazard`: height below `-max(hazard_drop_m, noise_scale × range)`, plus a
-     local ground-drop test between adjacent observed floor cells;
+   - `hazard`: height below `-max(hazard_drop_m, noise_scale × range)`.
+     Adjacent-cell drop detection (stairs) is opt-in via
+     `enable_drop_hazard`; it is noisy on cluttered floors, so it is off by
+     default and points genuinely below the floor still mark HAZARD;
    - overhang above `occ_max_m` is ignored.
 4. **Range weighting**: each point carries a confidence from its **forward
    distance**, not Euclidean camera range (the near camera is accurate a
@@ -128,6 +134,14 @@ it.  `--bev` with no other mode opens the depth cameras only (`color=False`).
 If a box lands in the wrong cell in one camera but not the other, re-check
 that camera's `height_m`/`pitch_deg`/`yaw_deg`; the joint plane and the
 per-camera residual in `/bev` make a mis-calibrated mount visible.
+
+The per-camera plane offset `d` is a direct mount-height check.  In the
+first live test the far plane sat about 6 cm below the near plane
+(`far d≈-0.059`, `near d≈-0.006`), and both planes were tilted ~5° with the
+robot on a cluttered carpet.  The per-camera fits absorb that; if the
+offset grows or the tilt persists on a known-flat floor, re-measure the
+mount.  Clutter on the floor is expected to render as occupied/inflated
+cells, not free space.
 
 ## Known limits / next
 

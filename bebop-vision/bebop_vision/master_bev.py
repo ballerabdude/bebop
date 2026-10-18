@@ -16,9 +16,11 @@ Conventions (same family as the old navd BEV):
 Per tick:
   1. ``prepare(frame)`` per camera: depth -> body-frame points.  No floor
      decision is made per camera; that is what makes the fusion stable.
-  2. ``fuse(per_camera, ages)``: fit **one joint floor plane** over both
-     cameras' points, classify each camera against it, accumulate weighted
-     occupied/free/hazard evidence, and fuse into a single grid.
+  2. ``fuse(per_camera, ages)``: fit a floor plane **per camera** (on a
+     near-floor band, then refine), classify each camera against its own
+     floor, accumulate weighted occupied/free/hazard evidence, and fuse into
+     a single grid.  A camera whose floor fit fails falls back to the joint
+     plane at reduced confidence and contributes no drop hazards.
 
 Why the weighted evidence instead of the old hard "near wins below 1.5 m"
 switch:
@@ -196,7 +198,7 @@ def deproject(depth_m, fx, fy, cx, cy, stride_x=4, stride_y=4,
 
 def fit_ground_plane(pts, *, residual_m=0.015, min_inliers=50, min_frac=0.15,
                      iters=96, rng=None, d_range=(-0.20, 0.20),
-                     range_scale=0.01, ranges=None):
+                     range_scale=0.01, ranges=None, normal_deg=20.0):
     """Batched RANSAC ground plane in the body frame.
 
     Returns ``(n, d, inlier_count)`` with ``n·p = d`` and ``n_z > 0``, or
@@ -218,7 +220,7 @@ def fit_ground_plane(pts, *, residual_m=0.015, min_inliers=50, min_frac=0.15,
     n[valid] /= norm[valid][:, None]
     flip = n[:, 2] < 0
     n[flip] = -n[flip]
-    valid &= n[:, 2] >= math.cos(math.radians(20.0))
+    valid &= n[:, 2] >= math.cos(math.radians(normal_deg))
     d = np.einsum("ij,ij->i", n, p[:, 0])
     valid &= (d >= d_range[0]) & (d <= d_range[1])
 
@@ -300,10 +302,22 @@ class MasterBevBuilder:
         self.plane_min_inliers = int(safety.get("plane_min_inliers", 100))
         self.plane_min_frac = float(safety.get("plane_min_frac", 0.15))
         self.noise_scale = float(safety.get("noise_scale", 0.01))
+        # Fit the floor on points near the body floor plane, not the whole
+        # scene: in a cluttered room a wall/box plane can otherwise win the
+        # RANSAC.  A camera with no trustworthy floor falls back to the joint
+        # plane at reduced confidence and contributes no drop hazards.
+        self.floor_band_m = float(mb.get("floor_band_m", 0.40))
+        self.plane_normal_deg = float(mb.get("plane_normal_deg", 10.0))
+        self.fallback_weight = float(mb.get("fallback_weight", 0.5))
 
         self.occ_min_m = float(mb.get("occ_min_m", 0.03))
         self.occ_max_m = float(mb.get("occ_max_m", 0.30))
         self.hazard_drop_m = float(mb.get("hazard_drop_m", 0.05))
+        # Adjacent-cell drop detection is useful for stairs but noisy on
+        # cluttered floors (box/desk edges).  Opt in once the scene is clean
+        # or the evidence is tuned; points genuinely below the floor still
+        # mark HAZARD either way.
+        self.enable_drop_hazard = bool(mb.get("enable_drop_hazard", False))
 
         # Evidence thresholds (weighted points per cell).
         self.occ_min_w = float(mb.get("occ_min_w", 0.75))
@@ -449,7 +463,71 @@ class MasterBevBuilder:
                             ranges.astype(np.float32),
                             int(frame.stamp_us), n_raw, int(len(pts)))
 
-    # -- joint floor --------------------------------------------------------
+    # -- floor planes -------------------------------------------------------
+
+    def _fit_camera_plane(self, cp):
+        """Fit one camera's floor on a near-floor band, then refine.
+
+        The band keeps walls, desks and tall boxes out of the RANSAC sample.
+        A camera whose band fit fails is reported as untrusted and falls back
+        to the joint plane at reduced confidence in :meth:`fuse`.
+        """
+        if cp is None or len(cp.points) == 0:
+            return None
+        pts = cp.points
+        rngs = cp.ranges
+        band = np.abs(pts[:, 2]) <= self.floor_band_m
+        band_n = int(band.sum())
+        if band_n < max(3, self.plane_min_inliers):
+            return None
+        bp, br = pts[band], rngs[band]
+        take = min(band_n, 6000)
+        idx = (np.linspace(0, band_n - 1, take).astype(np.int64)
+               if band_n > take else np.arange(band_n))
+        fit = fit_ground_plane(
+            bp[idx], residual_m=self.plane_residual_m,
+            min_inliers=self.plane_min_inliers,
+            min_frac=self.plane_min_frac, rng=self._rng,
+            d_range=(-0.20, 0.20), range_scale=self.noise_scale,
+            ranges=br[idx], normal_deg=self.plane_normal_deg)
+        if fit is None:
+            return None
+        nvec, d, cnt = fit
+
+        # Refine on every point close to the fitted plane, not just the band.
+        h = _height(pts, nvec, d)
+        gate = np.maximum(self.plane_residual_m, self.noise_scale * rngs)
+        inl = np.abs(h) < gate
+        if int(inl.sum()) >= max(3, self.plane_min_inliers):
+            ip, ir = pts[inl], rngs[inl]
+            n2 = len(ip)
+            take2 = min(n2, 6000)
+            idx2 = (np.linspace(0, n2 - 1, take2).astype(np.int64)
+                    if n2 > take2 else np.arange(n2))
+            fit2 = fit_ground_plane(
+                ip[idx2], residual_m=self.plane_residual_m,
+                min_inliers=self.plane_min_inliers,
+                min_frac=self.plane_min_frac, rng=self._rng,
+                d_range=(-0.20, 0.20), range_scale=self.noise_scale,
+                ranges=ir[idx2], normal_deg=self.plane_normal_deg)
+            if fit2 is not None:
+                nvec, d, cnt = fit2
+
+        h = _height(pts, nvec, d)
+        gate = np.maximum(self.plane_residual_m, self.noise_scale * rngs)
+        inl = np.abs(h) < gate
+        frac = float(inl.mean()) if h.size else 0.0
+        return {
+            "ok": True,
+            "n": [float(v) for v in nvec],
+            "d": float(d),
+            "inliers": int(cnt),
+            "total": int(len(pts)),
+            "band_points": band_n,
+            "inlier_frac": round(frac, 3),
+            "residual_m": round(
+                float(np.abs(h[inl]).mean()) if inl.any() else 0.0, 4),
+        }
 
     def _fit_joint_plane(self, per_camera):
         """One floor plane over every camera's points, with per-camera checks."""
@@ -542,8 +620,13 @@ class MasterBevBuilder:
             return w.astype(np.float32)
         return np.ones_like(forward_m)
 
-    def _evidence(self, cp: CameraPoints, plane):
-        """Weighted occupied/free/hazard/coverage evidence for one camera."""
+    def _evidence(self, cp: CameraPoints, plane, fallback=False):
+        """Weighted occupied/free/hazard/coverage evidence for one camera.
+
+        ``fallback`` means this camera's own floor fit failed, so it is using
+        another plane: its evidence is down-weighted and it contributes no
+        drop hazards (the floor reference is not trustworthy).
+        """
         n_cells = self.rows * self.cols
         out = {
             "occ_w": np.zeros(n_cells, np.float32),
@@ -574,6 +657,8 @@ class MasterBevBuilder:
         forward = x[inb]
         flat = rows * self.cols + cols
         w = self._range_weight(cp.role, forward)
+        if fallback:
+            w = w * self.fallback_weight
 
         min_h = np.maximum(self.occ_min_m, self.noise_scale * rng)
         drop_gate = np.maximum(self.hazard_drop_m, self.noise_scale * rng)
@@ -595,34 +680,39 @@ class MasterBevBuilder:
         haz_n = np.bincount(flat[below], minlength=n_cells).astype(np.int32)
 
         # Negative obstacles from a local ground drop: a cell whose floor is
-        # more than hazard_drop_m below an adjacent observed floor cell.
-        ground_n = np.bincount(flat[floor], minlength=n_cells).astype(np.int32)
-        ground_sum = np.bincount(flat[floor], weights=h[floor],
-                                 minlength=n_cells).astype(np.float32)
-        ground = np.where(ground_n > 0,
-                          ground_sum / np.maximum(ground_n, 1),
-                          np.nan).reshape(self.rows, self.cols)
-        ground_n2 = ground_n.reshape(self.rows, self.cols)
-        drop_vote = np.zeros((self.rows, self.cols), np.float32)
-        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            shifted = np.full_like(ground, np.nan)
-            shifted_n = np.zeros_like(ground_n2)
-            ys = slice(max(dy, 0), self.rows + min(dy, 0))
-            xs = slice(max(dx, 0), self.cols + min(dx, 0))
-            ys2 = slice(max(-dy, 0), self.rows + min(-dy, 0))
-            xs2 = slice(max(-dx, 0), self.cols + min(-dx, 0))
-            shifted[ys2, xs2] = ground[ys, xs]
-            shifted_n[ys2, xs2] = ground_n2[ys, xs]
-            with np.errstate(invalid="ignore"):
-                drop = ground - shifted
-            local = ((ground_n2 > 0) & (shifted_n > 0)
-                     & (drop > self.hazard_drop_m))
-            vote = np.where(local,
-                            np.minimum(ground_n2, 2).astype(np.float32) * 0.5,
-                            0.0)
-            drop_vote = np.maximum(drop_vote, vote.astype(np.float32))
-        haz_w += drop_vote.reshape(-1)
-        haz_n += (drop_vote.reshape(-1) > 0).astype(np.int32)
+        # more than hazard_drop_m below an adjacent observed floor cell.  A
+        # camera using a fallback plane has no trustworthy floor reference,
+        # so it contributes no drop hazards.
+        if not fallback and self.enable_drop_hazard:
+            ground_n = np.bincount(flat[floor],
+                                   minlength=n_cells).astype(np.int32)
+            ground_sum = np.bincount(flat[floor], weights=h[floor],
+                                     minlength=n_cells).astype(np.float32)
+            ground = np.where(ground_n > 0,
+                              ground_sum / np.maximum(ground_n, 1),
+                              np.nan).reshape(self.rows, self.cols)
+            ground_n2 = ground_n.reshape(self.rows, self.cols)
+            drop_vote = np.zeros((self.rows, self.cols), np.float32)
+            for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                shifted = np.full_like(ground, np.nan)
+                shifted_n = np.zeros_like(ground_n2)
+                ys = slice(max(dy, 0), self.rows + min(dy, 0))
+                xs = slice(max(dx, 0), self.cols + min(dx, 0))
+                ys2 = slice(max(-dy, 0), self.rows + min(-dy, 0))
+                xs2 = slice(max(-dx, 0), self.cols + min(-dx, 0))
+                shifted[ys2, xs2] = ground[ys, xs]
+                shifted_n[ys2, xs2] = ground_n2[ys, xs]
+                with np.errstate(invalid="ignore"):
+                    drop = ground - shifted
+                local = ((ground_n2 > 0) & (shifted_n > 0)
+                         & (drop > self.hazard_drop_m))
+                vote = np.where(
+                    local,
+                    np.minimum(ground_n2, 2).astype(np.float32) * 0.5,
+                    0.0)
+                drop_vote = np.maximum(drop_vote, vote.astype(np.float32))
+            haz_w += drop_vote.reshape(-1)
+            haz_n += (drop_vote.reshape(-1) > 0).astype(np.int32)
 
         out.update({
             "occ_w": occ_w,
@@ -645,7 +735,9 @@ class MasterBevBuilder:
         if not available:
             return None
         ages_s = dict(ages_s or {})
-        plane = self._fit_joint_plane(available)
+        joint = self._fit_joint_plane(available)
+        camera_planes = {role: self._fit_camera_plane(cp)
+                         for role, cp in available.items()}
         n_cells = self.rows * self.cols
 
         occ_w = np.zeros(n_cells, np.float32)
@@ -656,7 +748,19 @@ class MasterBevBuilder:
         contributions = {}
         camera_cov = {}
         for role, cp in available.items():
-            ev = self._evidence(cp, plane)
+            own = camera_planes.get(role)
+            if own is not None:
+                plane = own
+                fallback = False
+            elif joint.get("ok"):
+                plane = {"ok": False, "n": joint["n"], "d": joint["d"],
+                         "fallback": True}
+                fallback = True
+            else:
+                plane = {"ok": False, "n": [0.0, 0.0, 1.0], "d": 0.0,
+                         "fallback": True}
+                fallback = True
+            ev = self._evidence(cp, plane, fallback=fallback)
             occ_w += ev["occ_w"]
             free_w += ev["free_w"]
             haz_w += ev["haz_w"]
@@ -673,7 +777,8 @@ class MasterBevBuilder:
                 "coverage_weight": round(float(ev["cov_w"].sum()), 1),
                 "age_s": (round(float(ages_s[role]), 3)
                           if ages_s.get(role) is not None else None),
-                "plane_ok": bool(plane["per_camera"].get(role, {}).get("ok")),
+                "plane_ok": bool(own is not None),
+                "plane_fallback": bool(fallback),
             }
 
         # Coverage is "at least one valid return landed here".  The weighted
@@ -736,14 +841,26 @@ class MasterBevBuilder:
         confidence = confidence.reshape(self.rows, self.cols)
 
         stamp = max(int(cp.stamp_us) for cp in available.values())
-        plane_ok = {role: bool(plane["per_camera"].get(role, {}).get("ok"))
+        plane_ok = {role: bool(camera_planes.get(role) is not None)
                     for role in available}
+        per_camera_planes = {}
+        for role in available:
+            own = camera_planes.get(role)
+            per_camera_planes[role] = (
+                own if own is not None
+                else {"ok": False, "fallback": True,
+                      "inlier_frac": 0.0, "residual_m": None})
+        plane_out = dict(joint)
+        plane_out["per_camera"] = per_camera_planes
+        plane_out["fallback"] = {role: camera_planes.get(role) is None
+                                 for role in available}
+        plane_out["joint"] = joint
         return BevGrid(
             occ=occ, raw=raw, coverage=coverage, source=source,
             confidence=confidence, cell_m=self.cell_m,
             range_m=self.range_m, width_m=self.width_m,
             stamp_us=stamp, recv_ts=time.monotonic(),
-            per_camera_age_s=ages_s, plane_ok=plane_ok, plane=plane,
+            per_camera_age_s=ages_s, plane_ok=plane_ok, plane=plane_out,
             contributions=contributions, roles=sorted(available))
 
 

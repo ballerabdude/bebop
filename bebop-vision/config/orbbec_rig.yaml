@@ -113,6 +113,15 @@ robots:
       occ_min_m: 0.03
       occ_max_m: 0.30
       hazard_drop_m: 0.05
+      # Adjacent-cell drop hazards are noisy on cluttered floors; points
+      # genuinely below the floor still mark HAZARD.  Opt in for stairs.
+      enable_drop_hazard: false
+      # Per-camera floor fit: use only points within this height band of the
+      # body floor, require a normal within plane_normal_deg of vertical, and
+      # down-weight a camera that has to fall back to the joint plane.
+      floor_band_m: 0.40
+      plane_normal_deg: 10.0
+      fallback_weight: 0.5
       # Weighted-evidence thresholds per cell.
       occ_min_w: 0.75
       occ_dom_ratio: 0.35

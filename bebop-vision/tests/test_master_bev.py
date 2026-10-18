@@ -13,6 +13,7 @@ near-only or far-only regression visible in the tests.
 import time
 
 import numpy as np
+import pytest
 
 from bebop_vision.master_bev import (FREE, HAZARD, INFLATED, OCCUPIED,
                                      SRC_BOTH, SRC_FAR, SRC_NEAR,
@@ -47,6 +48,7 @@ def make_builder(radius_m=0.0, seed=0):
             "far_range_m": [1.00, 2.00, 4.50, 7.00],
             "occ_min_w": 0.75,
             "occ_dom_ratio": 0.35, "haz_min_w": 1.0,
+            "enable_drop_hazard": True,
         },
         "robot": {
             "radius_m": radius_m,
@@ -254,6 +256,33 @@ def test_joint_floor_plane_is_consistent():
     assert g.plane["inliers"] > 100
     assert g.plane["residual_m"] is not None
     assert g.plane["residual_m"] < 0.03
+
+
+def test_per_camera_floor_planes_are_used():
+    b = make_builder()
+    g = fuse(b, scene())
+    assert g.plane_ok == {"near": True, "far": True}
+    assert g.plane["fallback"] == {"near": False, "far": False}
+    near = g.plane["per_camera"]["near"]
+    far = g.plane["per_camera"]["far"]
+    assert near["ok"] is True and far["ok"] is True
+    assert abs(near["d"]) < 0.05
+    assert abs(far["d"]) < 0.05
+    assert near["inlier_frac"] > 0.2
+    assert far["inlier_frac"] > 0.2
+
+
+def test_fallback_evidence_is_downweighted_and_fit_reported():
+    b = make_builder()
+    frames = scene()
+    cp = b.prepare(frames["far"])
+    plane = b._fit_camera_plane(cp)
+    assert plane is not None
+    normal = b._evidence(cp, plane, fallback=False)
+    fallback = b._evidence(cp, plane, fallback=True)
+    assert fallback["cov_w"].sum() == pytest.approx(
+        normal["cov_w"].sum() * b.fallback_weight, rel=1e-4)
+    assert fallback["haz_w"].sum() == 0.0
 
 
 def test_hazard_detects_a_step_down():
