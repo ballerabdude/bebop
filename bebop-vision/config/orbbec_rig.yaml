@@ -64,6 +64,11 @@ robots:
         # the chassis is a trapezoid, the rect was masking floor at the
         # top corners and both sides.
         # The rigid mount keeps these pixels fixed.
+        # Keep the chassis polygon for consumers that need to exclude self
+        # pixels (fuse_navd_labels), but do not zero the published depth:
+        # the master BEV's body-frame robot.self_mask removes chassis points,
+        # and the color/depth views stay complete for comparison.
+        zero_self_pixels: false
         self_mask_pixels:
           - [[352, 238], [329, 479], [273, 479], [657, 479], [566, 479], [524, 240], [352, 238]]
       CPBLC53000ED:

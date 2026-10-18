@@ -21,6 +21,11 @@ def test_default_rig_config():
     assert cams["CPBLC53000PE"]["role"] == "near"
     assert cams["CPBLC53000ED"]["role"] == "far"
     assert cams["CPBLC53000PE"]["pitch_deg"] < cams["CPBLC53000ED"]["pitch_deg"] < 0
+    # The near camera keeps the chassis polygon for label consumers but no
+    # longer zeroes the published depth; the master BEV body self-mask does
+    # the chassis removal.
+    assert cams["CPBLC53000PE"]["zero_self_pixels"] is False
+    assert cams["CPBLC53000PE"]["self_mask_pixels"]
     bev = cfg["robots"]["default"]["bev"]
     assert (bev["range_m"], bev["width_m"], bev["cell_m"]) == (3.0, 3.0, 0.05)
     # The live master BEV is deliberately non-square: the far camera sees

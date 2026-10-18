@@ -91,9 +91,10 @@ checks), and per-camera contribution counters.
 | `bebop_vision/bev_service.py` | 10 Hz latest-wins worker + `/bev` publish |
 | `bebop_vision/videoserver.py` | `GET /bev`, `/snapshot?stream=bev`, `/whep?stream=bev` |
 | `main.py` | `--bev` standalone; auto-start during `--record-navd`; `--no-bev`, `--bev-hz` |
-| `tests/test_master_bev.py` | 12 synthetic-depth tests (both cameras, boxes, step down, source, rendering, JSON) |
+| `tests/test_master_bev.py` | synthetic-depth tests (both cameras, boxes, step down, source, rendering, JSON, per-camera planes) |
 | `tests/test_bev_service.py` | worker/cache/stale-camera tests |
-| `config/orbbec_rig.yaml` | `master_bev:` block (the legacy `bev:` 3×3 block is untouched) |
+| `tools/bev_compare.py` | capture a color+depth pair and write a color→BEV / occupancy comparison montage |
+| `config/orbbec_rig.yaml` | `master_bev:` block (the legacy `bev:` 3×3 block is untouched); near `zero_self_pixels: false` |
 
 ## Run it
 
@@ -142,6 +143,14 @@ robot on a cluttered carpet.  The per-camera fits absorb that; if the
 offset grows or the tilt persists on a known-flat floor, re-measure the
 mount.  Clutter on the floor is expected to render as occupied/inflated
 cells, not free space.
+
+The near camera keeps its chassis polygon for label consumers, but
+`zero_self_pixels: false` stops zeroing the published depth.  The body
+`robot.self_mask` removes chassis points before the BEV, so the robot is
+still not an obstacle.  Use `tools/bev_compare.py` to project the color
+image into the same grid and check occupied cells against the objects
+(the first run showed the clear floor free, boxes/bags/desk/wall occupied,
+and the thin orange streak matching a red cable on the floor).
 
 ## Known limits / next
 

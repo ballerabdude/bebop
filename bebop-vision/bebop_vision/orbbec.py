@@ -667,6 +667,12 @@ class OrbbecRig:
         for serial, c in cams.items():
             dp = tuple(c.get("depth_profile", (848, 480, 30)))
             rects, polys = parse_self_mask_entries(c.get("self_mask_pixels"))
+            # Keep the polygon in the config for consumers (the label
+            # pipeline uses it to exclude self pixels) but stop zeroing the
+            # published depth when zero_self_pixels is false.  The master BEV
+            # has its own body-frame self_mask.
+            if not bool(c.get("zero_self_pixels", True)):
+                rects, polys = None, None
             self.cameras[c["role"]] = OrbbecCamera(
                 serial=serial,
                 role=c["role"],
