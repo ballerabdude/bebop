@@ -40,6 +40,8 @@ interface MotorBenchProps {
   onOpenVoice?: () => void;
   /** When provided, render a "Places" link to the place-memory screen. */
   onOpenPlaces?: () => void;
+  /** When provided, render a "Map" link to the per-place map/graph view. */
+  onOpenMap?: () => void;
 }
 
 const MODE_LABEL: Record<RuntimeMode, string> = {
@@ -67,6 +69,7 @@ export function MotorBenchScreen({
   onOpenModels,
   onOpenVoice,
   onOpenPlaces,
+  onOpenMap,
 }: MotorBenchProps) {
   const transportRef = useRef<RuntimeTransport | null>(null);
   const [connecting, setConnecting] = useState(true);
@@ -1071,6 +1074,11 @@ export function MotorBenchScreen({
         {onOpenPlaces ? (
           <Button variant="ghost" onClick={onOpenPlaces}>
             Places
+          </Button>
+        ) : null}
+        {onOpenMap ? (
+          <Button variant="ghost" onClick={onOpenMap}>
+            Map
           </Button>
         ) : null}
         <Button variant="ghost" onClick={onBack}>

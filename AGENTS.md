@@ -42,6 +42,12 @@
   (the firmware shells out to `systemctl` and mirrors the unit state in
   telemetry, `VisionState`). `install-jetson.sh --enable-autostart` opts both
   into boot, which this robot has.
+- **Place memory is lofi by default.** A 1 Hz DINOv3 scout writes **pending**
+  places (no LLM); the app reviews/imports them in batches, optionally asking
+  the 27B for a name suggestion per place. Do not enable `--place-router` for
+  normal battery runs: it asks the 27B every tick (measured ~12 W average at a
+  45 s interval). Pending places are invisible to `whereami`/navigation until
+  imported.
 - **TensorRT Edge-LLM is the only generative runtime.** Every generative
   model (omni, or the cascade's ASR + brain + TTS, or a future VLA) is a
   `tensorrt-edgellm-serve` child — a checkpoint + an engine cache + a port.

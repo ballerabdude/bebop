@@ -121,33 +121,69 @@ def run_record_navd(args):
     # load never stalls recording or the drive loop.
     places = None
     if not args.no_places:
-        from bebop_vision.places import (DinoV3Encoder, PlaceStore,
-                                         PlacesService, RigCapture)
+        from bebop_vision.places import (DinoV3Encoder, PlaceImporter,
+                                         PlaceScout, PlaceStore,
+                                         PlacesService, RigCapture,
+                                         ScoutConfig)
+        from bebop_vision.router import ChatVLMClient
         pstore = PlaceStore(args.places_root)
         penc = DinoV3Encoder()
+        pcapture = RigCapture(rig, roles=tuple(rig.cameras.keys()))
+        # The VLM client is cheap to construct and is only called by an
+        # operator-requested import suggestion.  The scout never calls it.
+        vlm = ChatVLMClient(args.router_url, args.router_model,
+                            timeout=args.router_timeout)
+        scout = PlaceScout(
+            pstore, penc, pcapture,
+            config=ScoutConfig(
+                interval_s=args.place_scout_interval,
+                max_pending=args.place_pending_max,
+                pending_ttl_s=args.place_pending_ttl_days * 86400.0,
+            ),
+        )
+        importer = PlaceImporter(pstore, vlm)
         places = PlacesService(
             pstore,
-            capture=RigCapture(rig, roles=tuple(rig.cameras.keys())),
+            capture=pcapture,
             encoder=penc,
             port=args.places_port,
+            scout=scout,
+            importer=importer,
         )
-        places.start()
         threading.Thread(target=penc.warmup, name="places-warmup",
                          daemon=True).start()
+        places.start()
 
-        # System 1 router: a fast VLM decides whether the current view is
-        # worth remembering (first skill), and the executor writes the
-        # decision into the same place store. Off unless --place-router.
+        # Legacy System 1 router: fast VLM skills over one shared tick.  It
+        # is off by default now that the lofi scout + operator import is the
+        # normal path; enabling it still costs an LLM call per tick.
         if args.place_router:
-            from bebop_vision.router import (ChatVLMClient, PlaceMemoryExecutor,
-                                             PlaceMemorySkill, RouterService)
-            vlm = ChatVLMClient(args.router_url, args.router_model,
-                                timeout=args.router_timeout)
+            from bebop_vision.router import (
+                CaptureMapExecutor, CaptureMapSkill,
+                PlaceMemoryExecutor, PlaceMemorySkill, RouterService,
+                VoiceBusyProbe,
+            )
+            print("[router] legacy periodic LLM router enabled; the scout "
+                  "is also running", flush=True)
             rskill = PlaceMemorySkill(pstore, penc, vlm)
             rexec = PlaceMemoryExecutor(pstore, penc,
                                         cooldown_s=args.router_cooldown)
+            extra_skills = []
+            if args.live_slam:
+                structure_url = (f"http://127.0.0.1:{args.live_slam_port}"
+                                 "/structure")
+                extra_skills.append((
+                    CaptureMapSkill(pstore, penc, vlm,
+                                    structure_url=structure_url,
+                                    cooldown_s=args.router_cooldown),
+                    CaptureMapExecutor(pstore,
+                                       structure_url=structure_url,
+                                       cooldown_s=args.router_cooldown),
+                ))
             places.router = RouterService(
                 rskill, rexec, capture=places.capture,
+                skills=extra_skills,
+                voice_busy=VoiceBusyProbe(args.router_voice_url),
                 interval_s=args.router_interval,
             )
             places.router.start()
@@ -165,6 +201,55 @@ def run_record_navd(args):
             f"cannot write to {out_dir} "
             f"(owned by {out_dir.owner()}:{out_dir.group()}); fix with "
             f"'sudo chown bebop:bebop {out_dir}' or re-run install-jetson.sh")
+
+    # Live visual localization (observe-only): consumes the already-open
+    # rig slots, starts/stops with the recorder, and is independent of the
+    # recording armed state. No camera is opened here.
+    slam = None
+    slam_server = None
+
+    def stop_live_slam():
+        nonlocal slam, slam_server
+        if slam_server is not None:
+            try:
+                slam_server.stop()
+            finally:
+                slam_server = None
+        if slam is not None:
+            try:
+                slam.stop()
+            finally:
+                slam = None
+
+    if args.live_slam:
+        from bebop_vision.slam import (LiveSlam, LiveSlamConfig,
+                                       SlamStatusServer)
+        try:
+            log_path = (Path(args.live_slam_log).expanduser()
+                        if args.live_slam_log else None)
+            slam = LiveSlam(rig, LiveSlamConfig(
+                role=args.live_slam_camera,
+                rig_path=(Path(args.rig).expanduser() if args.rig else None),
+                enable_slam=bool(args.live_slam_map),
+                max_pair_delta_us=int(round(
+                    args.live_slam_max_pair_skew_ms * 1000)),
+                log_path=log_path))
+            slam.start()
+            slam_server = SlamStatusServer(slam, port=args.live_slam_port)
+            slam_server.start()
+        except Exception as exc:
+            stop_live_slam()
+            if places is not None:
+                if places.router is not None:
+                    places.router.stop()
+                places.stop()
+            if vserver is not None:
+                vserver.stop()
+            rig.stop()
+            robot.stop()
+            _release_recorder_lock()
+            raise SystemExit(f"live-slam failed to start: {exc}")
+
     from bebop_vision.orbbec import load_rig_config
     safety = load_rig_config()["robots"]["default"].get("safety", {})
     max_frame_age_s = float(safety.get("max_frame_age_s", 0.3))
@@ -205,6 +290,7 @@ def run_record_navd(args):
             pass
         finally:
             close_segment(rec, path)
+            stop_live_slam()
             if places is not None:
                 if places.router is not None:
                     places.router.stop()
@@ -270,6 +356,7 @@ def run_record_navd(args):
                 close_segment(seg, seg_path)
             except OSError as exc:
                 print(f"\n[record-navd] error closing final segment: {exc}")
+        stop_live_slam()
         if places is not None:
             if places.router is not None:
                 places.router.stop()
@@ -317,6 +404,32 @@ def main():
                         help="comma-separated camera roles to open "
                              "(default: all configured, e.g. 'near' while "
                              "the far camera's USB cable is unfixed)")
+    parser.add_argument("--live-slam", action="store_true",
+                        help="observe-only live RGB-D visual odometry/SLAM "
+                             "over the recorder's camera (no movement "
+                             "commands; status on --live-slam-port)")
+    parser.add_argument("--live-slam-camera", default="far",
+                        choices=["far", "near"],
+                        help="camera role used by --live-slam (default: far)")
+    parser.add_argument("--live-slam-max-pair-skew-ms", type=float,
+                        default=17.0,
+                        help="max color/depth device-timestamp skew for a "
+                             "valid RGB-D pair (default: 17 ms; measured Thor "
+                             "synchronized phase up to 16.6 ms = 30 Hz half "
+                             "period + rounding; 33 ms mismatches still "
+                             "rejected)")
+    parser.add_argument("--live-slam-port", type=int, default=9096,
+                        help="read-only live-SLAM status HTTP port "
+                             "(default: 9096)")
+    parser.add_argument("--live-slam-map", action="store_true",
+                        help="enable cuVSLAM SLAM and expose the separate "
+                             "corrected/map pose (needs --live-slam)")
+    parser.add_argument("--live-slam-log", default=None,
+                        help="optional JSONL path for per-frame live-SLAM "
+                             "records (needs --live-slam)")
+    parser.add_argument("--live-slam-imu", action="store_true",
+                        help="request camera IMU (rejected in this POC: no "
+                             "validated camera-to-IMU calibration)")
     parser.add_argument("--no-places", action="store_true",
                         help="do not start the semantic place-memory service "
                              "(see bebop_vision/places; default: started)")
@@ -325,10 +438,20 @@ def main():
     parser.add_argument("--places-root", default="/var/lib/bebop-places",
                         help="directory for the place DB + keyframes "
                              "(default: /var/lib/bebop-places)")
+    parser.add_argument("--place-scout-interval", type=float, default=1.0,
+                        help="seconds between lofi pending-place scans "
+                             "(default: 1.0; the scout always runs with "
+                             "--places)")
+    parser.add_argument("--place-pending-max", type=int, default=50,
+                        help="maximum pending places kept for review "
+                             "(default: 50)")
+    parser.add_argument("--place-pending-ttl-days", type=float, default=14.0,
+                        help="delete unreviewed pending places after this many "
+                             "days (default: 14)")
     parser.add_argument("--place-router", action="store_true",
-                        help="enable the System 1 place-memory router (a fast "
-                             "VLM decides when to remember; needs --places and "
-                             "an OpenAI-compatible VLM at --router-url)")
+                        help="enable the legacy every-tick System 1 LLM router "
+                             "(place memory + map capture; costs an LLM call "
+                             "per tick; the lofi scout runs regardless)")
     parser.add_argument("--router-url", default="http://127.0.0.1:8012",
                         help="OpenAI-compatible VLM base URL for the router "
                              "(default: the voice cascade brain on :8012)")
@@ -342,11 +465,22 @@ def main():
                              "the place just created (default: 180)")
     parser.add_argument("--router-timeout", type=float, default=120.0,
                         help="VLM request timeout in seconds (default: 120)")
+    parser.add_argument("--router-voice-url",
+                        default="http://127.0.0.1:9093/healthz",
+                        help="voice /healthz URL probed to skip router ticks "
+                             "while a voice turn is in flight (fail-open)")
     parser.add_argument("--robot-url", default=DEFAULT_URL)
     args = parser.parse_args()
 
     if args.place_router and args.no_places:
         parser.error("--place-router needs the place store; drop --no-places")
+    if args.live_slam_imu:
+        parser.error(
+            "--live-slam-imu is rejected in this POC: there is no validated "
+            "camera-to-IMU calibration or device/host timestamp alignment, and "
+            "identity extrinsics are not fabricated. Live SLAM is RGB-D only.")
+    if (args.live_slam_map or args.live_slam_log) and not args.live_slam:
+        parser.error("--live-slam-map/--live-slam-log need --live-slam")
 
     if not args.record_navd:
         parser.error(

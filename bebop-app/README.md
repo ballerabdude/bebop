@@ -20,7 +20,18 @@ Runs on desktop today and targets iOS and Android.
   affordance, power-board card, sticky toolbar with E-STOP.
 * **Live video** — the bebop-vision process's WebRTC (WHEP) streams
   (`:9092/whep?stream=...`): color + depth for both Orbbec cameras, each a
-  toggleable tile (`VideoScreen`).
+   toggleable tile (`VideoScreen`).
+* **Map** — open from the dashboard or motor bench to view the live colored
+  depth cloud and camera trajectory. Drag to orbit, wheel/pinch to zoom,
+  use **Fit** or **Top view**, and toggle cloud/path layers. The read-only
+  `:9096/map` feed requires live SLAM enabled in the Vision service; see
+  [SLAM setup](../docs/slam.md). This is a camera-relative odometry
+  reconstruction; geometry resets with a new tracking segment or service run.
+  **Robot POV** follows the tracked camera pose in perspective, looking
+  forward through the point cloud. It uses a 70° vertical viewer field of
+  view; orbit/zoom are locked while following. Select **Robot POV** again,
+  **Top view**, or **Fit** to return to an overview. Tracking loss or a paused
+  feed displays a waiting state rather than an assumed camera position.
 * **Teleop** — live video and driving in one screen (`TeleopScreen`): the
   primary stream front and center with other open streams docked as
   clickable thumbnails, a sticky HUD (link / mode / wheels / battery /

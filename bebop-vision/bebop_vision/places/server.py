@@ -14,11 +14,17 @@ memory over a small JSON API:
     GET    /places/{id}/keyframes/{file} the keyframe JPEG
     GET    /whereami                     recognise the current room
 
+    POST   /places/{id}/map              accumulate a :9096 /structure snapshot
+                                         ({"replace": true} starts over)
+    GET    /places/{id}/map              the place's local submap
+    GET    /places/graph                 nodes (places) + route edges
+    POST   /places/{from}/edges/{to}     record one A->B traversal
+
 When a System 1 router is attached (`router=`), it also proxies that:
 
     GET    /router/status                router state + rolling event list
     GET    /router/decisions?limit=N     recent routing decisions
-    POST   /router/assess {instruction}  one assessment now (blocking)
+    POST   /router/assess {instruction, skill}  one assessment now (blocking)
 
 The same operations are public methods, so the LLM tool layer can call them
 directly without a second HTTP hop.
@@ -57,11 +63,15 @@ class PlacesService:
         min_margin: float = 0.05,
         capture_roles=("near", "far"),
         router=None,
+        scout=None,
+        importer=None,
     ):
         self.store = store
         self.capture = capture
         self.encoder = encoder
         self.router = router
+        self.scout = scout
+        self.importer = importer
         self.host = host
         self.port = int(port)
         self.min_score = float(min_score)
@@ -86,9 +96,13 @@ class PlacesService:
             target=self._httpd.serve_forever, name="places-http", daemon=True
         )
         self._thread.start()
+        if self.scout is not None:
+            self.scout.start()
         _log(f"listening on :{self.bound_port} (root={self.store.root})")
 
     def stop(self) -> None:
+        if self.scout is not None:
+            self.scout.stop()
         if self._httpd is not None:
             self._httpd.shutdown()
             self._httpd.server_close()
@@ -96,8 +110,43 @@ class PlacesService:
 
     # -- memory operations ------------------------------------------------
 
-    def list_places(self) -> list[Place]:
-        return self.store.list_places()
+    def list_places(self, *, status: str = "confirmed") -> list[Place]:
+        return self.store.list_places(status=status)
+
+    def list_pending(self, *, limit: int = 100) -> list[dict]:
+        out: list[dict] = []
+        for place in self.store.list_pending(limit=limit):
+            item = place.to_dict(root=self.store.root)
+            if place.best_match_id:
+                target = self.store.get_place(place.best_match_id)
+                item["best_match"] = (
+                    {"id": target.id, "name": target.name,
+                     "score": (round(float(place.best_match_score), 4)
+                               if place.best_match_score is not None else None)}
+                    if target is not None else None
+                )
+            else:
+                item["best_match"] = None
+            out.append(item)
+        return out
+
+    def suggest_pending(self, id_or_name: str, *, refresh: bool = False) -> dict:
+        if self.importer is None:
+            raise ValueError("name suggestions are not configured")
+        return self.importer.suggest(id_or_name, refresh=refresh)
+
+    def import_pending(
+        self,
+        ids,
+        *,
+        names=None,
+        merge_into=None,
+        facts=None,
+    ) -> dict:
+        if self.importer is None:
+            raise ValueError("place import is not configured")
+        return self.importer.import_pending(
+            ids, names=names, merge_into=merge_into, facts=facts)
 
     def get_place(self, id_or_name: str) -> Place | None:
         return self.store.get_place(id_or_name)
@@ -198,6 +247,55 @@ class PlacesService:
             "views_total": len(result.keyframes),
         }
 
+    # -- local maps + place graph ----------------------------------------
+
+    def ingest_map(
+        self, id_or_name: str, payload: dict, *, pose=None,
+        replace: bool = False,
+    ) -> dict:
+        """Accumulate one place's submap from a structure snapshot.
+
+        By default the capture is merged into the stored evidence (anchor
+        pinned at the first capture, counts never shrink).  ``replace=True``
+        deliberately resets the place to exactly this patch.
+        """
+        place_map, created = self.store.upsert_place_map(
+            id_or_name, payload, pose=pose, replace=replace)
+        action = "replaced" if replace else ("stored" if created else "merged")
+        _log(f"{action} submap for {id_or_name!r} "
+             f"(revision {place_map.revision}, "
+             f"{place_map.width}x{place_map.height} cells, "
+             f"{len(place_map.walls)} walls)")
+        return {"map": place_map.to_dict(), "created": created,
+                "replaced": bool(replace)}
+
+    def get_map(self, id_or_name: str):
+        """The stored submap, or None when the place has never been mapped."""
+        place = self.store.get_place(id_or_name)
+        if place is None:
+            raise KeyError(id_or_name)
+        return self.store.get_place_map(place.id)
+
+    def graph(self) -> dict:
+        return self.store.graph()
+
+    def record_traversal(
+        self,
+        from_place: str,
+        to_place: str,
+        *,
+        success: bool,
+        duration_s=None,
+        guide_path=None,
+    ) -> dict:
+        edge, created = self.store.record_traversal(
+            from_place, to_place, success=success,
+            duration_s=duration_s, guide_path=guide_path)
+        _log(f"traversal {edge.from_name!r} -> {edge.to_name!r}: "
+             f"{'success' if success else 'failure'} "
+             f"({edge.successes}/{edge.traversals})")
+        return {"edge": edge.to_dict(), "created": created}
+
     def whereami(self, *, k: int = 3, roles=None) -> dict:
         """Recognise the current room by appearance.
 
@@ -218,7 +316,7 @@ class PlacesService:
             vec = self.encoder.encode_jpeg(view.jpeg)
         except Exception as exc:  # noqa: BLE001
             return {"matched": False, "reason": f"encode failed: {exc}"}
-        matches = self.store.match(vec, k=k)
+        matches = self.store.match(vec, k=k, status="confirmed")
         if not matches:
             return {"matched": False, "reason": "no places taught", "top": []}
         top = matches[0]
@@ -260,7 +358,8 @@ class PlacesService:
         return {
             "ok": True,
             "root": str(self.store.root),
-            "places": self.store.count(),
+            "places": self.store.count(status="confirmed"),
+            "pending": self.store.count(status="pending"),
             "descriptors": self.store.descriptor_count(),
             "encoder": {
                 "configured": self.encoder is not None,
@@ -271,6 +370,13 @@ class PlacesService:
             "capture": self.capture is not None,
             "min_score": self.min_score,
             "min_margin": self.min_margin,
+            "scout": (self.scout.status() if self.scout is not None
+                      else {"enabled": False}),
+            "importer": {
+                "configured": self.importer is not None,
+                "vlm": (self.importer.describe
+                        if self.importer is not None else None),
+            },
             "router": self.router.status() if self.router is not None
             else {"enabled": False},
         }
@@ -335,8 +441,16 @@ class _PlacesHandler(BaseHTTPRequestHandler):
             if parts == ["places"]:
                 return self._json({
                     "places": [p.to_dict(root=svc.store.root)
-                               for p in svc.list_places()]
+                               for p in svc.list_places()],
+                    "pending_count": svc.store.count(status="pending"),
                 })
+            if parts == ["places", "pending"]:
+                return self._json({
+                    "places": svc.list_pending(),
+                    "count": svc.store.count(status="pending"),
+                })
+            if parts == ["places", "graph"]:
+                return self._json(svc.graph())
             if parts == ["whereami"]:
                 k = int((query.get("k") or ["3"])[0])
                 return self._json(svc.whereami(k=k))
@@ -359,16 +473,24 @@ class _PlacesHandler(BaseHTTPRequestHandler):
                 if place is None:
                     return self._err(404, "no such place")
                 return self._json({"place": place.to_dict(root=svc.store.root)})
+            if (len(parts) == 3 and parts[0] == "places"
+                    and parts[2] == "map"):
+                place_map = svc.get_map(parts[1])
+                if place_map is None:
+                    return self._err(404, "no map captured for place")
+                return self._json({"map": place_map.to_dict()})
             if (len(parts) == 4 and parts[0] == "places"
                     and parts[2] == "keyframes"):
                 return self._serve_keyframe(parts[1], parts[3])
             return self._err(404, "not found")
+        except KeyError:
+            return self._err(404, "no such place")
         except ValueError as exc:
             return self._err(400, str(exc))
 
     def do_POST(self):
         self.close_connection = True
-        parts, _ = self._path()
+        parts, query = self._path()
         svc = self.svc
         try:
             body = self._body()
@@ -376,10 +498,41 @@ class _PlacesHandler(BaseHTTPRequestHandler):
                 router = self._router()
                 if router is None:
                     return
+                skill = body.get("skill")
+                if skill is None:
+                    skill = (query.get("skill") or [None])[0]
+                if skill is not None:
+                    skill = str(skill).strip()
+                    names = router.skill_names()
+                    if skill not in names:
+                        return self._err(
+                            400,
+                            f"unknown skill {skill!r}; available: "
+                            f"{', '.join(names)}")
                 instruction = body.get("instruction") or None
+                return self._json(router.assess_once(
+                    instruction=instruction, source="http", skill=skill))
+            if parts == ["places", "pending", "import"]:
+                ids = body.get("ids")
+                if not isinstance(ids, list) or not ids:
+                    return self._err(400, "ids must be a non-empty list")
+                names = body.get("names") or {}
+                merge_into = body.get("merge_into") or {}
+                facts = body.get("facts") or {}
+                if not isinstance(names, dict):
+                    return self._err(400, "names must be an object")
+                if not isinstance(merge_into, dict):
+                    return self._err(400, "merge_into must be an object")
+                if not isinstance(facts, dict):
+                    return self._err(400, "facts must be an object")
+                result = svc.import_pending(
+                    ids, names=names, merge_into=merge_into, facts=facts)
+                return self._json(result)
+            if (len(parts) == 4 and parts[0] == "places"
+                    and parts[1] == "pending" and parts[3] == "suggest"):
+                refresh = bool(body.get("refresh", False))
                 return self._json(
-                    router.assess_once(instruction=instruction, source="http")
-                )
+                    svc.suggest_pending(parts[2], refresh=refresh))
             if parts == ["places"]:
                 name = body.get("name")
                 if not name:
@@ -417,6 +570,26 @@ class _PlacesHandler(BaseHTTPRequestHandler):
                     return self._err(400, "name is required")
                 place = svc.store.rename_place(parts[1], str(name))
                 return self._json({"place": place.to_dict(root=svc.store.root)})
+            if (len(parts) == 3 and parts[0] == "places"
+                    and parts[2] == "map"):
+                replace = body.get("replace", False)
+                if not isinstance(replace, bool):
+                    raise ValueError("replace must be a boolean")
+                result = svc.ingest_map(parts[1], body, replace=replace)
+                return self._json(result,
+                                  status=201 if result["created"] else 200)
+            if (len(parts) == 4 and parts[0] == "places"
+                    and parts[2] == "edges"):
+                if "success" not in body:
+                    return self._err(400, "success is required")
+                result = svc.record_traversal(
+                    parts[1], parts[3],
+                    success=body["success"],
+                    duration_s=body.get("duration_s"),
+                    guide_path=body.get("guide_path"),
+                )
+                return self._json(result,
+                                  status=201 if result["created"] else 200)
             return self._err(404, "not found")
         except KeyError:
             return self._err(404, "no such place")

@@ -44,6 +44,7 @@ cuda-core==1.2.1
 cuda-pathfinder==1.8.3
 cuda-python==13.4.4
 cuda-toolkit==13.2.1
+cuvslam @ https://github.com/nvidia-isaac/cuVSLAM/releases/download/v17.0.1/cuvslam-17.0.1%2Bcu13-cp312-abi3-manylinux_2_39_aarch64.whl#sha256=b6b98ff484e5bc07333fb4231cf99b87906312534763dac2abfb8ed9dd5af752
 datasets==5.0.0
 dill==0.4.1
 einops==0.8.2

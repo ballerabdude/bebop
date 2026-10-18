@@ -31,11 +31,36 @@ SKIP = "skip"
 #: Insufficient/ambiguous evidence — look longer before deciding.
 DEFER = "defer"
 
+# --- decision vocabulary (place map capture) -------------------------------
+
+#: Persist the first local structure map for the recognized place.
+CAPTURE_MAP = "capture_map"
+#: Add this capture's evidence to the place's existing accumulated map.
+REFINE_MAP = "refine_map"
+#: Refuse the capture: the live map is not worth persisting. Writes nothing.
+REJECT_CAPTURE = "reject_capture"
+
 PLACE_MEMORY_DECISIONS: tuple[str, ...] = (
     REMEMBER_PLACE,
     UPDATE_PLACE,
     SKIP,
     DEFER,
+)
+
+#: Decisions the map-capture skill may emit.
+CAPTURE_DECISIONS: tuple[str, ...] = (
+    CAPTURE_MAP,
+    REFINE_MAP,
+    REJECT_CAPTURE,
+    SKIP,
+    DEFER,
+)
+
+#: Every canonical decision the router understands.
+ALL_DECISIONS: tuple[str, ...] = PLACE_MEMORY_DECISIONS + (
+    CAPTURE_MAP,
+    REFINE_MAP,
+    REJECT_CAPTURE,
 )
 
 #: Tolerated synonyms the model may emit; normalised to the canonical name.
@@ -59,6 +84,21 @@ _DECISION_ALIASES: dict[str, str] = {
     "unsure": DEFER,
     "need_more_evidence": DEFER,
     "gather_more": DEFER,
+    # map capture
+    "capture": CAPTURE_MAP,
+    "map_capture": CAPTURE_MAP,
+    "save_map": CAPTURE_MAP,
+    "create_map": CAPTURE_MAP,
+    "record_map": CAPTURE_MAP,
+    "refine": REFINE_MAP,
+    "update_map": REFINE_MAP,
+    "improve_map": REFINE_MAP,
+    "extend_map": REFINE_MAP,
+    "reject": REJECT_CAPTURE,
+    "reject_map": REJECT_CAPTURE,
+    "discard": REJECT_CAPTURE,
+    "discard_capture": REJECT_CAPTURE,
+    "not_worth_saving": REJECT_CAPTURE,
 }
 
 
@@ -110,6 +150,109 @@ class Observation:
     places_known: int = 0
 
 
+@dataclass(frozen=True)
+class StructureSummary:
+    """The small, prompt-sized view of one live ``:9096/structure`` snapshot.
+
+    The full snapshot is never shown to the model (and is never accepted from
+    it): the executor fetches it itself.  This is only the evidence the brain
+    needs to judge whether a capture is worth persisting.
+    """
+
+    gravity_valid: bool = False
+    pose_valid: bool = False
+    pose_x: float | None = None
+    pose_y: float | None = None
+    pose_yaw_deg: float | None = None
+    occupied_cells: int = 0
+    free_cells: int = 0
+    wall_count: int = 0
+    pose_delta_m: float = 0.0
+    pose_delta_yaw_deg: float = 0.0
+    revision: int | None = None
+    segment: int | None = None
+
+    @property
+    def known_cells(self) -> int:
+        return int(self.occupied_cells) + int(self.free_cells)
+
+
+@dataclass(frozen=True)
+class Recognition:
+    """The appearance match for "where am I", with its thresholds visible."""
+
+    matched: bool = False
+    place_id: str | None = None
+    place_name: str | None = None
+    score: float = 0.0
+    margin: float = 0.0
+    min_score: float = 0.0
+    min_margin: float = 0.0
+
+    @property
+    def reason(self) -> str:
+        if self.matched:
+            return "recognized"
+        if not self.place_id:
+            return "not_recognized_here"
+        return "below_threshold"
+
+
+@dataclass(frozen=True)
+class CaptureContext:
+    """Everything the map-capture skill knows before it may call the brain.
+
+    ``gate_ok``/``gate_reason`` come from the deterministic pre-gate: when the
+    gate fails the skill deflects to ``defer`` and makes **no** VLM request.
+    """
+
+    structure: StructureSummary
+    recognition: Recognition
+    place_id: str | None = None
+    place_name: str | None = None
+    has_map: bool = False
+    map_revision: int | None = None
+    map_age_s: float | None = None
+    map_known_cells: int = 0
+    cells_gained: int = 0
+    gate_ok: bool = False
+    gate_reason: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "gate": {"ok": bool(self.gate_ok), "reason": self.gate_reason},
+            "place": {
+                "id": self.place_id,
+                "name": self.place_name,
+                "recognized": self.recognition.matched,
+                "score": round(float(self.recognition.score), 4),
+                "margin": round(float(self.recognition.margin), 4),
+            },
+            "structure": {
+                "gravity_valid": self.structure.gravity_valid,
+                "pose_valid": self.structure.pose_valid,
+                "pose": [self.structure.pose_x, self.structure.pose_y,
+                         self.structure.pose_yaw_deg],
+                "occupied_cells": self.structure.occupied_cells,
+                "free_cells": self.structure.free_cells,
+                "known_cells": self.structure.known_cells,
+                "wall_count": self.structure.wall_count,
+                "pose_delta_m": round(float(self.structure.pose_delta_m), 4),
+                "pose_delta_yaw_deg": round(
+                    float(self.structure.pose_delta_yaw_deg), 3),
+                "revision": self.structure.revision,
+                "segment": self.structure.segment,
+            },
+            "map": {
+                "has_map": self.has_map,
+                "revision": self.map_revision,
+                "age_s": self.map_age_s,
+                "known_cells": self.map_known_cells,
+                "cells_gained": self.cells_gained,
+            },
+        }
+
+
 @dataclass
 class SkillDecision:
     """One routing decision, normalised."""
@@ -124,7 +267,8 @@ class SkillDecision:
 
     @property
     def actionable(self) -> bool:
-        return self.decision in (REMEMBER_PLACE, UPDATE_PLACE)
+        return self.decision in (
+            REMEMBER_PLACE, UPDATE_PLACE, CAPTURE_MAP, REFINE_MAP)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -145,7 +289,7 @@ def normalize_decision(name: Any) -> str | None:
     text = str(name or "").strip().lower().replace(" ", "_").replace("-", "_")
     if not text:
         return None
-    if text in PLACE_MEMORY_DECISIONS:
+    if text in ALL_DECISIONS:
         return text
     return _DECISION_ALIASES.get(text)
 

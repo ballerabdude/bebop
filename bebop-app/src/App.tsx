@@ -4,6 +4,7 @@ import { SetupTransport } from "./ble";
 import { ConfigScreen } from "./screens/ConfigScreen";
 import { ConnectByIpScreen } from "./screens/ConnectByIpScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
+import { MapScreen } from "./screens/MapScreen";
 import { MotorBenchScreen } from "./screens/MotorBenchScreen";
 import { ModelsScreen } from "./screens/ModelsScreen";
 import { PlacesScreen } from "./screens/PlacesScreen";
@@ -28,6 +29,8 @@ type Step =
   | "direct-motors"
   | "direct-teleop"
   | "direct-video"
+  | "map"
+  | "direct-map"
   | "motors"
   | "teleop"
   | "video"
@@ -41,6 +44,7 @@ type Step =
 function containerWidth(step: Step): string {
   if (step === "motors" || step === "direct-motors") return "max-w-6xl";
   if (step === "teleop" || step === "direct-teleop") return "max-w-6xl";
+  if (step === "map" || step === "direct-map") return "max-w-6xl";
   if (step === "dashboard") return "max-w-3xl";
   if (step === "models" || step === "direct-models") return "max-w-3xl";
   if (step === "voice" || step === "direct-voice") return "max-w-3xl";
@@ -78,6 +82,7 @@ function App() {
     null,
   );
   const [teleopReturn, setTeleopReturn] = useState<Step>("dashboard");
+  const [mapReturn, setMapReturn] = useState<Step>("dashboard");
 
   // Robot IP learned once Wi-Fi is up (used to open the operator screens).
   const [robotIp, setRobotIp] = useState<string>("");
@@ -167,6 +172,10 @@ function App() {
             onOpenModels={() => setStep("models")}
             onOpenVoice={() => setStep("voice")}
             onOpenPlaces={() => setStep("places")}
+            onOpenMap={() => {
+              setMapReturn("dashboard");
+              setStep("map");
+            }}
           />
         ) : null}
 
@@ -182,6 +191,10 @@ function App() {
             onOpenModels={() => setStep("models")}
             onOpenVoice={() => setStep("voice")}
             onOpenPlaces={() => setStep("places")}
+            onOpenMap={() => {
+              setMapReturn("motors");
+              setStep("map");
+            }}
           />
         ) : null}
 
@@ -198,6 +211,28 @@ function App() {
             onOpenModels={() => setStep("direct-models")}
             onOpenVoice={() => setStep("direct-voice")}
             onOpenPlaces={() => setStep("direct-places")}
+            onOpenMap={() => {
+              setMapReturn("direct-motors");
+              setStep("direct-map");
+            }}
+          />
+        ) : null}
+
+        {step === "map" && robotIp ? (
+          <MapScreen
+            robotIp={robotIp}
+            onBack={() => setStep(mapReturn)}
+            backLabel={
+              mapReturn === "motors" ? "Back to motor bench" : "Back to dashboard"
+            }
+          />
+        ) : null}
+
+        {step === "direct-map" && directIp ? (
+          <MapScreen
+            robotIp={directIp.ip}
+            onBack={() => setStep("direct-motors")}
+            backLabel="Back to motor bench"
           />
         ) : null}
 

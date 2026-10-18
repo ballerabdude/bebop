@@ -15,23 +15,30 @@ import pytest
 
 from bebop_vision.places import PlaceStore, PlacesService, StaticCapture
 from bebop_vision.places import View as PlaceView
+from bebop_vision.places.submap import encode_rle, rle_true_count
 from bebop_vision.router import (
+    CAPTURE_MAP,
     DEFER,
+    REFINE_MAP,
+    REJECT_CAPTURE,
     REMEMBER_PLACE,
     SKIP,
     UPDATE_PLACE,
+    CaptureMapExecutor,
+    CaptureMapSkill,
     DecisionParseError,
     PlaceMemoryExecutor,
     PlaceMemorySkill,
     RouterService,
     ScriptedVLMClient,
     View,
+    VoiceBusyProbe,
     build_messages,
     extract_json_object,
     normalize_decision,
     parse_decision,
 )
-from bebop_vision.router.schema import Observation, Candidate
+from bebop_vision.router.schema import Candidate, Observation, SkillDecision
 
 
 def _jpeg(value: int) -> bytes:
@@ -64,6 +71,85 @@ class FakeEncoder:
 
 def _reply(**kwargs) -> str:
     return json.dumps(kwargs)
+
+
+def _map_snapshot(
+    *,
+    occupied=None,
+    free=None,
+    width=4,
+    height=3,
+    origin=(-0.5, -0.4),
+    resolution=0.05,
+    pose=(1.0, 2.0, 10.0),
+    pose_valid=True,
+    gravity_valid=True,
+    walls=None,
+    pose_delta_m=None,
+    revision=1,
+):
+    """A valid :9096 /structure snapshot for capture tests."""
+    occ = (np.zeros((height, width), dtype=bool) if occupied is None
+           else np.asarray(occupied, dtype=bool))
+    fr = (np.zeros((height, width), dtype=bool) if free is None
+          else np.asarray(free, dtype=bool))
+    body = {
+        "frame_id": "map",
+        "gravity": {
+            "valid": gravity_valid,
+            "up": [0.0, -1.0, 0.0] if gravity_valid else None,
+            "roll_deg": 0.0 if gravity_valid else None,
+            "pitch_deg": 1.0 if gravity_valid else None,
+        },
+        "floor": {
+            "valid": gravity_valid,
+            "normal": [0.0, -1.0, 0.0] if gravity_valid else None,
+            "offset_m": 1.3 if gravity_valid else None,
+            "camera_height_m": 1.3 if gravity_valid else None,
+        },
+        "grid": {
+            "origin": [float(origin[0]), float(origin[1])],
+            "resolution_m": float(resolution),
+            "width": int(width),
+            "height": int(height),
+            "occupied_count": int(occ.sum()),
+            "free_count": int(fr.sum()),
+            "encoding": "rle_base64",
+            "occupied_rle": encode_rle(occ),
+            "free_rle": encode_rle(fr),
+        },
+        "walls": [] if walls is None else walls,
+        "wall_cells": [],
+        "pose": {
+            "valid": pose_valid,
+            "x": float(pose[0]) if pose_valid else None,
+            "y": float(pose[1]) if pose_valid else None,
+            "yaw_deg": float(pose[2]) if pose_valid else None,
+            "t_ns": 123,
+            "segment": 0,
+        },
+        "revision": revision,
+    }
+    if pose_delta_m is not None:
+        body["pose_delta_m"] = float(pose_delta_m)
+    return body
+
+
+def _recognizer(place, *, matched=True, score=0.9, margin=0.4):
+    """A /whereami-shaped recognizer (no camera or encoder needed)."""
+
+    def recognize(_views):
+        return {
+            "matched": matched and place is not None,
+            "place": ({"id": place.id, "name": place.name}
+                      if matched and place is not None else None),
+            "score": score,
+            "margin": margin,
+            "min_score": 0.5,
+            "min_margin": 0.05,
+        }
+
+    return recognize
 
 
 @pytest.fixture()
@@ -394,6 +480,486 @@ def test_service_loop_runs_and_stops(store, tmp_path):
     assert svc.status()["running"] is False
 
 
+# --- map-capture skill ------------------------------------------------------
+
+
+def _capture_skill(store, replies, *, snapshot=None, recognizer=None, **kw):
+    vlm = ScriptedVLMClient(replies)
+    if snapshot is None:
+        snapshot = _map_snapshot(free=np.ones((3, 4), dtype=bool))
+    fetch = snapshot if callable(snapshot) else (lambda: snapshot)
+    kw.setdefault("motion_window_s", 0.0)
+    kw.setdefault("min_cells", 1)
+    kw.setdefault("clock", Clock())
+    skill = CaptureMapSkill(
+        store, FakeEncoder(), vlm, structure_fetch=fetch,
+        recognizer=recognizer, **kw,
+    )
+    return skill, vlm
+
+
+def test_capture_gate_failures_defer_after_asking_the_vlm(store):
+    p = store.create_place("Lab")
+    views = [View("far", _jpeg(20), 1)]
+    cases = [
+        ("gravity_invalid", "gate_gravity_invalid",
+         _map_snapshot(gravity_valid=False), None),
+        ("pose_invalid", "gate_pose_invalid",
+         _map_snapshot(pose_valid=False), None),
+        ("robot_moving", "gate_moving", _map_snapshot(
+            pose_delta_m=1.0, free=np.ones((3, 4), dtype=bool)), None),
+        ("too_few_cells", "gate_too_few_cells", _map_snapshot(), None),
+        ("not_recognized_here", "gate_not_recognized_here",
+         _map_snapshot(free=np.ones((3, 4), dtype=bool)),
+         _recognizer(p, matched=False)),
+    ]
+    for gate_reason, expected, snap, recognizer in cases:
+        skill, vlm = _capture_skill(
+            store, _reply(decision="capture_map"),
+            snapshot=snap,
+            recognizer=recognizer or _recognizer(p),
+            min_cells=1,
+        )
+        out = skill.assess(views)
+        # The model is prompted every tick, even with a closed gate.
+        assert len(vlm.calls) == 1
+        assert out.decision.decision == DEFER
+        assert out.decision.reason_code == expected
+        assert out.decision.arguments["gate_reason"] == gate_reason
+        ex = CaptureMapExecutor(store, structure_fetch=lambda: snap,
+                                cooldown_s=0.0)
+        assert ex.apply(out.decision)["written"] is False
+        assert store.get_place_map(p.id) is None
+
+
+def test_capture_target_must_be_the_recognized_place(store):
+    here = store.create_place("Lab")
+    elsewhere = store.create_place("Kitchen")
+    skill, vlm = _capture_skill(
+        store, _reply(decision="capture_map"),
+        recognizer=_recognizer(here), min_cells=1,
+    )
+    out = skill.assess([View("far", _jpeg(20), 1)],
+                       target_place_id=elsewhere.id)
+    assert out.decision.reason_code == "gate_not_recognized_here"
+    assert out.decision.arguments["gate_reason"] == "not_recognized_here"
+    assert len(vlm.calls) == 1
+    assert store.get_place_map(here.id) is None
+
+
+def test_capture_map_applies_via_the_executor(store):
+    p = store.create_place("Lab")
+    occ = np.zeros((3, 4), dtype=bool)
+    occ[1, 1] = True
+    snap = _map_snapshot(occupied=occ)
+    skill, vlm = _capture_skill(
+        store,
+        _reply(decision="capture_map", reason_code="new_map",
+               confidence=0.9, arguments={"place_id": p.id},
+               observations=["a lab bench"]),
+        snapshot=snap, recognizer=_recognizer(p),
+    )
+    out = skill.assess([View("far", _jpeg(20), 1)])
+    assert out.context is not None and out.context.gate_ok is True
+    assert out.context.place_id == p.id
+    assert out.decision.decision == CAPTURE_MAP
+    assert len(vlm.calls) == 1
+
+    ex = CaptureMapExecutor(store, structure_fetch=lambda: snap, cooldown_s=0.0)
+    applied = ex.apply(out.decision)
+    assert applied["applied"] is True
+    assert applied["created"] is True and applied["written"] is True
+    place_map = store.get_place_map(p.id)
+    assert place_map is not None and place_map.revision == 1
+    assert rle_true_count(place_map.occupied_rle) == 1
+    assert applied["revision"] == 1
+
+
+def test_reject_capture_writes_nothing(store):
+    p = store.create_place("Lab")
+    snap = _map_snapshot(free=np.ones((3, 4), dtype=bool))
+    skill, _ = _capture_skill(
+        store, _reply(decision="reject_capture", reason_code="thin_map",
+                      arguments={"place_id": p.id}),
+        snapshot=snap, recognizer=_recognizer(p),
+    )
+    out = skill.assess([View("far", _jpeg(20), 1)])
+    assert out.decision.decision == REJECT_CAPTURE
+    ex = CaptureMapExecutor(store, structure_fetch=lambda: snap, cooldown_s=0.0)
+    applied = ex.apply(out.decision)
+    assert applied["applied"] is False
+    assert applied["written"] is False
+    assert store.get_place_map(p.id) is None
+
+
+def test_unknown_capture_decision_defers_and_writes_nothing(store):
+    p = store.create_place("Lab")
+    snap = _map_snapshot(free=np.ones((3, 4), dtype=bool))
+    skill, _ = _capture_skill(
+        store, _reply(decision="teleport", arguments={"place_id": p.id}),
+        snapshot=snap, recognizer=_recognizer(p),
+    )
+    out = skill.assess([View("far", _jpeg(20), 1)])
+    assert out.decision.decision == DEFER
+    assert out.decision.reason_code == "unknown_decision"
+    ex = CaptureMapExecutor(store, structure_fetch=lambda: snap, cooldown_s=0.0)
+    assert ex.apply(out.decision)["written"] is False
+    assert store.get_place_map(p.id) is None
+
+
+def test_executor_cooldown_suppresses_a_repeat_capture(store):
+    p = store.create_place("Lab")
+    snap = _map_snapshot(free=np.ones((3, 4), dtype=bool))
+    clock = Clock(1000.0)
+    ex = CaptureMapExecutor(store, structure_fetch=lambda: snap,
+                            cooldown_s=180.0, clock=clock)
+    decision = SkillDecision(decision=CAPTURE_MAP,
+                             arguments={"place_id": p.id})
+    first = ex.apply(decision)
+    assert first["applied"] is True and first["revision"] == 1
+
+    second = ex.apply(decision)
+    assert second["applied"] is False
+    assert second["reason_code"] == "cooldown"
+    assert store.get_place_map(p.id).revision == 1
+
+    clock.t += 181.0
+    third = ex.apply(decision)
+    assert third["applied"] is True
+    assert store.get_place_map(p.id).revision == 2
+
+
+def test_executor_ignores_geometry_authored_by_the_model(store):
+    p = store.create_place("Lab")
+    occ = np.zeros((3, 4), dtype=bool)
+    occ[2, 3] = True
+    snap = _map_snapshot(occupied=occ)
+    ex = CaptureMapExecutor(store, structure_fetch=lambda: snap, cooldown_s=0.0)
+    injected = SkillDecision(
+        decision=CAPTURE_MAP,
+        arguments={
+            "place_id": p.id,
+            # A hostile/hallucinated payload must be ignored completely.
+            "grid": {"width": 99, "height": 99, "occupied_rle": "bogus"},
+            "occupied_rle": "bogus",
+            "occupied_count": 999,
+            "walls": [[9.0, 9.0, 9.0, 9.0]],
+        },
+    )
+    out = ex.apply(injected)
+    assert out["applied"] is True
+    place_map = store.get_place_map(p.id)
+    assert (place_map.width, place_map.height) == (4, 3)
+    assert rle_true_count(place_map.occupied_rle) == 1
+    assert place_map.walls == []
+
+
+def test_capture_is_assessed_on_every_service_tick(store):
+    svc, lab, place_vlm, cap_vlm = _multi_service(
+        store,
+        _reply(decision="skip", reason_code="seen"),
+        _reply(decision="skip", reason_code="nothing_new"),
+    )
+    for _ in range(3):
+        out = svc.tick()
+        assert out["ok"] is True
+        assert {result["skill"] for result in out["results"]} == {
+            "place_memory", "capture_map"}
+    # There is no event-trigger skip path: both brains were asked every tick.
+    assert len(place_vlm.calls) == 3
+    assert len(cap_vlm.calls) == 3
+    assert store.get_place_map(lab.id) is None
+    assert not hasattr(svc.skills[1].skill, "event_trigger")
+
+    status = svc.status()
+    capture = next(s for s in status["skills"] if s["name"] == "capture_map")
+    assert capture["event_gated"] is False
+    assert capture["last_trigger"] is None
+    assert capture["gate"]["evaluated"] is True
+
+
+def test_capture_loop_prompts_the_vlm_every_tick(store):
+    import time
+
+    p = store.create_place("Lab")
+    snap = _map_snapshot(free=np.ones((3, 4), dtype=bool))
+    skill, vlm = _capture_skill(
+        store, _reply(decision="skip", reason_code="nothing_new"),
+        snapshot=snap, recognizer=_recognizer(p),
+    )
+    ex = CaptureMapExecutor(store, structure_fetch=lambda: snap,
+                            cooldown_s=180.0)
+    svc = RouterService(
+        skill, ex, StaticCapture([PlaceView("far", _jpeg(20), 1)]),
+        interval_s=0.02, initial_delay_s=0.01,
+    )
+    svc.start()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and len(vlm.calls) < 2:
+        time.sleep(0.02)
+    svc.stop()
+    assert len(vlm.calls) >= 2  # no event-trigger skip path
+
+
+def test_gate_failure_is_recorded_and_writes_nothing(store):
+    p = store.create_place("Lab")
+    snap = _map_snapshot(pose_valid=False,
+                         free=np.ones((3, 4), dtype=bool))
+    skill, vlm = _capture_skill(
+        store, _reply(decision="capture_map"), snapshot=snap,
+        recognizer=_recognizer(p), min_cells=1,
+    )
+    ex = CaptureMapExecutor(store, structure_fetch=lambda: snap, cooldown_s=0.0)
+    svc = RouterService(
+        skill, ex, StaticCapture([PlaceView("far", _jpeg(20), 1)]))
+
+    out = svc.tick()
+    assert len(vlm.calls) == 1          # asked even though the gate is closed
+    rec = out["record"]
+    assert rec["decision"] == DEFER
+    assert rec["reason_code"] == "gate_pose_invalid"
+    assert rec["gate_reason"] == "pose_invalid"
+    assert rec["applied"] is False
+    assert store.get_place_map(p.id) is None
+    assert svc.decisions()[0]["gate_reason"] == "pose_invalid"
+
+
+def test_service_tick_skips_voice_and_cooldown_blocks_repeat_writes(store):
+    p = store.create_place("Lab")
+    snap = _map_snapshot(free=np.ones((3, 4), dtype=bool))
+    clock = Clock(1000.0)
+    skill, vlm = _capture_skill(
+        store, _reply(decision="capture_map"), snapshot=snap,
+        recognizer=_recognizer(p), clock=clock,
+    )
+    ex = CaptureMapExecutor(store, structure_fetch=lambda: snap,
+                            cooldown_s=180.0, clock=clock)
+    busy = {"value": True}
+    svc = RouterService(
+        skill, ex, StaticCapture([PlaceView("far", _jpeg(20), 1)]),
+        voice_busy=lambda: busy["value"],
+    )
+
+    out = svc.tick()
+    assert out["skipped"] == "voice_busy"
+    assert vlm.calls == []
+
+    busy["value"] = False
+    first = svc.tick()
+    assert first["ok"] is True
+    assert first["applied"]["action"] == CAPTURE_MAP
+    assert store.get_place_map(p.id).revision == 1
+    assert len(vlm.calls) == 1
+
+    # The brain is still asked every tick; the executor cooldown suppresses
+    # the second write even though the model keeps saying capture_map.
+    second = svc.tick()
+    assert second["ok"] is True
+    assert second["record"]["applied"] is False
+    assert second["applied"]["reason_code"] == "cooldown"
+    assert store.get_place_map(p.id).revision == 1
+    assert len(vlm.calls) == 2
+    assert skill.gate_status()["in_cooldown"] is True
+
+    clock.t += 181.0
+    third = svc.tick()
+    assert third["record"]["applied"] is True
+    assert store.get_place_map(p.id).revision == 2
+    assert len(vlm.calls) == 3
+
+
+
+
+
+# --- multi-skill wiring -----------------------------------------------------
+
+
+def _multi_service(store, place_reply, capture_reply, *, snapshot=None,
+                   voice_busy=None, capture_kw=None):
+    lab = store.create_place("Lab")
+    snap = snapshot or _map_snapshot(free=np.ones((3, 4), dtype=bool))
+    place_skill, place_vlm = _skill(store, FakeEncoder(), place_reply)
+    cap_skill, cap_vlm = _capture_skill(
+        store, capture_reply, snapshot=snap, recognizer=_recognizer(lab),
+        place_stable_s=(capture_kw or {}).get("place_stable_s", 0.0),
+        min_cells_gained=(capture_kw or {}).get("min_cells_gained", 100),
+        cooldown_s=(capture_kw or {}).get("cooldown_s", 0.0),
+    )
+    place_ex = PlaceMemoryExecutor(store, FakeEncoder(), cooldown_s=0.0)
+    cap_ex = CaptureMapExecutor(store, structure_fetch=lambda: snap,
+                                cooldown_s=0.0)
+    svc = RouterService(
+        place_skill, place_ex,
+        capture=StaticCapture([PlaceView("far", _jpeg(20), 1)]),
+        skills=[(cap_skill, cap_ex)],
+        voice_busy=voice_busy,
+    )
+    return svc, lab, place_vlm, cap_vlm
+
+
+def test_two_registrations_are_both_evaluated(store):
+    svc, lab, place_vlm, cap_vlm = _multi_service(
+        store,
+        _reply(decision="remember_place", arguments={"name": "Workshop"}),
+        _reply(decision="capture_map"),
+    )
+    out = svc.tick()
+    assert out["ok"] is True
+    assert {result["skill"] for result in out["results"]} == {
+        "place_memory", "capture_map"}
+    assert len(place_vlm.calls) == 1
+    assert len(cap_vlm.calls) == 1
+    assert store.get_place("Workshop") is not None
+    assert store.get_place_map(lab.id) is not None
+    assert svc.status()["registrations"] == 2
+    assert [s["name"] for s in svc.status()["skills"]] == [
+        "place_memory", "capture_map"]
+
+
+def test_multi_skill_tick_skips_off_while_voice_busy(store):
+    svc, _lab, place_vlm, cap_vlm = _multi_service(
+        store,
+        _reply(decision="remember_place", arguments={"name": "Workshop"}),
+        _reply(decision="capture_map", arguments={"place_id": "ignored"}),
+        voice_busy=lambda: True,
+    )
+    assert svc.tick() == {"ok": False, "skipped": "voice_busy"}
+    assert place_vlm.calls == [] and cap_vlm.calls == []
+
+
+def test_single_registration_constructor_is_backward_compatible(store):
+    a = _jpeg(20)
+    skill, vlm = _skill(store, FakeEncoder({a: [1, 0, 0, 0]}),
+                        _reply(decision="skip"))
+    executor = PlaceMemoryExecutor(store, FakeEncoder())
+    svc = RouterService(skill, executor, StaticCapture([PlaceView("far", a, 1)]))
+    assert len(svc.registrations) == 1
+    assert svc.skill is skill and svc.executor is executor
+    out = svc.tick()
+    assert out["ok"] is True
+    assert len(vlm.calls) == 1
+    assert svc.status()["registrations"] == 1
+
+
+def test_voice_busy_probe_uses_a_signal_and_fails_open():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    state = {"body": {"phase": "ready"}}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            data = json.dumps(state["body"]).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{httpd.server_address[1]}/healthz"
+    try:
+        probe = VoiceBusyProbe(url, timeout=0.5)
+        assert probe() is False          # no signal -> fail open
+        state["body"] = {"turn_active": True}
+        assert probe() is True
+        state["body"] = {"in_flight": 0}
+        assert probe() is False
+        state["body"] = {"busy": "false"}  # strings are not a busy signal
+        assert probe() is False
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    # A dead service must fail open, not raise or block the tick.
+    dead = VoiceBusyProbe(url, timeout=0.1)
+    assert dead() is False
+
+
+
+
+
+def test_capture_gate_status_updates_on_every_assessment(store):
+    p = store.create_place("Lab")
+    snap = _map_snapshot(free=np.ones((3, 4), dtype=bool))
+    clock = Clock(100.0)
+    skill, vlm = _capture_skill(
+        store, _reply(decision="skip", reason_code="seen"), snapshot=snap,
+        recognizer=_recognizer(p), clock=clock, cooldown_s=180.0,
+    )
+    views = [View("far", _jpeg(20), 1)]
+
+    # Every assess call prompts the brain and refreshes gate telemetry.
+    assert skill.assess(views).decision.decision == SKIP
+    gate = skill.gate_status()
+    assert gate["evaluated"] is True
+    assert gate["gate_ok"] is True
+    assert gate["place_id"] == p.id
+    assert gate["place_changed"] is True
+    assert gate["stable_for_s"] == pytest.approx(0.0)
+    assert gate["place_stable_s"] == pytest.approx(10.0)
+    assert gate["cells_gained"] == 12
+    assert gate["min_cells_gained"] == 100
+    assert gate["in_cooldown"] is False
+    assert "trigger" not in gate  # event triggers are gone
+    assert len(vlm.calls) == 1
+
+    clock.t = 120.0
+    assert skill.assess(views).decision.decision == SKIP
+    gate = skill.gate_status()
+    assert gate["stable_for_s"] == pytest.approx(20.0)
+    assert gate["place_changed"] is False
+    assert len(vlm.calls) == 2
+
+    # Cooldown after a successful capture is visible without gating the prompt.
+    skill.note_outcome({"applied": True, "place_id": p.id})
+    clock.t = 130.0
+    assert skill.assess(views).decision.decision == SKIP
+    gate = skill.gate_status()
+    assert gate["in_cooldown"] is True
+    assert gate["cooldown_remaining_s"] == pytest.approx(170.0)
+    assert len(vlm.calls) == 3
+
+
+def test_router_status_exposes_each_skills_gate(store):
+    svc, lab, _place_vlm, cap_vlm = _multi_service(
+        store,
+        _reply(decision="skip", reason_code="seen"),
+        _reply(decision="capture_map"),
+        capture_kw={"place_stable_s": 10.0},
+    )
+    out = svc.tick()
+    assert out["results"][1]["ok"] is True
+    assert len(cap_vlm.calls) == 1
+    assert store.get_place_map(lab.id) is not None
+
+    status = svc.status()
+    json.dumps(status)  # /router/status must stay JSON-serializable
+    capture = next(s for s in status["skills"] if s["name"] == "capture_map")
+    assert capture["event_gated"] is False  # prompted every tick
+    assert capture["last_trigger"] is None
+    gate = capture["gate"]
+    assert gate["evaluated"] is True
+    assert gate["gate_ok"] is True
+    assert gate["stable_for_s"] == pytest.approx(0.0)
+    assert gate["place_stable_s"] == pytest.approx(10.0)
+    assert "place_changed" in gate
+    assert gate["cells_gained"] >= 0
+    assert gate["min_cells_gained"] == 100
+    assert gate["in_cooldown"] is False
+    assert "trigger" not in gate
+
+    place = next(s for s in status["skills"] if s["name"] == "place_memory")
+    assert "gate" not in place  # only skills that expose one
+
+
+
+
+
 # --- HTTP -------------------------------------------------------------------
 
 
@@ -439,6 +1005,65 @@ def test_http_router_endpoints(tmp_path):
 
         _, status_body = _get(port, "/router/status")
         assert status_body["assessments"] == 1
+    finally:
+        svc.stop()
+        store.close()
+
+
+def test_http_router_assess_skill_target(tmp_path):
+    a = _jpeg(20)
+    store = PlaceStore(tmp_path / "places")
+    lab = store.create_place("Lab")
+    snap = _map_snapshot(free=np.ones((3, 4), dtype=bool))
+
+    place_vlm = ScriptedVLMClient(_reply(decision="skip", reason_code="seen"))
+    place_skill = PlaceMemorySkill(store, FakeEncoder(), place_vlm)
+    cap_vlm = ScriptedVLMClient(_reply(decision="capture_map"))
+    cap_skill = CaptureMapSkill(
+        store, FakeEncoder(), cap_vlm, structure_fetch=lambda: snap,
+        recognizer=_recognizer(lab), motion_window_s=0.0, min_cells=1,
+    )
+    router = RouterService(
+        place_skill, PlaceMemoryExecutor(store, FakeEncoder(), cooldown_s=0.0),
+        StaticCapture([PlaceView("far", a, 1)]),
+        skills=[(cap_skill,
+                 CaptureMapExecutor(store, structure_fetch=lambda: snap,
+                                    cooldown_s=0.0))],
+    )
+    svc = PlacesService(store, capture=StaticCapture([]), encoder=FakeEncoder(),
+                        host="127.0.0.1", port=0, router=router)
+    svc.start()
+    try:
+        port = svc.bound_port
+
+        # Select capture_map by body: place memory must not be called.
+        status, out = _post(port, "/router/assess",
+                            {"skill": "capture_map"})
+        assert status == 200
+        assert out["applied"]["action"] == CAPTURE_MAP
+        assert out["record"]["skill"] == "capture_map"
+        assert place_vlm.calls == []
+        assert store.get_place_map(lab.id) is not None
+        first_revision = store.get_place_map(lab.id).revision
+
+        # And by query string.
+        status, out = _post(port, "/router/assess?skill=capture_map", {})
+        assert status == 200
+        assert out["record"]["skill"] == "capture_map"
+        assert store.get_place_map(lab.id).revision == first_revision + 1
+
+        # An unknown skill is a 400 that lists what is registered.
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(port, "/router/assess", {"skill": "nope"})
+        assert exc.value.code == 400
+        error = json.loads(exc.value.read())["error"]
+        assert "place_memory" in error and "capture_map" in error
+
+        # No skill target keeps the original primary-skill behaviour.
+        status, out = _post(port, "/router/assess", {})
+        assert status == 200
+        assert out["record"]["skill"] == "place_memory"
+        assert len(place_vlm.calls) == 1
     finally:
         svc.stop()
         store.close()

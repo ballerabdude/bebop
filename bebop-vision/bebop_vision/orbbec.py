@@ -131,6 +131,12 @@ class StampedFrame:
     color_jpeg: bytes = None   # camera-encoded MJPEG bytes, or None
     serial: str = ""
     role: str = ""
+    # Device timestamp of the color frame in the same FrameSet (None when
+    # the SDK/stream cannot supply it). Live RGB-D pairing requires it.
+    color_stamp_us: int = None
+    # SDK millimetres-per-raw-unit for the uint16 depth payload
+    # (get_depth_scale). None = unknown; consumers must not assume mm.
+    depth_scale_mm: float = None
 
     def age_s(self, now=None):
         return (now or time.monotonic()) - self.recv_ts
@@ -530,6 +536,14 @@ class OrbbecCamera:
                 depth = fs.get_depth_frame()
                 if depth is None:
                     continue
+                # Read device metadata from the SDK frame BEFORE post-filters:
+                # filter wrappers need not expose DepthFrame's timestamp/scale
+                # accessors, while filtering preserves both values.
+                stamp_us = int(depth.get_timestamp_us())
+                try:
+                    depth_scale_mm = float(depth.get_depth_scale())
+                except Exception:
+                    depth_scale_mm = None
                 for f in self._filters:
                     depth = f.process(depth)
                     if depth is None:
@@ -542,6 +556,7 @@ class OrbbecCamera:
                     arr[self._pix_mask] = 0
                 color = None
                 color_jpeg = None
+                color_stamp_us = None
                 if self.color_profile:
                     cf = fs.get_color_frame()
                     if cf is not None:
@@ -554,7 +569,10 @@ class OrbbecCamera:
                         else:
                             color = np.frombuffer(cdata, dtype=np.uint8).reshape(
                                 cf.get_height(), cf.get_width(), 3).copy()
-                stamp_us = int(depth.get_timestamp_us())
+                        try:
+                            color_stamp_us = int(cf.get_timestamp_us())
+                        except Exception:
+                            color_stamp_us = None
             except Exception as exc:
                 # Mid-run drop: log, keep the slot stale (deadman stops the
                 # robot), and retry — never take down the control loop.
@@ -565,7 +583,8 @@ class OrbbecCamera:
                 depth=arr, stamp_us=stamp_us, recv_ts=time.monotonic(),
                 width=self.width, height=self.height, fps=self.fps,
                 color=color, color_jpeg=color_jpeg, serial=self.serial,
-                role=self.role)
+                role=self.role, color_stamp_us=color_stamp_us,
+                depth_scale_mm=depth_scale_mm)
             with self._lock:
                 self._frame = frame
                 self._history.append(frame)

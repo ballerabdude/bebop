@@ -24,6 +24,8 @@ interface DashboardProps {
   onOpenVoice: () => void;
   /** Open the semantic place-memory screen (rooms the robot remembers). */
   onOpenPlaces: () => void;
+  /** Open the per-place local map + place-graph viewer. */
+  onOpenMap: () => void;
 }
 
 /// Live dashboard shown after setup. Stays connected to the provisioning
@@ -38,6 +40,7 @@ export function DashboardScreen({
   onOpenModels,
   onOpenVoice,
   onOpenPlaces,
+  onOpenMap,
 }: DashboardProps) {
   const [info, setInfo] = useState<DeviceInfo | null>(null);
   const [wifi, setWifi] = useState<WifiStatus | null>(null);
@@ -244,6 +247,9 @@ export function DashboardScreen({
         </Button>
         <Button variant="secondary" onClick={onOpenPlaces} disabled={!reachable}>
           Places &amp; rooms
+        </Button>
+        <Button variant="secondary" onClick={onOpenMap} disabled={!reachable}>
+          Map
         </Button>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           <Button variant="secondary" onClick={onReconfigure}>

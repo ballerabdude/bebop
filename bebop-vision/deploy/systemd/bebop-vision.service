@@ -20,10 +20,13 @@ User=root
 Group=root
 WorkingDirectory=/home/bebop/bebop/bebop-vision
 Environment=PYTHONUNBUFFERED=1
+# Optional features share this recorder's cameras. For the app Map page set
+# BEBOP_VISION_EXTRA_ARGS="--live-slam --live-slam-map" in vision.env.
+EnvironmentFile=-/etc/bebop/vision.env
 ExecStart=/home/bebop/bebop/bebop-vision/.venv/bin/python -u main.py \
     --record-navd /var/lib/bebop-captures \
     --auto \
-    --robot-url ws://127.0.0.1:9090/ws
+    --robot-url ws://127.0.0.1:9090/ws $BEBOP_VISION_EXTRA_ARGS
 
 # SIGTERM is translated by main.py into its KeyboardInterrupt path, which
 # flushes any open MCAP segment and releases /tmp/navd_recorder.lock, so

@@ -110,7 +110,7 @@ class PlaceMemorySkill:
             _log(f"candidate retrieval failed: {exc}")
             return []
         try:
-            matches = self.store.match(vec, k=self.k)
+            matches = self.store.match(vec, k=self.k, status="confirmed")
         except Exception as exc:  # noqa: BLE001
             _log(f"candidate match failed: {exc}")
             return []
@@ -143,7 +143,7 @@ class PlaceMemorySkill:
             instruction=instruction,
             active_skill=active_skill,
             recent_events=list(recent_events or []),
-            places_known=self.store.count(),
+            places_known=self.store.count(status="confirmed"),
         )
         try:
             text = self.vlm.complete(build_messages(obs), max_tokens=self.max_tokens)
@@ -182,7 +182,8 @@ class PlaceMemorySkill:
     def sanitize(self, decision: SkillDecision, obs: Observation) -> SkillDecision:
         """Reject anything the executor could not safely apply."""
         canonical = normalize_decision(decision.decision)
-        if canonical is None:
+        if canonical is None or canonical not in (
+                REMEMBER_PLACE, UPDATE_PLACE, SKIP, DEFER):
             return defer_fallback(
                 "unknown_decision",
                 raw=decision.raw,

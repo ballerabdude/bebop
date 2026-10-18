@@ -29,6 +29,18 @@ interface Tag {
 interface Place {
   id: string;
   name: string;
+  display_name?: string;
+  status?: string;
+  source?: string;
+  confirmed_at?: number | null;
+  seen_count?: number;
+  name_source?: string | null;
+  suggested_name?: string | null;
+  suggested_facts?: string[];
+  suggested_at?: number | null;
+  best_match?: BestMatch | null;
+  best_match_id?: string | null;
+  best_match_score?: number | null;
   created_at: number;
   updated_at: number;
   last_seen_at: number | null;
@@ -36,6 +48,11 @@ interface Place {
   facts: Fact[];
   tags: Tag[];
   keyframes: Keyframe[];
+}
+interface BestMatch {
+  id: string;
+  name: string;
+  score: number | null;
 }
 interface Match {
   id: string;
@@ -83,10 +100,14 @@ export function PlacesScreen({
   onBack: () => void;
 }) {
   const [places, setPlaces] = useState<Place[]>([]);
+  const [pending, setPending] = useState<Place[]>([]);
+  const [pendingSelected, setPendingSelected] = useState<string[]>([]);
+  const [pendingNames, setPendingNames] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<string | null>(null);
   const [where, setWhere] = useState<WhereAmI | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [pendingBusy, setPendingBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
@@ -102,12 +123,37 @@ export function PlacesScreen({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(httpUrl(robotIp, PLACES_PORT, "/places"), {
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error(await readError(res));
-      const body = await res.json();
-      setPlaces(body.places ?? []);
+      const [confirmedRes, pendingRes] = await Promise.all([
+        fetch(httpUrl(robotIp, PLACES_PORT, "/places"), {
+          cache: "no-store",
+        }),
+        fetch(httpUrl(robotIp, PLACES_PORT, "/places/pending"), {
+          cache: "no-store",
+        }),
+      ]);
+      if (!confirmedRes.ok) throw new Error(await readError(confirmedRes));
+      const body = await confirmedRes.json();
+      const confirmed: Place[] = body.places ?? [];
+      setPlaces(confirmed);
+      if (pendingRes.ok) {
+        const pendingBody = await pendingRes.json();
+        const waiting: Place[] = pendingBody.places ?? [];
+        setPending(waiting);
+        setPendingSelected((previous) =>
+          previous.filter((id) => waiting.some((place) => place.id === id)),
+        );
+        setPendingNames((previous) =>
+          Object.fromEntries(
+            Object.entries(previous).filter(([id]) =>
+              waiting.some((place) => place.id === id),
+            ),
+          ),
+        );
+      } else {
+        // Older places services do not expose the pending queue; keep the
+        // confirmed list usable rather than failing the whole screen.
+        setPending([]);
+      }
     } catch (e) {
       setError(
         `${(e as Error).message}. Is the vision card on? (Places runs in ` +
@@ -243,12 +289,296 @@ export function PlacesScreen({
     }
   }
 
+  const pendingNameFor = (place: Place) =>
+    (pendingNames[place.id] ?? place.suggested_name ?? "").trim();
+
+  const selectedPendingPlaces = pending.filter((p) =>
+    pendingSelected.includes(p.id),
+  );
+  const allSelectedNamed =
+    selectedPendingPlaces.length > 0 &&
+    selectedPendingPlaces.every((p) => pendingNameFor(p).length > 0);
+
+  function togglePending(id: string) {
+    setPendingSelected((previous) =>
+      previous.includes(id)
+        ? previous.filter((value) => value !== id)
+        : [...previous, id],
+    );
+  }
+
+  async function suggestOne(id: string): Promise<boolean> {
+    const res = await fetch(
+      httpUrl(
+        robotIp,
+        PLACES_PORT,
+        `/places/pending/${encodeURIComponent(id)}/suggest`,
+      ),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    const body = await res.json();
+    if (!res.ok || (body && body.error)) {
+      throw new Error(body?.error ?? `${res.status} ${res.statusText}`);
+    }
+    setPendingNames((previous) => ({
+      ...previous,
+      [id]: body.suggested_name ?? "",
+    }));
+    setPending((previous) =>
+      previous.map((place) =>
+        place.id === id
+          ? {
+              ...place,
+              display_name: body.suggested_name ?? place.display_name,
+              suggested_name: body.suggested_name ?? null,
+              suggested_facts: body.facts ?? [],
+            }
+          : place,
+      ),
+    );
+    if (body.conflict) {
+      setNote(
+        `Suggested "${body.suggested_name}" conflicts with ` +
+          `"${body.conflict.name}"; edit the name before importing.`,
+      );
+    }
+    return true;
+  }
+
+  async function suggestSelected() {
+    const targets = selectedPendingPlaces.filter((p) => !pendingNameFor(p));
+    if (targets.length === 0) {
+      setNote("Selected places already have names. Edit one or import as-is.");
+      return;
+    }
+    setPendingBusy(true);
+    setError(null);
+    setNote(null);
+    let suggested = 0;
+    let failed = 0;
+    try {
+      for (const place of targets) {
+        try {
+          await suggestOne(place.id);
+          suggested += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      setNote(
+        `${suggested} name suggestion(s) ready. Review/edit, then ` +
+          `Import selected.`,
+      );
+      if (failed) {
+        setError(
+          `${failed} suggestion(s) failed. Type a name or retry; the ` +
+            `pending places are unchanged.`,
+        );
+      }
+    } finally {
+      setPendingBusy(false);
+    }
+  }
+
+  async function importSelected() {
+    const targets = selectedPendingPlaces;
+    if (targets.length === 0) return;
+    const missing = targets.filter((p) => !pendingNameFor(p));
+    if (missing.length > 0) {
+      setNote("Name every selected place, or use Suggest names first.");
+      return;
+    }
+    const names: Record<string, string> = {};
+    for (const place of targets) names[place.id] = pendingNameFor(place);
+    setPendingBusy(true);
+    setError(null);
+    setNote(null);
+    try {
+      const res = await fetch(
+        httpUrl(robotIp, PLACES_PORT, "/places/pending/import"),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ids: targets.map((place) => place.id),
+            names,
+          }),
+        },
+      );
+      const body = await res.json();
+      if (!res.ok) throw new Error(await readError(res));
+      const failedIds = new Set<string>(
+        (body.results ?? [])
+          .filter((item: { status?: string }) => item.status === "failed")
+          .map((item: { id: string }) => item.id),
+      );
+      setNote(
+        `Imported ${body.imported ?? 0} place(s); merged ` +
+          `${body.merged ?? 0}; ${body.failed ?? 0} failed.`,
+      );
+      if (failedIds.size > 0) {
+        setError(
+          `${failedIds.size} place(s) are still pending. Fix the name or ` +
+            `conflict, then retry.`,
+        );
+      }
+      setPendingSelected((previous) =>
+        previous.filter((id) => failedIds.has(id)),
+      );
+      setPendingNames((previous) =>
+        Object.fromEntries(
+          Object.entries(previous).filter(([id]) => failedIds.has(id)),
+        ),
+      );
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setPendingBusy(false);
+    }
+  }
+
+  async function mergePending(place: Place, target: BestMatch) {
+    if (
+      !window.confirm(
+        `Merge this pending place into "${target.name}"? ` +
+          `The pending row is removed and its evidence is added to ` +
+          `"${target.name}".`,
+      )
+    ) {
+      return;
+    }
+    setPendingBusy(true);
+    setError(null);
+    setNote(null);
+    try {
+      const res = await fetch(
+        httpUrl(robotIp, PLACES_PORT, "/places/pending/import"),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ids: [place.id],
+            merge_into: { [place.id]: target.id },
+          }),
+        },
+      );
+      const body = await res.json();
+      if (!res.ok) throw new Error(await readError(res));
+      const result = (body.results ?? [])[0];
+      if (!result || result.status !== "merged") {
+        throw new Error(
+          result?.detail ?? result?.error ?? "merge was not applied",
+        );
+      }
+      setNote(`Merged into "${target.name}".`);
+      setPendingSelected((previous) =>
+        previous.filter((id) => id !== place.id),
+      );
+      setPendingNames((previous) => {
+        const next = { ...previous };
+        delete next[place.id];
+        return next;
+      });
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setPendingBusy(false);
+    }
+  }
+
+  async function discardPending(place: Place) {
+    if (
+      !window.confirm(
+        `Discard this pending place? Its keyframes and descriptors are ` +
+          `deleted. This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setPendingBusy(true);
+    setError(null);
+    setNote(null);
+    try {
+      const res = await fetch(
+        httpUrl(robotIp, PLACES_PORT, `/places/${encodeURIComponent(place.id)}`),
+        { method: "DELETE" },
+      );
+      if (!res.ok) throw new Error(await readError(res));
+      setNote("Pending place discarded.");
+      setPendingSelected((previous) =>
+        previous.filter((id) => id !== place.id),
+      );
+      setPendingNames((previous) => {
+        const next = { ...previous };
+        delete next[place.id];
+        return next;
+      });
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setPendingBusy(false);
+    }
+  }
+
+  async function discardSelected() {
+    if (selectedPendingPlaces.length === 0) return;
+    if (
+      !window.confirm(
+        `Discard ${selectedPendingPlaces.length} pending place(s)? ` +
+          `Their images and descriptors are deleted.`,
+      )
+    ) {
+      return;
+    }
+    setPendingBusy(true);
+    setError(null);
+    setNote(null);
+    try {
+      await Promise.all(
+        selectedPendingPlaces.map(async (place) => {
+          const res = await fetch(
+            httpUrl(
+              robotIp,
+              PLACES_PORT,
+              `/places/${encodeURIComponent(place.id)}`,
+            ),
+            { method: "DELETE" },
+          );
+          if (!res.ok) throw new Error(await readError(res));
+        }),
+      );
+      setPendingSelected([]);
+      setPendingNames({});
+      setNote("Selected pending places discarded.");
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+      await load();
+    } finally {
+      setPendingBusy(false);
+    }
+  }
+
   const detail = places.find((p) => p.id === selected) ?? null;
 
   return (
     <div className="flex flex-col flex-1 gap-4">
       <div className="flex items-baseline justify-between gap-3 mt-2">
-        <h2 className="text-2xl font-bold">Places</h2>
+        <h2 className="text-2xl font-bold">
+          Places
+          {pending.length > 0 ? (
+            <span className="ml-2 text-sm font-normal text-text-dim">
+              {places.length} confirmed · {pending.length} pending
+            </span>
+          ) : null}
+        </h2>
         <Button variant="ghost" onClick={() => void load()} loading={loading}>
           Refresh
         </Button>
@@ -297,8 +627,166 @@ export function PlacesScreen({
               top: {where.top.map((t) => `${t.name} ${t.score.toFixed(2)}`).join(" · ")}
             </div>
           ) : null}
+          {!where?.matched && pending.length > 0 ? (
+            <div className="text-text-dim text-xs">
+              {pending.length} pending place
+              {pending.length === 1 ? "" : "s"} waiting for import; pending
+              places are not recognized yet.
+            </div>
+          ) : null}
         </div>
       </Card>
+
+      {/* Pending review queue (captured without an LLM) */}
+      {pending.length > 0 ? (
+        <Card>
+          <div className="py-2 flex flex-col gap-3">
+            <div className="flex items-baseline justify-between gap-2">
+              <div>
+                <div className="text-xs text-text-dim uppercase tracking-wider">
+                  Pending places
+                </div>
+                <p className="text-text-dim text-xs mt-1">
+                  Captured automatically by the scout. They are not recognized
+                  until you import them.
+                </p>
+              </div>
+              <div className="text-sm font-semibold">{pending.length}</div>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              {pending.map((p) => {
+                const kf = p.keyframes[0];
+                const checked = pendingSelected.includes(p.id);
+                const score = p.best_match?.score ?? null;
+                return (
+                  <div
+                    key={p.id}
+                    className={`flex gap-3 rounded-[var(--radius-card)] border px-3 py-2.5 ${
+                      checked
+                        ? "border-accent bg-bg-elev-2"
+                        : "border-border bg-bg-elev"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => togglePending(p.id)}
+                      className="mt-1 shrink-0"
+                    />
+                    {kf ? (
+                      <img
+                        src={keyframeUrl(robotIp, p.id, kf.path)}
+                        alt=""
+                        className="w-16 h-12 object-cover rounded-md border border-border shrink-0"
+                      />
+                    ) : (
+                      <div className="w-16 h-12 rounded-md border border-border bg-bg-elev-2 shrink-0" />
+                    )}
+                    <div className="min-w-0 flex-1 flex flex-col gap-1.5">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <div className="font-semibold truncate">
+                          {p.display_name ?? "Unnamed place"}
+                        </div>
+                        <div className="text-text-dim text-xs shrink-0">
+                          {p.seen_count ?? 1} sighting
+                          {(p.seen_count ?? 1) === 1 ? "" : "s"}
+                        </div>
+                      </div>
+                      <div className="text-text-dim text-xs">
+                        first seen{" "}
+                        {new Date(p.created_at * 1000).toLocaleString()}
+                        {p.last_seen_at
+                          ? ` · last ${new Date(
+                              p.last_seen_at * 1000,
+                            ).toLocaleTimeString()}`
+                          : ""}
+                        {` · ${p.keyframes.length} view${
+                          p.keyframes.length === 1 ? "" : "s"
+                        }`}
+                        {p.best_match
+                          ? ` · closest ${p.best_match.name} ${
+                              score !== null ? score.toFixed(2) : ""
+                            }`
+                          : ""}
+                      </div>
+                      {p.suggested_facts && p.suggested_facts.length > 0 ? (
+                        <div className="text-text-dim text-xs">
+                          model facts: {p.suggested_facts.join("; ")}
+                        </div>
+                      ) : null}
+                      <input
+                        className="bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-2 text-text text-sm outline-none focus:border-accent"
+                        value={pendingNames[p.id] ?? p.suggested_name ?? ""}
+                        onChange={(e) =>
+                          setPendingNames((previous) => ({
+                            ...previous,
+                            [p.id]: e.target.value,
+                          }))
+                        }
+                        placeholder="Name this place, or use Suggest names"
+                      />
+                      {p.best_match && (score ?? 0) >= 0.8 ? (
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="ghost"
+                            onClick={() => void mergePending(p, p.best_match!)}
+                          >
+                            Merge into {p.best_match.name}
+                          </Button>
+                          <span className="text-text-dim text-xs">
+                            secondary action; no model call
+                          </span>
+                        </div>
+                      ) : null}
+                    </div>
+                    <Button
+                      variant="ghost"
+                      onClick={() => void discardPending(p)}
+                    >
+                      Discard
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex gap-2 flex-wrap">
+              <Button
+                variant="secondary"
+                onClick={() => void suggestSelected()}
+                loading={pendingBusy}
+                disabled={
+                  pendingBusy ||
+                  selectedPendingPlaces.filter((p) => !pendingNameFor(p))
+                    .length === 0
+                }
+              >
+                Suggest names
+              </Button>
+              <Button
+                onClick={() => void importSelected()}
+                loading={pendingBusy}
+                disabled={pendingBusy || !allSelectedNamed}
+              >
+                Import selected
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => void discardSelected()}
+                disabled={pendingBusy || selectedPendingPlaces.length === 0}
+              >
+                Discard selected
+              </Button>
+            </div>
+            <p className="text-text-dim text-xs">
+              Suggest names runs the model once per selected unnamed place.
+              Import is deterministic; nothing is confirmed until you press it.
+              Naming a place yourself skips the model entirely.
+            </p>
+          </div>
+        </Card>
+      ) : null}
 
       {/* Teach the current view */}
       <Card>
@@ -365,7 +853,9 @@ export function PlacesScreen({
                 <div className="w-16 h-12 rounded-md border border-border bg-bg-elev-2 shrink-0" />
               )}
               <div className="min-w-0 flex-1">
-                <div className="font-semibold truncate">{p.name}</div>
+                <div className="font-semibold truncate">
+                  {p.display_name ?? p.name}
+                </div>
                 <div className="text-text-dim text-xs truncate">
                   {p.keyframes.length} view{p.keyframes.length === 1 ? "" : "s"} ·{" "}
                   {p.facts.length} fact{p.facts.length === 1 ? "" : "s"}
