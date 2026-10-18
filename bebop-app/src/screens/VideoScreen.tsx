@@ -53,6 +53,7 @@ export function VideoScreen({
     "depth_near",
     "color_far",
     "depth_far",
+    "bev",
   ]);
   const toggleStream = (id: string) =>
     setVideoStreams((cur) =>
@@ -148,4 +149,5 @@ const VIDEO_STREAM_OPTIONS: { id: string; label: string }[] = [
   { id: "depth_near", label: "Depth" },
   { id: "color_far", label: "Far" },
   { id: "depth_far", label: "Far depth" },
+  { id: "bev", label: "BEV" },
 ];

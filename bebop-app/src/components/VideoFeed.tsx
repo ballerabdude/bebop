@@ -24,7 +24,7 @@ interface VideoFeedProps {
   /// stream selector and cache-buster are appended as query params.
   videoUrl?: string;
   /// Stream selector understood by the server: color_near | color_far |
-  /// depth_near | depth_far.
+  /// depth_near | depth_far | bev.
   stream?: string;
   /// Bump to tear the peer connection down and reconnect.
   reconnectKey: number;

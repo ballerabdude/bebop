@@ -115,6 +115,16 @@ def run_record_navd(args):
         vserver = VideoServer(rig, port=args.video_port)
         vserver.start()
 
+    # Live master BEV: fuses both depth cameras into one non-square grid
+    # and publishes /bev + /snapshot?stream=bev on the video server.  It is
+    # independent of recording/armed state, so the map is live while the
+    # robot is idle too.
+    bev_service = None
+    if vserver is not None and not args.no_bev:
+        from bebop_vision.bev_service import BevService
+        bev_service = BevService(rig, hz=args.bev_hz, video_server=vserver)
+        bev_service.start()
+
     # Semantic place memory (bebop_vision/places): teaches named rooms from
     # the live view and recognises them by DINOv3 appearance. Shares the rig
     # read-only; the encoder warms on a background thread so a slow first
@@ -243,6 +253,8 @@ def run_record_navd(args):
                 if places.router is not None:
                     places.router.stop()
                 places.stop()
+            if bev_service is not None:
+                bev_service.stop()
             if vserver is not None:
                 vserver.stop()
             rig.stop()
@@ -295,6 +307,8 @@ def run_record_navd(args):
                 if places.router is not None:
                     places.router.stop()
                 places.stop()
+            if bev_service is not None:
+                bev_service.stop()
             if vserver is not None:
                 vserver.stop()
             rig.stop()
@@ -361,6 +375,8 @@ def run_record_navd(args):
             if places.router is not None:
                 places.router.stop()
             places.stop()
+        if bev_service is not None:
+            bev_service.stop()
         if vserver is not None:
             vserver.stop()
         rig.stop()
@@ -369,11 +385,73 @@ def run_record_navd(args):
         print("\n[record-navd] done (auto mode)")
 
 
+def run_bev(args):
+    """Standalone live master-BEV view (no recording, no robot connection).
+
+    Opens the depth cameras, starts the operator video server and fuses both
+    cameras into the non-square master grid.  ``GET /bev`` returns the grid
+    as JSON; ``GET /snapshot?stream=bev`` returns the rendered JPEG.
+    """
+    from bebop_vision.bev_service import BevService
+    from bebop_vision.orbbec import OrbbecRig
+    from bebop_vision.videoserver import VideoServer
+    import time as _time
+
+    _acquire_recorder_lock()
+    roles = tuple(r.strip() for r in args.roles.split(",") if r.strip())
+    rig = OrbbecRig(rig_path=args.rig, color=False, roles=roles or None)
+    if not rig.wait_for_pair(timeout=10.0):
+        rig.stop()
+        _release_recorder_lock()
+        raise SystemExit("cameras did not produce fresh frames within 10 s")
+
+    vserver = None
+    if not args.no_video_server:
+        vserver = VideoServer(rig, port=args.video_port)
+        vserver.start()
+
+    service = BevService(rig, hz=args.bev_hz, video_server=vserver)
+    service.start()
+    t0 = _time.monotonic()
+    try:
+        while True:
+            if args.seconds and _time.monotonic() - t0 > args.seconds:
+                break
+            _time.sleep(0.5)
+            grid = service.latest()
+            if grid is None:
+                print("\r[bev] waiting for a fused grid...", end="",
+                      flush=True)
+                continue
+            c = grid.counts()
+            print(f"\r[bev] {service.status()['fps']:4.1f} Hz  "
+                  f"{grid.rows}x{grid.cols}  occ={c['occupied']} "
+                  f"haz={c['hazard']} unk={c['unknown']}", end="",
+                  flush=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        service.stop()
+        if vserver is not None:
+            vserver.stop()
+        rig.stop()
+        _release_recorder_lock()
+        print("\n[bev] done")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="bebop-vision data recorder (navd MCAP sessions)")
     parser.add_argument("--record-navd", metavar="DIR",
                         help="navd recorder v2: teleop session -> MCAP in DIR")
+    parser.add_argument("--bev", action="store_true",
+                        help="run the live master-BEV view only (no "
+                             "recording, no robot connection)")
+    parser.add_argument("--bev-hz", type=float, default=10.0,
+                        help="master-BEV update rate (default: 10)")
+    parser.add_argument("--no-bev", action="store_true",
+                        help="record-navd: do not run the live master-BEV "
+                             "worker")
     parser.add_argument("--auto", action="store_true",
                         help="record-navd: start/stop segments with the drive "
                              "state (wheels armed, no estop), roll on "
@@ -482,11 +560,12 @@ def main():
     if (args.live_slam_map or args.live_slam_log) and not args.live_slam:
         parser.error("--live-slam-map/--live-slam-log need --live-slam")
 
-    if not args.record_navd:
+    if not args.record_navd and not args.bev:
         parser.error(
-            "nothing to do — bebop-vision is a data recorder. Use "
-            "--record-navd <dir> [--auto]; drive the robot from the app. "
-            "(Model/drive code lives on the exp/navd-ai branch.)")
+            "nothing to do — use --bev for the live master-BEV view, or "
+            "--record-navd <dir> [--auto] for data collection. Drive the "
+            "robot from the app. (Model/drive code lives on the "
+            "exp/navd-ai branch.)")
 
     # Graceful SIGTERM: sessions started in the background (nohup ... &
     # inside a non-interactive shell) inherit SIGINT=SIG_IGN — CPython
@@ -502,6 +581,9 @@ def main():
 
     signal.signal(signal.SIGTERM, _sigterm_to_int)
 
+    if args.bev and not args.record_navd:
+        run_bev(args)
+        return
     run_record_navd(args)
 
 

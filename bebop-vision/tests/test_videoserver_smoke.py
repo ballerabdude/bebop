@@ -6,15 +6,19 @@ replies. These tests exercise the real handler over HTTP so a handler
 break fails loudly.
 """
 
+import json
 import threading
 import time
 import urllib.request
 
+import cv2
 import numpy as np
 import pytest
 
 from bebop_vision.orbbec import StampedFrame
 from bebop_vision.videoserver import STREAMS, VideoServer
+
+from test_master_bev import make_builder, scene
 
 
 def _frame(role, stamp_us):
@@ -56,15 +60,41 @@ def _get(port, path, timeout=5):
                                   timeout=timeout)
 
 
+def _publish_bev(server):
+    b = make_builder()
+    frames = scene()
+    grid = b.fuse({role: b.prepare(f) for role, f in frames.items()},
+                  {"near": 0.01, "far": 0.01})
+    ok, jpg = cv2.imencode(".jpg", np.zeros((48, 24, 3), np.uint8))
+    assert ok
+    server.publish_bev(grid, jpg.tobytes())
+    return grid
+
+
 def test_all_streams_serve_jpegs(server):
-    assert "bev" not in STREAMS
+    assert "bev" in STREAMS
+    _publish_bev(server)
     for stream in STREAMS:
         with _get(server._httpd.server_address[1],
                   f"/snapshot?stream={stream}") as r:
             assert r.status == 200
             body = r.read()
             assert body[:2] == b"\xff\xd8"      # JPEG SOI
-            assert len(body) > 1000
+            assert len(body) > 100
+
+
+def test_bev_json_endpoint(server):
+    grid = _publish_bev(server)
+    with _get(server._httpd.server_address[1], "/bev") as r:
+        assert r.status == 200
+        assert r.headers.get_content_type() == "application/json"
+        payload = json.loads(r.read())
+    assert payload["rows"] == grid.rows
+    assert payload["cols"] == grid.cols
+    assert payload["encoding"] == "rle_pairs"
+    assert payload["counts"]["unknown"] >= 0
+    assert payload["contributions"]["far"]["points"] > 0
+    assert payload["published_age_s"] >= 0.0
 
 
 def test_register_replaces_and_closes_predecessor():

@@ -23,6 +23,12 @@ def test_default_rig_config():
     assert cams["CPBLC53000PE"]["pitch_deg"] < cams["CPBLC53000ED"]["pitch_deg"] < 0
     bev = cfg["robots"]["default"]["bev"]
     assert (bev["range_m"], bev["width_m"], bev["cell_m"]) == (3.0, 3.0, 0.05)
+    # The live master BEV is deliberately non-square: the far camera sees
+    # further ahead than the robot is wide.
+    master = cfg["robots"]["default"]["master_bev"]
+    assert (master["range_m"], master["width_m"],
+            master["cell_m"]) == (6.0, 3.0, 0.05)
+    assert master["range_m"] > master["width_m"]
 
 
 class FakeProfile:
