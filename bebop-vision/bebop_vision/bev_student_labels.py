@@ -68,6 +68,10 @@ WALL_PROMPTS = ("wall", "door", "door frame", "pillar")
 OBSTACLE_PROMPTS = (
     "box", "bag", "chair", "table", "person", "cable", "trash can",
     "shelf", "cardboard box",
+    # The 2026-10-18 drives are home tours; beds/sofas/cabinets are the
+    # dominant obstacles and the brief's box/chair set alone misses them.
+    "bed", "sofa", "couch", "cabinet", "dresser", "wardrobe", "desk",
+    "counter", "appliance",
 )
 # Hazard is depth-primary, but SAM can flag stairs/holes on the lower
 # surface.  These prompts only support below-plane points; they never

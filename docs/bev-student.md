@@ -78,8 +78,13 @@ Prompts (curated; `bebop_vision/bev_student_labels.py`):
 |---|---|
 | floor | floor, carpet, rug, ground |
 | wall | wall, door, door frame, pillar |
-| obstacle | box, bag, chair, table, person, cable, trash can, shelf, cardboard box |
+| obstacle | box, bag, chair, table, person, cable, trash can, shelf, cardboard box, bed, sofa, couch, cabinet, dresser, wardrobe, desk, counter, appliance |
 | hazard support | stairs, staircase, step, hole, ledge, drop |
+
+The furniture prompts (`bed`, `sofa`, `couch`, `cabinet`, `dresser`,
+`wardrobe`, `desk`, `counter`, `appliance`) extend the brief's curated
+box/chair/table set: the first bedroom review showed beds/dressers were
+otherwise unlabeled, and these home-tour drives are dominated by furniture.
 
 Per labeled keyframe and camera:
 
