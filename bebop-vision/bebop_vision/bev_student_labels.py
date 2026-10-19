@@ -199,7 +199,7 @@ class LabelConfig:
     hazard_require_floor: bool = True
     min_range_m: float = 0.55
     max_range_m: float = 8.0
-    ego_x_range_m: tuple = (-0.25, 0.30)
+    ego_x_range_m: tuple = (0.0, 0.55)
     ego_y_range_m: tuple = (-0.22, 0.22)
     # Body-frame self mask from ``robot.self_mask`` (mast/rails), normalised
     # to x0/x1/y0/y1/min_h.  Floor points stay because z < min_h.
@@ -477,9 +477,10 @@ def prepare_observation(spec, depth_mm, floor_conf=None, wall_conf=None,
             f"{spec.role}: depth {depth.shape} != intrinsics "
             f"{(spec.height_d, spec.width_d)}")
     z = depth[spec.v_d, spec.u_d].astype(np.float32) * 1e-3  # uint16 mm
-    valid = np.isfinite(z) & (z > 0.0)
-    if spec.self_pixels is not None:
-        valid &= ~spec.self_pixels
+    self_pixel = (np.asarray(spec.self_pixels, bool).copy()
+                  if spec.self_pixels is not None
+                  else np.zeros(len(z), bool))
+    valid = np.isfinite(z) & (z > 0.0) & ~self_pixel
 
     pts = spec.dir_body * z[:, None] + spec.t_body
     x, y, zz = pts[:, 0], pts[:, 1], pts[:, 2]
@@ -496,6 +497,7 @@ def prepare_observation(spec, depth_mm, floor_conf=None, wall_conf=None,
     # Body-frame self mask (mast/rails).  Floor points stay because their
     # z is below the mask's min_height.
     cfg_self = (cfg.__dict__.get("self_mask") or {})
+    on_body = np.zeros(len(z), bool)
     if cfg_self:
         sm = cfg_self
         on_body = ((x > sm["x0"]) & (x < sm["x1"])

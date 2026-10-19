@@ -166,9 +166,11 @@ robots:
         occ_min_m: 0.03
         occ_max_m: 1.50
       ego:
-        # Physical chassis footprint (0.4 m wide x ~0.55 m long), not the
-        # 0.55 m dead disc.  Ego cells are semantic ignore.
-        x_range_m: [-0.25, 0.30]
+        # Physical chassis rectangle (0.44 m wide x 0.55 m of visible
+        # forward length).  This is deliberately a rectangle, not the
+        # fan-shaped near self-mask: the mask includes the mast/rails and
+        # nearby floor, which must not become the ego footprint.
+        x_range_m: [0.0, 0.55]
         y_range_m: [-0.22, 0.22]
     robot:
       radius_m: 0.20      # inflation radius for planning

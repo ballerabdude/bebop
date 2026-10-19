@@ -174,12 +174,19 @@ def test_config_loads_grid_and_ego():
     from bebop_vision.orbbec import load_rig_config
     cfg = load_rig_config()["robots"]["default"]
     lc = LabelConfig.from_config(cfg)
-    assert lc.ego_x_range_m == (-0.25, 0.30)
+    assert lc.ego_x_range_m == (0.0, 0.55)
     assert lc.hazard_require_floor is True
     specs, _cfg, grid, _lc = specs_from_config(roles=("near",))
     assert grid.shape == (120, 60)
     assert specs["near"].width_d == 848
     assert specs["near"].width_c == 1280
+
+
+def test_ego_is_a_long_chassis_rectangle():
+    mask = ego_mask(LabelConfig(), GridSpec())
+    rr, cc = np.where(mask)
+    assert (rr.max() - rr.min() + 1, cc.max() - cc.min() + 1) == (11, 8)
+    assert int(mask.sum()) == 88
 
 
 def test_conflict_priority_hazard_wall_obstacle_floor():

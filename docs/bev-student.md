@@ -67,8 +67,12 @@ The six 2026-10-18 sessions unpacked on 2026-10-18:
   `config/orbbec_rig.yaml`, `config/orbbec_intrinsics_<serial>.json`.
 
 Label ids: `0 floor`, `1 wall`, `2 obstacle`, `3 hazard`, `255 ignore`.
-`ego` and `coverage` are separate bool layers.  The planner-facing semantic
-ids are **not** `master_bev.FREE/OCCUPIED/HAZARD/INFLATED`; M5 maps them.
+`ego` and `coverage` are separate bool layers.  Ego is the fixed physical
+chassis rectangle (`x=0.0–0.55 m` visible forward, `y=±0.22 m`), **not** the
+fan-shaped near self-mask: the self-mask still excludes self pixels from
+scene evidence, but it includes the mast/rails and nearby floor and must
+not define the ego footprint.  The planner-facing semantic ids are **not**
+`master_bev.FREE/OCCUPIED/HAZARD/INFLATED`; M5 maps them.
 
 ## 3. Teacher: SAM 3.1 × depth
 
