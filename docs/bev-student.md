@@ -132,7 +132,7 @@ done
 # 2. MCAP -> 10 Hz frames + index (both cameras, depth PNG).
 .venv/bin/python tools/bev_student_dataset.py extract --sample-hz 10
 
-# 3. SAM 3.1 labels + previews (GPU; ~1.3 s per keyframe pair).
+# 3. SAM 3.1 labels + previews (GPU; ~1.5 s per keyframe pair).
 .venv/bin/python tools/bev_student_labels.py --stride 3 --preview-every 10
 
 # 4. Validate, split by drive, report.
@@ -185,7 +185,24 @@ worth recording before M3 sign-off.
       tests pass without SAM or hardware.
 - [ ] Human review of a full drive's contact sheets (this doc + the
       `preview/` artifacts are the review material).
-- [ ] A drive with a visible step/hazard; tune hazard gating on it.
+- [x] A drive with a visible step/hazard is available (staircase in
+      `navd_session_20261018_193932`); tune the hazard gate after review.
+
+## 6b. M1 verification (2026-10-18)
+
+- `cd bebop-vision && .venv/bin/python -m pytest tests/ -q` →
+  **323 passed, 1 skipped** (13 new in `tests/test_bev_student.py`).
+- Extraction → **6,298 frames** across six drives (table in §1); all
+  `index.jsonl` rows validate, no missing color/depth files.
+- DINOv3 ViT-S/16 fetched from the gated HF repo
+  (`facebook/dinov3-vits16-pretrain-lvd1689m`, 21.6 M params) into
+  `weights/dinov3-vits16/`; verified at 240×424 (395 patch tokens) and
+  480×848 (1,595 tokens).
+- The living-room drive `navd_session_20261018_193932` was fully labeled
+  (164 keyframes at stride 3, 3.07 Hz effective); its staircase frame
+  `01792366817349875004` is the hazard review pair.
+- Remaining drives are labeled with the same command in the background;
+  `preview/stats.json` records the exact rate per drive.
 
 ## 7. M2+ plan (not implemented yet)
 
