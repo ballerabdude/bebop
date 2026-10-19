@@ -109,6 +109,12 @@ class BevGrid:
     plane: dict
     contributions: dict
     roles: list
+    # Optional learned-student layers.  The geometric builder leaves these
+    # None; the model-backed producer fills them.  ``occ``/``raw`` remain
+    # the planner-compatible layers.
+    semantic: np.ndarray = None   # uint8 (R,C): 0 floor,1 wall,2 obstacle,3 hazard,255 ignore
+    wall: np.ndarray = None       # bool (R,C)
+    ego: np.ndarray = None        # bool (R,C)
 
     @property
     def shape(self):
@@ -134,7 +140,7 @@ class BevGrid:
 
     def to_dict(self) -> dict:
         """JSON-ready payload (compact run-length layers)."""
-        return {
+        payload = {
             "stamp_us": int(self.stamp_us),
             "age_s": round(time.monotonic() - self.recv_ts, 3),
             "cell_m": self.cell_m,
@@ -154,6 +160,21 @@ class BevGrid:
             "roles": self.roles,
             "contributions": self.contributions,
         }
+        if self.semantic is not None:
+            sem = np.asarray(self.semantic)
+            payload["semantic_rle"] = _rle(sem)
+            payload["semantic_counts"] = {
+                "floor": int(np.sum(sem == 0)),
+                "wall": int(np.sum(sem == 1)),
+                "obstacle": int(np.sum(sem == 2)),
+                "hazard": int(np.sum(sem == 3)),
+                "unknown": int(np.sum(sem == 255)),
+            }
+        if self.wall is not None:
+            payload["wall_rle"] = _rle(np.asarray(self.wall, np.uint8))
+        if self.ego is not None:
+            payload["ego_rle"] = _rle(np.asarray(self.ego, np.uint8))
+        return payload
 
 
 def _rle(values) -> list[list[int]]:
@@ -882,6 +903,17 @@ BEV_COLORS = {
     INFLATED: (60, 60, 120),     # dark red / planning margin
 }
 UNKNOWN_COLOR = (28, 28, 28)
+# Learned semantic palette (BGR): floor grey, wall blue/purple, obstacle
+# red, hazard orange.  INFLATED is overlaid dark red; ego is outlined cyan.
+SEMANTIC_COLORS = {
+    0: (90, 90, 90),
+    1: (255, 120, 40),
+    2: (40, 40, 220),
+    3: (0, 160, 255),
+    255: UNKNOWN_COLOR,
+}
+EGO_FILL = (55, 55, 0)
+EGO_COLOR = (220, 220, 40)
 SOURCE_COLORS = {
     SRC_NONE: (28, 28, 28),
     SRC_NEAR: (255, 120, 0),     # blue-ish (BGR)
@@ -903,6 +935,21 @@ def render_bev(grid: BevGrid, *, scale=4, source_view=False,
         for code, color in SOURCE_COLORS.items():
             small[grid.source == code] = color
         small[~grid.coverage] = UNKNOWN_COLOR
+    elif grid.semantic is not None:
+        sem = np.asarray(grid.semantic)
+        for cls, color in SEMANTIC_COLORS.items():
+            small[sem == cls] = color
+        small[~grid.coverage] = UNKNOWN_COLOR
+        # Inflation is a planning overlay on top of the semantic classes.
+        if grid.occ is not None:
+            infl = (grid.occ == INFLATED) & grid.coverage
+            small[infl] = BEV_COLORS[INFLATED]
+        if grid.ego is not None:
+            ego_u8 = np.asarray(grid.ego, np.uint8)
+            small[ego_u8 > 0] = EGO_FILL
+            contours, _ = cv2.findContours(
+                ego_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(small, contours, -1, EGO_COLOR, 1)
     else:
         for cls, color in BEV_COLORS.items():
             small[(grid.occ == cls) & grid.coverage] = color
@@ -931,13 +978,21 @@ def render_bev(grid: BevGrid, *, scale=4, source_view=False,
             f"BEV {grid.range_m:.1f}x{grid.width_m:.1f}m  "
             f"{grid.cell_m*100:.0f}cm",
         ]
-        for role in grid.roles:
-            c = grid.contributions.get(role, {})
-            age = c.get("age_s")
-            age_s = f"{age:.2f}s" if age is not None else "?"
+        model = grid.contributions.get("model")
+        if model:
             lines.append(
-                f"{role}: {c.get('points', 0)}pts {c.get('cells', 0)}cells "
-                f"plane={'ok' if c.get('plane_ok') else 'no'} {age_s}")
+                f"model {model.get('engine', '?')} "
+                f"{model.get('infer_ms', '?')}ms "
+                f"hazard={model.get('hazard_source', '?')}")
+        else:
+            for role in grid.roles:
+                c = grid.contributions.get(role, {})
+                age = c.get("age_s")
+                age_s = f"{age:.2f}s" if age is not None else "?"
+                lines.append(
+                    f"{role}: {c.get('points', 0)}pts "
+                    f"{c.get('cells', 0)}cells "
+                    f"plane={'ok' if c.get('plane_ok') else 'no'} {age_s}")
         lines.append(
             "occ={occupied} haz={hazard} infl={inflated} unk={unknown}".format(
                 **grid.counts()))

@@ -133,7 +133,10 @@ def run_record_navd(args):
     bev_service = None
     if vserver is not None and not args.no_bev:
         from bebop_vision.bev_service import BevService
-        bev_service = BevService(rig, hz=args.bev_hz, video_server=vserver)
+        bev_service = BevService(
+            rig, hz=args.bev_hz, video_server=vserver,
+            model_path=args.bev_model, model_meta=args.bev_model_meta,
+            hazard_source=args.bev_hazard_source)
         bev_service.start()
 
     # Semantic place memory (bebop_vision/places): teaches named rooms from
@@ -410,7 +413,8 @@ def run_bev(args):
 
     _acquire_recorder_lock()
     roles = tuple(r.strip() for r in args.roles.split(",") if r.strip())
-    rig = OrbbecRig(rig_path=args.rig, color=False, roles=roles or None)
+    rig = OrbbecRig(rig_path=args.rig, color=bool(args.bev_model),
+                    roles=roles or None)
     if not rig.wait_for_pair(timeout=10.0):
         rig.stop()
         _release_recorder_lock()
@@ -421,7 +425,10 @@ def run_bev(args):
         vserver = VideoServer(rig, port=args.video_port)
         vserver.start()
 
-    service = BevService(rig, hz=args.bev_hz, video_server=vserver)
+    service = BevService(
+        rig, hz=args.bev_hz, video_server=vserver,
+        model_path=args.bev_model, model_meta=args.bev_model_meta,
+        hazard_source=args.bev_hazard_source)
     service.start()
     t0 = _time.monotonic()
     try:
@@ -455,6 +462,16 @@ def main():
         description="bebop-vision data recorder (navd MCAP sessions)")
     parser.add_argument("--record-navd", metavar="DIR",
                         help="navd recorder v2: teleop session -> MCAP in DIR")
+    parser.add_argument("--bev-model", default=None,
+                        help="learned BEV TensorRT engine; "
+                             "default: geometric master BEV")
+    parser.add_argument("--bev-model-meta", default=None,
+                        help="metadata JSON next to the engine")
+    parser.add_argument("--bev-hazard-source",
+                        choices=("geometric", "union", "model"),
+                        default="model",
+                        help="hazard source for the learned BEV "
+                             "(default: model-only)")
     parser.add_argument("--bev", action="store_true",
                         help="run the live master-BEV view only (no "
                              "recording, no robot connection)")
