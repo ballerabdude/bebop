@@ -191,7 +191,7 @@ worth recording before M3 sign-off.
 ## 6b. M1 verification (2026-10-18)
 
 - `cd bebop-vision && .venv/bin/python -m pytest tests/ -q` →
-  **323 passed, 1 skipped** (13 new in `tests/test_bev_student.py`).
+  **324 passed, 1 skipped** (13 new in `tests/test_bev_student.py`).
 - Extraction → **6,298 frames** across six drives (table in §1); all
   `index.jsonl` rows validate, no missing color/depth files.
 - DINOv3 ViT-S/16 fetched from the gated HF repo

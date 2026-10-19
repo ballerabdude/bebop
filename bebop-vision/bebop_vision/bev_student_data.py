@@ -172,6 +172,12 @@ def validate_session(session_dir, grid=None, strict=True):
         "orphan_labels": orphan,
         "errors": errors,
     }
+    sp = session_dir / "preview" / "stats.json"
+    if sp.exists():
+        try:
+            result["label_stats"] = json.loads(sp.read_text())
+        except ValueError:
+            result["label_stats"] = {}
     if labels:
         result["stats"] = summarize_label_files(labels, grid)
     return result
@@ -291,6 +297,13 @@ def write_sessions_manifest(root=DEFAULT_ROOT):
                 meta = json.loads(mp.read_text())
             except ValueError:
                 meta = {}
+        label_stats = {}
+        sp = sd / "preview" / "stats.json"
+        if sp.exists():
+            try:
+                label_stats = json.loads(sp.read_text())
+            except ValueError:
+                label_stats = {}
         rows.append({
             "session": sd.name,
             "source_mcap": meta.get("source_mcap"),
@@ -300,6 +313,7 @@ def write_sessions_manifest(root=DEFAULT_ROOT):
             "extracted_hz": meta.get("extracted_hz"),
             "frames": meta.get("frames"),
             "labeled": len(find_labels(sd)),
+            "effective_label_hz": label_stats.get("effective_label_hz"),
             "split": split.get(sd.name),
         })
     payload = {
@@ -338,12 +352,14 @@ def write_dataset_stats(report, root=DEFAULT_ROOT):
 def print_report(report):
     tot = report["totals"]
     print(f"{'session':32s} {'frames':>7s} {'labeled':>8s} "
-          f"{'label%':>7s} {'floor':>6s} {'wall':>6s} "
+          f"{'label%':>7s} {'Hz':>6s} {'floor':>6s} {'wall':>6s} "
           f"{'obs':>6s} {'haz':>6s} {'ign':>6s}")
     for s in report["sessions"]:
         f = (s.get("stats") or {}).get("class_fraction", {})
+        hz = (s.get("label_stats") or {}).get("effective_label_hz", 0.0)
         print(f"{s['session'][:32]:32s} {s['frames']:7d} "
               f"{s['labeled']:8d} {100*s['label_rate']:6.1f}% "
+              f"{hz:6.2f} "
               f"{100*f.get('floor', 0):5.1f}% "
               f"{100*f.get('wall', 0):5.1f}% "
               f"{100*f.get('obstacle', 0):5.1f}% "

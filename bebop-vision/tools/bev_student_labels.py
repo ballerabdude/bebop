@@ -41,6 +41,14 @@ from bebop_vision.bev_student_labels import (  # noqa: E402
 )
 
 
+def _spread(seq, n):
+    """Evenly sample ``n`` items across ``seq`` (for a representative sheet)."""
+    if len(seq) <= n:
+        return list(seq)
+    idx = np.linspace(0, len(seq) - 1, n).astype(int)
+    return [seq[i] for i in idx]
+
+
 def session_dirs(root, sessions):
     root = Path(root)
     base = root / "sessions"
@@ -234,10 +242,10 @@ def label_session(session_dir, labeler, segmenter, *, roles, stride,
     if preview_every:
         if sheet_bev:
             cv2.imwrite(str(preview_dir / "contact_sheet.png"),
-                        contact_sheet(sheet_bev[-24:], cols=4))
+                        contact_sheet(_spread(sheet_bev, 24), cols=4))
         if sheet_color:
             cv2.imwrite(str(preview_dir / "contact_sheet_colors.jpg"),
-                        contact_sheet(sheet_color[-24:], cols=3),
+                        contact_sheet(_spread(sheet_color, 18), cols=3),
                         [int(cv2.IMWRITE_JPEG_QUALITY), 88])
 
     agg = summarize_label_files(paths, labeler.grid) if paths else {
