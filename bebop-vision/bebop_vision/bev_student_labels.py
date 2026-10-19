@@ -1025,6 +1025,21 @@ def label_stats(semantic, ego, coverage):
     }
 
 
+def draw_legend(img, items, y=None):
+    """Draw small colored squares + labels along the bottom of ``img``."""
+    out = img
+    if y is None:
+        out = np.vstack([out, np.zeros((18, out.shape[1], 3), np.uint8)])
+        y = out.shape[0] - 5
+    x = 4
+    for label, color in items:
+        cv2.rectangle(out, (x, y - 9), (x + 8, y), color, -1)
+        cv2.putText(out, label, (x + 11, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.32, (215, 215, 215), 1, cv2.LINE_AA)
+        x += 11 + 7 * len(label) + 10
+    return out
+
+
 def render_label_bev(semantic, ego, coverage, grid, *, scale=4,
                      show_hud=True):
     """Semantic (R,C) -> BGR review image, mirrored like render_bev."""
@@ -1055,6 +1070,14 @@ def render_label_bev(semantic, ego, coverage, grid, *, scale=4,
                 f"{100*vals['ignore']/cells:.0f}%")
         cv2.putText(img, text, (4, 13), cv2.FONT_HERSHEY_SIMPLEX, 0.34,
                     (220, 220, 220), 1, cv2.LINE_AA)
+        img = draw_legend(img, [
+            ("floor", LABEL_COLORS[FLOOR]),
+            ("wall", LABEL_COLORS[WALL]),
+            ("obstacle", LABEL_COLORS[OBSTACLE]),
+            ("hazard", LABEL_COLORS[HAZARD]),
+            ("unknown", LABEL_COLORS[IGNORE]),
+            ("ego", EGO_COLOR),
+        ])
     return img
 
 
@@ -1104,7 +1127,13 @@ def render_color_masks(images, masks_by_role, *, max_width=640):
                            interpolation=cv2.INTER_AREA)
         out.append(t)
         out.append(np.zeros((h, 6, 3), np.uint8))
-    return np.concatenate(out[:-1], axis=1)
+    img = np.concatenate(out[:-1], axis=1)
+    return draw_legend(img, [
+        ("floor", (60, 220, 60)),
+        ("wall", (235, 120, 40)),
+        ("obstacle", (40, 40, 220)),
+        ("hazard prompt", (0, 220, 255)),
+    ])
 
 
 def contact_sheet(images, cols=4, pad=4):
