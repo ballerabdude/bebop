@@ -43,10 +43,13 @@ teacher = [
     "tensorrt>=11.0",
     "sam3 @ git+https://github.com/facebookresearch/sam3.git",
 ]
-# Workstation-side training only (--tb in train_navd.py): the Jetson never
-# trains, so tensorboard stays out of the main dependency set.
+# Workstation-side training/extraction only: the Jetson never trains, so
+# TensorBoard and PyAV (H.265 MCAP decode) stay out of the main dependency
+# set.  ONNX/TensorRT are installed separately for the M4 export bench
+# because onnxruntime and onnxruntime-gpu share one import name.
 train = [
     "tensorboard>=2.12",
+    "av>=12",
 ]
 # ML review dashboard: FastAPI backend (tools/dashboard_api.py) + the React
 # app under dashboard/ (built bundle served as static files). Inference

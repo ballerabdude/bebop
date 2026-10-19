@@ -133,6 +133,43 @@ robots:
       haz_min_w: 1.0
       # Fill 1-2 cell gaps between observed free cells (sparse far returns).
       gap_fill_iters: 2
+    # Learned master-BEV student (docs/bev-student.md).  SAM 3.1 is the
+    # offline semantic teacher; these knobs shape its depth-fused labels.
+    # The grid matches master_bev exactly (120x60, row 0 far, col 0 right).
+    bev_student:
+      grid:
+        range_m: 6.0
+        width_m: 3.0
+        cell_m: 0.05
+      label:
+        # Per-cell weighted-evidence thresholds.
+        floor_min_w: 0.40
+        wall_min_w: 0.35
+        obstacle_min_w: 0.35
+        hazard_min_w: 0.50
+        # Weak depth-only floor vote in cells where SAM returned no mask at
+        # all; SAM remains the semantic source.  Set 0 to require a SAM mask.
+        depth_floor_weight: 0.25
+        # A compact, short wall component is a solid object (bookshelf
+        # edge), not a wall; tall pillars stay walls.
+        wall_compact_m: 0.60
+        wall_pillar_min_h_m: 2.00
+        # Local floor-height differences (rug/step edges) are noisy
+        # indoors; below-plane depth is the primary hazard signal.
+        local_drop_hazard: false
+        # Require the below-plane point itself to be SAM floor/ground or
+        # stairs/hole; dark furniture undersides and shadows are not holes.
+        hazard_require_floor: true
+        floor_tol_m: 0.04
+        wall_min_h_m: 0.80
+        wall_max_h_m: 2.50
+        occ_min_m: 0.03
+        occ_max_m: 1.50
+      ego:
+        # Physical chassis footprint (0.4 m wide x ~0.55 m long), not the
+        # 0.55 m dead disc.  Ego cells are semantic ignore.
+        x_range_m: [-0.25, 0.30]
+        y_range_m: [-0.22, 0.22]
     robot:
       radius_m: 0.20      # inflation radius for planning
       # Self-view mask: the mast cameras see the robot's own chassis at
