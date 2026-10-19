@@ -197,6 +197,13 @@ class LabelConfig:
     # shadows, rug fringes) are usually multipath noise, not holes.  Require
     # the point itself to be SAM floor/ground or stairs/hole.
     hazard_require_floor: bool = True
+    # Hazard ablations (see docs/bev-student.md).  Defaults preserve the
+    # original rule: any below-plane point on SAM floor/stairs is hazard.
+    # ``hazard_absolute=False`` disables that and leaves only local drop
+    # evidence; ``hazard_prompt_only=True`` requires the SAM stairs/step/
+    # hole prompt on the point itself (removes people/shadow false alarms).
+    hazard_absolute: bool = True
+    hazard_prompt_only: bool = False
     min_range_m: float = 0.55
     max_range_m: float = 8.0
     ego_x_range_m: tuple = (0.0, 0.55)
@@ -733,8 +740,12 @@ def camera_evidence(prep, plane, cfg, grid, fallback=False):
     obstacle = obj | stair
     obs_conf = np.where(obj, oconf, hconf)
     hazard = h < -drop_gate
+    if cfg.hazard_prompt_only:
+        hazard &= (hconf > 0)
     if cfg.hazard_require_floor:
         hazard &= ((fconf > 0) | (hconf > 0))
+    if not cfg.hazard_absolute:
+        hazard[:] = False
 
     def add(target, mask, weights):
         if mask.any():

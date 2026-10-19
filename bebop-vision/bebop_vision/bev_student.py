@@ -260,8 +260,9 @@ class BevStudent(nn.Module):
 
     def __init__(self, pretrained_dir=None, tiny=False, backbone=None,
                  backbone_layers=None, fpn_dim=128, lut=None,
-                 feat_hw=FEAT_HW):
+                 feat_hw=FEAT_HW, num_classes=NUM_CLASSES):
         super().__init__()
+        self.num_classes = int(num_classes)
         self.feat_hw = tuple(int(v) for v in feat_hw)
         self.backbone = (backbone if backbone is not None
                          else _build_backbone(pretrained_dir, tiny))
@@ -298,7 +299,7 @@ class BevStudent(nn.Module):
                               align_corners=False)
         self.dec2 = _ConvBlock(128, 128)
         self.dec3 = _ConvBlock(128, 128)
-        self.sem_head = nn.Conv2d(128, NUM_CLASSES, 1)
+        self.sem_head = nn.Conv2d(128, self.num_classes, 1)
         self.ego_head = nn.Conv2d(128, 1, 1)
         self.cov_head = nn.Conv2d(128, 1, 1)
 

@@ -112,8 +112,9 @@ def read_index(session_dir):
     return rows
 
 
-def label_path(session_dir, stamp_ns):
-    return Path(session_dir) / "labels" / f"{int(stamp_ns):020d}.npz"
+def label_path(session_dir, stamp_ns, labels_subdir="labels"):
+    return (Path(session_dir) / str(labels_subdir)
+            / f"{int(stamp_ns):020d}.npz")
 
 
 def find_labels(session_dir):
