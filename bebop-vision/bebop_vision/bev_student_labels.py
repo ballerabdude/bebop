@@ -712,15 +712,23 @@ def camera_evidence(prep, plane, cfg, grid, fallback=False):
         w = w * 0.5
 
     floor_gate = np.maximum(cfg.floor_tol_m, cfg.noise_scale * rng)
-    floor_sam = (fconf > 0) & (np.abs(h) <= floor_gate)
+    # A stair/hole prompt wins over a floor prompt: never let a staircase
+    # surface become drivable floor just because SAM also called it floor.
+    floor_sam = ((fconf > 0) & (hconf <= 0) & (np.abs(h) <= floor_gate))
     floor_depth = ((fconf <= 0) & (wconf <= 0) & (oconf <= 0)
                    & (hconf <= 0) & (np.abs(h) <= floor_gate)
                    & (cfg.depth_floor_weight > 0))
     wall = ((wconf > 0) & (h >= cfg.wall_min_h_m)
             & (h <= cfg.wall_max_h_m))
-    obstacle = ((oconf > 0) & (h >= cfg.occ_min_m)
-                & (h <= cfg.occ_max_m))
+    # Ascending stairs / steps are obstacles; descending ones are hazards.
+    # Once the stairs/step/hole prompt fires, the surface is never floor:
+    # at/above the floor plane it is an obstacle (even a flat landing), and
+    # below it, hazard.  This survives small floor-plane fit variation.
     drop_gate = np.maximum(cfg.hazard_drop_m, cfg.noise_scale * rng)
+    obj = ((oconf > 0) & (h >= cfg.occ_min_m) & (h <= cfg.occ_max_m))
+    stair = ((hconf > 0) & (h >= -drop_gate) & (h <= cfg.occ_max_m))
+    obstacle = obj | stair
+    obs_conf = np.where(obj, oconf, hconf)
     hazard = h < -drop_gate
     if cfg.hazard_require_floor:
         hazard &= ((fconf > 0) | (hconf > 0))
@@ -733,7 +741,7 @@ def camera_evidence(prep, plane, cfg, grid, fallback=False):
     add(out["floor_w"], floor_sam, w * np.clip(fconf, 0.05, 1.0))
     add(out["floor_w"], floor_depth, w * cfg.depth_floor_weight)
     add(out["wall_w"], wall, w * np.clip(wconf, 0.05, 1.0))
-    add(out["occ_w"], obstacle, w * np.clip(oconf, 0.05, 1.0))
+    add(out["occ_w"], obstacle, w * np.clip(obs_conf, 0.05, 1.0))
     add(out["haz_w"], hazard, w)
     out["cov_n"] = np.bincount(flat, minlength=n_cells).astype(np.int32)
     out["cov_w"] = np.bincount(flat, weights=w,

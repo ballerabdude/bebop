@@ -156,6 +156,21 @@ def test_hazard_from_step_down():
     assert any(out.semantic[r, c] == HAZARD for r, c in cells)
 
 
+def test_stairs_prompt_marks_above_plane_as_obstacle():
+    # An ascending stair/step surface is above the floor plane.  The
+    # stairs/step prompt must make it obstacle evidence, not floor/ignore.
+    box = (1.45, 1.55, -0.20, 0.20, 0.00, 0.40)
+    depth, hit = render_scene(boxes=(box,))
+    spec = make_spec()
+    prep = prepare_observation(
+        spec, depth, hazard_conf=(hit == 2).astype(np.float32),
+        cfg=LABEL_CFG, grid=GRID)
+    plane = fit_plane(prep, LABEL_CFG)
+    ev = camera_evidence(prep, plane, LABEL_CFG, GRID)
+    assert ev["occ_w"].sum() > 0.0
+    assert ev["floor_w"].sum() < ev["cov_w"].sum()
+
+
 def test_hazard_requires_floor_confirmation():
     box = (1.99, 2.01, -2.0, 2.0, -0.30, 0.0)
     floors = ((0.0, -20.0, 2.0), (-0.30, 2.0, 20.0))

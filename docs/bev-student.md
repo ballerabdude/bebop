@@ -113,6 +113,10 @@ Per labeled keyframe and camera:
      floor-height drops are opt-in and off by default indoors.  Points
      below the plane under furniture are suppressed by an obstacle-adjacency
      check.
+   - stairs/step/hole prompts are **never floor**: at/above the local floor
+     plane they become obstacles, below it hazards.  This catches ascending
+     stairs (e.g. the 193224 hallway) as well as drops, independent of small
+     plane-fit variation.
 5. Fuse both cameras and resolve with priority
    `hazard > wall > obstacle > floor`; ego and unobserved cells become 255.
 6. `coverage` is any valid depth return from either camera (ego cells are
