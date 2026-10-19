@@ -107,6 +107,7 @@ comparison.
 | `exp-fixed-flip-control` | mixed labels, no hazard loss | 0.516 | 0.140 | 0.076 | 0.829 / 0.900 |
 | `exp-fixed-flip-tvbal` | mixed labels, Tversky 0.5/0.5 | 0.521 | 0.155 | 0.058 | 0.838 / 0.903 |
 | **`exp-base2-flip-tvbal`** | **full clean labels, Tversky 0.5/0.5** | **0.545** | **0.325** | **0.259** | **0.816 / 0.912** |
+| `exp-base2-flip-tvbal-s1` | same recipe, seed 1 | 0.524 | 0.234 | — | 0.814 / 0.908 |
 
 Negative results worth keeping:
 
@@ -190,3 +191,7 @@ Evaluate and sweep hazard thresholds:
 Six drives, 2,100 labelled frames, one held-out drive.  The validation
 drive is correlated with the training rooms and was relabeled during this
 pass.  Treat these numbers as a development signal, not a final benchmark.
+The clean-label recipe also has seed variance: the same 40 epochs with
+seed 1 produced mIoU 0.524 / hazard F1 0.234 (raw), versus 0.545 / 0.325
+for seed 0.  Both are above the old 0.518 / 0.121, and the direction of the
+label fix is consistent, but the headline number is a best-of-two seed.
