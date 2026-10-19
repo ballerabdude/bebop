@@ -116,6 +116,14 @@ def test_dataset_sample_shapes(tmp_path):
     assert counts[0] > 0
 
 
+def test_wall_boundary_metric_is_a_ring():
+    trainer = _load_trainer()
+    m = torch.zeros(1, 4, 4)
+    m[..., 1:3, 1:3] = 1.0
+    edge = trainer._edge(m)
+    assert int(edge.sum()) == 4
+
+
 def test_one_batch_overfit_smoke(tmp_path):
     trainer = _load_trainer()
     model = BevStudent(tiny=True, lut=dummy_lift_lut()).train()

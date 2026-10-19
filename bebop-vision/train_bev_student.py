@@ -220,9 +220,10 @@ def compute_loss(out, batch, class_weights, device):
 
 
 def _edge(mask):
+    """Boundary pixels of a binary mask (erosion, not dilation)."""
     m = mask.float().unsqueeze(1)
-    er = F.max_pool2d(m, 3, 1, 1)
-    return (m > 0.5) & (er <= 0.5)
+    eroded = -F.max_pool2d(-m, 3, 1, 1)  # min-pool = erosion
+    return (m > 0.5) & (eroded <= 0.5)
 
 
 def _bands(rows, width=120):
