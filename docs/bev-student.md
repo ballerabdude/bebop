@@ -43,7 +43,19 @@ bebop-vision/
 `<stamp>` is the source MCAP `log_time` in nanoseconds, zero-padded to 20
 digits.  The extractor snaps each source tick to a 10 Hz target grid (nearest
 real frame; never interpolated), because the recorder writes at the
-frame-set rate (~21 Hz on the 2026-10-18 sessions), not at exactly 10 Hz.
+frame-set rate (~21-24 Hz on the 2026-10-18 sessions), not at exactly 10 Hz.
+
+The six 2026-10-18 sessions unpacked on 2026-10-18:
+
+| Session | Duration | Source ticks | Source Hz | 10 Hz frames |
+|---|---:|---:|---:|---:|
+| `navd_session_20261018_191614` | 195.1 s | 4,371 | 22.39 | 1,920 |
+| `navd_session_20261018_191941` | 67.0 s | 1,524 | 22.73 | 633 |
+| `navd_session_20261018_192050` | 65.2 s | 1,576 | 24.17 | 644 |
+| `navd_session_20261018_193224` | 122.8 s | 2,925 | 23.82 | 1,194 |
+| `navd_session_20261018_193619` | 157.4 s | 3,359 | 21.34 | 1,415 |
+| `navd_session_20261018_193932` | 53.8 s | 1,157 | 21.47 | 492 |
+| **Total** | **661 s** | **14,912** | | **6,298** |
 
 ## 2. Grid convention (unchanged from master BEV)
 
@@ -97,10 +109,9 @@ Per labeled keyframe and camera:
 6. `coverage` is any valid depth return from either camera (ego cells are
    excluded from coverage and marked `ego=True`).
 
-Effective label rate: 10 Hz extraction × `--stride 3` = 3.33 Hz nominal
-(the actual extracted rate is printed in `preview/stats.json`; it is
-~2.7 Hz on the 2026-10-18 sessions because the source recorder ran at
-~21.5 Hz).  Adjacent 10 Hz frames are nearly identical; this is intentional.
+Effective label rate: ~9-10 Hz extraction × `--stride 3` = ~3.0-3.3 Hz
+(the exact per-session rate is in `preview/stats.json`).  Adjacent 10 Hz
+frames are nearly identical; this is intentional.
 
 ## 4. Commands
 
@@ -155,9 +166,12 @@ Per session under `sessions/<session>/preview/`:
 
 Do **not** start training until a drive with a wall, a box/chair and a
 step/hazard has been reviewed.  The 2026-10-18 home-tour drives contain
-walls, doors, chairs, tables, beds, cabinets and sofas; no unambiguous
-stair/box test scene was found in the sampled frames.  Record one more
-short drive with a cardboard box and a step down before M3 sign-off.
+walls, doors, chairs, tables, beds, cabinets, sofas and a staircase.  The
+living-room drive `navd_session_20261018_193932` includes the staircase
+frame `01792366817349875004` (explicit `_color_masks.jpg` +
+`_bev_labels.png` pair in that session's `preview/`); use it for the
+hazard review.  A short drive with a cardboard box in the path is still
+worth recording before M3 sign-off.
 
 ## 6. M1 acceptance checks
 
