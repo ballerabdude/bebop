@@ -141,7 +141,8 @@ def run_record_navd(args):
                 rig, hz=args.bev_hz, video_server=vserver,
                 model_path=args.bev_model,
                 model_meta=args.bev_model_meta,
-                hazard_source=args.bev_hazard_source)
+                hazard_source=args.bev_hazard_source,
+                hazard_threshold=args.bev_hazard_threshold)
             bev_service.start()
 
     # Semantic place memory (bebop_vision/places): teaches named rooms from

@@ -104,3 +104,20 @@ def test_inflation_layer():
                              ages_s={})
     assert np.sum(grid.occ == INFLATED) > 0
     assert np.all(grid.raw[60, 30] == OCCUPIED)
+
+
+def test_hazard_threshold_override():
+    # Hazard probability ~0.475 (softmax(1,0,0,0)); below 0.5 but above 0.4.
+    logits = np.zeros((4, 120, 60), np.float32)
+    logits[3] = 1.0
+    ego = np.full((1, 120, 60), -8.0, np.float32)
+    cov = np.full((1, 120, 60), 8.0, np.float32)
+    rt = _runtime(hazard_source="model")
+    rt.hazard_threshold = 0.4
+    grid, _ = rt.postprocess(logits, ego, cov, {"near": _Frame(),
+                                                "far": _Frame()}, ages_s={})
+    assert np.all(grid.semantic[grid.coverage] == 3)
+    rt.hazard_threshold = 0.6
+    grid, _ = rt.postprocess(logits, ego, cov, {"near": _Frame(),
+                                                "far": _Frame()}, ages_s={})
+    assert not np.any(grid.semantic == 3)

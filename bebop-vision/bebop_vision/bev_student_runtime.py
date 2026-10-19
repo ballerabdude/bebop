@@ -46,12 +46,13 @@ class BevStudentRuntime:
     """Load one TensorRT engine and run a near/far RGB-D pair."""
 
     def __init__(self, engine_path, meta_path=None, device="cuda",
-                 hazard_source="model"):
+                 hazard_source="model", hazard_threshold=0.5):
         import tensorrt as trt
 
         self.engine_path = str(engine_path)
         self.device = device
         self.hazard_source = hazard_source
+        self.hazard_threshold = float(hazard_threshold)
         meta_path = Path(meta_path) if meta_path else self._find_meta(
             Path(engine_path))
         with open(meta_path) as f:
@@ -212,6 +213,18 @@ class BevStudentRuntime:
         cov_logits = np.asarray(cov_logits).reshape(-1, self.rows, self.cols)[0]
         probs = self._softmax(sem_logits, axis=0)
         semantic = probs.argmax(0).astype(np.uint8)
+        # Optional hazard probability threshold.  The default 0.5 is the
+        # argmax contract; lower values trade precision for stair/drop
+        # recall, higher values suppress more orange.  Applied within the
+        # predicted coverage mask below.
+        if getattr(self, "hazard_threshold", 0.5) != 0.5:
+            hz = probs[SEM_HAZARD] > self.hazard_threshold
+            if self.hazard_threshold < 0.5:
+                semantic[hz] = SEM_HAZARD
+            else:
+                alt = probs[:3].argmax(0).astype(np.uint8)
+                semantic[(semantic == SEM_HAZARD) & ~hz] = alt[
+                    (semantic == SEM_HAZARD) & ~hz]
         confidence = (probs.max(0) * 255.0).astype(np.uint8)
         ego = self._sigmoid(ego_logits) > 0.5
         coverage = self._sigmoid(cov_logits) > 0.5
@@ -293,6 +306,7 @@ class BevStudentRuntime:
         return {
             "engine": Path(self.engine_path).name,
             "hazard_source": self.hazard_source,
+            "hazard_threshold": getattr(self, "hazard_threshold", 0.5),
             "input_shape": list(self.in_shape),
             "infer_ms": (round(self.last_latency_ms, 2)
                          if self.last_latency_ms is not None else None),

@@ -29,7 +29,8 @@ class BevService:
 
     def __init__(self, rig, *, hz=10.0, video_server=None,
                  jpeg_quality=80, model_path=None, model_meta=None,
-                 hazard_source="model", runtime=None):
+                 hazard_source="model", hazard_threshold=0.5,
+                 runtime=None):
         self.rig = rig
         self.hz = max(1.0, float(hz))
         self.video_server = video_server
@@ -41,7 +42,8 @@ class BevService:
                     "BevService is model-only; pass model_path or runtime")
             runtime = BevStudentRuntime(
                 model_path, meta_path=model_meta,
-                hazard_source=hazard_source)
+                hazard_source=hazard_source,
+                hazard_threshold=hazard_threshold)
         self.runtime = runtime
         self.range_m = float(runtime.range_m)
         self.width_m = float(runtime.width_m)
@@ -62,8 +64,8 @@ class BevService:
         self._last_error = None
         self._last_grid_ts = 0.0
         print(f"[bev] learned model {getattr(runtime, 'engine_path', '?')} "
-              f"({getattr(runtime, 'in_shape', '?')}, hazard={hazard_source})",
-              flush=True)
+              f"({getattr(runtime, 'in_shape', '?')}, hazard={hazard_source}, "
+              f"threshold={hazard_threshold})", flush=True)
 
     # -- one tick -----------------------------------------------------------
 
