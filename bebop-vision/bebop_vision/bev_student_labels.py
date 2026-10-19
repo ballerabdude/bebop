@@ -4,7 +4,7 @@ The teacher is SAM 3.1 for semantics and the rig's depth streams for
 geometry.  Per labeled keyframe and camera:
 
   1. every sampled depth pixel is deprojected into the body frame using the
-     same mount / intrinsics model as :mod:`bebop_vision.master_bev`;
+     the same mount / intrinsics model as the geometric BEV used to;
   2. the point is projected into the **color** frame through the camera's
      depth->color extrinsic, so the SAM mask is sampled at the exact pixel
      that saw that depth sample (no zero-baseline approximation);
@@ -108,7 +108,7 @@ def prompt_class(prompt):
 
 @dataclasses.dataclass(frozen=True)
 class GridSpec:
-    """Body-frame BEV grid, identical to ``master_bev.MasterBevBuilder``."""
+    """Body-frame BEV grid: 120x60, 6x3 m, row 0 far, col 0 right."""
 
     range_m: float = 6.0
     width_m: float = 3.0
@@ -208,15 +208,16 @@ class LabelConfig:
     @classmethod
     def from_config(cls, cfg):
         raw = (cfg.get("bev_student") or {}).get("label") or {}
-        mb = cfg.get("master_bev") or {}
+        geo = ((cfg.get("bev_student") or {}).get("geometry")
+               or cfg.get("master_bev") or {})
         kw = {}
         for f in dataclasses.fields(cls):
             if f.name in raw:
                 kw[f.name] = raw[f.name]
         for name in ("floor_band_m", "noise_scale", "near_range_m",
                      "far_range_m", "min_range_m", "max_range_m"):
-            if name in mb and name not in kw:
-                kw[name] = mb[name]
+            if name in geo and name not in kw:
+                kw[name] = geo[name]
         safety = cfg.get("safety") or {}
         for name in ("plane_residual_m", "plane_min_inliers",
                      "plane_min_frac", "hazard_drop_m", "noise_scale"):
@@ -346,7 +347,7 @@ def height_above_plane(points, normal, offset):
 
 
 def range_weight(role, forward_m, cfg=None):
-    """Confidence from the **forward** distance, matching master_bev.
+    """Confidence from the **forward** distance, matching the historical geometric BEV.
 
     Near: full to 1.20 m, fade to zero at 2.00 m.  Far: ramp 1.00->2.00,
     full 2.00-4.50, fade to zero at 7.00 m.
@@ -405,10 +406,12 @@ def build_camera_spec(role, serial, cam_cfg, intr, cfg, grid):
         R_dc = np.eye(3, dtype=np.float64)
         t_dc = np.zeros(3, np.float64)
 
-    stride_x = int(cam_cfg.get("label_stride_x", cfg.get("label_stride_x", 4)))
+    geo = (cfg.get("bev_student") or {}).get("geometry") or {}
+    stride_x = int(cam_cfg.get(
+        "label_stride_x", geo.get("stride_x", 4)))
     stride_y = int(cam_cfg.get(
         "label_stride_y",
-        cfg.get(f"label_stride_y_{role}", 2 if role == "near" else 1)))
+        geo.get(f"stride_y_{role}", 2 if role == "near" else 1)))
 
     # Self-view pixels: the rig config keeps the polygon even though the live
     # recorder no longer zeroes the published depth.  Labels must exclude
@@ -485,7 +488,7 @@ def prepare_observation(spec, depth_mm, floor_conf=None, wall_conf=None,
     pts = spec.dir_body * z[:, None] + spec.t_body
     x, y, zz = pts[:, 0], pts[:, 1], pts[:, 2]
     body_r = np.hypot(x, y)
-    # Same working volume as master_bev.prepare, plus the dead disc.  Points
+    # Same working volume as the old geometric BEV prepare, plus the dead disc.
     # inside the disc are the robot/chassis or stereo artifacts; the ego
     # footprint is a separate, explicit layer.
     valid &= (body_r >= cfg.min_range_m)

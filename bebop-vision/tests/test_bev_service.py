@@ -1,8 +1,12 @@
-"""BevService wiring tests (fake rig, no hardware)."""
+"""Model-only BevService wiring tests (fake runtime, no hardware/TRT)."""
 
-from test_master_bev import make_builder, scene
+import time
+
+import numpy as np
 
 from bebop_vision.bev_service import BevService
+from bebop_vision.master_bev import BevGrid
+from bebop_vision.orbbec import StampedFrame
 
 
 class FakeCam:
@@ -26,15 +30,58 @@ class FakeVideo:
         self.published.append((grid, jpeg))
 
 
-def test_tick_once_publishes_a_grid_and_jpeg():
-    rig = FakeRig(scene())
+class FakeRuntime:
+    engine_path = "fake.engine"
+    in_shape = [2, 4, 240, 424]
+    range_m = 6.0
+    width_m = 3.0
+    cell_m = 0.05
+
+    def __init__(self):
+        self.calls = 0
+
+    def infer(self, frames, geo_grid=None, ages_s=None):
+        self.calls += 1
+        assert geo_grid is None
+        shape = (120, 60)
+        return BevGrid(
+            occ=np.zeros(shape, np.uint8),
+            raw=np.zeros(shape, np.uint8),
+            coverage=np.ones(shape, bool),
+            source=np.full(shape, 3, np.uint8),
+            confidence=np.full(shape, 200, np.uint8),
+            cell_m=0.05, range_m=6.0, width_m=3.0,
+            stamp_us=1234, recv_ts=time.monotonic(),
+            per_camera_age_s=ages_s or {}, plane_ok={}, plane={},
+            contributions={"model": {"engine": "fake.engine",
+                                     "hazard_source": "model",
+                                     "infer_ms": 1.0}},
+            roles=sorted(frames),
+            semantic=np.zeros(shape, np.uint8),
+            wall=np.zeros(shape, bool),
+            ego=np.zeros(shape, bool))
+
+    def status(self):
+        return {"engine": "fake.engine", "infer_ms": 1.0,
+                "hazard_source": "model"}
+
+
+def _frame(role, stamp_us=10):
+    return StampedFrame(
+        depth=np.zeros((480, 848), np.uint16), stamp_us=stamp_us,
+        recv_ts=time.monotonic(), width=848, height=480, fps=30.0,
+        color=None, color_jpeg=b"jpeg", serial="S-" + role, role=role)
+
+
+def test_tick_once_publishes_a_model_grid_and_jpeg():
+    rig = FakeRig({"near": _frame("near"), "far": _frame("far")})
     video = FakeVideo()
-    svc = BevService(rig, builder=make_builder(), hz=20,
-                     video_server=video)
+    svc = BevService(rig, runtime=FakeRuntime(), hz=20, video_server=video)
     grid = svc.tick_once()
     assert grid is not None
     assert grid.shape == (120, 60)
-    assert grid.contributions["far"]["points"] > 0
+    assert "model" in grid.contributions
+    assert grid.semantic is not None
     assert svc.latest() is grid
     assert svc.latest_jpeg() is not None
     assert len(video.published) == 1
@@ -45,16 +92,14 @@ def test_tick_once_publishes_a_grid_and_jpeg():
     assert status["grid"]["rows"] == 120
     assert status["grid"]["cols"] == 60
     assert status["has_jpeg"] is True
-    assert status["running"] is False  # not started; tick_once is manual
+    assert status["running"] is False
+    assert status["model"]["engine"] == "fake.engine"
 
 
-def test_tick_once_with_one_stale_camera_still_fuses():
-    frames = scene()
-    # The near frame is fresh; the far one is old enough to be dropped.
+def test_stale_camera_does_not_fall_back():
+    frames = {"near": _frame("near"), "far": _frame("far")}
     frames["far"].recv_ts -= 10.0
-    rig = FakeRig(frames)
-    svc = BevService(rig, builder=make_builder(), hz=10)
-    grid = svc.tick_once()
-    assert grid is not None
-    assert grid.roles == ["near"]
-    assert "far" not in grid.contributions
+    svc = BevService(FakeRig(frames), runtime=FakeRuntime(), hz=10)
+    assert svc.tick_once() is None
+    assert "missing" in svc._last_error
+    assert svc.latest() is None

@@ -132,12 +132,17 @@ def run_record_navd(args):
     # robot is idle too.
     bev_service = None
     if vserver is not None and not args.no_bev:
-        from bebop_vision.bev_service import BevService
-        bev_service = BevService(
-            rig, hz=args.bev_hz, video_server=vserver,
-            model_path=args.bev_model, model_meta=args.bev_model_meta,
-            hazard_source=args.bev_hazard_source)
-        bev_service.start()
+        if not args.bev_model:
+            print("[bev] no --bev-model; BEV disabled (model-only)",
+                  flush=True)
+        else:
+            from bebop_vision.bev_service import BevService
+            bev_service = BevService(
+                rig, hz=args.bev_hz, video_server=vserver,
+                model_path=args.bev_model,
+                model_meta=args.bev_model_meta,
+                hazard_source=args.bev_hazard_source)
+            bev_service.start()
 
     # Semantic place memory (bebop_vision/places): teaches named rooms from
     # the live view and recognises them by DINOv3 appearance. Shares the rig
@@ -406,6 +411,9 @@ def run_bev(args):
     cameras into the non-square master grid.  ``GET /bev`` returns the grid
     as JSON; ``GET /snapshot?stream=bev`` returns the rendered JPEG.
     """
+    if not args.bev_model:
+        raise SystemExit(
+            "--bev is model-only; pass --bev-model <engine>")
     from bebop_vision.bev_service import BevService
     from bebop_vision.orbbec import OrbbecRig
     from bebop_vision.videoserver import VideoServer
@@ -473,7 +481,7 @@ def main():
                         help="hazard source for the learned BEV "
                              "(default: model-only)")
     parser.add_argument("--bev", action="store_true",
-                        help="run the live master-BEV view only (no "
+                        help="run the live learned-BEV view only (no "
                              "recording, no robot connection)")
     parser.add_argument("--bev-hz", type=float, default=10.0,
                         help="master-BEV update rate (default: 10)")

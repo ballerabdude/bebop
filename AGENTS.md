@@ -203,6 +203,6 @@
 - Dual cameras run matched 30 fps under hardware sync (both cams negotiate
   848x480@30 on the Thor). The old "matched 15 fps / 30+30 starves the GIL"
   rule was measured on the Orin Nano with the old BEV worker; without a BEV
-  the Thor recorder sustains ~29 Hz at 30+30. The opt-in master BEV
-  (`main.py --bev`, `docs/master-bev.md`) is a separate 10 Hz worker over
+  the Thor recorder sustains ~29 Hz at 30+30. The learned BEV
+  (`main.py --bev-model`, `docs/bev-student.md`) is a separate 10 Hz worker over
   both depth streams; `--no-bev` disables it during `--record-navd`.

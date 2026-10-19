@@ -94,53 +94,25 @@ robots:
       # outside the self-view mask; nothing inside this radius is
       # actionable (planner rays start at 0.35 m).
       min_range_m: 0.55
-    # Live master BEV: one fused occupancy grid from both depth cameras.
-    # Deliberately non-square — the far camera sees further ahead than the
-    # robot is wide. 6.0 m forward x 3.0 m wide at 5 cm = 120 x 60 cells.
-    # The legacy `bev:` block above stays at 3x3 m for the exp-branch navd
-    # planner; `--bev` and the live feed use this block.
-    master_bev:
-      range_m: 6.0
-      width_m: 3.0
-      cell_m: 0.05
-      min_range_m: 0.55
-      max_range_m: 8.0
-      # Horizontal subsampling is cheap; vertical is not, because the far
-      # camera sees the floor at a grazing angle.  At 5 m one vertical
-      # pixel spans ~7 cm of floor; stride 1-2 keeps the 5 cm grid filled.
-      stride_x: 4
-      stride_y_near: 2
-      stride_y_far: 1
-      # Range weights (metres).  Near: full to full1, fade to zero at zero.
-      # Far: ramp ramp0..full0, full through full1, fade to zero at zero.
-      near_range_m: [0.55, 1.20, 2.00]
-      far_range_m: [1.00, 2.00, 4.50, 7.00]
-      occ_min_m: 0.03
-      occ_max_m: 0.30
-      hazard_drop_m: 0.05
-      # Adjacent-cell drop hazards are noisy on cluttered floors; points
-      # genuinely below the floor still mark HAZARD.  Opt in for stairs.
-      enable_drop_hazard: false
-      # Per-camera floor fit: use only points within this height band of the
-      # body floor, require a normal within plane_normal_deg of vertical, and
-      # down-weight a camera that has to fall back to the joint plane.
-      floor_band_m: 0.40
-      plane_normal_deg: 10.0
-      fallback_weight: 0.5
-      # Weighted-evidence thresholds per cell.
-      occ_min_w: 0.75
-      occ_dom_ratio: 0.35
-      haz_min_w: 1.0
-      # Fill 1-2 cell gaps between observed free cells (sparse far returns).
-      gap_fill_iters: 2
     # Learned master-BEV student (docs/bev-student.md).  SAM 3.1 is the
     # offline semantic teacher; these knobs shape its depth-fused labels.
-    # The grid matches master_bev exactly (120x60, row 0 far, col 0 right).
+    # The grid is 120x60, row 0 far, col 0 right.  The live BEV is model-only;
+    # `geometry` is used by the offline label/training tools.
     bev_student:
       grid:
         range_m: 6.0
         width_m: 3.0
         cell_m: 0.05
+      geometry:
+        min_range_m: 0.55
+        max_range_m: 8.0
+        stride_x: 4
+        stride_y_near: 2
+        stride_y_far: 1
+        near_range_m: [0.55, 1.20, 2.00]
+        far_range_m: [1.00, 2.00, 4.50, 7.00]
+        floor_band_m: 0.40
+        noise_scale: 0.01
       label:
         # Per-cell weighted-evidence thresholds.
         floor_min_w: 0.40
