@@ -154,7 +154,7 @@ done
     --val-sessions navd_session_20261018_193932
 .venv/bin/python tools/bev_student_dataset.py report
 
-# 5. A TensorBoard run directory (M2 fills it).
+# 5. TensorBoard training run (M2/M3).
 .venv/bin/python tools/bev_student_dataset.py init-run --run-id dino-vits16-m1
 tensorboard --logdir runs/bev-student --port 6006
 ```
@@ -202,46 +202,60 @@ worth recording before M3 sign-off.
 - [x] A drive with a visible step/hazard is available (staircase in
       `navd_session_20261018_193932`); tune the hazard gate after review.
 
-## 6b. M1 verification (2026-10-18)
+## 6b. M1 verification (2026-10-18, updated 2026-10-19)
 
 - `cd bebop-vision && .venv/bin/python -m pytest tests/ -q` →
-  **324 passed, 1 skipped** (13 new in `tests/test_bev_student.py`).
+  **331 passed, 1 skipped** (label, model and synthetic-overfit tests).
 - Extraction → **6,298 frames** across six drives (table in §1); all
   `index.jsonl` rows validate, no missing color/depth files.
 - DINOv3 ViT-S/16 fetched from the gated HF repo
   (`facebook/dinov3-vits16-pretrain-lvd1689m`, 21.6 M params) into
   `weights/dinov3-vits16/`; verified at 240×424 (395 patch tokens) and
   480×848 (1,595 tokens).
-- Two full drives are labeled: `navd_session_20261018_191614` (640
-  keyframes, 3.28 Hz effective) and `navd_session_20261018_193932` (164,
-  3.06 Hz effective); a killed exploratory pass left 4 valid labels in
-  `navd_session_20261018_191941`. Aggregate: **808 labeled frames**,
-  floor 21.8%, wall 4.2%, obstacle 3.6%, hazard 0.7%, ignore 69.7%.
+- All six drives are labeled: **2,100 keyframes** (33.3% of extracted
+  frames, 3.0–3.3 Hz effective). Aggregate: floor 21.4%, wall 4.0%,
+  obstacle 4.6%, hazard 1.5%, ignore 68.5%.
 - Split: **val = `navd_session_20261018_193932`** (staircase living room),
-  train = `navd_session_20261018_191614` + the 4 exploratory frames in
-  `navd_session_20261018_191941`. Re-run `split` after labeling more.
-- The other four drives are extracted and ready; run the same label
-  command after reviewing the two full drives. `preview/stats.json`
-  records the exact rate per drive.
+  train = the other five drives.
+- Stairs/step/hole prompts are never floor: at/above the plane they are
+  obstacles, below they are hazards. The 193224 stair frame has 10%
+  hazard; the staircase drive is held out for validation.
+- Ego is the fixed 0.55 m forward × 0.40 m wide chassis rectangle (88
+  cells), not the fan-shaped near self-mask. The self-mask still excludes
+  self pixels from scene evidence.
 
-## 7. M2+ plan (not implemented yet)
+## 7. M2/M3 — student model and training (implemented 2026-10-19)
 
-- `bebop_vision/bev_student.py`: DINOv3 ViT-S/16 (~21 M) shared encoder,
-  4th depth channel, multi-layer patch tokens → FPN 60×106×128, learned
-  near/far embedding, multi-plane IPM at z = 0.0/0.3/0.8/1.5 m, fixed
-  bilinear LUT (`Gather`/`Mul`/`Add`, no `grid_sample`), U-Net decoder to
-  120×60, heads semantic[4], ego[1], coverage[1].
-- `train_bev_student.py`: class-weighted CE/focal + Dice for wall/hazard,
-  BCE ego/coverage, AMP/AdamW, stage 1 frozen encoder / stage 2 low-LR
-  unfreeze, drive-level split, TensorBoard scalars/images, best checkpoint
-  by safety-weighted score (obstacle/hazard recall + wall IoU).
-- `tools/export_bev_student.py`: whole-graph ONNX (opset 17/18, static
-  `[2,4,240,424]`), ONNX parity, TensorRT FP16 engine + metadata.
-- `tools/bench_bev_student.py`: PyTorch/ONNX/TRT parity and Thor latency
-  (target ≤20 ms/camera, ≤40 ms for the pair at 10 Hz).
-- Live integration: `main.py --bev-model`, `bev_service` model producer,
-  `BevGrid` semantic/wall/ego RLE, `/bev` JSON, render palette, planner
-  mapping, geometric fallback.
+- `bebop_vision/bev_student.py` — DINOv3 ViT-S/16 shared encoder, 4th
+  depth channel (zero-initialised), patch tokens from layers 3/6/9/12,
+  FPN to 60×106×128, learned near/far camera embedding, fixed bilinear
+  multi-plane LUT at z = 0.0/0.3/0.8/1.5 m (`Gather` + `Mul` + `Add`, no
+  `grid_sample`), per-camera depth-validity channels, U-Net decoder to
+  120×60, heads semantic[4]/ego[1]/coverage[1].  Total **22.62 M params**
+  (21.6 M encoder + head).  Build the LUT from the same rig YAML and
+  intrinsics as the labels.
+- `train_bev_student.py` — drive-split dataset, colour/depth augmentation
+  (horizontal flip is applied to images and BEV consistently), class-
+  weighted CE + wall/obstacle Dice + down-weighted ego BCE + coverage BCE,
+  AMP/AdamW, stage 1 frozen encoder (5 epochs), stage 2 encoder at
+  `lr × 0.1`, TensorBoard scalars/per-class IoU/recall/coverage/ego/sample
+  images, safety-weighted best checkpoint (wall boundary IoU + obstacle/
+  hazard recall + small mIoU).
+- Full run (60 epochs, batch 8, batch step ~50 ms on the RTX 5090):
+  ```bash
+  cd bebop-vision
+  .venv/bin/python train_bev_student.py     --epochs 60 --stage1-epochs 5 --batch-size 8     --lr 1e-4 --encoder-lr-scale 0.1     --run runs/bev-student/dino-vits16-full
+  tensorboard --logdir runs/bev-student --port 6006
+  ```
+  Outputs: `runs/bev-student/dino-vits16-full/{checkpoints,tb,config.json}`.
+- Remaining M4/M5 work:
+  - `tools/export_bev_student.py`: whole-graph ONNX (opset 17/18, static
+    `[2,4,240,424]`), ONNX parity, TensorRT FP16 engine + metadata.
+  - `tools/bench_bev_student.py`: PyTorch/ONNX/TRT parity and Thor latency
+    (target ≤20 ms/camera, ≤40 ms for the pair at 10 Hz).
+  - Live integration: `main.py --bev-model`, `bev_service` model producer,
+    `BevGrid` semantic/wall/ego RLE, `/bev` JSON, render palette, planner
+    mapping, geometric fallback.
 - DINOv3 ViT-L/16 is an optional feature-distillation teacher only; never
   deployed.
 
