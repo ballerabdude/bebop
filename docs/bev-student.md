@@ -161,7 +161,8 @@ label npz files; `--max-frames` is for a quick review pass.
 Per session under `sessions/<session>/preview/`:
 
 - `<stamp>_color_masks.jpg` — near|far color with SAM masks overlaid
-  (green floor, blue wall, red obstacle, yellow hazard).
+  (green floor, blue wall, red obstacle; the depth-gated hazard is shown
+  in the BEV label, not the color overlay).
 - `<stamp>_bev_labels.png` — 120×60 semantic grid, mirrored horizontally
   like `render_bev`, with class percentages and the ego footprint outlined.
 - `contact_sheet.png` — grid of BEV label tiles.
@@ -203,11 +204,17 @@ worth recording before M3 sign-off.
   (`facebook/dinov3-vits16-pretrain-lvd1689m`, 21.6 M params) into
   `weights/dinov3-vits16/`; verified at 240×424 (395 patch tokens) and
   480×848 (1,595 tokens).
-- The living-room drive `navd_session_20261018_193932` was fully labeled
-  (164 keyframes at stride 3, 3.07 Hz effective); its staircase frame
-  `01792366817349875004` is the hazard review pair.
-- Remaining drives are labeled with the same command in the background;
-  `preview/stats.json` records the exact rate per drive.
+- Two full drives are labeled: `navd_session_20261018_191614` (640
+  keyframes, 3.28 Hz effective) and `navd_session_20261018_193932` (164,
+  3.06 Hz effective); a killed exploratory pass left 4 valid labels in
+  `navd_session_20261018_191941`. Aggregate: **808 labeled frames**,
+  floor 21.8%, wall 4.2%, obstacle 3.6%, hazard 0.7%, ignore 69.7%.
+- Split: **val = `navd_session_20261018_193932`** (staircase living room),
+  train = `navd_session_20261018_191614` + the 4 exploratory frames in
+  `navd_session_20261018_191941`. Re-run `split` after labeling more.
+- The other four drives are extracted and ready; run the same label
+  command after reviewing the two full drives. `preview/stats.json`
+  records the exact rate per drive.
 
 ## 7. M2+ plan (not implemented yet)
 

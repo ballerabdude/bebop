@@ -1106,8 +1106,7 @@ def render_color_masks(images, masks_by_role, *, max_width=640):
         maps = masks_by_role.get(role) or {}
         for cls, color in ((FLOOR, (60, 220, 60)),
                            (WALL, (235, 120, 40)),
-                           (OBSTACLE, (40, 40, 220)),
-                           (HAZARD, (0, 220, 255))):
+                           (OBSTACLE, (40, 40, 220))):
             m = maps.get(cls)
             if m is None:
                 continue
@@ -1136,7 +1135,6 @@ def render_color_masks(images, masks_by_role, *, max_width=640):
         ("floor", (60, 220, 60)),
         ("wall", (235, 120, 40)),
         ("obstacle", (40, 40, 220)),
-        ("hazard prompt", (0, 220, 255)),
     ])
 
 
