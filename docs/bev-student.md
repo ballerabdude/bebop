@@ -205,7 +205,7 @@ worth recording before M3 sign-off.
 ## 6b. M1 verification (2026-10-18, updated 2026-10-19)
 
 - `cd bebop-vision && .venv/bin/python -m pytest tests/ -q` →
-  **331 passed, 1 skipped** (label, model and synthetic-overfit tests).
+  **332 passed, 1 skipped** (label, model and synthetic-overfit tests).
 - Extraction → **6,298 frames** across six drives (table in §1); all
   `index.jsonl` rows validate, no missing color/depth files.
 - DINOv3 ViT-S/16 fetched from the gated HF repo
@@ -248,6 +248,47 @@ worth recording before M3 sign-off.
   tensorboard --logdir runs/bev-student --port 6006
   ```
   Outputs: `runs/bev-student/dino-vits16-full/{checkpoints,tb,config.json}`.
+
+### M3 full-training result (2026-10-19)
+
+60 epochs, batch 8, stage 1 frozen for 5 epochs; ~12.7 s/epoch on the
+RTX 5090.  The val metrics plateau around epoch 20; later epochs overfit
+(train loss 0.25, val loss 12.6).  `best.pt` is **epoch 20**.
+
+Held-out staircase drive `navd_session_20261018_193932`:
+
+| Metric | Value |
+|---|---:|
+| mIoU (4 classes) | 0.520 |
+| floor IoU / recall | 0.810 / 0.855 |
+| wall IoU / recall | 0.668 / 0.817 |
+| obstacle IoU / recall | 0.535 / 0.755 |
+| hazard IoU / recall | 0.066 / 0.207 |
+| wall boundary IoU | 0.110 |
+| coverage precision / recall | 0.812 / 0.920 |
+| ego false-positive rate | 0.063 |
+| obstacle recall 0–1 / 1–2 / 2–4 m | 0.827 / 0.760 / 0.748 |
+
+The hazard head works on the **training** drives (precision 0.608,
+recall 0.938, IoU 0.585) but does **not** generalise to the held-out
+living-room staircase: on val it predicts hazard on floor/obstacle cells
+(precision 0.088 at the argmax).  Thresholding does not rescue it (best
+IoU 0.070).  This is a domain/data gap, not a loss bug.
+
+**Recommendation:** use the learned floor/wall/obstacle/coverage heads,
+but keep the geometric BEV hazard fallback and treat the student hazard
+head as experimental until 2–3 more stair/drop drives are recorded.
+The next training experiment should add hazard-frame oversampling and
+stronger colour/depth augmentation (to discourage a colour shortcut),
+and/or use a dedicated hazard auxiliary head.  Export/bench (M4) is safe
+for the semantic/ego/coverage heads now; hazard can be an extra output.
+
+Evaluation artifacts: `runs/bev-student/dino-vits16-full/eval/metrics.json`
+and `sample_*.jpg`; checkpoints in `checkpoints/best.pt` (epoch 20) and
+`last.pt` (epoch 59).  The original selection score used a broken
+wall-boundary term (always 0); the corrected best-checkpoint score is
+0.385, and the chosen epoch remains the best on wall/obstacle/hazard
+metrics.
 - Remaining M4/M5 work:
   - `tools/export_bev_student.py`: whole-graph ONNX (opset 17/18, static
     `[2,4,240,424]`), ONNX parity, TensorRT FP16 engine + metadata.
