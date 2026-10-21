@@ -139,20 +139,24 @@
 
 ## Driving / navigation test loop
 
-- Recorder + navigation in one process (the flag makes the recorder
-  consume app goals and drive):
-  `sudo .venv/bin/python -u main.py --record-navd /var/lib/bebop-captures --auto --goal-drive --navd-model weights/navd.onnx`
-  (add `--drive-any-mode` to skip the Policy-mode gate — Dial-in works).
-  Driving is model-only: `--goal-drive` refuses to start without
-  `--navd-model` (a tick the model cannot serve stops the drive node;
-  the reason shows in the `[navd-model]` log lines; needs
-  weights/navd.onnx scp'd to the robot — it is gitignored).
-- The `nav:` status lines print the drive-loop gate state
-  (waiting/hold/estop/no_floor/search/rotate/hard_stop/drive) — if the
-  robot isn't moving, that line says why.
-- Mode gate: goals need wheels armed + Policy mode unless
-  `--drive-any-mode`; the app's **Go** button (current app build) does
-  the Policy+arm switch itself, **Clear** returns to Dial-in.
+- **The old `--goal-drive` / `--navd-model` planner is gone** (excised from
+  `main` in d99a250, 2026-09-09; archived on `exp/navd-ai-20260909`, not
+  trusted). The BEV student is **disabled** on the robot since 2026-10-21
+  (`/etc/bebop/vision.env` = `--no-bev --nav`); measured ~5 W of GPU for a
+  grid nothing consumed.
+- Navigation direction (2026-10-21): topological place-to-place over the
+  places service (`:9095`), steering by appearance (DINOv3 / VLM at decision
+  points), **depth only for obstacle avoidance**. No SLAM.
+- The fast layer is `bebop_vision/nav/` (`docs/nav.md`): depth stop-cone +
+  bearing waypoint driver, HTTP on **`:9097`**, started by `--nav` inside the
+  recorder process (cameras are exclusive). Goals are a bearing + distance
+  or an odom point; it arms only for the goal and disarms on every exit:
+  `curl -s -X POST -H 'Content-Type: application/json' -d '{"bearing_deg":0,"distance_m":0.5}' http://127.0.0.1:9097/goal`
+  then poll `/status`; `/clearance` is the live sector map. `nav` never
+  clears an E-STOP — a `CAN bus can4` E-STOP at arming means the drive bus
+  is down (motor power off); fix that and clear it from the app.
+- Mode gate: the driver switches to DIAL_IN itself (arming requires it) and
+  the recorder's `--auto` captures every nav drive as an MCAP session.
 
 ## Gotchas (learned the hard way)
 

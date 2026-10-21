@@ -364,6 +364,9 @@ class OrbbecCamera:
         self.imu_enabled = bool(imu)
         self.imu_hz = float(imu_hz)
         self._imu_buf = collections.deque(maxlen=8192) if imu else None
+        # Extra consumers (e.g. the nav pose estimator) each own a tap;
+        # drain_imu() serves only the primary buffer (the recorder).
+        self._imu_taps = []
         self._imu_profiles = {}
         # Self-view shapes (rects [x0, y0, x1, y1] and/or polygons
         # [[x, y], ...]) in DEPTH-frame pixels: the rigid mount means the
@@ -615,11 +618,26 @@ class OrbbecCamera:
                 if fr is None:
                     continue
                 v = fr.get_value()
-                self._imu_buf.append((kind, float(v.x), float(v.y), float(v.z),
-                                      int(fr.get_timestamp_us()),
-                                      time.monotonic()))
+                sample = (kind, float(v.x), float(v.y), float(v.z),
+                          int(fr.get_timestamp_us()), time.monotonic())
+                self._imu_buf.append(sample)
+                for tap in self._imu_taps:
+                    tap.append(sample)
             except Exception:
                 continue
+
+    def add_imu_tap(self, maxlen=4096):
+        """Register an independent IMU consumer; returns its deque.
+
+        Samples are (kind, x, y, z, device_us, recv_ts) exactly as the
+        primary buffer sees them (gyro in rad/s, accel in m/s^2, camera
+        IMU frame).  None when the camera has no IMU stream.
+        """
+        if self._imu_buf is None:
+            return None
+        tap = collections.deque(maxlen=maxlen)
+        self._imu_taps.append(tap)
+        return tap
 
     def drain_imu(self):
         """Return buffered (kind, x, y, z, device_us, recv_ts) and clear it."""
