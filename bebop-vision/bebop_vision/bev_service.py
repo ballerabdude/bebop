@@ -47,7 +47,12 @@ class BevService:
         self.runtime = runtime
         self.range_m = float(runtime.range_m)
         self.width_m = float(runtime.width_m)
-        self.cell_m = float(runtime.cell_m)
+        self.cell_x_m = float(getattr(runtime, "cell_x_m", None)
+                              or runtime.cell_m)
+        self.cell_y_m = float(getattr(runtime, "cell_y_m", None)
+                              or runtime.cell_m)
+        self.cell_m = (self.cell_x_m if abs(self.cell_x_m - self.cell_y_m)
+                       < 1e-9 else None)
         cfg = load_rig_config()["robots"]["default"]
         self.max_frame_age_s = float(
             (cfg.get("safety") or {}).get("max_frame_age_s", 0.3))
@@ -120,8 +125,10 @@ class BevService:
 
         jpeg = None
         try:
+            # Upscale small grids for the operator stream; a 360-row
+            # matched grid is already display sized.
             ok, buf = cv2.imencode(
-                ".jpg", render_bev(grid),
+                ".jpg", render_bev(grid, scale=max(1, 480 // grid.rows)),
                 [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
             if ok:
                 jpeg = buf.tobytes()
@@ -176,8 +183,8 @@ class BevService:
                                         daemon=True)
         self._thread.start()
         print(f"[bev] started {self.range_m:.1f}x{self.width_m:.1f} m "
-              f"@ {self.cell_m*100:.0f} cm, {self.hz:.0f} Hz "
-              f"(learned model-only)", flush=True)
+              f"@ {self.cell_x_m*100:.2g}x{self.cell_y_m*100:.2g} cm, "
+              f"{self.hz:.0f} Hz (learned model-only)", flush=True)
 
     def stop(self):
         self._stop.set()

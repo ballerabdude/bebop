@@ -6,6 +6,7 @@ thresholds and conflict priority are exercised end to end.  SAM is replaced
 by a synthetic hit-type map (floor / box).
 """
 
+import dataclasses
 import json
 
 import numpy as np
@@ -117,6 +118,53 @@ def test_grid_convention_row0_far_col0_right():
     assert row == 60 and col == 30  # half-width left
 
 
+def test_rectangular_grid_keeps_metric_coordinates_and_ego():
+    grid = GridSpec(rows_override=360, cols_override=640)
+    assert grid.shape == (360, 640)
+    assert grid.cell_x_m == pytest.approx(6 / 360)
+    assert grid.cell_y_m == pytest.approx(3 / 640)
+    assert grid.metadata()["cell_m"] is None
+    x, y = grid.centers()
+    for row, col in ((0, 0), (180, 320), (359, 639)):
+        assert grid.cell_of(x[row], y[col]) == (row, col)
+    ego = ego_mask(LabelConfig(), grid)
+    rr, cc = np.where(ego)
+    assert np.all((x[rr] >= 0) & (x[rr] <= 0.55))
+    assert np.all(np.abs(y[cc]) <= 0.22)
+    assert ego.sum() * grid.cell_x_m * grid.cell_y_m == pytest.approx(
+        0.55 * 0.44, abs=0.005)
+    with pytest.raises(ValueError):
+        GridSpec(rows_override=360)
+
+
+def test_rectangular_labels_project_native_points_and_keep_drop_hazards():
+    grid = GridSpec(range_m=4.0, width_m=2.0,
+                    rows_override=360, cols_override=640)
+    spec = make_spec()
+    depth, hits = render_scene(
+        # one real stair riser (18 cm): deeper depth-only drops are treated
+        # as glossy-floor reflections unless SAM says stairs
+        boxes=((1.99, 2.01, -2.0, 2.0, -0.18, 0.0),),
+        floors=((0.0, -20.0, 2.0), (-0.18, 2.0, 20.0)), spec=spec)
+    prep = prepare_observation(spec, depth, floor_conf=(hits == 1).astype(np.float32),
+                               obstacle_conf=(hits == 2).astype(np.float32),
+                               cfg=LABEL_CFG, grid=grid)
+    plane = fit_plane(prep, LABEL_CFG)
+    assert plane["ok"]
+    evidence = camera_evidence(prep, plane, LABEL_CFG, grid)
+    label = fuse_camera_evidence({"near": evidence}, LABEL_CFG, grid)
+    validate_label_arrays(label.semantic, label.ego, label.coverage, grid)
+    assert np.any(label.semantic == HAZARD)
+    assert np.any(label.semantic == FLOOR)
+    # Every covered cell must come from an actual deprojected depth sample.
+    covered = set(np.flatnonzero(label.coverage))
+    projected = set(prep.flat[prep.in_grid])
+    assert covered <= projected
+    for idx in np.flatnonzero(prep.in_grid)[::25]:
+        assert grid.cell_of(*prep.points[idx, :2]) == (
+            prep.rows[idx], prep.cols[idx])
+
+
 # --- prompt mapping --------------------------------------------------------
 
 def test_prompt_categories():
@@ -146,14 +194,16 @@ def test_synthetic_floor_and_box_project_to_expected_cells():
 
 
 def test_hazard_from_step_down():
-    box = (1.99, 2.01, -2.0, 2.0, -0.30, 0.0)  # vertical riser
-    floors = ((0.0, -20.0, 2.0), (-0.30, 2.0, 20.0))
+    box = (1.99, 2.01, -2.0, 2.0, -0.18, 0.0)  # one vertical stair riser
+    floors = ((0.0, -20.0, 2.0), (-0.18, 2.0, 20.0))
     depth, hit = render_scene(boxes=(box,), floors=floors)
     out = label_scene(depth, hit)
     # The riser occludes the near part of the lower floor; the first
-    # visible drop cells are where the grazing ray clears its top (~2.6 m).
-    cells = [rc(x, 0.0) for x in (2.7, 2.9, 3.1)]
-    assert any(out.semantic[r, c] == HAZARD for r, c in cells)
+    # visible drop cells are where the grazing ray clears its top (~2.4 m).
+    xc, _ = GRID.centers()
+    band = out.semantic[(xc >= 2.4) & (xc <= 4.0)]
+    assert np.any(band == HAZARD)
+    assert not np.any(out.semantic[xc < 1.9] == HAZARD)
 
 
 def test_stairs_prompt_marks_above_plane_as_obstacle():
@@ -172,8 +222,8 @@ def test_stairs_prompt_marks_above_plane_as_obstacle():
 
 
 def test_hazard_requires_floor_confirmation():
-    box = (1.99, 2.01, -2.0, 2.0, -0.30, 0.0)
-    floors = ((0.0, -20.0, 2.0), (-0.30, 2.0, 20.0))
+    box = (1.99, 2.01, -2.0, 2.0, -0.18, 0.0)
+    floors = ((0.0, -20.0, 2.0), (-0.18, 2.0, 20.0))
     depth, _hit = render_scene(boxes=(box,), floors=floors)
     spec = make_spec()
     prep = prepare_observation(spec, depth, cfg=LABEL_CFG, grid=GRID)
@@ -189,7 +239,14 @@ def test_config_loads_grid_and_ego():
     from bebop_vision.orbbec import load_rig_config
     cfg = load_rig_config()["robots"]["default"]
     lc = LabelConfig.from_config(cfg)
-    assert lc.ego_x_range_m == (0.0, 0.55)
+    # Chassis rectangle measured from the near camera (2026-10-19); the
+    # runtime ORs the same rectangle onto the predicted ego, so the YAML is
+    # the single source for both.
+    assert lc.ego_x_range_m == (-0.10, 0.29)
+    assert lc.ego_y_range_m == (-0.27, 0.17)
+    assert lc.cull_rect_m is None and lc.cull_ego_margin_m == 0.02
+    assert lc.hazard_ego_margin_m == 0.15
+    assert lc.ego_mask_file == "ego_mask.npz"
     assert lc.hazard_require_floor is True
     specs, _cfg, grid, _lc = specs_from_config(roles=("near",))
     assert grid.shape == (120, 60)
@@ -323,3 +380,139 @@ def test_split_by_drive_never_leaks_frames(tmp_path):
     report = validate_session(tmp_path / "sessions" / names[0], grid=GRID)
     assert report["labeled"] == 3
     assert report["frames"] == 3
+
+
+def test_fit_ground_plane_handles_sparse_point_sets():
+    """A near-floor band with fewer than iters*3 points must still fit
+    (regression: numpy refused to sample 96 triplets without replacement
+    from ~100 points and the stride-1 relabel crashed mid-drive)."""
+    from bebop_vision.master_bev import fit_ground_plane
+
+    rng = np.random.default_rng(0)
+    n = 100  # between min_inliers (50) and iters * 3 (288)
+    pts = np.column_stack([rng.uniform(0.5, 3.0, n), rng.uniform(-1, 1, n),
+                           rng.normal(0.0, 0.003, n)])
+    fit = fit_ground_plane(pts, rng=rng)
+    assert fit is not None
+    nvec, d, count = fit
+    assert nvec[2] > 0.99 and abs(d) < 0.02 and count >= 50
+
+
+def _coverage_rows_known(label, grid, x0, x1, half_width=0.3):
+    """Covered fraction of the band [x0, x1) forward, |y| < half_width."""
+    r0 = int((grid.range_m - x1) / grid.cell_x_m)
+    r1 = int((grid.range_m - x0) / grid.cell_x_m)
+    y = (np.arange(grid.cols) + 0.5) * grid.cell_y_m - grid.width_m / 2
+    return float(label.coverage[r0:r1][:, np.abs(y) < half_width].mean())
+
+
+def test_footprint_splat_fills_sampling_gaps_but_keeps_walls_thin():
+    """On a fine grid the point projection leaves unobserved stripes between
+    depth rows; the footprint splat fills them.  A vertical face is a depth
+    discontinuity, so it must not smear forward."""
+    grid = GridSpec(range_m=4.0, width_m=2.0,
+                    rows_override=240, cols_override=400)   # 1.67 x 0.5 cm
+    spec = make_spec(pitch=-20.0, height=1.0)
+    box = (2.0, 2.4, -0.4, 0.4, 0.0, 0.5)
+    depth, hits = render_scene(boxes=(box,), spec=spec)
+    floor_conf = (hits == 1).astype(np.float32)
+    obs_conf = (hits == 2).astype(np.float32)
+
+    def run(cfg):
+        prep = prepare_observation(spec, depth, floor_conf=floor_conf,
+                                   obstacle_conf=obs_conf, cfg=cfg, grid=grid)
+        plane = fit_plane(prep, cfg)
+        assert plane["ok"]
+        ev = camera_evidence(prep, plane, cfg, grid)
+        return prep, fuse_camera_evidence({"near": ev}, cfg, grid)
+
+    point_cfg = dataclasses.replace(LABEL_CFG)
+    splat_cfg = dataclasses.replace(LABEL_CFG, splat_footprint=True)
+    prep_p, lab_p = run(point_cfg)
+    prep_s, lab_s = run(splat_cfg)
+    assert prep_p.splat_src is None and prep_s.splat_src is not None
+    validate_label_arrays(lab_s.semantic, lab_s.ego, lab_s.coverage, grid)
+
+    # The floor in front of the box (1.0-2.0 m) is striped under point
+    # projection and (nearly) solid under the splat.
+    assert _coverage_rows_known(lab_p, grid, 1.0, 1.9) < 0.3
+    assert _coverage_rows_known(lab_s, grid, 1.0, 1.9) > 0.9
+    # Splat only adds coverage; every point-projected cell is still covered.
+    assert np.all(lab_s.coverage[lab_p.coverage])
+    # Semantics agree wherever both runs classified the cell (the splat also
+    # turns covered-but-unclassified point cells into classified ones, which
+    # is the intended gain, not a disagreement).
+    both = (lab_p.semantic != IGNORE) & (lab_s.semantic != IGNORE)
+    assert np.mean(lab_p.semantic[both] == lab_s.semantic[both]) > 0.95
+    # The box's front face is a vertical wall of obstacle points at x=2.0;
+    # the splat must not push obstacle evidence in front of it.
+    x = grid.range_m - (np.arange(grid.rows) + 0.5) * grid.cell_x_m
+    obs_rows = np.flatnonzero((lab_s.semantic == OBSTACLE).any(axis=1))
+    assert x[obs_rows].min() > 2.0 - 0.06
+    # Every splat cell belongs to an in-grid sample and lies in the grid.
+    assert np.all(prep_s.in_grid[prep_s.splat_src])
+    assert prep_s.splat_flat.min() >= 0
+    assert prep_s.splat_flat.max() < grid.rows * grid.cols
+
+
+def test_splat_patch_is_bounded_by_max_extent():
+    """Neighbours across a depth jump or beyond splat_max_m do not extend a
+    patch: a sample never covers more than (max/cell)+1 cells per axis."""
+    grid = GridSpec(range_m=4.0, width_m=2.0,
+                    rows_override=240, cols_override=400)
+    spec = make_spec(pitch=-20.0, height=1.0)
+    depth, hits = render_scene(boxes=((2.0, 2.4, -0.4, 0.4, 0.0, 0.5),),
+                               spec=spec)
+    cfg = dataclasses.replace(LABEL_CFG, splat_footprint=True, splat_max_m=0.05)
+    prep = prepare_observation(spec, depth, floor_conf=(hits == 1).astype(np.float32),
+                               cfg=cfg, grid=grid)
+    counts = np.bincount(prep.splat_src, minlength=len(prep.points))
+    max_rows = int(0.05 / grid.cell_x_m) + 2
+    max_cols = int(0.05 / grid.cell_y_m) + 2
+    assert counts.max() <= max_rows * max_cols
+
+
+def test_label_config_reads_splat_from_rig_yaml():
+    cfg = LabelConfig.from_config(
+        {"bev_student": {"label": {"splat_footprint": True, "splat_max_m": 0.2}}})
+    assert cfg.splat_footprint is True and cfg.splat_max_m == 0.2
+    assert LabelConfig.from_config({}).splat_footprint is False
+
+
+def test_grid_from_args_width_override():
+    from bebop_vision.bev_student import grid_from_args
+    g = grid_from_args({"bev_rows": 360, "bev_cols": 640, "bev_width": 4.0})
+    assert (g.rows, g.cols, g.width_m, g.range_m) == (360, 640, 4.0, 6.0)
+    assert g.cell_y_m == pytest.approx(4.0 / 640)
+    assert grid_from_args({}).width_m == 3.0
+
+
+def test_rect_cull_keeps_floor_beside_chassis_and_drops_inside():
+    """The rectangular near-body cull replaces the 0.55 m dead disc: floor
+    beside the chassis (inside the old disc) survives, points inside the
+    rectangle do not."""
+    spec = make_spec(pitch=-60.0, height=1.0)
+    depth, hits = render_scene(spec=spec)
+    floor_conf = (hits == 1).astype(np.float32)
+    disc_cfg = dataclasses.replace(LABEL_CFG, min_range_m=0.55)
+    rect = (-0.30, 0.35, -0.28, 0.17)
+    rect_cfg = dataclasses.replace(LABEL_CFG, min_range_m=0.55, cull_rect_m=rect)
+    p_disc = prepare_observation(spec, depth, floor_conf=floor_conf, cfg=disc_cfg, grid=GRID)
+    p_rect = prepare_observation(spec, depth, floor_conf=floor_conf, cfg=rect_cfg, grid=GRID)
+    r_disc = np.hypot(p_disc.points[:, 0], p_disc.points[:, 1])
+    assert r_disc.min() >= 0.55
+    x, y = p_rect.points[:, 0], p_rect.points[:, 1]
+    inside = (x >= rect[0]) & (x <= rect[1]) & (y >= rect[2]) & (y <= rect[3])
+    assert not inside.any()
+    beside = (np.hypot(x, y) < 0.55) & (y > rect[3])
+    assert beside.sum() > 0, "floor beside the chassis must survive the rect cull"
+    assert len(p_rect.points) > len(p_disc.points)
+
+
+def test_label_config_cull_rect_from_yaml_and_validation():
+    cfg = LabelConfig.from_config(
+        {"bev_student": {"label": {"cull_rect_m": [-0.3, 0.35, -0.28, 0.17]}}})
+    assert cfg.cull_rect_m == (-0.3, 0.35, -0.28, 0.17)
+    with pytest.raises(ValueError):
+        LabelConfig.from_config({"bev_student": {"label": {"cull_rect_m": [0.3, -0.3, 0, 1]}}})
+    assert LabelConfig.from_config({}).cull_rect_m is None

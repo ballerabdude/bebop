@@ -16,6 +16,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import os
+from pathlib import Path
 import time
 
 # Keep OpenBLAS/OpenMP from leaving a spinning pool behind; see main.py.
@@ -67,6 +68,19 @@ class BevGrid:
     semantic: np.ndarray = None   # uint8 (R,C): 0 floor,1 wall,2 obstacle,3 hazard,255 ignore
     wall: np.ndarray = None       # bool (R,C)
     ego: np.ndarray = None        # bool (R,C)
+    # Rectangular metric cells (matched-grid students): forward (row) and
+    # sideways (column) cell size.  None means square cells of ``cell_m``,
+    # which is itself None when the cells are not square.
+    cell_x_m: float = None
+    cell_y_m: float = None
+
+    @property
+    def cell_fwd_m(self) -> float:
+        return float(self.cell_x_m if self.cell_x_m is not None else self.cell_m)
+
+    @property
+    def cell_side_m(self) -> float:
+        return float(self.cell_y_m if self.cell_y_m is not None else self.cell_m)
 
     @property
     def shape(self):
@@ -96,6 +110,8 @@ class BevGrid:
             "stamp_us": int(self.stamp_us),
             "age_s": round(time.monotonic() - self.recv_ts, 3),
             "cell_m": self.cell_m,
+            "cell_x_m": self.cell_fwd_m,
+            "cell_y_m": self.cell_side_m,
             "range_m": self.range_m,
             "width_m": self.width_m,
             "rows": self.rows,
@@ -127,6 +143,40 @@ class BevGrid:
         if self.ego is not None:
             payload["ego_rle"] = _rle(np.asarray(self.ego, np.uint8))
         return payload
+
+
+def load_ego_raster(path):
+    """Body-frame chassis raster written by tools/bev_ego_from_data.py.
+
+    Returns {mask [nx, ny] bool, x0, y0, cell, name, path}: index 0 sits at
+    (x0, y0) metres, index i covers [x0 + i*cell, x0 + (i+1)*cell).
+    """
+    path = Path(path)
+    with np.load(path) as d:
+        return {"mask": np.asarray(d["mask"], bool),
+                "x0": float(d["x0"]), "y0": float(d["y0"]),
+                "cell": float(d["cell"]), "name": path.name,
+                "path": str(path)}
+
+
+def rasterize_ego(raster, xc, yc):
+    """Chassis raster -> bool [len(xc), len(yc)] on a grid of cell centres.
+
+    A grid cell is ego when its centre falls in a raster cell of the mask;
+    centres outside the raster are not ego.
+    """
+    mask = raster["mask"]
+    xc = np.asarray(xc, np.float64)
+    yc = np.asarray(yc, np.float64)
+    ix = np.floor((xc - raster["x0"]) / raster["cell"]).astype(np.int64)
+    iy = np.floor((yc - raster["y0"]) / raster["cell"]).astype(np.int64)
+    ok_x = (ix >= 0) & (ix < mask.shape[0])
+    ok_y = (iy >= 0) & (iy < mask.shape[1])
+    out = np.zeros((len(xc), len(yc)), bool)
+    sub = mask[np.clip(ix, 0, mask.shape[0] - 1)[:, None],
+               np.clip(iy, 0, mask.shape[1] - 1)[None, :]]
+    out[ok_x[:, None] & ok_y[None, :]] = sub[ok_x[:, None] & ok_y[None, :]]
+    return out
 
 
 def _rle(values) -> list[list[int]]:
@@ -177,7 +227,11 @@ def fit_ground_plane(pts, *, residual_m=0.015, min_inliers=50, min_frac=0.15,
     if n_pts < max(3, min_inliers):
         return None
     rng = rng or np.random.default_rng()
-    idx = rng.choice(n_pts, (iters, 3), replace=False)
+    # Sampling without replacement needs iters * 3 distinct points; a sparse
+    # near-floor band (e.g. facing a wall) can have fewer, so fall back to
+    # sampling with replacement there.  Degenerate triplets with repeated
+    # points give a zero normal and are rejected below.
+    idx = rng.choice(n_pts, (iters, 3), replace=n_pts < iters * 3)
     p = pts[idx]
     n = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
     norm = np.linalg.norm(n, axis=1)
@@ -286,23 +340,28 @@ def render_bev(grid: BevGrid, *, scale=4, source_view=False,
     img = np.ascontiguousarray(img[:, ::-1])
     h, w = img.shape[:2]
 
-    # Origin at the bottom centre; range rings every metre.
+    # Origin at the bottom centre; range rings every metre.  Cells may be
+    # rectangular, so a metric circle is an ellipse in pixels.
     cx = (cols // 2) * scale
     cy = rows * scale
+    px_side = scale / grid.cell_side_m
+    px_fwd = scale / grid.cell_fwd_m
     for metre in range(1, int(grid.range_m) + 1):
-        r = int(round(metre / grid.cell_m * scale))
-        cv2.circle(img, (cx, cy), r, (95, 95, 95), 1, cv2.LINE_AA)
+        cv2.ellipse(img, (cx, cy),
+                    (int(round(metre * px_side)), int(round(metre * px_fwd))),
+                    0, 180, 360, (95, 95, 95), 1, cv2.LINE_AA)
 
     # Robot footprint (body 0.4 m wide, 0.5 m long for the wheeled base).
-    fw = int(round(0.40 / grid.cell_m * scale))
-    fh = int(round(0.50 / grid.cell_m * scale))
+    fw = int(round(0.40 * px_side))
+    fh = int(round(0.50 * px_fwd))
     cv2.ellipse(img, (cx, cy), (fw // 2, fh // 2), 0, 180, 360,
                 (210, 210, 210), 2, cv2.LINE_AA)
 
     if show_hud:
         lines = [
             f"BEV {grid.range_m:.1f}x{grid.width_m:.1f}m  "
-            f"{grid.cell_m*100:.0f}cm",
+            + (f"{grid.cell_m*100:.0f}cm" if grid.cell_m is not None else
+               f"{grid.cell_fwd_m*100:.2g}x{grid.cell_side_m*100:.2g}cm"),
         ]
         model = grid.contributions.get("model")
         if model:

@@ -21,7 +21,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from bebop_vision.bev_student import BevStudent, build_lift_lut
+from bebop_vision.bev_student import grid_from_model, student_from_checkpoint
 from train_bev_student import BevStudentDataset, evaluate
 
 
@@ -41,18 +41,15 @@ def main():
     a = ck.get("args") or {}
     labels_subdir = args.labels_subdir or a.get("labels_subdir", "labels")
     unknown = bool(a.get("unknown_class", False))
-    n = 5 if unknown else 4
-    heights = None
-    if a.get("lift_heights"):
-        heights = tuple(float(v) for v in a["lift_heights"].split(","))
-    lut = build_lift_lut(heights=heights) if heights else build_lift_lut()
-    model = BevStudent(lut=lut, num_classes=n).to(args.device)
-    model.load_state_dict(ck["model"])
+    single = bool(a.get("single_head", False))
+    n = 6 if single else 5 if unknown else 4
+    model = student_from_checkpoint(ck).to(args.device)
     model.eval()
     ds = BevStudentDataset(a.get("root"), args.split, train=False,
                            labels_subdir=labels_subdir,
-                           unknown_class=unknown,
-                           coverage_target=a.get("coverage_target", "depth"))
+                           unknown_class=unknown, single_head=single,
+                           coverage_target=a.get("coverage_target", "depth"),
+                           image_hw=model.input_hw, grid=grid_from_model(model))
     ld = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                     num_workers=4, pin_memory=True)
     weights = torch.ones(n, device=args.device)

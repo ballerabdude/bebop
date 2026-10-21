@@ -481,6 +481,10 @@ def main():
                         default="model",
                         help="hazard source for the learned BEV "
                              "(default: model-only)")
+    parser.add_argument("--bev-hazard-threshold", type=float, default=0.5,
+                        help="student hazard probability threshold "
+                             "(0.5 = plain argmax; lower trades precision "
+                             "for stair/drop recall)")
     parser.add_argument("--bev", action="store_true",
                         help="run the live learned-BEV view only (no "
                              "recording, no robot connection)")

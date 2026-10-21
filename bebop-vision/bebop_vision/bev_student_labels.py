@@ -47,7 +47,8 @@ import cv2
 import numpy as np
 
 from .master_bev import fit_ground_plane, mount_rotation
-from .orbbec import (build_self_view_mask, load_intrinsics, load_rig_config,
+from .orbbec import (CONFIG_DIR, build_self_view_mask, load_intrinsics,
+                     load_rig_config,
                      parse_self_mask_entries)
 
 # Label classes.  These are *not* the planner's FREE/OCCUPIED/HAZARD ids.
@@ -98,6 +99,10 @@ LABEL_COLORS = {
 }
 EGO_COLOR = (220, 220, 40)
 EGO_FILL = (55, 55, 0)
+# Observed (depth coverage) but no class won: flat clutter, conflicting SAM
+# evidence.  Drawn distinct from never-observed so reviews do not read an
+# unlabeled fringe as a narrow field of view.
+OBSERVED_UNCLASSIFIED = (48, 40, 36)
 
 
 def prompt_class(prompt):
@@ -108,19 +113,55 @@ def prompt_class(prompt):
 
 @dataclasses.dataclass(frozen=True)
 class GridSpec:
-    """Body-frame BEV grid: 120x60, 6x3 m, row 0 far, col 0 right."""
+    """Metric BEV: default 120x60 / 6x3 m, or explicit rectangular-cell shape.
+
+    Row 0 is far, column 0 right. Explicit shapes use cell_x_m/cell_y_m;
+    the legacy cell_m field is only the default square-grid constructor.
+    """
 
     range_m: float = 6.0
     width_m: float = 3.0
     cell_m: float = 0.05
+    rows_override: int | None = None
+    cols_override: int | None = None
+
+    def __post_init__(self):
+        if min(self.range_m, self.width_m, self.cell_m) <= 0:
+            raise ValueError("grid extents and cell size must be positive")
+        if (self.rows_override is None) != (self.cols_override is None):
+            raise ValueError("explicit grid requires both rows and columns")
+        if self.rows_override is not None:
+            if any(int(v) != v or v <= 0 for v in
+                   (self.rows_override, self.cols_override)):
+                raise ValueError("grid rows and columns must be positive integers")
 
     @property
     def rows(self):
+        if self.rows_override is not None:
+            return int(self.rows_override)
         return int(round(self.range_m / self.cell_m))
 
     @property
     def cols(self):
+        if self.cols_override is not None:
+            return int(self.cols_override)
         return int(round(self.width_m / self.cell_m))
+
+    @property
+    def cell_x_m(self):
+        return self.range_m / self.rows if self.rows_override is not None else self.cell_m
+
+    @property
+    def cell_y_m(self):
+        return self.width_m / self.cols if self.cols_override is not None else self.cell_m
+
+    def metadata(self):
+        square = np.isclose(self.cell_x_m, self.cell_y_m)
+        return {"rows": self.rows, "cols": self.cols,
+                "range_m": self.range_m, "width_m": self.width_m,
+                "cell_m": self.cell_x_m if square else None,
+                "cell_x_m": self.cell_x_m, "cell_y_m": self.cell_y_m,
+                "row0": "far", "col0": "right"}
 
     @property
     def shape(self):
@@ -134,21 +175,22 @@ class GridSpec:
         return cls(
             range_m=float(mb.get("range_m", 6.0)),
             width_m=float(mb.get("width_m", 3.0)),
-            cell_m=float(mb.get("cell_m", 0.05)),
+            cell_m=float(mb.get("cell_m") or 0.05),
+            rows_override=mb.get("rows"), cols_override=mb.get("cols"),
         )
 
     def cell_of(self, x, y):
         """Body (x, y) -> (row, col), or (-1, -1) outside the grid."""
-        row = int(np.floor((self.range_m - np.asarray(x)) / self.cell_m))
+        row = int(np.floor((self.range_m - np.asarray(x)) / self.cell_x_m))
         col = int(np.floor((np.asarray(y) + self.width_m / 2.0)
-                           / self.cell_m))
+                           / self.cell_y_m))
         if not (0 <= row < self.rows and 0 <= col < self.cols):
             return -1, -1
         return row, col
 
     def centers(self):
-        x = self.range_m - (np.arange(self.rows) + 0.5) * self.cell_m
-        y = (np.arange(self.cols) + 0.5) * self.cell_m - self.width_m / 2.0
+        x = self.range_m - (np.arange(self.rows) + 0.5) * self.cell_x_m
+        y = (np.arange(self.cols) + 0.5) * self.cell_y_m - self.width_m / 2.0
         return x, y
 
     def contains(self, x, y):
@@ -204,10 +246,54 @@ class LabelConfig:
     # hole prompt on the point itself (removes people/shadow false alarms).
     hazard_absolute: bool = True
     hazard_prompt_only: bool = False
+    # Glossy floors reflect the room into the stereo matcher, and the far
+    # camera then reads the whole floor as a pit 0.3-0.8 m below the fitted
+    # plane (seen on the laminate drives, 2026-10-19: 44 % of all hazard
+    # cells came from 62 such frames).  A real single step down is 15-20 cm.
+    # So a depth-only drop deeper than this needs the SAM stairs/step/hole
+    # prompt on the point; otherwise the sample is a reflection and is
+    # removed from ALL evidence (it is not a floor observation either).
+    hazard_deep_drop_m: float = 0.25
+    # Footprint splat: a depth pixel observes the patch of surface between
+    # itself and its right/down neighbours, not a single point.  With fine
+    # grids (cells smaller than the sensor's ground sampling distance) a
+    # point projection leaves unobserved stripes between depth rows; the
+    # splat marks every cell inside that patch instead.  A neighbour further
+    # than ``splat_max_m`` away on any body axis is across a discontinuity
+    # (occlusion edge, object top to the floor behind it) and does not
+    # extend the patch, so walls and object edges stay thin.
+    splat_footprint: bool = False
+    splat_max_m: float = 0.12
     min_range_m: float = 0.55
     max_range_m: float = 8.0
+    # Near-body cull.  Default: the historical dead disc of ``min_range_m``
+    # around the body origin.  ``cull_rect_m = (x0, x1, y0, y1)`` replaces
+    # the disc with a body-frame rectangle (chassis plus margin), so floor
+    # observed right beside the wheels is kept.  Chassis parts the camera
+    # sees outside the rectangle are handled by the pixel self mask and the
+    # body-frame ``robot.self_mask``, as before.
+    cull_rect_m: tuple = None
+    # Cull that follows the learned footprint: drop depth only inside the
+    # ego raster dilated by this margin (metres).  Takes precedence over
+    # ``cull_rect_m`` and the disc when ``ego_mask_file`` is set.  A hand
+    # rectangle larger than the body leaves a band of never-labelled cells
+    # around the chassis that the model then fills with neighbouring
+    # obstacles; the raster rule keeps the floor beside the wheels.
+    cull_ego_margin_m: float = None
+    # Hazard-free margin around the learned footprint (metres).  Depth
+    # pixels on the silhouette edge of the chassis rails mix the rail
+    # (0.6 m away) with the floor behind it and land 5-8 cm below the floor
+    # plane a few cm outside the footprint; with SAM calling that floor,
+    # the hazard rule painted an orange strip along the left rail in 83 %
+    # of frames (2026-10-20).  Below-plane evidence inside this margin is
+    # not a drop.  Needs ``ego_mask_file``; None keeps the old behaviour.
+    hazard_ego_margin_m: float = None
     ego_x_range_m: tuple = (0.0, 0.55)
     ego_y_range_m: tuple = (-0.22, 0.22)
+    # Learned chassis footprint (tools/bev_ego_from_data.py), a body-frame
+    # raster file relative to the config directory.  When set it replaces
+    # the ego rectangle above, which stays as the fallback.
+    ego_mask_file: str = None
     # Body-frame self mask from ``robot.self_mask`` (mast/rails), normalised
     # to x0/x1/y0/y1/min_h.  Floor points stay because z < min_h.
     self_mask: dict = None
@@ -221,6 +307,16 @@ class LabelConfig:
         for f in dataclasses.fields(cls):
             if f.name in raw:
                 kw[f.name] = raw[f.name]
+        for name in ("cull_ego_margin_m", "hazard_ego_margin_m"):
+            if kw.get(name) is not None:
+                kw[name] = float(kw[name])
+                if kw[name] < 0:
+                    raise ValueError(f"{name} must be >= 0")
+        if kw.get("cull_rect_m") is not None:
+            rect = tuple(float(v) for v in kw["cull_rect_m"])
+            if len(rect) != 4 or rect[0] >= rect[1] or rect[2] >= rect[3]:
+                raise ValueError("cull_rect_m must be (x0, x1, y0, y1) with x0<x1, y0<y1")
+            kw["cull_rect_m"] = rect
         for name in ("floor_band_m", "noise_scale", "near_range_m",
                      "far_range_m", "min_range_m", "max_range_m"):
             if name in geo and name not in kw:
@@ -239,6 +335,8 @@ class LabelConfig:
             kw["ego_x_range_m"] = tuple(float(v) for v in ego["x_range_m"])
         if "y_range_m" in ego:
             kw["ego_y_range_m"] = tuple(float(v) for v in ego["y_range_m"])
+        if ego.get("mask_file"):
+            kw["ego_mask_file"] = str(ego["mask_file"])
         sm = (cfg.get("robot") or {}).get("self_mask") or {}
         if sm:
             xr = sm.get("x_range_m", [-0.30, 1.00])
@@ -324,6 +422,11 @@ class PreparedObservation:
     wall_conf: np.ndarray
     obstacle_conf: np.ndarray
     hazard_conf: np.ndarray
+    # Footprint splat (``LabelConfig.splat_footprint``): parallel (M,) arrays
+    # of sample index (into the arrays above) and flat grid cell, one entry
+    # per cell inside that sample's observed patch.  None = point projection.
+    splat_src: np.ndarray = None
+    splat_flat: np.ndarray = None
     stamp_us: int = 0
 
 
@@ -493,12 +596,21 @@ def prepare_observation(spec, depth_mm, floor_conf=None, wall_conf=None,
     valid = np.isfinite(z) & (z > 0.0) & ~self_pixel
 
     pts = spec.dir_body * z[:, None] + spec.t_body
+    pts_all = pts
     x, y, zz = pts[:, 0], pts[:, 1], pts[:, 2]
     body_r = np.hypot(x, y)
     # Same working volume as the old geometric BEV prepare, plus the dead disc.
     # inside the disc are the robot/chassis or stereo artifacts; the ego
     # footprint is a separate, explicit layer.
-    valid &= (body_r >= cfg.min_range_m)
+    cull_rect = getattr(cfg, "cull_rect_m", None)
+    margin = getattr(cfg, "cull_ego_margin_m", None)
+    if margin is not None and getattr(cfg, "ego_mask_file", None):
+        valid &= ~points_in_raster(ego_cull_mask(cfg), x, y)
+    elif cull_rect:
+        rx0, rx1, ry0, ry1 = (float(v) for v in cull_rect)
+        valid &= ~((x >= rx0) & (x <= rx1) & (y >= ry0) & (y <= ry1))
+    else:
+        valid &= (body_r >= cfg.min_range_m)
     valid &= ((x > -0.50)
               & (x < max(grid.range_m + 2.0, cfg.max_range_m))
               & (np.abs(y) < grid.width_m / 2.0 + 1.5)
@@ -561,11 +673,16 @@ def prepare_observation(spec, depth_mm, floor_conf=None, wall_conf=None,
         out[in_color] = conf[v_i[in_color], u_i[in_color]]
         return np.clip(out, 0.0, 1.0)
 
-    rows = np.floor((grid.range_m - x) / grid.cell_m).astype(np.int32)
-    cols = np.floor((y + grid.width_m / 2.0) / grid.cell_m).astype(np.int32)
+    rows = np.floor((grid.range_m - x) / grid.cell_x_m).astype(np.int32)
+    cols = np.floor((y + grid.width_m / 2.0) / grid.cell_y_m).astype(np.int32)
     in_grid = ((rows >= 0) & (rows < grid.rows)
                & (cols >= 0) & (cols < grid.cols))
     flat = np.where(in_grid, rows.astype(np.int64) * grid.cols + cols, -1)
+
+    splat_src = splat_flat = None
+    if getattr(cfg, "splat_footprint", False):
+        splat_src, splat_flat = footprint_cells(
+            spec, pts_all, valid, in_grid, cfg, grid)
 
     return PreparedObservation(
         role=spec.role, points=pts, ranges=ranges, forward=x,
@@ -573,7 +690,65 @@ def prepare_observation(spec, depth_mm, floor_conf=None, wall_conf=None,
         u_c=u_i, v_c=v_i, in_color=in_color,
         floor_conf=sample(floor_conf), wall_conf=sample(wall_conf),
         obstacle_conf=sample(obstacle_conf),
-        hazard_conf=sample(hazard_conf))
+        hazard_conf=sample(hazard_conf),
+        splat_src=splat_src, splat_flat=splat_flat)
+
+
+def footprint_cells(spec, pts_all, valid, in_grid, cfg, grid):
+    """Cells observed by each valid in-grid depth sample (footprint splat).
+
+    ``pts_all`` covers every sampled pixel in ``spec`` order (row major over
+    the stride grid); ``valid`` selects the samples that survive
+    the working-volume cull and ``in_grid`` is indexed over those survivors.
+    A sample's patch is the body-frame bounding box of itself and its right
+    and down pixel neighbours when those lie on the same surface.  Returns
+    ``(src, flat)``: for every cell in a patch, the index of the owning
+    sample among the valid samples and the flat grid index.
+    """
+    n_all = len(pts_all)
+    nu = len(np.arange(0, spec.width_d, spec.stride_x))
+    idx = np.arange(n_all)
+    cap = float(cfg.splat_max_m)
+    x_lo = pts_all[:, 0].copy()
+    x_hi = pts_all[:, 0].copy()
+    y_lo = pts_all[:, 1].copy()
+    y_hi = pts_all[:, 1].copy()
+    for offset, is_right in ((1, True), (nu, False)):
+        nb = idx + offset
+        ok = nb < n_all
+        if is_right:
+            ok &= (idx % nu) != nu - 1          # no wrap at the row end
+        nb_c = np.where(ok, nb, 0)
+        d = np.abs(pts_all[nb_c] - pts_all)
+        same = ok & valid & valid[nb_c] & np.all(d <= cap, axis=1)
+        np.minimum(x_lo, np.where(same, pts_all[nb_c, 0], x_lo), out=x_lo)
+        np.maximum(x_hi, np.where(same, pts_all[nb_c, 0], x_hi), out=x_hi)
+        np.minimum(y_lo, np.where(same, pts_all[nb_c, 1], y_lo), out=y_lo)
+        np.maximum(y_hi, np.where(same, pts_all[nb_c, 1], y_hi), out=y_hi)
+
+    # Restrict to the valid samples (prep order) that land in the grid.
+    v_idx = np.flatnonzero(valid)
+    own = np.flatnonzero(in_grid)                 # indices into prep arrays
+    g = v_idx[own]                                # indices into *_all arrays
+    r0 = np.floor((grid.range_m - x_hi[g]) / grid.cell_x_m).astype(np.int64)
+    r1 = np.floor((grid.range_m - x_lo[g]) / grid.cell_x_m).astype(np.int64)
+    c0 = np.floor((y_lo[g] + grid.width_m / 2.0) / grid.cell_y_m).astype(np.int64)
+    c1 = np.floor((y_hi[g] + grid.width_m / 2.0) / grid.cell_y_m).astype(np.int64)
+    r0 = np.clip(r0, 0, grid.rows - 1)
+    r1 = np.clip(r1, 0, grid.rows - 1)
+    c0 = np.clip(c0, 0, grid.cols - 1)
+    c1 = np.clip(c1, 0, grid.cols - 1)
+    nr = r1 - r0 + 1
+    nc = c1 - c0 + 1
+    cnt = nr * nc
+    total = int(cnt.sum())
+    src = np.repeat(own, cnt)
+    start = np.cumsum(cnt) - cnt
+    k = np.arange(total, dtype=np.int64) - np.repeat(start, cnt)
+    nc_e = np.repeat(nc, cnt)
+    rr = np.repeat(r0, cnt) + k // nc_e
+    cc = np.repeat(c0, cnt) + k % nc_e
+    return src.astype(np.int64), (rr * grid.cols + cc).astype(np.int64)
 
 
 # ---------------------------------------------------------------------------
@@ -703,10 +878,23 @@ def camera_evidence(prep, plane, cfg, grid, fallback=False):
         "wall_h_max": np.full(n_cells, -np.inf, np.float32),
         "wall_h_min": np.full(n_cells, np.inf, np.float32),
         "cells": 0,
+        "reflections": 0,
     }
     if prep is None or len(prep.points) == 0 or not prep.in_grid.any():
         return out
-    keep = prep.in_grid
+    keep = prep.in_grid.copy()
+    deep_m = float(getattr(cfg, "hazard_deep_drop_m", 0.0) or 0.0)
+    if deep_m > 0:
+        # Stereo reflections off a glossy floor: depth far below the plane
+        # that SAM does not call stairs/hole is not a drop and not a floor
+        # observation.  Drop those samples before any evidence is counted.
+        h0 = height_above_plane(prep.points[keep], plane["n"], plane["d"])
+        reflect = (h0 < -deep_m) & (prep.hazard_conf[keep] <= 0)
+        if reflect.any():
+            keep[np.flatnonzero(keep)[reflect]] = False
+            out["reflections"] = int(reflect.sum())
+            if not keep.any():
+                return out
     flat = prep.flat[keep]
     pts = prep.points[keep]
     rng = prep.ranges[keep]
@@ -746,6 +934,28 @@ def camera_evidence(prep, plane, cfg, grid, fallback=False):
         hazard &= ((fconf > 0) | (hconf > 0))
     if not cfg.hazard_absolute:
         hazard[:] = False
+    edge_m = getattr(cfg, "hazard_ego_margin_m", None)
+    if (edge_m is not None and getattr(cfg, "ego_mask_file", None)
+            and hazard.any()):
+        # Rail-edge flying pixels: not a drop this close to the wheels.
+        near_body = points_in_raster(ego_dilated_mask(cfg, edge_m),
+                                     pts[:, 0], pts[:, 1])
+        out["edge_hazard"] = int((hazard & near_body).sum())
+        hazard &= ~near_body
+
+    if prep.splat_src is not None:
+        # Each sample votes in every cell of its observed patch.  Plane
+        # fitting above used the un-splatted points, so far samples do not
+        # outweigh near ones there.
+        kept_pos = np.cumsum(keep) - 1
+        ok = keep[prep.splat_src]          # drop patches of rejected samples
+        src = kept_pos[prep.splat_src[ok]]
+        flat = prep.splat_flat[ok]
+        (h, rng, w, fconf, wconf, oconf, hconf, floor_sam, floor_depth,
+         wall, obstacle, obs_conf, hazard) = (
+            a[src] for a in (h, rng, w, fconf, wconf, oconf, hconf,
+                             floor_sam, floor_depth, wall, obstacle,
+                             obs_conf, hazard))
 
     def add(target, mask, weights):
         if mask.any():
@@ -783,8 +993,11 @@ def _compact_wall_fix(wall_w, obs_w, wall_h_max, wall_candidate, cfg, grid):
     """Reclassify compact, short wall components as obstacles."""
     if not wall_candidate.any():
         return wall_w, obs_w
+    # Preserve the historical 5 cm grouping radius when changing grid size.
+    rx = max(1, int(round(0.05 / grid.cell_x_m)))
+    ry = max(1, int(round(0.05 / grid.cell_y_m)))
     group = cv2.dilate(wall_candidate.astype(np.uint8),
-                       np.ones((3, 3), np.uint8))
+                       np.ones((2 * rx + 1, 2 * ry + 1), np.uint8))
     n, labels, _stats, _ = cv2.connectedComponentsWithStats(
         group, connectivity=8)
     xc, yc = grid.centers()
@@ -793,8 +1006,8 @@ def _compact_wall_fix(wall_w, obs_w, wall_h_max, wall_candidate, cfg, grid):
         if not comp.any():
             continue
         rr, cc = np.where(comp)
-        extent_x = float(xc[rr].max() - xc[rr].min() + grid.cell_m)
-        extent_y = float(yc[cc].max() - yc[cc].min() + grid.cell_m)
+        extent_x = float(xc[rr].max() - xc[rr].min() + grid.cell_x_m)
+        extent_y = float(yc[cc].max() - yc[cc].min() + grid.cell_y_m)
         hmax = float(np.max(wall_h_max[comp]))
         if (extent_x <= cfg.wall_compact_m
                 and extent_y <= cfg.wall_compact_m
@@ -805,9 +1018,19 @@ def _compact_wall_fix(wall_w, obs_w, wall_h_max, wall_candidate, cfg, grid):
     return wall_w, obs_w
 
 
-def _neighbor_count(mask):
+def _neighbor_count(mask, grid=None):
     """Count true 4-neighbours of each cell (no scipy dependency)."""
     m = np.asarray(mask, bool)
+    if grid is not None and (not np.isclose(grid.cell_x_m, 0.05)
+                             or not np.isclose(grid.cell_y_m, 0.05)):
+        rx = max(1, int(round(0.05 / grid.cell_x_m)))
+        ry = max(1, int(round(0.05 / grid.cell_y_m)))
+        kernel = np.zeros((2 * rx + 1, 2 * ry + 1), np.float32)
+        kernel[:, ry] = 1
+        kernel[rx, :] = 1
+        kernel[rx, ry] = 0
+        return cv2.filter2D(m.astype(np.float32), -1, kernel,
+                            borderType=cv2.BORDER_CONSTANT).round().astype(np.int32)
     out = np.zeros_like(m, np.int32)
     out[1:, :] += m[:-1, :]
     out[:-1, :] += m[1:, :]
@@ -927,7 +1150,7 @@ def fuse_camera_evidence(evidences, cfg, grid, ego=None, planes=None):
     # underside); a step down / hole has no obstacle ring, while a piece of
     # furniture does.  Local floor-height drops are always kept.
     obs_ok = (obs_w2 >= cfg.obstacle_min_w) & coverage
-    obs_nb = _neighbor_count(obs_ok)
+    obs_nb = _neighbor_count(obs_ok, grid)
     below_gate = ((haz_below2 >= cfg.hazard_min_w)
                   & (obs_nb == 0) & coverage)
     haz_w2 = haz_drop2 + np.where(below_gate, haz_below2, 0.0)
@@ -962,8 +1185,54 @@ def class_counts(semantic, ego, coverage):
     return counts
 
 
+def resolve_ego_mask_path(name):
+    """Raster file name from the rig config -> absolute path."""
+    p = Path(name)
+    return p if p.is_absolute() else CONFIG_DIR / p
+
+
+_CULL_CACHE = {}
+
+
+def ego_dilated_mask(cfg, margin_m):
+    """Learned footprint dilated by ``margin_m`` -> raster dict (same
+    layout as ``master_bev.load_ego_raster``), cached per file+margin."""
+    key = (str(cfg.ego_mask_file), float(margin_m))
+    hit = _CULL_CACHE.get(key)
+    if hit is None:
+        from .master_bev import load_ego_raster
+        raster = dict(load_ego_raster(resolve_ego_mask_path(cfg.ego_mask_file)))
+        n = int(round(float(margin_m) / raster["cell"]))
+        if n > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * n + 1, 2 * n + 1))
+            raster["mask"] = cv2.dilate(raster["mask"].astype(np.uint8), k).astype(bool)
+        _CULL_CACHE[key] = hit = raster
+    return hit
+
+
+def ego_cull_mask(cfg):
+    """Footprint dilated by ``cull_ego_margin_m`` (the near-body cull)."""
+    return ego_dilated_mask(cfg, cfg.cull_ego_margin_m)
+
+
+def points_in_raster(raster, x, y):
+    """Bool per point: (x, y) falls inside the raster mask."""
+    mask = raster["mask"]
+    ix = np.floor((np.asarray(x) - raster["x0"]) / raster["cell"]).astype(np.int64)
+    iy = np.floor((np.asarray(y) - raster["y0"]) / raster["cell"]).astype(np.int64)
+    ok = (ix >= 0) & (ix < mask.shape[0]) & (iy >= 0) & (iy < mask.shape[1])
+    out = np.zeros(len(ix), bool)
+    out[ok] = mask[ix[ok], iy[ok]]
+    return out
+
+
 def ego_mask(cfg, grid):
     xc, yc = grid.centers()
+    mask_file = getattr(cfg, "ego_mask_file", None)
+    if mask_file:
+        from .master_bev import load_ego_raster, rasterize_ego
+        return rasterize_ego(load_ego_raster(resolve_ego_mask_path(mask_file)),
+                             xc, yc)
     x0, x1 = cfg.ego_x_range_m
     y0, y1 = cfg.ego_y_range_m
     return ((xc[:, None] >= x0) & (xc[:, None] <= x1)
@@ -1025,6 +1294,8 @@ class BevStudentLabeler:
         out = fuse_camera_evidence(
             evidences, self.label_cfg, self.grid, ego=self.ego, planes=planes)
         out.stats["plane_ok"] = {r: bool(planes[r]["ok"]) for r in planes}
+        out.stats["reflections"] = {r: int(evidences[r].get("reflections", 0))
+                                    for r in evidences}
         out.stats["plane_fallback"] = {
             r: bool(planes[r].get("fallback")) for r in planes}
         out.stats["roles"] = sorted(preps)
@@ -1075,6 +1346,9 @@ def render_label_bev(semantic, ego, coverage, grid, *, scale=4,
     small = np.zeros((grid.rows, grid.cols, 3), np.uint8)
     for cls, color in LABEL_COLORS.items():
         small[semantic == cls] = color
+    if coverage is not None:
+        small[(semantic == IGNORE) & np.asarray(coverage, bool)] = (
+            OBSERVED_UNCLASSIFIED)
     if ego is not None and np.asarray(ego).any():
         ego_u8 = np.asarray(ego, np.uint8)
         small[ego_u8 > 0] = EGO_FILL
@@ -1090,7 +1364,7 @@ def render_label_bev(semantic, ego, coverage, grid, *, scale=4,
         bar = 18
         cv2.rectangle(img, (0, 0), (img.shape[1], bar), (0, 0, 0), -1)
         text = (f"BEV labels {grid.range_m:.1f}x{grid.width_m:.1f}m "
-                f"{grid.cell_m*100:.0f}cm | floor "
+                 f"{grid.cell_x_m*100:.2f}x{grid.cell_y_m*100:.2f}cm | floor "
                 f"{100*vals['floor']/cells:.0f}% wall "
                 f"{100*vals['wall']/cells:.0f}% obs "
                 f"{100*vals['obstacle']/cells:.0f}% haz "
@@ -1104,6 +1378,7 @@ def render_label_bev(semantic, ego, coverage, grid, *, scale=4,
             ("obstacle", LABEL_COLORS[OBSTACLE]),
             ("hazard", LABEL_COLORS[HAZARD]),
             ("unknown", LABEL_COLORS[IGNORE]),
+            ("seen, no class", OBSERVED_UNCLASSIFIED),
             ("ego", EGO_COLOR),
         ])
     return img

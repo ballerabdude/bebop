@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from bebop_vision.bev_student import BevStudent, build_lift_lut
+from bebop_vision.bev_student import grid_from_model, student_from_checkpoint
 from train_bev_student import BevStudentDataset
 
 
@@ -35,12 +35,11 @@ def main():
     ck = torch.load(run / "checkpoints" / args.ckpt, map_location="cpu",
                     weights_only=False)
     a = ck.get("args") or {}
-    lut = build_lift_lut()
-    model = BevStudent(lut=lut, num_classes=4).to(args.device)
-    model.load_state_dict(ck["model"])
+    model = student_from_checkpoint(ck).to(args.device)
     model.eval()
     ds = BevStudentDataset(a.get("root"), "val", train=False,
-                           labels_subdir=args.labels_subdir)
+                           labels_subdir=args.labels_subdir,
+                           image_hw=model.input_hw, grid=grid_from_model(model))
     ld = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                     num_workers=4, pin_memory=True)
     ps, covs, labels = [], [], []
@@ -49,8 +48,12 @@ def main():
             out = model(batch["color"].to(args.device),
                         batch["depth"].to(args.device))
             p = torch.softmax(out["semantic"].float(), 1)[:, 3].cpu().numpy()
-            c = (torch.sigmoid(out["coverage"][:, 0].float()) > 0.5
-                 ).cpu().numpy()
+            if "coverage" in out:
+                c = (torch.sigmoid(out["coverage"][:, 0].float()) > 0.5
+                     ).cpu().numpy()
+            else:                      # single head: ego=4, unknown=5
+                am = out["semantic"].argmax(1).cpu().numpy()
+                c = (am != 5) & (am != 4)
             ps.append(p)
             covs.append(c)
             labels.append(batch["semantic"].numpy())

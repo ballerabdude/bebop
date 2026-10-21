@@ -12,6 +12,8 @@ to the code they describe.
 | [`navd.md`](navd.md)                 | Depth-camera obstacle avoidance: dual Gemini 335Lg → BEV occupancy → goal-conditioned planner → learned student (design + phased spec). |
 | [`bev-student.md`](bev-student.md)   | Learned semantic BEV: SAM 3.1 teacher, DINOv3 TensorRT student, training and the model-only live service. |
 | [`bev-experiments.md`](bev-experiments.md) | 2026-10-19 label audit and model-improvement experiments: clean labels, hazard metrics, leaderboard, next steps. |
+| [`bev-matched-grid.md`](bev-matched-grid.md) | Deployed BEV: 160×320 grid over 4 m × 4 m, learned chassis footprint cull, rail-edge hazard margin, TensorRT deploy numbers. |
+| [`bev-segformer.md`](bev-segformer.md) | SegFormer-B5 / higher-resolution BEV queue (stopped in favour of the matched-grid run). |
 | [`place-router.md`](place-router.md) | Place memory: lofi scout capture into a pending queue, then operator batch import with optional model name suggestions (the legacy every-tick router is documented there too). |
 | [`slam.md`](slam.md)                 | Live RGB-D visual localization POC, tracking status, and visual-heading turn diagnostic. |
 | [`internal-map.md`](internal-map.md) | Per-place local structure submaps, the anchor frame, and the place graph of remembered routes, with honest status. |

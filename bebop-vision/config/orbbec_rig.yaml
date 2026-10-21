@@ -137,13 +137,52 @@ robots:
         wall_max_h_m: 2.50
         occ_min_m: 0.03
         occ_max_m: 1.50
+        # Near-body cull: depth is dropped only inside the learned chassis
+        # footprint (ego.mask_file below) dilated by this margin, so the
+        # floor right beside the wheels stays labelled.  The earlier hand
+        # rectangle [-0.30, 0.37, -0.35, 0.25] (cull_rect_m) was 8-17 cm
+        # larger than the body on every side and left a never-labelled band
+        # around the chassis that the model filled with neighbouring
+        # obstacles (2026-10-19).  cull_rect_m still works as a fallback
+        # when no ego raster exists; unset both to get the 0.55 m disc back.
+        cull_ego_margin_m: 0.02
+        # Below-plane depth within this distance of the footprint is not a
+        # drop: pixels on the chassis rails' silhouette edge mix rail and
+        # floor depth and land 5-8 cm under the plane just outside the
+        # body (an orange strip along the left rail in 83 % of frames,
+        # 2026-10-20).  A real drop that close to the wheels is behind the
+        # frame and invisible to the near camera anyway.
+        hazard_ego_margin_m: 0.15
       ego:
-        # Physical chassis rectangle (0.44 m wide x 0.55 m of visible
-        # forward length).  This is deliberately a rectangle, not the
-        # fan-shaped near self-mask: the mask includes the mast/rails and
-        # nearby floor, which must not become the ego footprint.
-        x_range_m: [0.0, 0.55]
-        y_range_m: [-0.22, 0.22]
+        # Learned chassis footprint (tools/bev_ego_from_data.py): a 1 cm
+        # body-frame raster next to this file, built from the robot's own
+        # recordings -- cells that hold above-floor depth in nearly every
+        # frame are the body, never-observed cells beside it are the floor
+        # the body hides (wheels, underbody).  Read by the labeler AND the
+        # live runtime; when present it replaces the rectangle below, which
+        # stays as the fallback.  Rebuild after any chassis/camera change.
+        # 2026-10-19 (633 frames): body seen x -0.11..+0.30, y -0.21..+0.10;
+        # footprint x -0.13..+0.32, y -0.34..+0.19 m (0.45 x 0.53 m).
+        mask_file: ego_mask.npz
+        # Live guard matching label.hazard_ego_margin_m: a predicted drop in
+        # this ring around the chassis becomes the model's best other class.
+        hazard_pad_m: 0.15
+        # Fallback rectangle in the body frame (x forward from the
+        # camera mast, y left).  Read by the offline labeler (ego layer) AND
+        # by the live runtime, which ORs this static rectangle onto the
+        # model's predicted ego every frame -- keep them the same numbers.
+        # Measured 2026-10-19 from the near camera's depth across all six
+        # drives: the frame top (0.58 m up) spans x -0.10..+0.29,
+        # y -0.20..+0.09, i.e. the body is 0.40 m long x 0.29 m wide, centred
+        # 10 cm ahead of and 5 cm right of the mast.  Width here is widened
+        # to the 0.44 m the previous entry carried (wheels outside the frame),
+        # centred on the measured body.  The old [0.0, 0.55] forward range
+        # covered 25 cm of floor in front of the body that the near camera
+        # cannot see past the frame; that is unobserved, not chassis.
+        # Verify against the physical robot: overall width incl. wheels,
+        # mast-to-front and mast-to-rear distance, lateral mast offset.
+        x_range_m: [-0.10, 0.29]
+        y_range_m: [-0.27, 0.17]
     robot:
       radius_m: 0.20      # inflation radius for planning
       # Self-view mask: the mast cameras see the robot's own chassis at

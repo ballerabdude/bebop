@@ -1,4 +1,4 @@
-"""DINOv3 ViT-S/16 student for the learned semantic master BEV.
+"""DINOv3 ViT-S/16 or SegFormer-B5 student for the semantic master BEV.
 
 Input per sample: both cameras' RGB-D at 240x424::
 
@@ -22,8 +22,9 @@ and the teacher labels.  It is registered as model buffers so it exports as
 constants with the graph.
 
 The module is deliberately independent of SAM (teacher-side only).  A tiny
-random DINOv3 backbone is available for CPU tests so CI does not need the
-gated weights.
+random backbone is available for CPU tests. SegFormer uses its four native
+multi-scale feature maps in place of DINO's four token layers. Camera size
+and lift resolution are recorded in the LUT; defaults preserve DINO runs.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ ROLES = ("near", "far")
 NUM_CLASSES = 4
 DEFAULT_WEIGHTS = (Path(__file__).resolve().parents[1]
                    / "weights" / "dinov3-vits16")
+SEGFORMER_WEIGHTS = "nvidia/segformer-b5-finetuned-ade-640-640"
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +95,8 @@ def _bilinear(nu, nv, width, height):
 
 
 def build_lift_lut(rig_cfg=None, config_dir=None, heights=HEIGHTS,
-                   feat_hw=FEAT_HW, depth_hw=DEPTH_HW, bev_hw=BEV_HW):
+                    feat_hw=FEAT_HW, depth_hw=DEPTH_HW, bev_hw=BEV_HW,
+                    grid_override=None):
     """Project the BEV feature grid into both cameras at each height.
 
     Returns ``{"tensors": {...}, "meta": {...}}``.  Group order is
@@ -103,6 +106,7 @@ def build_lift_lut(rig_cfg=None, config_dir=None, heights=HEIGHTS,
     """
     specs, cfg, grid, _label_cfg = specs_from_config(
         rig_cfg=rig_cfg, config_dir=config_dir, roles=ROLES)
+    grid = grid_override or grid
     bev_r, bev_c = int(bev_hw[0]), int(bev_hw[1])
     range_m, width_m = float(grid.range_m), float(grid.width_m)
     x = range_m - (np.arange(bev_r) + 0.5) * (range_m / bev_r)
@@ -170,7 +174,9 @@ def build_lift_lut(rig_cfg=None, config_dir=None, heights=HEIGHTS,
         "groups": [(r, float(z)) for r in ROLES for z in heights],
         "grid_rows": grid.rows,
         "grid_cols": grid.cols,
-        "cell_m": grid.cell_m,
+        "cell_m": grid.metadata()["cell_m"],
+        "cell_x_m": grid.cell_x_m,
+        "cell_y_m": grid.cell_y_m,
     }
     return {"tensors": tensors, "meta": meta}
 
@@ -229,7 +235,39 @@ def _adapt_patch_embedding(backbone):
     return backbone
 
 
-def _build_backbone(pretrained_dir=None, tiny=False):
+def _build_backbone(pretrained_dir=None, tiny=False, encoder="dinov3",
+                    config=None):
+    if encoder == "segformer-b5":
+        from transformers import SegformerConfig, SegformerModel
+        if config is not None:
+            return SegformerModel(SegformerConfig(**config))
+        if tiny:
+            backbone = SegformerModel(SegformerConfig(
+                hidden_sizes=[8, 16, 32, 64], depths=[1, 1, 1, 1],
+                num_attention_heads=[1, 2, 4, 8]))
+        else:
+            backbone = SegformerModel.from_pretrained(
+                str(pretrained_dir or SEGFORMER_WEIGHTS))
+        holder = (backbone.stages[0].patch_embeddings
+                  if hasattr(backbone, "stages")
+                  else backbone.encoder.patch_embeddings[0])
+        proj = holder.proj
+        new = nn.Conv2d(4, proj.out_channels, proj.kernel_size,
+                        stride=proj.stride, padding=proj.padding,
+                        bias=proj.bias is not None)
+        with torch.no_grad():
+            new.weight[:, :3].copy_(proj.weight)
+            new.weight[:, 3:].zero_()
+            if proj.bias is not None:
+                new.bias.copy_(proj.bias)
+        holder.proj = new
+        backbone.config.num_channels = 4
+        return backbone
+    if encoder != "dinov3":
+        raise ValueError(f"unknown encoder: {encoder}")
+    if config is not None:
+        from transformers import DINOv3ViTConfig, DINOv3ViTModel
+        return DINOv3ViTModel(DINOv3ViTConfig(**config))
     if tiny:
         from transformers import DINOv3ViTConfig, DINOv3ViTModel
         cfg = DINOv3ViTConfig(
@@ -255,26 +293,48 @@ class _ConvBlock(nn.Module):
         return self.act(self.norm(self.conv(x)))
 
 
+# Single-head class layout (``single_head=True``): the chassis and the
+# unobserved area are classes of the one semantic output instead of two
+# extra sigmoid heads.  Runtime: ego = class 4, coverage = not class 5.
+EGO_CLASS = 4
+UNKNOWN_CLASS = 5
+SINGLE_HEAD_CLASSES = ("floor", "wall", "obstacle", "hazard", "ego", "unknown")
+
+
 class BevStudent(nn.Module):
-    """DINOv3 ViT-S/16 + FPN + fixed-LUT BEV lift + U-Net heads."""
+    """DINOv3 or SegFormer encoder + FPN + fixed-LUT lift + BEV heads."""
 
     def __init__(self, pretrained_dir=None, tiny=False, backbone=None,
                  backbone_layers=None, fpn_dim=128, lut=None,
-                 feat_hw=FEAT_HW, num_classes=NUM_CLASSES):
+                 feat_hw=FEAT_HW, num_classes=NUM_CLASSES,
+                 encoder="dinov3", backbone_config=None, single_head=False):
         super().__init__()
+        self.encoder = encoder
+        self.fpn_dim = int(fpn_dim)
+        self.single_head = bool(single_head)
+        if self.single_head and int(num_classes) != len(SINGLE_HEAD_CLASSES):
+            raise ValueError("single-head model uses 6 classes "
+                             "(floor, wall, obstacle, hazard, ego, unknown)")
         self.num_classes = int(num_classes)
+        lut = lut or build_lift_lut(feat_hw=feat_hw)
+        feat_hw = lut["meta"]["feat_hw"]
         self.feat_hw = tuple(int(v) for v in feat_hw)
+        self.input_hw = tuple(lut["meta"]["depth_hw"])
         self.backbone = (backbone if backbone is not None
-                         else _build_backbone(pretrained_dir, tiny))
+                         else _build_backbone(pretrained_dir, tiny, encoder,
+                                              backbone_config))
         self.backbone_layers = tuple(
             backbone_layers
             or ((1, 2, 2, 2) if tiny else (3, 6, 9, 12)))
-        hidden = int(self.backbone.config.hidden_size)
-        self.patch_size = int(self.backbone.config.patch_size)
-        self.num_prefix = 1 + int(self.backbone.config.num_register_tokens)
+        if encoder == "segformer-b5":
+            channels = self.backbone.config.hidden_sizes
+        else:
+            channels = [int(self.backbone.config.hidden_size)] * len(
+                self.backbone_layers)
+            self.patch_size = int(self.backbone.config.patch_size)
+            self.num_prefix = 1 + int(self.backbone.config.num_register_tokens)
         self.proj = nn.ModuleList(
-            [nn.Conv2d(hidden, fpn_dim, 1)
-             for _ in self.backbone_layers])
+            [nn.Conv2d(ch, fpn_dim, 1) for ch in channels])
         self.fpn_conv = nn.Conv2d(fpn_dim, fpn_dim, 3, padding=1)
         self.fpn_norm = nn.GroupNorm(8, fpn_dim)
         self.cam_emb = nn.Embedding(2, 16)
@@ -282,7 +342,6 @@ class BevStudent(nn.Module):
         nn.init.normal_(self.cam_emb.weight, std=0.02)
         nn.init.zeros_(self.cam_proj.bias)
 
-        lut = lut or build_lift_lut()
         for name, tensor in lut["tensors"].items():
             self.register_buffer(name, tensor)
         self.lut_meta = lut["meta"]
@@ -295,13 +354,15 @@ class BevStudent(nn.Module):
         self.reduce_norm = nn.GroupNorm(8, fpn_dim)
         self.reduce_act = nn.GELU()
         self.dec1 = _ConvBlock(fpn_dim, 128)
-        self.up = nn.Upsample(scale_factor=2, mode="bilinear",
+        self.up = nn.Upsample(size=(self.lut_meta["grid_rows"],
+                                    self.lut_meta["grid_cols"]), mode="bilinear",
                               align_corners=False)
         self.dec2 = _ConvBlock(128, 128)
         self.dec3 = _ConvBlock(128, 128)
         self.sem_head = nn.Conv2d(128, self.num_classes, 1)
-        self.ego_head = nn.Conv2d(128, 1, 1)
-        self.cov_head = nn.Conv2d(128, 1, 1)
+        if not self.single_head:
+            self.ego_head = nn.Conv2d(128, 1, 1)
+            self.cov_head = nn.Conv2d(128, 1, 1)
 
     # -- encoder -----------------------------------------------------------
 
@@ -309,11 +370,17 @@ class BevStudent(nn.Module):
         """[2B,4,H,W] -> [2B,128,60,106]."""
         out = self.backbone(pixel_values=x, output_hidden_states=True)
         hs = out.hidden_states
-        bh, bw = x.shape[-2] // self.patch_size, x.shape[-1] // self.patch_size
+        if self.encoder == "segformer-b5":
+            maps = hs
+        else:
+            bh = x.shape[-2] // self.patch_size
+            bw = x.shape[-1] // self.patch_size
+            maps = []
+            for layer in self.backbone_layers:
+                t = hs[layer][:, self.num_prefix:]
+                maps.append(t.reshape(t.shape[0], bh, bw, -1).permute(0, 3, 1, 2))
         feats = []
-        for i, layer in enumerate(self.backbone_layers):
-            t = hs[layer][:, self.num_prefix:]
-            t = t.reshape(t.shape[0], bh, bw, -1).permute(0, 3, 1, 2)
+        for i, t in enumerate(maps):
             f = self.proj[i](t)
             f = F.interpolate(f, size=self.feat_hw, mode="bilinear",
                               align_corners=False)
@@ -336,6 +403,9 @@ class BevStudent(nn.Module):
         if depth.ndim != 5 or depth.shape[1] != 2:
             raise ValueError("depth must be [B,2,1,H,W]")
         b, _, _, h, w = color.shape
+        if not torch.jit.is_tracing() and (
+                (h, w) != self.input_hw or depth.shape[-2:] != color.shape[-2:]):
+            raise ValueError(f"RGB-D size must match LUT {self.input_hw}")
         x = torch.cat([color, depth], dim=2).reshape(b * 2, 4, h, w)
         feats = self.encode(x).reshape(b, 2, -1, *self.feat_hw)
         cam = self.cam_proj(self.cam_emb(
@@ -363,6 +433,8 @@ class BevStudent(nn.Module):
         z = self.up(z)
         z = self.dec2(z)
         z = self.dec3(z)
+        if self.single_head:
+            return {"semantic": self.sem_head(z)}
         return {
             "semantic": self.sem_head(z),
             "ego": self.ego_head(z),
@@ -384,3 +456,88 @@ class BevStudent(nn.Module):
 
     def num_parameters(self):
         return sum(p.numel() for p in self.parameters())
+
+    def model_config(self):
+        """Self-contained architecture, including the calibration used to train."""
+        return {
+            "encoder": self.encoder, "fpn_dim": self.fpn_dim,
+            "num_classes": self.num_classes, "single_head": self.single_head,
+            "backbone_config": self.backbone.config.to_dict(),
+            "backbone_layers": list(self.backbone_layers),
+            "lut_meta": self.lut_meta,
+        }
+
+
+def grid_from_args(args):
+    from .orbbec import load_rig_config
+    grid = GridSpec.from_config(load_rig_config()["robots"]["default"])
+    extents = {}
+    if args.get("bev_width") is not None:
+        extents["width_m"] = float(args["bev_width"])
+    if args.get("bev_range") is not None:
+        extents["range_m"] = float(args["bev_range"])
+    if extents:
+        grid = dataclasses.replace(grid, **extents)
+    if args.get("bev_rows") is not None or args.get("bev_cols") is not None:
+        grid = dataclasses.replace(grid, rows_override=args.get("bev_rows"),
+                                    cols_override=args.get("bev_cols"))
+    return grid
+
+
+def grid_from_model(model):
+    m = model.lut_meta
+    return GridSpec(range_m=m["range_m"], width_m=m["width_m"],
+                    rows_override=m["grid_rows"], cols_override=m["grid_cols"])
+
+
+def student_from_args(args):
+    """Build training architecture; old run arguments retain their defaults."""
+    hw = (int(args.get("height", 240)), int(args.get("width", 424)))
+    if min(hw) < 32:
+        raise ValueError("input height/width must be at least 32")
+    feat_hw = tuple((v + 3) // 4 for v in hw)
+    heights = args.get("lift_heights")
+    heights = tuple(float(v) for v in heights.split(",")) if heights else HEIGHTS
+    grid = grid_from_args(args)
+    bev_hw = (grid.shape if args.get("full_res_lift", False)
+              else tuple((v + 1) // 2 for v in grid.shape))
+    if args.get("tiny", False):
+        if heights != HEIGHTS:
+            raise ValueError("tiny smoke model uses the default lift heights")
+        lut = dummy_lift_lut(n_cells=bev_hw[0] * bev_hw[1])
+        lut["meta"]["bev_hw"] = list(bev_hw)
+        lut["meta"]["depth_hw"] = list(hw)
+        lut["meta"]["feat_hw"] = list(feat_hw)
+        lut["meta"].update(grid_rows=grid.rows, grid_cols=grid.cols,
+                           range_m=grid.range_m, width_m=grid.width_m,
+                           cell_m=grid.metadata()["cell_m"],
+                           cell_x_m=grid.cell_x_m, cell_y_m=grid.cell_y_m)
+    else:
+        lut = build_lift_lut(
+            heights=heights, depth_hw=hw, feat_hw=feat_hw,
+            bev_hw=bev_hw, grid_override=grid)
+    single_head = bool(args.get("single_head", False))
+    num_classes = (len(SINGLE_HEAD_CLASSES) if single_head
+                   else 5 if args.get("unknown_class", False) else 4)
+    return BevStudent(
+        pretrained_dir=args.get("pretrained_dir"), tiny=args.get("tiny", False),
+        encoder=args.get("encoder", "dinov3"), lut=lut,
+        num_classes=num_classes, single_head=single_head)
+
+
+def student_from_checkpoint(ck, pretrained_dir=None):
+    config = ck.get("model_config")
+    if config:
+        config = dict(config)
+        meta = config.pop("lut_meta")
+        lut = {"meta": meta, "tensors": {
+            name: ck["model"][name] for name in
+            ("feat_idx", "feat_w", "feat_valid", "depth_idx", "depth_w")}}
+        model = BevStudent(lut=lut, **config)
+    else:
+        args = dict(ck.get("args") or {})
+        if pretrained_dir:
+            args["pretrained_dir"] = pretrained_dir
+        model = student_from_args(args)
+    model.load_state_dict(ck["model"])
+    return model

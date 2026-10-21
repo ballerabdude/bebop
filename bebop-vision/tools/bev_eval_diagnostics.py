@@ -27,7 +27,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from bebop_vision.bev_student import BevStudent, build_lift_lut
+from bebop_vision.bev_student import grid_from_model, student_from_checkpoint
 from bebop_vision.bev_student_data import DEFAULT_ROOT
 from bebop_vision.bev_student_labels import IGNORE
 from train_bev_student import BevStudentDataset
@@ -78,15 +78,15 @@ def main():
     ck = torch.load(run / "checkpoints" / args.ckpt, map_location="cpu",
                     weights_only=False)
     cfg = ck.get("args") or {}
-    lut = build_lift_lut()
-    model = BevStudent(lut=lut).to(args.device)
-    model.load_state_dict(ck["model"])
+    model = student_from_checkpoint(ck).to(args.device)
+    grid = grid_from_model(model)
     model.eval()
     print("loaded", args.ckpt, "epoch", ck.get("epoch"),
           "stage", ck.get("stage"), flush=True)
 
     ds = BevStudentDataset(args.root, args.split, train=False,
-                           labels_subdir=args.labels_subdir)
+                           labels_subdir=args.labels_subdir,
+                           image_hw=model.input_hw, grid=grid)
     ld = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                     num_workers=4, pin_memory=True)
     conf_raw = np.zeros((4, 4), np.int64)
@@ -96,7 +96,7 @@ def main():
     haz_pred = np.zeros((5, 2), np.int64)
     haz_true = np.zeros((2,), np.int64)
     # forward-range bins (body x): row -> x
-    x = 6.0 - (np.arange(120) + 0.5) * 0.05
+    x, _y = grid.centers()
     bins = [(0, 0.5), (0.5, 1.0), (1.0, 2.0), (2.0, 3.0),
             (3.0, 4.0), (4.0, 6.0)]
     bin_t = np.zeros((len(bins), 2), np.int64)   # target hazard, pred hazard
@@ -111,9 +111,15 @@ def main():
             out = model(color, depth)
             sem = torch.softmax(out["semantic"].float(), 1).cpu().numpy()
             pred = sem.argmax(1).astype(np.uint8)
-            cov = (torch.sigmoid(out["coverage"][:, 0].float()) > 0.5
-                   ).cpu().numpy()
-            valid = label != IGNORE
+            if "coverage" in out:
+                cov = (torch.sigmoid(out["coverage"][:, 0].float()) > 0.5
+                       ).cpu().numpy()
+            else:                      # single head: ego=4, unknown=5
+                cov = (pred != 5) & (pred != 4)
+            # Single-head / 5-class models also predict ego or unknown
+            # (ids >= 4); those cells are not covered and stay out of the
+            # 4x4 confusion.
+            valid = (label != IGNORE) & (pred < 4)
             flat = (label[valid].astype(np.int64) * 4
                     + pred[valid].astype(np.int64))
             conf_raw += np.bincount(flat, minlength=16).reshape(4, 4)
@@ -145,15 +151,16 @@ def main():
                     msk = pred[j].copy()
                     msk[~cov[j]] = 255
                     panel = np.concatenate(
-                        [colorize(teacher), np.full((120, 2, 3), 0, np.uint8),
-                         colorize(raw), np.full((120, 2, 3), 0, np.uint8),
+                        [colorize(teacher), np.full((grid.rows, 2, 3), 0, np.uint8),
+                         colorize(raw), np.full((grid.rows, 2, 3), 0, np.uint8),
                          colorize(msk)], axis=1)
-                    covimg = np.zeros((120, 60, 3), np.uint8)
+                    covimg = np.zeros((*grid.shape, 3), np.uint8)
                     covimg[cov[j]] = (255, 255, 255)
                     covimg[~cov[j]] = (30, 30, 30)
                     panel = np.concatenate([panel, covimg], axis=1)
-                    panel = cv2.resize(panel, (panel.shape[1] * 3,
-                                               panel.shape[0] * 3),
+                    scale = max(1, min(3, 480 // grid.rows))
+                    panel = cv2.resize(panel, (panel.shape[1] * scale,
+                                               panel.shape[0] * scale),
                                        interpolation=cv2.INTER_NEAREST)
                     cv2.putText(panel, f"{bi}-{j} teacher|raw|masked|cov",
                                 (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45,

@@ -1,5 +1,7 @@
 # BEV student overnight experiments — 2026-10-19
 
+Follow-up: [SegFormer-B5 and resolution experiments](bev-segformer.md).
+
 This is the lab notebook for the first improvement pass after the model-only
 live BEV.  Everything below is measured on `navd_session_20261018_193932`
 (the held-out drive).  The robot was off; no engine was built or deployed.
@@ -61,7 +63,7 @@ TensorRT); build on the Thor when it is back on:
 
 ```bash
 trtexec --onnx=bev_student.onnx --saveEngine=bev_student_fp16.engine \
-    --fp16 --shapes=input:2x4x240x424
+    --fp16
 ```
 
 Do not replace the live engine until the operator has reviewed the model.

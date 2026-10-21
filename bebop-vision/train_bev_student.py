@@ -5,7 +5,9 @@
         --run runs/bev-student/dino-vits16-full \
         --epochs 50 --stage1-epochs 5 --batch-size 8
 
-Input: both cameras' RGB-D at 240x424.  Output: 120x60 semantic
+Input: both cameras' RGB-D at configurable size (default 240x424).
+Use --encoder segformer-b5 --height 480 --width 848 --full-res-lift to
+train the high-resolution variant. Output: 120x60 semantic
 (floor/wall/obstacle/hazard), ego and coverage heads.  The split is by drive
 (`splits/drive_split.json`; the staircase drive is held out by default).
 
@@ -39,13 +41,12 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-from bebop_vision.bev_student import (BEV_HW, BevStudent, build_lift_lut,
-                                      dummy_lift_lut)
+from bebop_vision.bev_student import grid_from_args, student_from_args
 from bebop_vision.bev_student_data import (DEFAULT_ROOT, RUNS_ROOT,
                                            ensure_run_layout, label_path,
                                            read_index, session_dirs)
 from bebop_vision.bev_student_labels import (CLASS_NAMES, FLOOR, HAZARD,
-                                             IGNORE, OBSTACLE, WALL,
+                                             IGNORE, OBSTACLE, WALL, GridSpec,
                                              load_label_npz)
 
 IMG_HW = (240, 424)
@@ -61,7 +62,36 @@ CLASS_PALETTE = np.array([[120, 120, 120], [255, 120, 40],
 # ---------------------------------------------------------------------------
 
 
-UNKNOWN = 4
+UNKNOWN = 4          # legacy 5-class layout (--unknown-class)
+EGO_CLASS = 4        # single-head 6-class layout (--single-head)
+UNKNOWN6 = 5
+EGO_PALETTE = np.array([55, 55, 0], np.uint8)
+
+
+def num_classes_for(single_head=False, unknown_class=False):
+    return 6 if single_head else 5 if unknown_class else 4
+
+
+def unknown_index(num_classes):
+    """Class id that stands for 'unobserved' (IGNORE for the 4-class model)."""
+    return IGNORE if num_classes == 4 else num_classes - 1
+
+
+def map_semantic(sem, ego, num_classes):
+    """Teacher label (0-3 / 255) -> training target for the class layout.
+
+    4 classes: unchanged (255 is ignored by the loss).
+    5 classes: 255 -> 4 (unknown).
+    6 classes: 255 -> 5 (unknown), chassis cells -> 4 (ego): the single head
+    classifies the robot's own body so it is never floor or obstacle.
+    """
+    sem = np.asarray(sem)
+    if num_classes == 4:
+        return sem
+    out = np.where(sem == IGNORE, num_classes - 1, sem)
+    if num_classes == 6:
+        out = np.where(np.asarray(ego, bool), EGO_CLASS, out)
+    return out
 
 
 class BevStudentDataset(Dataset):
@@ -70,10 +100,13 @@ class BevStudentDataset(Dataset):
     def __init__(self, root, split, train=False, max_items=0, seed=0,
                  labels_subdir="labels", flip_prob=0.5,
                  color_jitter=True, depth_dropout=True,
-                 unknown_class=False, coverage_target="depth",
+                 unknown_class=False, single_head=False, coverage_target="depth",
                  hazard_oversample=1, hazard_oversample_min=0.02,
-                 cutout_prob=0.0, cutout_max=96, blur_prob=0.0):
+                 cutout_prob=0.0, cutout_max=96, blur_prob=0.0,
+                 image_hw=IMG_HW, grid=None):
         self.root = Path(root)
+        self.grid = grid or GridSpec()
+        self.image_hw = tuple(int(v) for v in image_hw)
         self.split = split
         self.train = train
         self.labels_subdir = str(labels_subdir)
@@ -81,6 +114,8 @@ class BevStudentDataset(Dataset):
         self.color_jitter = bool(color_jitter)
         self.depth_dropout = bool(depth_dropout)
         self.unknown_class = bool(unknown_class)
+        self.single_head = bool(single_head)
+        self.num_classes = num_classes_for(self.single_head, self.unknown_class)
         self.coverage_target = str(coverage_target)
         self.cutout_prob = float(cutout_prob) if train else 0.0
         self.cutout_max = int(cutout_max)
@@ -95,6 +130,11 @@ class BevStudentDataset(Dataset):
             except ValueError:
                 session_split = {}
         for sd in session_dirs(root):
+            meta_path = sd / self.labels_subdir / "grid.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text())["grid"]
+                if meta != self.grid.metadata():
+                    raise ValueError(f"label grid does not match model: {meta_path}")
             want = session_split.get(sd.name)
             for row in read_index(sd):
                 row_split = row.get("split") or want
@@ -115,7 +155,7 @@ class BevStudentDataset(Dataset):
             for sd, row in self.rows:
                 sem, _ego, _cov = load_label_npz(
                     label_path(sd, int(row["stamp_ns"]),
-                               self.labels_subdir))
+                               self.labels_subdir), self.grid)
                 if float((sem == HAZARD).mean()) >= float(
                         hazard_oversample_min):
                     extra.extend([(sd, row)] * (int(hazard_oversample) - 1))
@@ -133,7 +173,7 @@ class BevStudentDataset(Dataset):
         if bgr is None:
             raise FileNotFoundError(path)
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        rgb = cv2.resize(rgb, (IMG_HW[1], IMG_HW[0]),
+        rgb = cv2.resize(rgb, self.image_hw[::-1],
                          interpolation=cv2.INTER_AREA)
         x = rgb.astype(np.float32) / 255.0
         x = (x - MEAN) / STD
@@ -143,7 +183,7 @@ class BevStudentDataset(Dataset):
         d = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         if d is None:
             raise FileNotFoundError(path)
-        d = cv2.resize(d, (IMG_HW[1], IMG_HW[0]),
+        d = cv2.resize(d, self.image_hw[::-1],
                        interpolation=cv2.INTER_NEAREST)
         m = d.astype(np.float32) * 1e-3 / 8.0
         m = np.clip(m, 0.0, 1.0)
@@ -158,13 +198,11 @@ class BevStudentDataset(Dataset):
             color.append(self._color(sd / f"color_{role}" / f"{name}.jpg"))
             depth.append(self._depth(sd / f"depth_{role}" / f"{name}.png"))
         sem, ego, cov = load_label_npz(
-            label_path(sd, stamp, self.labels_subdir))
+            label_path(sd, stamp, self.labels_subdir), self.grid)
         orig_sem = sem
         if self.coverage_target == "semantic":
             cov = cov & (orig_sem != IGNORE) & ~ego
-        if self.unknown_class:
-            sem = np.where(orig_sem == IGNORE, UNKNOWN, orig_sem)
-        sem = sem.astype(np.int64)
+        sem = map_semantic(orig_sem, ego, self.num_classes).astype(np.int64)
 
         if self.train:
             rng = self._rng
@@ -223,24 +261,25 @@ class BevStudentDataset(Dataset):
 
 
 def class_weights_for(dataset):
-    n = 5 if dataset.unknown_class else 4
+    n = dataset.num_classes
     counts = np.zeros(n, np.int64)
     for sd, row in dataset.rows:
-        sem, _ego, _cov = load_label_npz(
-            label_path(sd, int(row["stamp_ns"]), dataset.labels_subdir))
-        if dataset.unknown_class:
-            v = np.where(sem == IGNORE, UNKNOWN, sem).ravel()
-        else:
-            v = sem[sem != IGNORE].ravel()
+        sem, ego, _cov = load_label_npz(
+            label_path(sd, int(row["stamp_ns"]), dataset.labels_subdir), dataset.grid)
+        v = map_semantic(sem, ego, n).ravel()
+        v = v[v != IGNORE]
         counts += np.bincount(v.astype(np.int64), minlength=n)[:n]
     freq = np.maximum(counts.astype(np.float64), 1.0)
     w = (freq.sum() / (float(n) * freq))
     w = np.clip(w, 0.5, 8.0)
-    if dataset.unknown_class:
+    if n >= 5:
         # Unknown is the majority class; a huge inverse-frequency weight
         # would swamp the semantic classes.  Keep it at 1.0 and let the
-        # four labeled classes retain their relative balance.
-        w[UNKNOWN] = 1.0
+        # four labeled classes retain their relative balance.  The ego
+        # class is a constant shape and needs no emphasis either.
+        w[n - 1] = 1.0
+        if n == 6:
+            w[EGO_CLASS] = 1.0
     return w.astype(np.float32), counts
 
 
@@ -262,7 +301,7 @@ def compute_loss(out, batch, class_weights, device, *, num_classes=4,
         pt = torch.exp(-nll)
         w = class_weights[label.clamp(min=0)]
         ce_map = ((1.0 - pt) ** float(focal_gamma)) * nll * w
-        if num_classes == 5:
+        if num_classes >= 5:
             ce = ce_map.mean()
         else:
             ce = ce_map[label != IGNORE].mean()
@@ -270,7 +309,7 @@ def compute_loss(out, batch, class_weights, device, *, num_classes=4,
         ce = F.cross_entropy(sem, label, weight=class_weights,
                              ignore_index=ignore)
     probs = torch.softmax(sem, dim=1)
-    valid = (label != IGNORE) if num_classes == 4 else (label != UNKNOWN)
+    valid = label < 4          # labelled floor/wall/obstacle/hazard cells
     dice = sem.new_zeros(())
     for cls in (WALL, OBSTACLE):
         p = probs[:, cls] * valid
@@ -293,13 +332,18 @@ def compute_loss(out, batch, class_weights, device, *, num_classes=4,
             hz = hz + hazard_tversky_weight * (
                 1.0 - (tp + 1.0) / (tp + hazard_tversky_alpha * fp
                                    + hazard_tversky_beta * fn + 1.0))
-    ego = out["ego"][:, 0].float()
-    cov = out["coverage"][:, 0].float()
-    bce_ego = F.binary_cross_entropy_with_logits(
-        ego, batch["ego"].to(device),
-        pos_weight=torch.tensor(2.0, device=device))
-    bce_cov = F.binary_cross_entropy_with_logits(
-        cov, batch["coverage"].to(device))
+    if "ego" in out and "coverage" in out:
+        ego = out["ego"][:, 0].float()
+        cov = out["coverage"][:, 0].float()
+        bce_ego = F.binary_cross_entropy_with_logits(
+            ego, batch["ego"].to(device),
+            pos_weight=torch.tensor(2.0, device=device))
+        bce_cov = F.binary_cross_entropy_with_logits(
+            cov, batch["coverage"].to(device))
+    else:
+        # single head: ego and unknown are classes of the CE above
+        bce_ego = sem.new_zeros(())
+        bce_cov = sem.new_zeros(())
     loss = ce + 0.5 * dice + hz + 0.2 * bce_ego + 0.5 * bce_cov
     return loss, {"loss": float(loss.detach()),
                   "ce": float(ce.detach()),
@@ -316,9 +360,8 @@ def _edge(mask):
     return (m > 0.5) & (eroded <= 0.5)
 
 
-def _bands(rows, width=120):
-    # x forward: row 0 = 6 m, row 119 = 0.025 m
-    x = 6.0 - (torch.arange(rows, device="cpu") + 0.5) * 0.05
+def _bands(rows, range_m=6.0):
+    x = range_m - (torch.arange(rows, device="cpu") + 0.5) * (range_m / rows)
     return {
         "0_1m": x < 1.0,
         "1_2m": (x >= 1.0) & (x < 2.0),
@@ -338,8 +381,9 @@ def evaluate(model, loader, device, class_weights, max_steps=0,
     cov_tp = cov_fp = cov_fn = 0
     band_stats = {k: [0, 0] for k in ("0_1m", "1_2m", "2_4m")}
     losses = []
+    samples = 0
     images = []
-    bands = _bands(120)
+    bands = _bands(model.lut_meta["grid_rows"], model.lut_meta["range_m"])
     for i, batch in enumerate(loader):
         if max_steps and i >= max_steps:
             break
@@ -355,6 +399,7 @@ def evaluate(model, loader, device, class_weights, max_steps=0,
             hazard_tversky_alpha=hazard_tversky_alpha,
             hazard_tversky_beta=hazard_tversky_beta)
         losses.append(float(loss) * label.shape[0])
+        samples += label.shape[0]
         sem = out["semantic"].float()
         pred = sem.argmax(1)
         valid = ((label != IGNORE) if num_classes == 4 else
@@ -364,20 +409,24 @@ def evaluate(model, loader, device, class_weights, max_steps=0,
                                ).reshape(num_classes, num_classes)
         # wall boundary (and obstacle bands) only on labelled cells
         lab4 = batch["semantic"].to(device)
-        v4 = lab4 != (IGNORE if num_classes == 4 else UNKNOWN)
+        v4 = lab4 < 4
         tw = (lab4 == WALL)
         pw = (pred == WALL)
         te, pe = _edge(tw), _edge(pw)
         bwall += torch.tensor([int((te & pe).sum()), int(pe.sum()),
                                int(te.sum())])
-        # ego
-        ep = torch.sigmoid(out["ego"][:, 0].float()) > 0.5
+        # ego / coverage: from the extra heads, or from the single head's
+        # ego and unknown classes
+        if "ego" in out:
+            ep = torch.sigmoid(out["ego"][:, 0].float()) > 0.5
+            cp = torch.sigmoid(out["coverage"][:, 0].float()) > 0.5
+        else:
+            ep = pred == EGO_CLASS
+            cp = (pred != unknown_index(num_classes)) & ~ep
         et = batch["ego"].to(device) > 0.5
         ego_tp += int((ep & et).sum())
         ego_fp += int((ep & ~et).sum())
         ego_fn += int((~ep & et).sum())
-        # coverage
-        cp = torch.sigmoid(out["coverage"][:, 0].float()) > 0.5
         ct = batch["coverage"].to(device) > 0.5
         cov_tp += int((cp & ct).sum())
         cov_fp += int((cp & ~ct).sum())
@@ -393,9 +442,13 @@ def evaluate(model, loader, device, class_weights, max_steps=0,
             images.extend(_val_images(batch, pred, num_classes=num_classes))
     conf = conf.numpy()
     ious, recalls, precisions = {}, {}, {}
+    strict = {}
     for c in range(4):
         tp = conf[c, c]
-        fp = conf[:, c].sum() - tp
+        # IoU over labelled cells only (rows 0-3), the same definition the
+        # 4-class runs always had, so layouts stay comparable: a class
+        # predicted on an unobserved cell is not a false positive here.
+        fp = conf[:4, c].sum() - tp
         fn = conf[c, :].sum() - tp
         union = tp + fp + fn
         ious[CLASS_NAMES[c]] = float(tp / union) if union else float("nan")
@@ -403,17 +456,32 @@ def evaluate(model, loader, device, class_weights, max_steps=0,
                                    if (tp + fn) else float("nan"))
         precisions[CLASS_NAMES[c]] = (float(tp / (tp + fp))
                                       if (tp + fp) else float("nan"))
+        fp_all = conf[:, c].sum() - tp
+        strict[CLASS_NAMES[c]] = (float(tp / (tp + fp_all + fn))
+                                  if (tp + fp_all + fn) else float("nan"))
     vals = [v for v in ious.values() if not np.isnan(v)]
     miou = float(np.mean(vals)) if vals else 0.0
     aux = {}
-    if num_classes == 5:
-        tp = conf[4, 4]
-        fp = conf[:4, 4].sum()
-        fn = conf[4, :4].sum()
+    if num_classes >= 5:
+        # Strict variant: predictions on unknown/ego-labelled cells count
+        # as false positives (what the 5/6-class logs showed before).
+        svals = [v for v in strict.values() if not np.isnan(v)]
+        aux["miou_strict"] = float(np.mean(svals)) if svals else 0.0
+        aux["iou_strict"] = strict
+    if num_classes >= 5:
+        u = unknown_index(num_classes)
+        tp = conf[u, u]
+        fp = conf[:, u].sum() - tp
+        fn = conf[u, :].sum() - tp
         aux["unknown_iou"] = float(tp / max(tp + fp + fn, 1))
         aux["unknown_precision"] = float(tp / max(tp + fp, 1))
         aux["unknown_recall"] = float(tp / max(tp + fn, 1))
-        aux["unknown_cells"] = int(conf[4, :].sum())
+        aux["unknown_cells"] = int(conf[u, :].sum())
+    if num_classes == 6:
+        tp = conf[EGO_CLASS, EGO_CLASS]
+        fp = conf[:, EGO_CLASS].sum() - tp
+        fn = conf[EGO_CLASS, :].sum() - tp
+        aux["ego_iou"] = float(tp / max(tp + fp + fn, 1))
     wall_b = (2.0 * bwall[0] / (bwall[1] + bwall[2] + 1e-9)).item()
     prec = cov_tp / max(cov_tp + cov_fp, 1)
     rec = cov_tp / max(cov_tp + cov_fn, 1)
@@ -421,7 +489,7 @@ def evaluate(model, loader, device, class_weights, max_steps=0,
     hazard_r = recalls.get("hazard", 0.0)
     hazard_f1 = (2 * hazard_p * hazard_r / max(hazard_p + hazard_r, 1e-9))
     return {
-        "loss": sum(losses) / max(len(losses), 1),
+        "loss": sum(losses) / max(samples, 1),
         "miou": miou,
         "iou": ious,
         "precision": precisions,
@@ -448,12 +516,17 @@ def _denorm(color):
     return (np.clip(rgb, 0, 1).transpose(1, 2, 0) * 255).astype(np.uint8)
 
 
-def _bev_panel(teacher, pred, scale=4):
+def _bev_panel(teacher, pred, scale=4, num_classes=4):
+    scale = max(1, min(scale, 480 // teacher.shape[0]))
     def colorize(lab):
         out = np.zeros((*lab.shape, 3), np.uint8)
         for c in range(4):
             out[lab == c] = CLASS_PALETTE[c]
         out[lab == IGNORE] = CLASS_PALETTE[4]
+        if num_classes >= 5:
+            out[lab == num_classes - 1] = CLASS_PALETTE[4]
+        if num_classes == 6:
+            out[lab == EGO_CLASS] = EGO_PALETTE
         return out
     t, p = colorize(teacher), colorize(pred)
     sep = np.zeros((t.shape[0], 2, 3), np.uint8)
@@ -475,7 +548,7 @@ def _val_images(batch, pred, num_classes=4):
         color = np.concatenate([near, np.zeros((h, 4, 3), np.uint8),
                                 far], axis=1)
         panel = _bev_panel(batch["semantic"][i].cpu().numpy(),
-                           pred[i].cpu().numpy())
+                           pred[i].cpu().numpy(), num_classes=num_classes)
         canvas = np.zeros((color.shape[0] + panel.shape[0] + 4,
                            max(color.shape[1], panel.shape[1]), 3), np.uint8)
         canvas[:color.shape[0], :color.shape[1]] = color
@@ -501,6 +574,7 @@ def save_ckpt(path, model, optimizer, scheduler, epoch, stage, best, args,
               metrics):
     torch.save({
         "model": model.state_dict(),
+        "model_config": model.model_config(),
         "optimizer": optimizer.state_dict() if optimizer else None,
         "scheduler": scheduler.state_dict() if scheduler else None,
         "epoch": epoch, "stage": stage, "best": best,
@@ -517,20 +591,40 @@ def main(argv=None):
     ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--stage1-epochs", type=int, default=5)
     ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--accum-steps", type=int, default=1,
+                    help="gradient accumulation; effective batch = batch-size * this")
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--encoder-lr-scale", type=float, default=0.1)
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument("--num-workers", type=int, default=6)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--pretrained-dir", default=None)
+    ap.add_argument("--encoder", choices=("dinov3", "segformer-b5"),
+                    default="dinov3")
+    ap.add_argument("--height", type=int, default=240)
+    ap.add_argument("--width", type=int, default=424)
+    ap.add_argument("--bev-rows", type=int, default=None,
+                    help="explicit output rows; requires --bev-cols")
+    ap.add_argument("--bev-cols", type=int, default=None,
+                    help="explicit output columns, over the configured metric map")
+    ap.add_argument("--bev-width", type=float, default=None,
+                    help="BEV width in metres (default: rig config, 3.0); "
+                         "must match the label grid")
+    ap.add_argument("--bev-range", type=float, default=None,
+                    help="BEV forward range in metres (default: rig config)")
+    ap.add_argument("--full-res-lift", action="store_true",
+                    help="project features directly to 5 cm cells (default 10 cm)")
     ap.add_argument("--tiny", action="store_true",
-                    help="small random DINOv3 backbone + dummy LUT (smoke)")
+                    help="small random selected backbone + dummy LUT (smoke)")
     ap.add_argument("--max-train", type=int, default=0)
     ap.add_argument("--max-val", type=int, default=0)
     ap.add_argument("--max-steps", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--labels-subdir", default="labels",
                     help="per-session label directory (default labels)")
+    ap.add_argument("--single-head", action="store_true",
+                    help="one 6-class semantic output (floor, wall, obstacle, "
+                         "hazard, ego, unknown); no ego/coverage heads")
     ap.add_argument("--unknown-class", action="store_true",
                     help="5-class semantic: IGNORE becomes class 4 (unknown)")
     ap.add_argument("--flip-prob", type=float, default=0.5,
@@ -563,6 +657,10 @@ def main(argv=None):
                     default="legacy")
     ap.add_argument("--resume", action="store_true")
     args = ap.parse_args(argv)
+    if args.accum_steps < 1:
+        ap.error("--accum-steps must be positive")
+    if min(args.height, args.width) < 96:
+        ap.error("training input dimensions must be at least 96 for depth augmentation")
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
@@ -575,23 +673,27 @@ def main(argv=None):
         (run / sub).mkdir(parents=True, exist_ok=True)
     tb = make_tb(run / "tb")
 
-    num_classes = 5 if args.unknown_class else 4
+    if args.single_head and args.unknown_class:
+        raise SystemExit("--single-head already carries an unknown class")
+    num_classes = num_classes_for(args.single_head, args.unknown_class)
+    grid = grid_from_args(vars(args))
     train_ds = BevStudentDataset(
         args.root, "train", train=True, max_items=args.max_train,
         seed=args.seed, labels_subdir=args.labels_subdir,
         flip_prob=args.flip_prob, color_jitter=not args.no_color_jitter,
         depth_dropout=not args.no_depth_dropout,
-        unknown_class=args.unknown_class,
+        unknown_class=args.unknown_class, single_head=args.single_head,
         coverage_target=args.coverage_target,
         hazard_oversample=args.hazard_oversample,
         hazard_oversample_min=args.hazard_oversample_min,
         cutout_prob=args.cutout_prob, cutout_max=args.cutout_max,
-        blur_prob=args.blur_prob)
+        blur_prob=args.blur_prob, image_hw=(args.height, args.width), grid=grid)
     val_ds = BevStudentDataset(
         args.root, "val", train=False, max_items=args.max_val,
         seed=args.seed + 1, labels_subdir=args.labels_subdir,
-        unknown_class=args.unknown_class,
-        coverage_target=args.coverage_target)
+        unknown_class=args.unknown_class, single_head=args.single_head,
+        coverage_target=args.coverage_target,
+        image_hw=(args.height, args.width), grid=grid)
     cw_np, counts = class_weights_for(train_ds)
     if args.class_weights:
         vals = [float(v) for v in args.class_weights.split(",")]
@@ -612,17 +714,7 @@ def main(argv=None):
         val_ds, batch_size=args.batch_size, shuffle=False,
         num_workers=max(2, args.num_workers // 2), pin_memory=True)
 
-    heights = None
-    if args.lift_heights:
-        heights = tuple(float(v) for v in args.lift_heights.split(","))
-    if args.tiny:
-        n_h = len(heights) if heights else 4
-        lut = dummy_lift_lut(groups=2 * n_h)
-    else:
-        lut = build_lift_lut(heights=heights) if heights else build_lift_lut()
-    model = BevStudent(pretrained_dir=args.pretrained_dir,
-                       tiny=args.tiny, lut=lut,
-                       num_classes=num_classes).to(args.device)
+    model = student_from_args(vars(args)).to(args.device)
     print(f"model {model.num_parameters()/1e6:.2f} M params; "
           f"LUT {model.lut_meta['groups']}", flush=True)
 
@@ -633,6 +725,13 @@ def main(argv=None):
     if args.resume and (run / "checkpoints" / "last.pt").exists():
         ck = torch.load(run / "checkpoints" / "last.pt",
                         map_location=args.device, weights_only=False)
+        old_args = ck.get("args") or {}
+        for key, default in (("encoder", "dinov3"), ("height", 240),
+                             ("width", 424), ("full_res_lift", False),
+                             ("lift_heights", None), ("bev_rows", None),
+                             ("bev_cols", None), ("single_head", False)):
+            if old_args.get(key, default) != getattr(args, key):
+                raise ValueError(f"cannot resume with changed {key}; use a new run")
         model.load_state_dict(ck["model"])
         start_epoch = int(ck["epoch"]) + 1
         best = float(ck.get("best", -1.0))
@@ -686,12 +785,13 @@ def main(argv=None):
         t0 = time.time()
         train_loss = 0.0
         n = 0
+        steps = min(len(train_ld), args.max_steps) if args.max_steps else len(train_ld)
+        opt.zero_grad(set_to_none=True)
         for i, batch in enumerate(train_ld):
             if args.max_steps and i >= args.max_steps:
                 break
             color = batch["color"].to(args.device, non_blocking=True)
             depth = batch["depth"].to(args.device, non_blocking=True)
-            opt.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda",
                                     enabled=args.device.startswith("cuda")):
                 out = model(color, depth)
@@ -702,12 +802,16 @@ def main(argv=None):
                     hazard_tversky_weight=args.hazard_tversky_weight,
                     hazard_tversky_alpha=args.hazard_tversky_alpha,
                     hazard_tversky_beta=args.hazard_tversky_beta)
-            scaler.scale(loss).backward()
-            scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad], 1.0)
-            scaler.step(opt)
-            scaler.update()
+            group_start = (i // args.accum_steps) * args.accum_steps
+            group_size = min(args.accum_steps, steps - group_start)
+            scaler.scale(loss / group_size).backward()
+            if (i + 1) % args.accum_steps == 0 or i + 1 == steps:
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad], 1.0)
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
             step += 1
             train_loss += parts["loss"]
             n += 1

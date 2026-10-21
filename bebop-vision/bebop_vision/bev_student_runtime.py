@@ -1,7 +1,7 @@
 """TensorRT runtime for the learned master-BEV student.
 
 The engine is exported by ``tools/export_bev_student.py`` with a static
-``[2,4,240,424]`` input (near, far; RGB + depth/8) and three outputs:
+``[2,4,H,W]`` input (near, far; RGB + depth/8) and three outputs:
 ``semantic [4,120,60]``, ``ego [1,120,60]``, ``coverage [1,120,60]``.
 
 This module owns only preprocessing, TensorRT execution and postprocessing;
@@ -9,6 +9,7 @@ the training model (``bev_student.py``) is not imported on the robot.  The
 postprocessed ``BevGrid`` keeps the geometric planner/app contract
 (``occ``/``raw``/``coverage``) and adds the learned ``semantic``, ``wall``
 and ``ego`` layers.
+Preprocessing derives H/W from the engine and validates the metadata shape.
 
 Hazard policy: ``hazard_source="model"`` (default) is the pure student.
 ``"union"`` adds geometric BEV hazard cells; ``"geometric"`` discards the
@@ -29,8 +30,9 @@ import numpy as np
 import torch
 
 from .master_bev import (FREE, HAZARD, INFLATED, OCCUPIED, SRC_BOTH,
-                         SRC_NEAR, SRC_FAR, BevGrid)
-from .orbbec import load_rig_config
+                         SRC_NEAR, SRC_FAR, BevGrid, load_ego_raster,
+                         rasterize_ego)
+from .orbbec import CONFIG_DIR, load_rig_config
 
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 STD = np.array([0.229, 0.224, 0.225], np.float32)
@@ -66,8 +68,19 @@ class BevStudentRuntime:
             raise StudentRuntimeError(f"could not deserialize {engine_path}")
         self.context = self.engine.create_execution_context()
         self.input_name = "input"
-        self.output_names = ["semantic", "ego", "coverage"]
+        # Single-head engines carry ego and unknown as classes 4 and 5 of
+        # the semantic output; older engines have separate sigmoid heads.
+        self.single_head = bool(self.meta.get("single_head", False))
+        self.output_names = (["semantic"] if self.single_head
+                             else ["semantic", "ego", "coverage"])
         self.in_shape = tuple(self.engine.get_tensor_shape(self.input_name))
+        if (len(self.in_shape) != 4 or self.in_shape[:2] != (2, 4)
+                or min(self.in_shape[2:]) <= 0):
+            raise StudentRuntimeError(f"expected static [2,4,H,W], got {self.in_shape}")
+        self.image_hw = self.in_shape[2:]
+        meta_shape = tuple(self.meta.get("input", {}).get("shape", self.in_shape))
+        if meta_shape != self.in_shape:
+            raise StudentRuntimeError("metadata input shape does not match engine")
         self.in_dtype = self._torch_dtype(
             self.engine.get_tensor_dtype(self.input_name))
         self.input = torch.empty(self.in_shape, device=device,
@@ -84,33 +97,74 @@ class BevStudentRuntime:
             self.context.set_tensor_address(name, buf.data_ptr())
         self.stream = torch.cuda.current_stream().cuda_stream
 
-        cfg = load_rig_config()["robots"]["default"]
+        self.configure_grid(self.meta.get("grid", {}),
+                            load_rig_config()["robots"]["default"])
+        self.last_latency_ms = None
+        self.last_preprocess_ms = None
+        self.runs = 0
+
+    def configure_grid(self, grid, cfg):
+        """Metric grid geometry from the engine metadata + rig config.
+
+        Cells may be rectangular: matched-grid students (e.g. 360x640 over
+        6 m x 4 m) record ``cell_x_m``/``cell_y_m`` and a null ``cell_m``;
+        older square-cell metadata only carries ``cell_m``.  The static ego
+        rectangle and the inflation kernel use the per-axis sizes.
+        """
         ego = ((cfg.get("bev_student") or {}).get("ego") or {})
         self.ego_x = tuple(float(v) for v in ego.get(
             "x_range_m", [0.0, 0.55]))
         self.ego_y = tuple(float(v) for v in ego.get(
             "y_range_m", [-0.22, 0.22]))
-        grid = self.meta.get("grid", {})
         self.rows = int(grid.get("rows", 120))
         self.cols = int(grid.get("cols", 60))
-        self.cell_m = float(grid.get("cell_m", 0.05))
         self.range_m = float(grid.get("range_m", 6.0))
         self.width_m = float(grid.get("width_m", 3.0))
-        x = self.range_m - (np.arange(self.rows) + 0.5) * self.cell_m
-        y = (np.arange(self.cols) + 0.5) * self.cell_m - self.width_m / 2.0
-        self.ego_static = ((x[:, None] >= self.ego_x[0])
-                           & (x[:, None] <= self.ego_x[1])
-                           & (y[None, :] >= self.ego_y[0])
-                           & (y[None, :] <= self.ego_y[1]))
+        square = grid.get("cell_m")
+        self.cell_x_m = float(grid.get("cell_x_m") or square
+                              or self.range_m / self.rows)
+        self.cell_y_m = float(grid.get("cell_y_m") or square
+                              or self.width_m / self.cols)
+        self.cell_m = (self.cell_x_m
+                       if np.isclose(self.cell_x_m, self.cell_y_m) else None)
+        x = self.range_m - (np.arange(self.rows) + 0.5) * self.cell_x_m
+        y = (np.arange(self.cols) + 0.5) * self.cell_y_m - self.width_m / 2.0
+        mask_file = ego.get("mask_file")
+        if mask_file:
+            # Learned chassis footprint (tools/bev_ego_from_data.py); the
+            # rectangle above is only the fallback when the file is absent.
+            path = Path(mask_file)
+            if not path.is_absolute():
+                path = CONFIG_DIR / path
+            self.ego_static = rasterize_ego(load_ego_raster(path), x, y)
+            self.ego_source = str(path)
+        else:
+            self.ego_static = ((x[:, None] >= self.ego_x[0])
+                               & (x[:, None] <= self.ego_x[1])
+                               & (y[None, :] >= self.ego_y[0])
+                               & (y[None, :] <= self.ego_y[1]))
+            self.ego_source = "rect"
         radius = float((cfg.get("robot") or {}).get("radius_m", 0.20))
-        cells = int(round(radius / self.cell_m))
+        cells_x = int(round(radius / self.cell_x_m))
+        cells_y = int(round(radius / self.cell_y_m))
         self.inflate_kernel = (
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
-                                      (2 * cells + 1, 2 * cells + 1))
-            if cells > 0 else None)
-        self.last_latency_ms = None
-        self.last_preprocess_ms = None
-        self.runs = 0
+            cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * cells_y + 1, 2 * cells_x + 1))
+            if max(cells_x, cells_y) > 0 else None)
+        # Hazard pad: a ring this wide around the static chassis where a
+        # predicted drop is replaced by the model's best other class.  The
+        # teacher used to paint rail-edge flying pixels as a drop strip
+        # along the chassis; the ring hides that on engines trained before
+        # ``label.hazard_ego_margin_m`` existed and is harmless after.
+        self.hazard_pad_m = float(ego.get("hazard_pad_m", 0.0) or 0.0)
+        self.hazard_pad_ring = None
+        px = int(round(self.hazard_pad_m / self.cell_x_m))
+        py = int(round(self.hazard_pad_m / self.cell_y_m))
+        if max(px, py) > 0 and self.ego_static.any():
+            k = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * py + 1, 2 * px + 1))
+            dil = cv2.dilate(self.ego_static.astype(np.uint8), k) > 0
+            self.hazard_pad_ring = dil & ~self.ego_static
 
     @staticmethod
     def _find_meta(engine_path):
@@ -134,7 +188,7 @@ class BevStudentRuntime:
     # -- preprocessing -----------------------------------------------------
 
     @staticmethod
-    def _color(frame):
+    def _color(frame, image_hw=IMG_HW):
         if frame.color_jpeg:
             bgr = cv2.imdecode(
                 np.frombuffer(frame.color_jpeg, np.uint8),
@@ -146,18 +200,18 @@ class BevStudentRuntime:
             rgb = frame.color              # StampedFrame.color is RGB
         else:
             raise StudentRuntimeError("camera frame has no color")
-        rgb = cv2.resize(rgb, (IMG_HW[1], IMG_HW[0]),
+        rgb = cv2.resize(rgb, tuple(image_hw)[::-1],
                          interpolation=cv2.INTER_AREA)
         x = rgb.astype(np.float32) / 255.0
         x = (x - MEAN) / STD
         return x.transpose(2, 0, 1)
 
     @staticmethod
-    def _depth(frame):
+    def _depth(frame, image_hw=IMG_HW):
         d = frame.depth
         if d is None:
             raise StudentRuntimeError("camera frame has no depth")
-        d = cv2.resize(d, (IMG_HW[1], IMG_HW[0]),
+        d = cv2.resize(d, tuple(image_hw)[::-1],
                        interpolation=cv2.INTER_NEAREST)
         scale = float(frame.depth_scale_mm or 1.0)
         m = d.astype(np.float32) * scale * 1e-3 / 8.0
@@ -170,8 +224,8 @@ class BevStudentRuntime:
             fr = frames.get(role)
             if fr is None:
                 raise StudentRuntimeError(f"missing {role} frame")
-            colors.append(self._color(fr))
-            depths.append(self._depth(fr))
+            colors.append(self._color(fr, self.image_hw))
+            depths.append(self._depth(fr, self.image_hw))
         return np.concatenate(
             [np.stack(colors), np.stack(depths)], axis=1
         ).astype(np.float32)
@@ -192,8 +246,11 @@ class BevStudentRuntime:
         self.last_preprocess_ms = (t_pre - t0) * 1e3
         self.last_latency_ms = (t_infer - t_pre) * 1e3
         sem_logits = self.outputs["semantic"].float().cpu().numpy()
-        ego_logits = self.outputs["ego"].float().cpu().numpy()
-        cov_logits = self.outputs["coverage"].float().cpu().numpy()
+        if self.single_head:
+            ego_logits = cov_logits = None
+        else:
+            ego_logits = self.outputs["ego"].float().cpu().numpy()
+            cov_logits = self.outputs["coverage"].float().cpu().numpy()
         grid, stats = self.postprocess(
             sem_logits, ego_logits, cov_logits, frames, geo_grid, ages_s)
         stats["preprocess_ms"] = round(self.last_preprocess_ms, 2)
@@ -209,10 +266,19 @@ class BevStudentRuntime:
         sem_logits = np.asarray(sem_logits)
         if sem_logits.ndim == 4:
             sem_logits = sem_logits[0]
-        ego_logits = np.asarray(ego_logits).reshape(-1, self.rows, self.cols)[0]
-        cov_logits = np.asarray(cov_logits).reshape(-1, self.rows, self.cols)[0]
         probs = self._softmax(sem_logits, axis=0)
         semantic = probs.argmax(0).astype(np.uint8)
+        if ego_logits is None or cov_logits is None:
+            # single head: class 4 is the chassis, class 5 unobserved
+            if sem_logits.shape[0] != 6:
+                raise StudentRuntimeError(
+                    "single-head engine must have 6 semantic classes")
+            ego_cls = semantic == 4
+            cov_cls = (semantic != 5) & ~ego_cls
+            ego_logits = np.where(ego_cls, 30.0, -30.0).astype(np.float32)
+            cov_logits = np.where(cov_cls, 30.0, -30.0).astype(np.float32)
+        ego_logits = np.asarray(ego_logits).reshape(-1, self.rows, self.cols)[0]
+        cov_logits = np.asarray(cov_logits).reshape(-1, self.rows, self.cols)[0]
         # Optional hazard probability threshold.  The default 0.5 is the
         # argmax contract; lower values trade precision for stair/drop
         # recall, higher values suppress more orange.  Applied within the
@@ -247,6 +313,15 @@ class BevStudentRuntime:
                 semantic[geo_hazard] = SEM_HAZARD
                 coverage = coverage | geo_hazard
         # "model" leaves the student hazard untouched.
+        ring = getattr(self, "hazard_pad_ring", None)
+        edge_hazard = 0
+        if ring is not None:
+            edge = ring & (semantic == SEM_HAZARD)
+            edge_hazard = int(edge.sum())
+            if edge_hazard:
+                alt = probs[:3].argmax(0).astype(np.uint8)
+                semantic = semantic.copy()
+                semantic[edge] = alt[edge]
 
         coverage = coverage & ~ego
         semantic = semantic.copy()
@@ -280,11 +355,13 @@ class BevStudentRuntime:
             },
             "coverage_cells": int(np.sum(coverage)),
             "ego_cells": int(np.sum(ego)),
+            "edge_hazard_cells": edge_hazard,
             "roles": sorted(frames),
         }
         grid = BevGrid(
             occ=occ, raw=raw, coverage=coverage, source=source,
             confidence=confidence, cell_m=self.cell_m,
+            cell_x_m=self.cell_x_m, cell_y_m=self.cell_y_m,
             range_m=self.range_m, width_m=self.width_m,
             stamp_us=stamp, recv_ts=time.monotonic(),
             per_camera_age_s=ages, plane_ok={}, plane={},
