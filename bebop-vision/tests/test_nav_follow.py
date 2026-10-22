@@ -304,3 +304,19 @@ def test_http_route_endpoints(tmp_path):
         assert code == 200 and body["status"]["state"] == "stopped"
     finally:
         server.stop()
+
+
+def test_blocked_driver_is_not_refreshed(tmp_path):
+    f, store, route, drive, a, b = _follower(
+        tmp_path, [(0, 0), (5.0, 0)], visual=False)
+    f.follow(route.id)
+    f.tick(now=0.0)
+    n = len(drive.goals)
+    drive.state = "blocked"
+    f.tick(now=1.0)
+    f.tick(now=2.0)
+    assert len(drive.goals) == n                 # no goal refresh while blocked
+    assert f.status()["detail"]["hold"] == "blocked"
+    drive.state = "drive"
+    f.tick(now=3.0)
+    assert len(drive.goals) == n + 1

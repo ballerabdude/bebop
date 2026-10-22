@@ -217,3 +217,16 @@ def test_adequate_goal_sector_beats_wide_open_side():
     cmd = c.step((0, 0, 0), m, now=0.0)
     assert cmd.state == "drive"
     assert abs(cmd.detail["heading_deg"]) < 20
+
+
+def test_corridor_obstacle_is_steered_around_not_parked_at():
+    c = BearingController()
+    sim = Sim()
+    c.set_goal(Goal(2.0, 0.0), sim.odom)
+    # A return just inside the corridor edge, 0.5 m ahead on the left:
+    # straight sectors read 0.5 m, everything else is open.
+    m = cmap(obstacle=[(8.6, 0.5), (0, 0.5)], corridor=0.5)
+    cmd = c.step(sim.odom, m, now=0.0)
+    assert cmd.state in ("drive", "rotate")
+    assert cmd.detail["mode"] == "sector"
+    assert abs(cmd.detail["heading_deg"]) >= 15

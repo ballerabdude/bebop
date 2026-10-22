@@ -188,11 +188,24 @@ class BearingController:
             return self._rotate(goal_b, detail)
 
         goal_clear = cmap.clearance_at(goal_b)
-        if dist <= goal_clear:
+        if cmap.drop:
+            # A drop in the corridor is never steered around: the near
+            # camera is the only drop sensor and it only sees the corridor.
+            detail["drop"] = True
+            return self._blocked(now, "drop_in_corridor", detail)
+        corridor_ok = cmap.corridor_min_m >= c.stop_m
+        # Head straight for the goal only while the chassis-width corridor
+        # is clear; otherwise fall through to sector steering so a return
+        # just inside the corridor edge is driven around, not parked at.
+        if dist <= goal_clear and (corridor_ok
+                                   or abs(goal_b) > math.radians(15.0)):
             chosen, chosen_clear = goal_b, goal_clear
             detail["mode"] = "direct"
         else:
             eligible = cmap.clearance_m >= c.stop_m
+            if not corridor_ok:
+                eligible = eligible & (np.abs(cmap.bearings_rad)
+                                       >= math.radians(15.0))
             if not np.any(eligible):
                 if can_turn and abs(goal_b) > math.radians(c.rotate_deg):
                     # Nothing ahead is clear but the goal is well off to
@@ -208,6 +221,11 @@ class BearingController:
             # far off to the side.
             useful = np.minimum(cmap.clearance_m, dist + c.approach_m)
             turn_pen = 1.0 - c.turn_penalty * np.abs(cmap.bearings_rad) / half_fov
+            if not corridor_ok:
+                # Straight-ahead sectors would be refused by the corridor
+                # check below; do not pick them.
+                eligible = eligible & (np.abs(cmap.bearings_rad)
+                                       >= math.radians(15.0))
             score = np.where(eligible, useful ** 1.5 * w * turn_pen, -1.0)
             i = int(np.argmax(score))
             chosen = float(cmap.bearings_rad[i])
@@ -222,7 +240,6 @@ class BearingController:
                 return self._blocked(now, "turn_blocked", detail)
             return self._rotate(chosen, detail)
 
-        corridor_ok = (cmap.corridor_min_m >= c.stop_m) and not cmap.drop
         detail["corridor_min_m"] = (None if not math.isfinite(cmap.corridor_min_m)
                                     else round(cmap.corridor_min_m, 3))
         if cmap.drop:

@@ -203,6 +203,20 @@ POST :9097/route/stop
 newest taught route between the two places. Only forward following exists:
 to come back, teach the return trip.
 
+First live follow (2026-10-21, office lane): taught a 1.16 m / 4-node
+straight leg by nav goal, reversed back to the start (heading held), then
+`POST /route/follow`: every tick matched the taught keyframes confidently
+(96-99 of 196 patches, ~50 %, zero column offset), the visual correction
+pulled a 34° anchoring error out of the route frame (yaw correction
+converged to +26°), and the run ended `arrived` at the last node in 3.2 s
+with the edge recorded (2 traversals, 2 successes). Lessons from the two
+failed attempts before it: never refresh the driver's goal while it reports
+`blocked` (it resets the abort timer), and the driver now steers around a
+return inside the corridor edge instead of parking in front of it; a drop
+in the corridor still stops it outright. Reversing can yaw the chassis by
+tens of degrees as the castors swing round, so a frame anchored after a
+reverse relies on the visual correction.
+
 ## 9. Live results (2026-10-21) and caveats
 
 - `fwd 0.5 m`: reached in 2.4 s (stopped 0.36 m in, the old 0.15 m reach

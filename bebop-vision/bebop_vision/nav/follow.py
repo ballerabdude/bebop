@@ -270,9 +270,12 @@ class RouteFollower:
                 "source": source, "goal_m": round(goal_d, 2),
                 "nav_state": nav_state,
             }
-            # The driver owns motion: refresh its goal unless it is in the
-            # middle of an abort it has not reported yet.
-            if nav_state in ("arming",):
+            # The driver owns motion: refresh its goal unless it is arming
+            # or blocked.  A fresh goal resets the driver's blocked timer,
+            # so re-sending while blocked would keep it blocked forever
+            # instead of letting it abort (seen live 2026-10-21).
+            if nav_state in ("arming", "blocked"):
+                self._detail["hold"] = nav_state
                 return
             try:
                 self.drive.set_goal(bearing_deg=math.degrees(bearing),
