@@ -169,6 +169,37 @@ the corner, the corner speed cap, progress-preserving re-sends, obstacles
 still blocking, and the body-frame form. Next: the follower and trip runner
 sending whole trails as paths, and the seeker looking while driving.
 
+## 3d. Near-camera depth tuning (SDK presets and filters)
+
+`tools/orbbec_depth_tune.py` opens a camera directly (stop `bebop-vision`
+first), captures a few seconds under each preset × filter set with the
+robot still, and scores what the stop-cone cares about: valid pixel
+fraction, achieved fps, per-pixel temporal noise on floor pixels (median,
+by range band), and **flicker**: floor pixels (floor in the median frame)
+that read as an obstacle (≥ 0.10 m) or a drop within 1.2 m in a given frame.
+
+Measured 2026-10-22 on the near camera (848×480 @ 30, 2.5 s per set):
+
+| preset / filters | valid | floor noise 0.5-1 / 1-1.7 m | phantom obstacles per frame (max) |
+|---|---|---|---|
+| High Accuracy, none | 87.4 % | 1.5 / 2.5 mm | 0 (0) |
+| High Accuracy, temporal | 87.5 % | 0.8 / 1.3 mm | 0 (0) |
+| **High Accuracy, noise + temporal** | 87.5 % | 0.7 / 1.3 mm | **0 (0)** |
+| High Accuracy, noise + temporal + hole | 97.8 % | 0.8 / 1.3 mm | 3.9 (13) |
+| High Accuracy, temporal + hole (old default) | 97.8 % | 0.8 / 1.3 mm | 7.1 (24) |
+| High Density, noise + temporal | 92.9 % | 0.6 / 1.1 mm | 0.9 (3) |
+| High Density, temporal + hole | 98.2 % | 0.6 / 1.1 mm | 3.5 (7) |
+| Default, temporal + hole | 97.9 % | 0.7 / 1.2 mm | 6.3 (24) |
+
+The raw depth is quiet; **hole filling** is what invents raised points, and
+one such point inside the corridor brakes the driver. The near camera now
+runs High Accuracy with `[noise, temporal]` (zero phantoms), accepting
+~12 % holes, and the corridor minimum is the third-nearest blocking return
+(`corridor_min_points`) so an isolated pixel can never block. The far
+camera keeps `[temporal, hole]` for coverage; it is not the drop authority,
+but its hole-filled phantoms would still count in the sector map, so it
+deserves the same sweep (`--role far`) next.
+
 ## 4. Bearing controller
 
 A goal is a pose-frame point, set from a bearing + distance at the moment

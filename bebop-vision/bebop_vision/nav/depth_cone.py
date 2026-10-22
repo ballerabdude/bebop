@@ -210,6 +210,10 @@ class ConeConfig:
     # Forward corridor: chassis width + margin each side, from the front
     # of the footprint out to `lookahead_m`.
     corridor_margin_m: float = 0.08
+    # The corridor minimum is the k-th nearest blocking return, so a
+    # single flickering pixel (hole filling invents a few per frame) does
+    # not brake the robot; a real object has dozens.
+    corridor_min_points: int = 3
     lookahead_m: float = 2.5
     # Polar sectors over +-half_fov_deg (0 = straight ahead, + = left).
     n_sectors: int = 15
@@ -668,8 +672,11 @@ class DepthCone:
                    & (x <= c.lookahead_m))
         corr_block = block & in_corr
         corridor_point = None
-        if np.any(corr_block):
-            k = int(np.argmin(np.where(corr_block, x, np.inf)))
+        n_corr = int(np.count_nonzero(corr_block))
+        if n_corr >= max(1, c.corridor_min_points):
+            idx_c = np.flatnonzero(corr_block)
+            order = idx_c[np.argsort(x[idx_c])]
+            k = int(order[min(c.corridor_min_points, n_corr) - 1])
             corridor_min = float(x[k])
             corridor_point = (round(float(x[k]), 3), round(float(y[k]), 3),
                               round(float(z[k]), 3))

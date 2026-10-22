@@ -308,3 +308,18 @@ def test_castor_wheel_at_the_front_corner_is_not_an_obstacle():
     depth = render_depth(g, boxes=[(0.62, 0.72, -0.42, -0.26, 0.25)])
     cm = cone.evaluate({"near": frame(depth)})
     assert cm.corridor_min_m == pytest.approx(0.62, abs=0.06)
+
+
+def test_corridor_ignores_isolated_flicker_points():
+    g = small_geometry()
+    cone = cone_for(g)
+    # Two stray raised points in the corridor at 0.8 m: not a block.
+    pts = np.array([[0.8, 0.0, 0.3], [0.85, 0.1, 0.3]] + [[1.0 + i * 0.01, 0.0, 0.0] for i in range(60)],
+                   dtype=np.float32)
+    cm = cone.evaluate_points(pts)
+    assert not math.isfinite(cm.corridor_min_m)
+    # Five of them are a block.
+    pts = np.array([[0.8 + i * 0.01, 0.0, 0.3] for i in range(5)] + [[1.0 + i * 0.01, 0.0, 0.0] for i in range(60)],
+                   dtype=np.float32)
+    cm = cone.evaluate_points(pts)
+    assert cm.corridor_min_m == pytest.approx(0.82, abs=0.011)

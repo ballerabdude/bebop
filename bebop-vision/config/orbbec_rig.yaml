@@ -33,12 +33,16 @@ robots:
         # RGB + re-encode; the capture threads also shed their decode work).
         color_format: mjpg
         # Host-side SDK depth post-filters (run on the Jetson, not the
-        # camera). [temporal, hole] is the measured-cheapest useful set on
-        # the Thor: ~23% of one core vs ~86% for the old
-        # [spatial, temporal, hole], with identical valid-pixel coverage —
-        # SpatialModerateFilter cost ~60% for no validity gain. `[]`
-        # disables all host filtering.
-        depth_filters: [temporal, hole]
+        # camera).  The near camera is the obstacle/drop authority, so
+        # false positives matter more than holes: measured with
+        # tools/orbbec_depth_tune.py (2026-10-22, robot still, 2.5 s per
+        # set) HoleFilling invents 4-7 raised points per frame (max 27)
+        # that read as obstacles within 1.2 m -- one inside the corridor
+        # brakes the driver -- while any set without it gives zero.
+        # [noise, temporal]: 0 phantom points, 0.7/1.3 mm floor noise at
+        # 0.5-1 / 1-1.7 m, 87.5% valid.  (With hole: 97.8% valid but 3.9
+        # phantoms/frame; the old [temporal, hole]: 7.1/frame.)
+        depth_filters: [noise, temporal]
         # Camera IMU (accel + gyro) captured into the session MCAP as a VIO
         # input. Rates: 50/100/200/500/1000 Hz; the device clock is shared
         # with depth/color (tools/orbbec_imu_probe).
