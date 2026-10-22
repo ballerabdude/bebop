@@ -43,6 +43,14 @@ robots:
         # 0.5-1 / 1-1.7 m, 87.5% valid.  (With hole: 97.8% valid but 3.9
         # phantoms/frame; the old [temporal, hole]: 7.1/frame.)
         depth_filters: [noise, temporal]
+        # Range clip for the near camera (it only serves 0.2-2.5 m; beyond
+        # that the far camera is the authority).  The 335Lg rejects the
+        # device MIN/MAX depth properties, so orbbec.py applies this with
+        # the SDK ThresholdFilter.  Measured: no change in noise or
+        # phantoms at rest; it just drops far returns.  Device noise
+        # removal (max_speckle_size 80, max_diff 256) measured no better
+        # at 200/400 and 128, so it keeps the preset values.
+        depth_range_mm: [150, 2500]
         # Camera IMU (accel + gyro) captured into the session MCAP as a VIO
         # input. Rates: 50/100/200/500/1000 Hz; the device clock is shared
         # with depth/color (tools/orbbec_imu_probe).

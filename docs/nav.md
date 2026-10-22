@@ -191,6 +191,18 @@ Measured 2026-10-22 on the near camera (848×480 @ 30, 2.5 s per set):
 | High Density, temporal + hole | 98.2 % | 0.6 / 1.1 mm | 3.5 (7) |
 | Default, temporal + hole | 97.9 % | 0.7 / 1.2 mm | 6.3 (24) |
 
+**Device-side range and precision.** The Gemini 335Lg (SDK 2.9.3) rejects
+`OB_PROP_MIN_DEPTH_INT` / `OB_PROP_MAX_DEPTH_INT` and the depth precision
+level (not writable, not readable), so "set the near camera's distance" is
+done host-side: `depth_range_mm: [lo, hi]` in the rig YAML becomes an SDK
+`ThresholdFilter`. The on-device noise removal (`max_speckle_size`,
+`max_diff`) is writable (`depth_noise_params:`), but 200/400 and 128
+measured no better than the preset's 80/256. Laser power (level 4),
+auto-exposure and gain are also writable and untested. A real low object
+check: a doll on the floor to the robot's left reads as an obstacle at
+0.32 m in the +43..+60° sectors with the new filter set (its body is 4-10 cm,
+its head clears the 10 cm obstacle floor).
+
 The raw depth is quiet; **hole filling** is what invents raised points, and
 one such point inside the corridor brakes the driver. The near camera now
 runs High Accuracy with `[noise, temporal]` (zero phantoms), accepting

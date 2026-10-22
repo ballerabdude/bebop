@@ -148,11 +148,16 @@ def _sdk():
 
 
 _FILTER_NAMES = {"spatial": "SpatialModerateFilter",
+                 "spatial_fast": "SpatialFastFilter",
+                 "spatial_advanced": "SpatialAdvancedFilter",
                  "temporal": "TemporalFilter",
-                 "hole": "HoleFillingFilter"}
+                 "hole": "HoleFillingFilter",
+                 "noise": "NoiseRemovalFilter",
+                 "edge": "EdgeNoiseRemovalFilter",
+                 "threshold": "ThresholdFilter"}
 
 
-def _set_depth_filters(ob, names=("temporal", "hole")):
+def _set_depth_filters(ob, names=("temporal", "hole"), depth_range_mm=None):
     """Build the OrbbecSDK depth post-filters for one camera.
 
     Measured on the Thor (2026-09-26, both cameras, 848x480@15): the
@@ -171,7 +176,14 @@ def _set_depth_filters(ob, names=("temporal", "hole")):
             print(f"[orbbec] unknown depth filter {name!r}; ignoring")
             continue
         try:
-            filters.append(getattr(ob, cls)())
+            f = getattr(ob, cls)()
+            if name == "threshold" and depth_range_mm:
+                # Host-side range clip (the 335Lg rejects the device
+                # MIN/MAX depth properties): returns outside [lo, hi] mm
+                # become invalid instead of far-floor/ceiling noise.
+                lo, hi = int(depth_range_mm[0]), int(depth_range_mm[1])
+                f.set_value_range(lo, hi)
+            filters.append(f)
         except Exception as exc:
             print(f"[orbbec] depth filter {name} unavailable: {exc}")
     return filters
@@ -342,12 +354,25 @@ class OrbbecCamera:
     def __init__(self, serial, role, depth_profile=(848, 480, 30),
                  color_profile=None, config_dir=None, mask_rects=None,
                  color_format="rgb", depth_work_mode=None, depth_preset=None,
-                 mask_polys=None, depth_filters=None, imu=False, imu_hz=200.0):
+                 mask_polys=None, depth_filters=None, imu=False, imu_hz=200.0,
+                 depth_range_mm=None, depth_precision_mm=None,
+                 depth_noise_params=None):
         self.serial = serial
         self.role = role
         self.depth_profile = tuple(depth_profile)
         self.depth_work_mode = depth_work_mode
         self.depth_preset = depth_preset
+        # Optional device-side depth range clip [min_mm, max_mm] and
+        # precision level (mm per raw unit: 1.0, 0.8, 0.4, 0.2, 0.1) applied
+        # after the preset.  The frame's depth_scale_mm reports whatever the
+        # device ends up using, so consumers never assume millimetres.
+        self.depth_range_mm = (tuple(depth_range_mm) if depth_range_mm
+                               else None)
+        self.depth_precision_mm = (float(depth_precision_mm)
+                                   if depth_precision_mm else None)
+        # On-device noise removal tuning (writable on the 335Lg):
+        # {"max_speckle_size": int, "max_diff": int}; None keeps the preset's.
+        self.depth_noise_params = dict(depth_noise_params or {})
         # SDK depth post-filter names (see _set_depth_filters). None uses
         # the measured-cheapest default; [] disables all host filtering.
         self.depth_filter_names = (tuple(depth_filters)
@@ -513,7 +538,9 @@ class OrbbecCamera:
         self._pipeline = ob.Pipeline(dev)
         self._pipeline.enable_frame_sync()
         self._pipeline.start(config)
-        self._filters = _set_depth_filters(ob, self.depth_filter_names)
+        self._apply_depth_props(dev, ob)
+        self._filters = _set_depth_filters(ob, self.depth_filter_names,
+                                           self.depth_range_mm)
 
         if not intrinsics_path(self.serial, self.config_dir).exists():
             try:
@@ -525,6 +552,51 @@ class OrbbecCamera:
               f"color={'on' if self.color_profile else 'off'}"
               f"{' (' + str(self.color_format).split('.')[-1] + ')' if self.color_profile else ''}"
               f"{' imu' + imu_note if imu_note else ''}")
+
+    def _apply_depth_props(self, dev, ob):
+        """Device-side range clip and precision level (best effort, logged)."""
+        P = ob.OBPropertyID
+        if self.depth_precision_mm is not None:
+            try:
+                levels = {1.0: 0, 0.8: 1, 0.4: 2, 0.2: 3, 0.1: 4, 0.05: 5}
+                lvl = levels.get(self.depth_precision_mm)
+                if lvl is None:
+                    raise ValueError(f"unsupported precision {self.depth_precision_mm}")
+                dev.set_int_property(P.OB_PROP_DEPTH_PRECISION_LEVEL_INT, lvl)
+                got = dev.get_int_property(P.OB_PROP_DEPTH_PRECISION_LEVEL_INT)
+                print(f"[orbbec] {self.role}: depth precision level {got} "
+                      f"({self.depth_precision_mm} mm/unit)")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[orbbec] {self.role}: depth precision rejected: {exc}")
+        if self.depth_range_mm is not None:
+            lo, hi = int(self.depth_range_mm[0]), int(self.depth_range_mm[1])
+            rejected = False
+            for pid, val in ((P.OB_PROP_MIN_DEPTH_INT, lo),
+                             (P.OB_PROP_MAX_DEPTH_INT, hi)):
+                try:
+                    dev.set_int_property(pid, val)
+                except Exception:  # noqa: BLE001
+                    rejected = True
+            if rejected:
+                if "threshold" not in self.depth_filter_names:
+                    # Fall back to the host-side ThresholdFilter.
+                    self.depth_filter_names = ("threshold",) + tuple(
+                        self.depth_filter_names)
+                print(f"[orbbec] {self.role}: device depth range not writable; "
+                      f"clipping {lo}-{hi} mm with ThresholdFilter")
+            else:
+                print(f"[orbbec] {self.role}: device depth range {lo}-{hi} mm")
+        for key, pid_name in (("max_speckle_size", "OB_PROP_DEPTH_MAX_SPECKLE_SIZE_INT"),
+                              ("max_diff", "OB_PROP_DEPTH_MAX_DIFF_INT")):
+            val = self.depth_noise_params.get(key)
+            if val is None:
+                continue
+            try:
+                dev.set_int_property(getattr(P, pid_name), int(val))
+                print(f"[orbbec] {self.role}: depth noise {key} = "
+                      f"{dev.get_int_property(getattr(P, pid_name))}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[orbbec] {self.role}: depth noise {key} rejected: {exc}")
 
     def _read_loop(self):
         frames = 0
@@ -704,6 +776,9 @@ class OrbbecRig:
                 depth_work_mode=c.get("depth_work_mode"),
                 depth_preset=c.get("depth_preset"),
                 depth_filters=c.get("depth_filters"),
+                depth_range_mm=c.get("depth_range_mm"),
+                depth_precision_mm=c.get("depth_precision_mm"),
+                depth_noise_params=c.get("depth_noise_params"),
                 imu=bool(c.get("imu", False)),
                 imu_hz=float(c.get("imu_hz", 200.0)))
 
