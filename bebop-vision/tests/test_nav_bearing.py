@@ -373,3 +373,22 @@ def test_sector_side_is_kept_for_a_while():
     # After the commitment expires it may switch.
     cmd = c.step((0, 0, 0), two_sided(2.0, 3.0), now=4.5)
     assert cmd.detail["heading_deg"] < 0
+
+
+def test_sweep_blocked_big_turn_prefers_an_arc_heading():
+    c = BearingController()
+    c.set_goal(Goal(1.15, 1.64), (0, 0, 0))          # goal at +55 deg, 2 m
+    m = cmap(clear=0.5, corridor=0.5)
+    # Wide open at +60 (needs a big in-place turn), modest at +34 (an arc
+    # will do); a return at 0.35 m dead ahead refuses the big turn.
+    for i, b in enumerate(m.bearings_rad):
+        if abs(math.degrees(b) - 60) < 1:
+            m.clearance_m[i] = m.obstacle_m[i] = 2.5
+        if abs(math.degrees(b) - 34) < 1:
+            m.clearance_m[i] = m.obstacle_m[i] = 1.2
+        if abs(math.degrees(b)) < 1:
+            m.obstacle_m[i] = 0.35
+    cmd = c.step((0, 0, 0), m, now=0.0)
+    assert cmd.state == "drive" and cmd.detail["mode"] == "arc"
+    assert cmd.detail["heading_deg"] == pytest.approx(34.3, abs=0.1)
+    assert cmd.vx > 0 and cmd.wz > 0

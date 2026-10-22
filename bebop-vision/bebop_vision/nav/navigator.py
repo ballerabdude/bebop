@@ -227,10 +227,23 @@ class Navigator:
             self._log("[navigate] turn blocked: backing up 0.4 m to retry")
             return True
         if phase == "reversing" and state == "arrived":
+            # Re-issue only what is left of the ORIGINAL turn: the robot
+            # may have rotated part way before the refusal (a full 180 on
+            # top of that over-rotated by 35 deg live).
+            delta = m["turn_deg"]
+            target = m.get("target_heading_deg")
+            pose = self.drive.current_pose()
+            if target is not None and pose is not None:
+                import math as _m
+                cur = _m.degrees(pose.as_tuple()[2])
+                delta = (target - cur + 180.0) % 360.0 - 180.0
+                if abs(delta) < 1.0:
+                    m["recover"] = "retried"
+                    return False               # already there
             try:
-                self.drive.set_goal(turn_deg=m["turn_deg"],
+                self.drive.set_goal(turn_deg=delta,
                                     label=f"cmd:{m['command'][:24]}")
-            except RuntimeError:
+            except (RuntimeError, ValueError):
                 return False
             m["recover"] = "retried"
             self._log("[navigate] retrying the turn")
@@ -272,9 +285,11 @@ class Navigator:
         elif intent["kind"] == "object":
             self._start_object(intent)
         elif intent["kind"] == "turn":
-            self.drive.set_goal(turn_deg=intent["turn_deg"],
-                                label=f"cmd:{text[:24]}")
+            g = self.drive.set_goal(turn_deg=intent["turn_deg"],
+                                    label=f"cmd:{text[:24]}")
             intent["runner"] = "goal"
+            if isinstance(g, dict) and g.get("rotate_to_deg") is not None:
+                intent["target_heading_deg"] = g["rotate_to_deg"]
         elif intent["kind"] == "reverse":
             self.drive.set_goal(reverse_m=intent["distance_m"],
                                 label=f"cmd:{text[:24]}")

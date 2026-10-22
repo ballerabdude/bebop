@@ -342,12 +342,31 @@ class BearingController:
         # --- act --------------------------------------------------------------
         if abs(chosen) > math.radians(c.rotate_deg):
             if not can_turn(chosen):
-                return self._escape_or_block(odom, cmap, now, goal_b,
-                                             "turn_blocked", detail, can_turn)
-            # Commit to the whole rotation: finish turning to that heading
-            # before re-choosing, so a 180 is one confident turn.
-            self._turn_commit = (wrap_pi(th + chosen), now + c.commit_s * 2)
-            return self._rotate(chosen, detail)
+                # The in-place turn would sweep a corner into something.
+                # Driving an arc toward a nearer open sector does not
+                # sweep: take the best eligible heading within the arc
+                # range before resorting to an escape.
+                arc = ((cmap.clearance_m >= c.stop_m)
+                       & (np.abs(cmap.bearings_rad) <= math.radians(c.rotate_deg))
+                       & (np.abs(cmap.bearings_rad) >= math.radians(15.0)))
+                if self._side_commit is not None:
+                    arc &= np.sign(cmap.bearings_rad) == self._side_commit[0]
+                if np.any(arc):
+                    j = int(np.argmax(np.where(arc, cmap.clearance_m, -1.0)))
+                    chosen = float(cmap.bearings_rad[j])
+                    chosen_clear = float(cmap.clearance_m[j])
+                    detail["mode"] = "arc"
+                    detail["heading_deg"] = round(math.degrees(chosen), 1)
+                    detail["clearance_m"] = round(chosen_clear, 3)
+                else:
+                    return self._escape_or_block(odom, cmap, now, goal_b,
+                                                 "turn_blocked", detail,
+                                                 can_turn)
+            else:
+                # Commit to the whole rotation: finish turning to that
+                # heading before re-choosing, so a 180 is one confident turn.
+                self._turn_commit = (wrap_pi(th + chosen), now + c.commit_s * 2)
+                return self._rotate(chosen, detail)
 
         detail["corridor_min_m"] = (None if not math.isfinite(cmap.corridor_min_m)
                                     else round(cmap.corridor_min_m, 3))

@@ -1,6 +1,7 @@
 """Navigator: command parsing and mission lifecycle (fakes, no hardware)."""
 
 import json
+import math
 import urllib.request
 from types import SimpleNamespace
 
@@ -43,11 +44,20 @@ class FakeDrive:
         self.state = "idle"
         self.cancelled = 0
         self.navigator = None
+        self.th = 0.0
+
+    def current_pose(self):
+        return SimpleNamespace(as_tuple=lambda: (0.0, 0.0, self.th),
+                               heading_source="gyro")
 
     def set_goal(self, **kw):
         self.goals.append(kw)
         self.active = True
         self.state = "drive"
+        out = {"x": 0.0, "y": 0.0}
+        if kw.get("turn_deg") is not None:
+            out["rotate_to_deg"] = round(math.degrees(self.th) + kw["turn_deg"], 1)
+        return out
 
     def cancel(self):
         self.cancelled += 1
@@ -254,8 +264,11 @@ def test_blocked_turn_backs_up_and_retries_once(tmp_path):
     assert drive.goals[-1]["reverse_m"] == 0.4
     drive.active = False
     drive.state = "reached"
+    # The robot had already turned 40 deg before the refusal: the retry
+    # asks only for the remaining 140 toward the original target.
+    drive.th = math.radians(40)
     nav.tick()                                      # retry the turn
-    assert drive.goals[-1]["turn_deg"] == 180
+    assert drive.goals[-1]["turn_deg"] == pytest.approx(140, abs=0.5)
     drive.active = False
     drive.state = "reached"
     nav.tick()                                      # turn done -> step 2

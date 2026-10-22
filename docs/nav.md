@@ -76,6 +76,35 @@ the gyro stream stalls for 0.5 s, heading falls back to odometry deltas and
 starts at the first firmware odom pose seen and is local to the process.
 The firmware IMU (`ImuStats`) is not configured on this robot.
 
+## 3a. Turning in tight spaces
+
+The old rule "refuse any in-place turn when a return is within 0.5 m" made
+the robot timid beside furniture and blind to which way was clear. The
+controller now uses the chassis geometry (`sweep_blocked`): each footprint
+corner sweeps an arc at its own radius for the requested turn, and the turn
+is refused only when a sector return sits inside one of those arcs (plus a
+4 cm radius margin and half a sector of angle); anything closer than 0.28 m
+anywhere refuses everything. So facing a wall at 0.45 m, a right turn of
+60° (front-left corner, 0.37 m radius) is fine while a left turn of 90°
+(front-right corner, 0.47 m) is not, and the controller picks the side that
+clears.
+
+When blocked (corridor, too close, drop, or a refused turn) it **escapes**:
+drive an arc toward the best open sector within 45° if one exists, else
+turn in place toward the most open sector whose sweep is clear, else back up
+0.3 m once per goal; only then does the 4 s blocked timer count toward an
+abort. Escape turns and large sector rotations are **committed** to an
+absolute heading and driven to completion, and sector steering keeps its
+side for 3 s, because re-choosing every tick as the view rotated made the
+robot oscillate left and right live. A navigator turn command that is
+refused backs up and re-issues only the *remaining* angle to the original
+target (a fresh 180 on top of a partial turn over-rotated by 35° live).
+
+Live 2026-10-21, boxed in beside a crib (returns 0.44-0.8 m all round,
+corridor 0.38 m): "turn around" → one 0.3 m back-off, then a single
+committed turn of 178° in 6 s; "go to the dresser" → found at 2.0 m, two
+legs, arrived, no detours.
+
 ## 4. Bearing controller
 
 A goal is a pose-frame point, set from a bearing + distance at the moment
