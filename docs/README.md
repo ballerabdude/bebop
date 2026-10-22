@@ -16,7 +16,7 @@ to the code they describe.
 | [`bev-segformer.md`](bev-segformer.md) | SegFormer-B5 / higher-resolution BEV queue (stopped in favour of the matched-grid run). |
 | [`place-router.md`](place-router.md) | Place memory: lofi scout capture into a pending queue, then operator batch import with optional model name suggestions (the legacy every-tick router is documented there too). |
 | [`slam.md`](slam.md)                 | Live RGB-D visual localization POC, tracking status, and visual-heading turn diagnostic. |
+| [`depth-tuning.md`](depth-tuning.md) | Depth camera preset / filter measurements (valid fraction, floor noise, hole-fill phantoms) and what the Gemini 335Lg lets you set. |
 | [`internal-map.md`](internal-map.md) | Per-place local structure submaps, the anchor frame, and the place graph of remembered routes, with honest status. |
-| [`nav.md`](nav.md)                   | Depth stop-cone + bearing waypoint driver (`--nav`, `:9097`): the fast obstacle-avoiding layer under vision-first navigation, plus route teach mode (`/routes/teach`). |
 
 If you're new, read them in the order above.

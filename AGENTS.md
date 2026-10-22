@@ -137,34 +137,31 @@
 - Live state checks: `journalctl -u bebop-linux -n 5 --no-pager`,
   `systemctl is-active bebop-linux`, `curl http://127.0.0.1:9090/healthz`.
 
-## Driving / navigation test loop
+## Driving / navigation
 
-- **The old `--goal-drive` / `--navd-model` planner is gone** (excised from
-  `main` in d99a250, 2026-09-09; archived on `exp/navd-ai-20260909`, not
-  trusted). The BEV student is **disabled** on the robot since 2026-10-21
-  (`/etc/bebop/vision.env` = `--no-bev --nav`); measured ~5 W of GPU for a
-  grid nothing consumed.
-- Navigation direction (2026-10-21): topological place-to-place over the
-  places service (`:9095`), steering by appearance (DINOv3 / VLM at decision
-  points), **depth only for obstacle avoidance**. No SLAM.
-- The fast layer is `bebop_vision/nav/` (`docs/nav.md`): depth stop-cone +
-  bearing waypoint driver, HTTP on **`:9097`**, started by `--nav` inside the
-  recorder process (cameras are exclusive). Goals are a bearing + distance
-  or an odom point; it arms only for the goal and disarms on every exit:
-  `curl -s -X POST -H 'Content-Type: application/json' -d '{"bearing_deg":0,"distance_m":0.5}' http://127.0.0.1:9097/goal`
-  then poll `/status`; `/clearance` is the live sector map. `nav` never
-  clears an E-STOP — a `CAN bus can4` E-STOP at arming means the drive bus
-  is down (motor power off); fix that and clear it from the app.
-- Mode gate: the driver switches to DIAL_IN itself (arming requires it) and
-  the recorder's `--auto` captures every nav drive as an MCAP session.
-- **Wheel odometry heading is wrong on in-place turns** (~2x over-read on
-  carpet). `:9097/pose` is the gyro-corrected pose; route teach mode
-  (`:9095/routes/teach/start|stop`, `docs/nav.md` §7) records trails in it.
-- **One command surface:** `POST :9097/navigate {"command": "go to the
-  dresser"}` (text) or the voice `navigate` tool. It picks trip / object
-  seek / relative move itself; `GET /navigate` has the spoken summary;
-  `/stop` halts everything. The building blocks (`/goal`, `/route/follow`,
-  `/trip`, `/object/seek`) stay for tests. See `docs/nav.md` §8-§11.
+- **The self-navigation stack was stripped on 2026-10-22** to be redone from
+  scratch; only place memory (`bebop_vision/places`, `:9095`) remains. Gone:
+  `bebop_vision/nav/` (stop-cone driver on :9097, object seeker, route
+  follower, trips, the `/navigate` command surface), route teach mode and
+  taught routes (`/routes/*`, `/places/plan`, the `routes` tables), the
+  voice `navigate` tools, `docs/nav.md`, and the nav cone / depth tuning
+  tools. History: `git log -- bebop-vision/bebop_vision/nav`. The stash
+  `depthsim` (2026-10-22) holds a depth-only simulator built on that
+  package. The place graph (`/places/graph`, traversal edges) stays.
+- **Drop `--nav` from `/etc/bebop/vision.env` before deploying this**;
+  `main.py` no longer accepts it and the service would fail to start.
+- The old `--goal-drive` / `--navd-model` planner is gone (d99a250,
+  2026-09-09; archived on `exp/navd-ai-20260909`). The BEV student is
+  disabled on the robot (`--no-bev`, ~5 W of GPU saved).
+- Wheel odometry heading over-read in-place turns ~2x on carpet live on
+  2026-10-21; the camera gyros are the heading truth (optical->body
+  rotation, third row, as the removed `nav/pose.py` did). Fitted drive
+  response from the 2026-10-18 MCAPs: forward lag 0.08 s after a 0.05 s
+  delay, yaw lag 0.30 s after 0.075 s, odometry yaw within 10 % of the
+  gyro on those drives.
+- Voice `move_relative` (bounded odom-relative moves) is the only motion
+  tool left. The depth-camera preset measurements are kept in
+  `docs/depth-tuning.md`.
 
 ## Gotchas (learned the hard way)
 

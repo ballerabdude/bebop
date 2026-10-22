@@ -11,8 +11,8 @@ room" layer:
 This is deliberately **not** global metric SLAM.  Each taught place can own
 a local, gravity-aligned structure submap accumulated across captures in one
 vision-session frame (the first capture's pose is the pinned anchor), and
-places are linked by route knowledge (traversal/success counts), not by a
-single global map.  Re-capturing a place unions its occupied/free evidence
+places are linked by traversal knowledge (success counts per A->B edge), not
+by a single global map.  Re-capturing a place unions its occupied/free evidence
 instead of replacing it; `replace=True` is the explicit reset.
 Localisation is still primarily place recognition among taught rooms; the
 submaps and graph are the navigation material, and relocalization is the
@@ -24,8 +24,7 @@ from .importer import PlaceImporter
 from .scout import PlaceScout, ScoutConfig
 from .server import DEFAULT_PORT, DEFAULT_ROOT, PlacesService
 from .store import (Fact, Keyframe, Match, Place, PlaceEdge, PlaceMap,
-                    PlaceStore, Route, RouteNode, Tag)
-from .trail import TrailConfig, TrailTeacher
+                    PlaceStore, Tag)
 
 __all__ = [
     "Capture",
@@ -45,10 +44,6 @@ __all__ = [
     "Place",
     "PlaceMap",
     "PlaceEdge",
-    "Route",
-    "RouteNode",
-    "TrailConfig",
-    "TrailTeacher",
     "Fact",
     "Keyframe",
     "Tag",

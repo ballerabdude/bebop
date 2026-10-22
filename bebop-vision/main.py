@@ -286,105 +286,6 @@ def run_record_navd(args):
     safety = load_rig_config()["robots"]["default"].get("safety", {})
     max_frame_age_s = float(safety.get("max_frame_age_s", 0.3))
 
-    # Waypoint driver: depth stop-cone + bearing controller over the same
-    # rig slots.  Idle until a goal is POSTed; arms only for the goal.
-    nav = None
-    nav_server = None
-
-    def stop_nav():
-        nonlocal nav, nav_server
-        if nav_server is not None:
-            try:
-                nav_server.stop()
-            finally:
-                nav_server = None
-        if nav is not None:
-            try:
-                nav.stop()
-            finally:
-                nav = None
-
-    if args.nav:
-        from bebop_vision.nav import (BearingController, CameraGeometry,
-                                      ConeConfig, ControllerConfig, DepthCone,
-                                      NavDrive, NavServer, footprint_from_rig)
-        try:
-            nav_roles = tuple(r.strip() for r in args.nav_roles.split(",")
-                              if r.strip() and r.strip() in rig.cameras)
-            if not nav_roles:
-                raise RuntimeError(
-                    f"--nav-roles {args.nav_roles!r} matches no open camera")
-            geoms = [CameraGeometry.from_rig(r, rig_path=args.rig)
-                     for r in nav_roles]
-            cone = DepthCone(geoms, ConeConfig(
-                footprint_m=tuple(footprint_from_rig(rig_path=args.rig))))
-            ctrl = BearingController(ControllerConfig(
-                v_max=args.nav_v_max, w_max=args.nav_w_max,
-                stop_m=args.nav_stop_m,
-                footprint_m=tuple(footprint_from_rig(rig_path=args.rig))))
-            nav = NavDrive(rig, robot, cone, ctrl, hz=args.nav_hz,
-                           max_frame_age_s=max_frame_age_s,
-                           roles=nav_roles).start()
-            nav_server = NavServer(nav, port=args.nav_port).start()
-            if places is not None:
-                from bebop_vision.places import TrailConfig, TrailTeacher
-                places.teacher = TrailTeacher(
-                    pstore, pcapture, penc, nav.current_pose,
-                    TrailConfig(step_m=args.teach_step_m,
-                                turn_deg=args.teach_turn_deg),
-                    recognize=lambda: places.whereami(),
-                ).start_thread()
-                print("[trail] route teach mode on the places service "
-                      "(POST /routes/teach/start|stop)", flush=True)
-                from bebop_vision.nav import FollowConfig, RouteFollower
-                far_capture = RigCapture(rig, roles=("far",), max_age_s=0.8)
-                nav.follower = RouteFollower(
-                    nav, pstore, penc, far_capture,
-                    recognize=lambda: places.whereami(),
-                    config=FollowConfig(
-                        patch_image_size=args.follow_patch_size),
-                ).start_thread()
-                print("[follow] route following on :%d "
-                      "(POST /route/follow)" % args.nav_port, flush=True)
-                from bebop_vision.nav import TripRunner
-                nav.trip = TripRunner(
-                    nav.follower, pstore,
-                    recognize=lambda: places.whereami()).start_thread()
-                print("[trip] multi-leg trips on :%d (POST /trip)"
-                      % args.nav_port, flush=True)
-                from bebop_vision.nav import ObjectSeeker
-                from bebop_vision.orbbec import load_intrinsics
-                far_geom = next((g for g in geoms if g.role == "far"), None)
-                if far_geom is not None:
-                    far_serial = next(
-                        s_ for s_, c_ in load_rig_config(args.rig)["robots"]
-                        ["default"]["cameras"].items() if c_["role"] == "far")
-                    nav.seeker = ObjectSeeker(
-                        nav, vlm, far_capture, far_geom,
-                        load_intrinsics(far_serial)).start_thread()
-                    print("[object] object goals on :%d (POST /object/seek)"
-                          % args.nav_port, flush=True)
-                from bebop_vision.nav import Navigator
-                nav.navigator = Navigator(
-                    nav, pstore, trip=nav.trip, seeker=nav.seeker,
-                    recognize=lambda: places.whereami()).start_thread()
-                print("[navigate] command surface on :%d (POST /navigate)"
-                      % args.nav_port, flush=True)
-        except Exception as exc:
-            stop_nav()
-            stop_live_slam()
-            if places is not None:
-                if places.router is not None:
-                    places.router.stop()
-                places.stop()
-            if bev_service is not None:
-                bev_service.stop()
-            if vserver is not None:
-                vserver.stop()
-            rig.stop()
-            robot.stop()
-            _release_recorder_lock()
-            raise SystemExit(f"nav failed to start: {exc}")
     budget = args.disk_budget_gb * 1e9
     rate = args.record_rate if args.record_rate is not None else 30.0
     rec = None
@@ -422,7 +323,6 @@ def run_record_navd(args):
             pass
         finally:
             close_segment(rec, path)
-            stop_nav()
             stop_live_slam()
             if places is not None:
                 if places.router is not None:
@@ -491,7 +391,6 @@ def run_record_navd(args):
                 close_segment(seg, seg_path)
             except OSError as exc:
                 print(f"\n[record-navd] error closing final segment: {exc}")
-        stop_nav()
         stop_live_slam()
         if places is not None:
             if places.router is not None:
@@ -651,30 +550,6 @@ def main():
     parser.add_argument("--live-slam-imu", action="store_true",
                         help="request camera IMU (rejected in this POC: no "
                              "validated camera-to-IMU calibration)")
-    parser.add_argument("--nav", action="store_true",
-                        help="start the depth stop-cone + bearing waypoint "
-                             "driver (HTTP goals on --nav-port)")
-    parser.add_argument("--nav-port", type=int, default=9097,
-                        help="nav HTTP port (default 9097)")
-    parser.add_argument("--nav-roles", default="near,far",
-                        help="depth cameras feeding the stop-cone "
-                             "(default near,far)")
-    parser.add_argument("--nav-hz", type=float, default=15.0,
-                        help="drive loop rate (default 15)")
-    parser.add_argument("--nav-v-max", type=float, default=0.30,
-                        help="forward speed cap m/s (default 0.30)")
-    parser.add_argument("--nav-w-max", type=float, default=0.9,
-                        help="yaw rate cap rad/s (default 0.9)")
-    parser.add_argument("--nav-stop-m", type=float, default=0.60,
-                        help="clearance from the mast below which forward "
-                             "motion stops (default 0.60)")
-    parser.add_argument("--teach-step-m", type=float, default=0.6,
-                        help="route teach: new node every this many metres")
-    parser.add_argument("--teach-turn-deg", type=float, default=25.0,
-                        help="route teach: new node after this heading change")
-    parser.add_argument("--follow-patch-size", type=int, default=224,
-                        help="route following: DINOv3 input size for patch "
-                             "matching (224 -> 14x14 grid, 336 -> 21x21)")
     parser.add_argument("--no-places", action="store_true",
                         help="do not start the semantic place-memory service "
                              "(see bebop_vision/places; default: started)")
