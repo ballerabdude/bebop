@@ -20,6 +20,7 @@ navd / BEV driving stack.
 | `tools/nav_cone_preview.py` | offline check on recorded depth PNGs, renders a top-down view |
 | `bebop_vision/nav/visual.py` | DINOv3 patch matching -> heading correction |
 | `bebop_vision/nav/follow.py` | `RouteFollower`: teach-and-repeat over `NavDrive` |
+| `bebop_vision/places/planner.py`, `bebop_vision/nav/trip.py` | Dijkstra over taught routes; `TripRunner` chains legs |
 | `tests/test_nav_*.py`, `tests/test_routes.py` | 69 hardware-free tests |
 
 ## 2. Depth stop-cone
@@ -217,7 +218,40 @@ in the corridor still stops it outright. Reversing can yaw the chassis by
 tens of degrees as the castors swing round, so a frame anchored after a
 reverse relies on the visual correction.
 
-## 9. Live results (2026-10-21) and caveats
+## 9. Multi-leg trips over the place graph
+
+`bebop_vision/places/planner.py` runs Dijkstra over `/places/graph`. A
+directed edge is usable only when it carries a taught route; its cost is
+the edge's median successful duration (or the newest route's length at
+0.2 m/s before any has been measured), multiplied by `1 + 2·(1 − success
+rate)` so legs that failed get expensive. `GET :9095/places/plan?from=&to=`
+returns the legs. `bebop_vision/nav/trip.py` (`TripRunner`, on the nav
+server) drives them: one `RouteFollower.follow` per leg, the next leg
+starting where the previous one ended (`arrived` or `arrived_unconfirmed`),
+any failed leg failing the trip. The start place is given or recognised.
+
+```
+GET  :9095/places/plan?from=office%20room&to=Master%20Bedroom
+POST :9097/trip {"to": "Master Bedroom"[, "from": "office room"]}
+GET  :9097/trip            state, plan, current leg, follower status
+POST :9097/trip/stop
+```
+
+Teaching tip for a chain: finish route A→B facing the way route B→C
+starts; the follower re-anchors each leg at the robot's live pose and the
+visual correction only absorbs tens of degrees.
+
+First live trip (2026-10-21, master bedroom): two straight legs taught by
+nav goal (1.11 m + 0.83 m, three nodes each) through a temporary mid place,
+reversed back to the start, then `POST /trip {"to": "bedroom-far", "from":
+"Master Bedroom"}`: the planner returned both legs (~14.5 s estimated), leg
+1 ended `arrived` (recognition confirmed the mid place), leg 2 ended
+`arrived_unconfirmed`, total 8.0 s, visual matches confident on every
+tick (56-68 % of patches), both edges now carry measured median
+durations. Note that freshly taught places inside one room (0.8 m apart)
+shadow the room's own place in recognition; test places were deleted.
+
+## 10. Live results (2026-10-21) and caveats
 
 - `fwd 0.5 m`: reached in 2.4 s (stopped 0.36 m in, the old 0.15 m reach
   tolerance; now 0.08 m).

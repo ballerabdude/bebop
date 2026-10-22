@@ -18,6 +18,7 @@ memory over a small JSON API:
                                          ({"replace": true} starts over)
     GET    /places/{id}/map              the place's local submap
     GET    /places/graph                 nodes (places) + route edges
+    GET    /places/plan?from=&to=        legs over taught routes (Dijkstra)
     POST   /places/{from}/edges/{to}     record one A->B traversal
 
     POST   /routes/teach/start {from?, label?}   begin recording a trail
@@ -459,6 +460,15 @@ class _PlacesHandler(BaseHTTPRequestHandler):
         try:
             if parts == ["healthz"]:
                 return self._json(svc.status())
+            if parts == ["places", "plan"]:
+                src = (query.get("from") or [None])[0]
+                dst = (query.get("to") or [None])[0]
+                if not src or not dst:
+                    return self._err(400, "from and to are required")
+                try:
+                    return self._json(svc.store.plan_trip(src, dst))
+                except KeyError as exc:
+                    return self._err(404, f"no such place: {exc.args[0]}")
             if parts == ["routes", "teach"]:
                 teacher = self._teacher()
                 if teacher is None:

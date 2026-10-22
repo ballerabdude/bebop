@@ -17,6 +17,7 @@ from .drive import DEFAULT_PORT, NavDrive, NavServer
 from .pose import Pose, PoseConfig, PoseEstimator
 from .visual import MatchConfig, MatchResult, match_patches
 from .follow import FollowConfig, RouteFollower
+from .trip import TripRunner
 
 __all__ = [
     "CameraGeometry", "ClearanceMap", "ConeConfig", "DepthCone",
@@ -25,5 +26,5 @@ __all__ = [
     "NavDrive", "NavServer", "DEFAULT_PORT",
     "Pose", "PoseConfig", "PoseEstimator",
     "MatchConfig", "MatchResult", "match_patches",
-    "FollowConfig", "RouteFollower",
+    "FollowConfig", "RouteFollower", "TripRunner",
 ]

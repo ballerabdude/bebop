@@ -345,6 +345,12 @@ def run_record_navd(args):
                 ).start_thread()
                 print("[follow] route following on :%d "
                       "(POST /route/follow)" % args.nav_port, flush=True)
+                from bebop_vision.nav import TripRunner
+                nav.trip = TripRunner(
+                    nav.follower, pstore,
+                    recognize=lambda: places.whereami()).start_thread()
+                print("[trip] multi-leg trips on :%d (POST /trip)"
+                      % args.nav_port, flush=True)
         except Exception as exc:
             stop_nav()
             stop_live_slam()

@@ -1376,6 +1376,40 @@ class PlaceStore:
             shutil.rmtree(self.root / "routes" / route_id, ignore_errors=True)
         return deleted
 
+    def plan_trip(self, from_place: str, to_place: str, *,
+                  min_success_rate: float = 0.0) -> dict:
+        """Legs to drive from one place to another over taught routes.
+
+        Returns {"from", "to", "legs": [...], "cost_s", "reachable"}; raises
+        KeyError for an unknown place.
+        """
+        from .planner import plan
+
+        src = self.get_place(from_place)
+        if src is None:
+            raise KeyError(from_place)
+        dst = self.get_place(to_place)
+        if dst is None:
+            raise KeyError(to_place)
+        routes = {r.id: {"length_m": r.length_m, "created_at": r.created_at,
+                         "from_name": r.from_name, "to_name": r.to_name}
+                  for r in self.list_routes()}
+        graph = self.graph()
+        names = {n["id"]: n["name"] for n in graph["nodes"]}
+        legs = plan(graph, routes, src.id, dst.id,
+                    min_success_rate=min_success_rate)
+        for leg in legs:
+            leg["from_name"] = names.get(leg["from"], leg["from"])
+            leg["to_name"] = names.get(leg["to"], leg["to"])
+            leg["length_m"] = round(routes[leg["route_id"]]["length_m"], 3)
+        return {
+            "from": src.id, "from_name": src.name,
+            "to": dst.id, "to_name": dst.name,
+            "legs": legs,
+            "cost_s": round(sum(l["cost_s"] for l in legs), 1),
+            "reachable": bool(legs) or src.id == dst.id,
+        }
+
     def _row_to_route(self, row: sqlite3.Row, nodes: list) -> Route:
         return Route(
             id=str(row["id"]), from_place=str(row["from_place"]),
