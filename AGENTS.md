@@ -160,6 +160,11 @@
 - **Wheel odometry heading is wrong on in-place turns** (~2x over-read on
   carpet). `:9097/pose` is the gyro-corrected pose; route teach mode
   (`:9095/routes/teach/start|stop`, `docs/nav.md` §7) records trails in it.
+- **One command surface:** `POST :9097/navigate {"command": "go to the
+  dresser"}` (text) or the voice `navigate` tool. It picks trip / object
+  seek / relative move itself; `GET /navigate` has the spoken summary;
+  `/stop` halts everything. The building blocks (`/goal`, `/route/follow`,
+  `/trip`, `/object/seek`) stay for tests. See `docs/nav.md` §8-§11.
 
 ## Gotchas (learned the hard way)
 

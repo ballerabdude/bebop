@@ -22,6 +22,7 @@ navd / BEV driving stack.
 | `bebop_vision/nav/follow.py` | `RouteFollower`: teach-and-repeat over `NavDrive` |
 | `bebop_vision/places/planner.py`, `bebop_vision/nav/trip.py` | Dijkstra over taught routes; `TripRunner` chains legs |
 | `bebop_vision/nav/object_goal.py` | `ObjectSeeker`: VLM box -> bearing + depth range -> driver goals |
+| `bebop_vision/nav/navigator.py` | `Navigator`: one command (voice/text) -> trip, seek or move |
 | `tests/test_nav_*.py`, `tests/test_routes.py` | 69 hardware-free tests |
 
 ## 2. Depth stop-cone
@@ -283,7 +284,40 @@ code fix; the resumed seek reported `arrived` at 1.1 m. The basketball and
 the fireplace located at 2.3 m and 7.6 m from the same spot. Each look costs
 one 27B call, so a seek is a handful of calls, never per tick.
 
-## 11. Live results (2026-10-21) and caveats
+## 11. One command surface: voice or text
+
+`bebop_vision/nav/navigator.py` is where every "go somewhere" lands,
+whether it arrives as typed text (`POST :9097/navigate {"command": "..."}`)
+or through the voice brain's `navigate` tool (which just relays the user's
+words). It resolves the words without a model call:
+
+| words | mechanism | waypoints |
+|---|---|---|
+| a taught place (fuzzy match: "the kitchen" → `Kitchen`) with a route chain from the recognised current place | trip over the graph | one per route node, leg by leg |
+| a taught place with no chain, or the current place unrecognised | object seeker with the place name as the description | one per VLM look |
+| anything else ("the dresser", "the red chair by the window") | object seeker | one per VLM look |
+| "forward 1 m", "back half a metre", "turn left 90", "turn around" | one bounded driver goal | one |
+| "stop" / "halt" / "wait" | stops everything | — |
+
+A new command replaces the active one. `GET /navigate` returns one state
+(`running`, `arrived`, `arrived_unconfirmed`, `stopped`, `failed_*`) plus a
+spoken-style `summary` ("Heading for dresser, about 3.0 metres away.",
+"On the way to Kitchen, leg 1 of 2.", "Arrived at dresser.", "Could not get
+to unicorn: failed not found."). `POST /navigate/stop` and the global
+`/stop` halt it.
+
+Voice: `voice_server.py` advertises `navigate(command)`,
+`navigation_status()` and `stop_navigation()` behind the same
+`motion_enabled` switch as `move_relative`; the brain only relays words and
+reads back the summary, so "are we there yet" is a `navigation_status`
+call. The voice service must be restarted to pick the tools up.
+
+Live 2026-10-21: `{"command": "go to the dresser"}` from 1 m away →
+`arrived` on the first look; the tool path (`_run_tool("navigate",
+{"command": "back half a metre"})`) drove the reverse and reported
+"Done: back half a metre."
+
+## 12. Live results (2026-10-21) and caveats
 
 - `fwd 0.5 m`: reached in 2.4 s (stopped 0.36 m in, the old 0.15 m reach
   tolerance; now 0.08 m).

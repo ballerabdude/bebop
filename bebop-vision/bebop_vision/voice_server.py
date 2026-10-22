@@ -949,6 +949,8 @@ async def _run_tool(name: str, arguments: str) -> str:
         return await _robot_status_text()
     if name == "move_relative":
         return await _move_relative(args)
+    if name in ("navigate", "navigation_status", "stop_navigation"):
+        return await _navigate_tool(name, args)
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             if name == "remember_place":
@@ -1103,6 +1105,112 @@ MOVE_TOOL: dict[str, Any] = {
         },
     },
 }
+
+
+# --- navigation tools -------------------------------------------------------
+# One command surface: the nav service (:9097, inside bebop-vision) resolves
+# "go to the kitchen" / "go to the dresser" / "forward one metre" itself and
+# keeps feeding the driver waypoints until it arrives.  The brain only
+# relays the user's words and reports progress; it never picks waypoints.
+# Rides the `motion_enabled` switch like move_relative: nothing here can
+# latch, clear or reset an E-STOP (the nav driver refuses to move on one).
+NAV_URL = "http://127.0.0.1:9097"
+
+NAV_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "navigate",
+            "description": (
+                "Send the robot somewhere and keep it driving there on its "
+                "own: a remembered room ('the kitchen'), something it can "
+                "see ('the dresser', 'the basketball'), or a relative move "
+                "('forward one metre', 'turn left 90', 'back half a metre'). "
+                "Pass the user's destination words as given. Returns "
+                "immediately with what the robot is doing; it keeps driving "
+                "afterwards. Only when the user asks the robot to go "
+                "somewhere."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The destination or move, in the user's words.",
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "navigation_status",
+            "description": (
+                "How the current navigation is going: still driving, arrived, "
+                "stopped, or why it failed. Use for 'are we there yet' and "
+                "similar."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_navigation",
+            "description": (
+                "Stop the robot's current navigation immediately (wheels stop "
+                "and disarm). Use when the user says stop, wait, or halt."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+]
+
+
+async def _nav_request(method: str, path: str, body: dict | None = None) -> dict:
+    """One call to the nav service; errors come back as {"error": ...}."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            if method == "GET":
+                r = await client.get(f"{NAV_URL}{path}")
+            else:
+                r = await client.post(f"{NAV_URL}{path}", json=body or {})
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        if r.status_code >= 400:
+            return {"error": data.get("error") or f"HTTP {r.status_code}"}
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:  # noqa: BLE001 - the service may be down
+        return {"error": f"navigation service unreachable: {exc}"}
+
+
+async def _navigate_tool(name: str, args: dict) -> str:
+    if name == "navigate":
+        command = str(args.get("command") or "").strip()
+        if not command:
+            return "No destination was given."
+        data = await _nav_request("POST", "/navigate", {"command": command})
+        if "error" in data:
+            return f"I cannot do that: {data['error']}"
+        st = data.get("status") or {}
+        return st.get("summary") or "Navigation started."
+    if name == "navigation_status":
+        data = await _nav_request("GET", "/navigate")
+        if "error" in data:
+            return f"Navigation status unavailable: {data['error']}"
+        return data.get("summary") or data.get("state") or "Unknown."
+    if name == "stop_navigation":
+        data = await _nav_request("POST", "/navigate/stop")
+        if "error" in data:
+            return f"Could not stop: {data['error']}"
+        return (data.get("status") or {}).get("summary") or "Stopped."
+    return f"Unknown tool {name!r}."
 
 
 def _wrap_pi(a: float) -> float:
@@ -1376,7 +1484,7 @@ async def _run_turn_cascade(
     if config.tools_enabled:
         tools += PLACES_TOOLS + [ROBOT_STATUS_TOOL]
     if config.motion_enabled:
-        tools += [MOVE_TOOL]
+        tools += [MOVE_TOOL] + NAV_TOOLS
     tools = tools or None
     spoken = ""
     pending = ""

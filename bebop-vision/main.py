@@ -363,6 +363,12 @@ def run_record_navd(args):
                         load_intrinsics(far_serial)).start_thread()
                     print("[object] object goals on :%d (POST /object/seek)"
                           % args.nav_port, flush=True)
+                from bebop_vision.nav import Navigator
+                nav.navigator = Navigator(
+                    nav, pstore, trip=nav.trip, seeker=nav.seeker,
+                    recognize=lambda: places.whereami())
+                print("[navigate] command surface on :%d (POST /navigate)"
+                      % args.nav_port, flush=True)
         except Exception as exc:
             stop_nav()
             stop_live_slam()

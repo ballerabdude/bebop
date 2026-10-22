@@ -8,8 +8,14 @@ drive, then stop + disarm + restore the previous mode on every exit path
 refreshed within 500 ms).  It never touches the E-STOP: a latched E-STOP
 aborts the goal and the loop waits for a person.
 
-The small HTTP surface (default :9097) lets the app, the voice tools and
-a higher-level navigator set one goal at a time and watch the state:
+The small HTTP surface (default :9097).  The one command surface is
+``POST /navigate {"command": "go to the kitchen"}`` (voice and text both
+land there; see nav/navigator.py); the rest are the building blocks it
+drives:
+
+    POST /navigate {command}   resolve the words and keep driving waypoints
+    GET  /navigate             mission state + a spoken-style summary
+    POST /navigate/stop
 
     GET  /healthz              liveness + state
     GET  /status               controller state, last command, goal, robot
@@ -79,6 +85,7 @@ class NavDrive:
         self.follower = None
         self.trip = None
         self.seeker = None
+        self.navigator = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -475,6 +482,12 @@ class _NavHandler(BaseHTTPRequestHandler):
                              "clearance_age_s": s["clearance_age_s"]})
         elif path == "/status":
             self._send(200, self.nav.status())
+        elif path == "/navigate":
+            n = self.nav.navigator
+            if n is None:
+                self._send(503, {"ok": False, "error": "navigator not configured"})
+            else:
+                self._send(200, n.status())
         elif path == "/trip":
             t = self.nav.trip
             if t is None:
@@ -525,7 +538,8 @@ class _NavHandler(BaseHTTPRequestHandler):
                 "POST /stop", "POST /route/follow", "POST /route/stop",
                 "GET /trip", "POST /trip", "POST /trip/stop",
                 "GET /object", "POST /object/locate", "POST /object/seek",
-                "POST /object/stop"]})
+                "POST /object/stop", "GET /navigate", "POST /navigate",
+                "POST /navigate/stop"]})
         else:
             self._send(404, {"ok": False, "error": "not found"})
 
@@ -556,6 +570,9 @@ class _NavHandler(BaseHTTPRequestHandler):
                 return
             self._send(202, {"ok": True, "goal": goal})
         elif path == "/stop":
+            n = self.nav.navigator
+            if n is not None:
+                n.stop()
             o = self.nav.seeker
             if o is not None:
                 o.stop()
@@ -592,6 +609,33 @@ class _NavHandler(BaseHTTPRequestHandler):
                 self._send(409, {"ok": False, "error": str(exc)})
                 return
             self._send(202, {"ok": True, "status": st})
+        elif path == "/navigate":
+            n = self.nav.navigator
+            if n is None:
+                self._send(503, {"ok": False, "error": "navigator not configured"})
+                return
+            text = str(body.get("command") or body.get("text") or "").strip()
+            if not text:
+                self._send(400, {"ok": False, "error": "command is required"})
+                return
+            try:
+                st = n.command(text)
+            except (KeyError, LookupError) as exc:
+                self._send(404, {"ok": False, "error": str(exc)})
+                return
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+                return
+            except RuntimeError as exc:
+                self._send(409, {"ok": False, "error": str(exc)})
+                return
+            self._send(202, {"ok": True, "status": st})
+        elif path == "/navigate/stop":
+            n = self.nav.navigator
+            if n is None:
+                self._send(503, {"ok": False, "error": "navigator not configured"})
+            else:
+                self._send(200, {"ok": True, "status": n.stop()})
         elif path in ("/object/locate", "/object/seek"):
             o = self.nav.seeker
             if o is None:
