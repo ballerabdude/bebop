@@ -205,7 +205,9 @@ def test_estop_during_arming_is_reported_and_mode_restored():
 
 def test_blocked_wall_is_not_driven_into():
     g = small_geometry()
-    depth = render_depth(g, walls=[(0.5, -2, 2, 0.8)])
+    # 0.7 m: just past the stop distance (the 0.56 m in front of the mast
+    # is a deliberate self-cull blind zone).
+    depth = render_depth(g, walls=[(0.7, -2, 2, 0.8)])
     drive, robot = make_drive(depth=depth, blocked_timeout_s=0.5)
     drive.start()
     try:
@@ -273,9 +275,13 @@ def test_http_goal_status_clearance_and_stop():
                                     "label": "test"})
         assert code == 202 and body["goal"]["label"] == "test"
         assert wait_for(lambda: call("/status")[1]["active"])
+        assert wait_for(lambda: bool(drive.trace(1)))
         code, body = call("/stop", {})
         assert code == 200
         assert wait_for(lambda: call("/status")[1]["state"] == "stopped")
+        code, body = call("/trace?n=50")
+        assert code == 200 and body["rows"]
+        assert {"t", "state", "heading_deg", "goal"} <= set(body["rows"][-1])
         code, _ = call("/nope")
         assert code == 404
     finally:

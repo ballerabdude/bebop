@@ -39,6 +39,7 @@ drives:
 """
 from __future__ import annotations
 
+import collections
 import json
 import math
 import threading
@@ -106,6 +107,10 @@ class NavDrive:
         self._last_cmd: Command = Command(0.0, 0.0, "idle")
         self._last_detail: dict = {}
         self._history: list[dict] = []
+        # Decision trace: one row per tick while a goal is active (60 s at
+        # 15 Hz), plus a log line whenever the decision changes.
+        self._trace = collections.deque(maxlen=900)
+        self._trace_key = None
         self._cancel = False
 
     # -- lifecycle ----------------------------------------------------------
@@ -218,6 +223,53 @@ class NavDrive:
                 "history": list(self._history[-10:]),
             }
 
+    def _record_trace(self, cmd: Command, est, now: float) -> None:
+        d = cmd.detail or {}
+        cm = self._cmap
+        row = {
+            "t": round(now, 2),
+            "state": cmd.state,
+            "vx": round(cmd.vx, 3), "wz": round(cmd.wz, 3),
+            "heading_deg": round(math.degrees(est.theta), 1),
+            "goal": (self._goal_current.label if self._goal_current else None),
+            "dist_m": d.get("dist_m", d.get("remaining_m")),
+            "goal_bearing_deg": d.get("goal_bearing_deg"),
+            "mode": d.get("mode"),
+            "chosen_deg": d.get("heading_deg", d.get("turn_remaining_deg")),
+            "clearance_m": d.get("clearance_m"),
+            "corridor_m": (None if cm is None or not math.isfinite(cm.corridor_min_m)
+                           else round(cm.corridor_min_m, 2)),
+            "min_obstacle_m": d.get("min_obstacle_m"),
+            "reason": d.get("reason"),
+            "escape": d.get("escape"),
+            "escapes": d.get("escapes"),
+            "commit_deg": d.get("commit_deg"),
+            "side": d.get("side"),
+            "blocked_s": d.get("blocked_s"),
+            "drop": d.get("drop"),
+            "corridor_pt": (None if cm is None else cm.corridor_point),
+            "floor_pitch_deg": (None if cm is None else
+                                (cm.floor_fit.get("near") or {}).get("plane", {}).get("pitch_deg")),
+            "floor_height_m": (None if cm is None else
+                               (cm.floor_fit.get("near") or {}).get("plane", {}).get("height_m")),
+        }
+        self._trace.append(row)
+        chosen = row["chosen_deg"]
+        key = (row["state"], row["mode"], row["reason"],
+               (row["escape"] or "").split(" (")[0],
+               None if chosen is None else (chosen > 0) - (chosen < 0),
+               row["commit_deg"], row["side"])
+        if key != self._trace_key:
+            self._trace_key = key
+            self._log("[nav] decide " + " ".join(
+                f"{k}={v}" for k, v in row.items()
+                if v is not None and k not in ("t",)))
+
+    def trace(self, n: int = 300) -> list:
+        with self._lock:
+            rows = list(self._trace)
+        return rows[-max(1, int(n)):]
+
     def current_pose(self) -> Pose | None:
         with self._lock:
             return self._pose
@@ -320,6 +372,7 @@ class NavDrive:
             self._last_cmd = cmd
             if cmd.detail:
                 self._last_detail = dict(cmd.detail, state=cmd.state)
+            self._record_trace(cmd, est, now)
         if cmd.state in TERMINAL_STATES or cmd.state.startswith("aborted"):
             self._log(f"[nav] {cmd.state}: {cmd.detail}")
             self._finish(cmd.state)
@@ -494,6 +547,14 @@ class _NavHandler(BaseHTTPRequestHandler):
                              "clearance_age_s": s["clearance_age_s"]})
         elif path == "/status":
             self._send(200, self.nav.status())
+        elif path == "/trace":
+            from urllib.parse import parse_qs
+            q = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            try:
+                n = int((q.get("n") or ["300"])[0])
+            except ValueError:
+                n = 300
+            self._send(200, {"rows": self.nav.trace(n)})
         elif path == "/navigate":
             n = self.nav.navigator
             if n is None:

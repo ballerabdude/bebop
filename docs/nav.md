@@ -105,6 +105,47 @@ corridor 0.38 m): "turn around" → one 0.3 m back-off, then a single
 committed turn of 178° in 6 s; "go to the dresser" → found at 2.0 m, two
 legs, arrived, no detours.
 
+## 3b. Debugging the driver's choices
+
+`GET :9097/trace?n=300` returns one row per driver tick while a goal is
+active (60 s ring): state, mode (`direct` / `sector` / `arc`), the chosen
+heading, goal bearing and distance, clearance, corridor minimum and the
+nearest corridor return `(x, y, z)`, block reason, escape, commitment,
+latched side, the fitted floor pitch/height, the commanded twist and the
+gyro heading. Every change of decision is also a journal line
+(`[nav] decide ...`). `tools/nav_trace.py` prints the trace collapsed to
+changes of mind (`--all` for every tick, `--follow` to tail live):
+
+```
+cd ~/bebop/bebop-vision
+.venv/bin/python tools/nav_trace.py --follow      # on the robot, or --host bebop.local
+```
+
+What the trace found on 2026-10-21 (master bedroom):
+
+- **The front castor.** The corridor's nearest return sat at exactly the
+  chassis cull edge on every heading (`corridor_m=0.38`, then 0.46 and 0.56
+  as the cull was widened), at the front-right corner, 11-24 cm high: the
+  front swivel wheel and fork, which swing outside the learned footprint
+  after a turn (and were sticking). With the corridor "blocked", sector
+  steering was never allowed to pick straight ahead, so even "forward 1 m"
+  zigzagged ±17°. Fix: the front self-cull now reaches 0.56 m from the mast
+  (`footprint_front_margin_m`), plus explicit low castor envelopes at both
+  front corners (`castor_zones_m`); nothing within 0.56 m of the mast is
+  visible, which is inside the 0.6 m stop distance anyway. With the castor
+  fixed, the return disappears.
+- **Flapping between direct and sector steering**, and a latched side that
+  fought a goal on the other side: fixed with mode hysteresis (`commit_s`),
+  dropping the side latch when the goal is clearly on the other side, and
+  capping escape turns per goal (`max_escape_turns`), which were resetting
+  the blocked timer indefinitely.
+- **Reversing on castors** yaws the chassis 5-14° even with the heading
+  hold; the escape reverse now uses 0.22 m/s and gives up after 1.5 s of no
+  motion.
+- Drops are only trusted within 1.5 m of the near camera and need ≥ 15
+  points; mirror reflections produced 2,000 "under-floor" points at 1.8 m to
+  the side.
+
 ## 4. Bearing controller
 
 A goal is a pose-frame point, set from a bearing + distance at the moment

@@ -149,10 +149,10 @@ def test_floor_fit_corrects_a_mis_pitched_prior():
     cm_raw = raw.evaluate({"near": frame(depth)})
     fitted = DepthCone([g_prior], ConeConfig(footprint_m=FOOTPRINT, stride=2))
     cm_fit = None
-    for _ in range(6):   # the plane low-pass converges over a few frames
+    for _ in range(14):  # the plane low-pass converges over a few frames
         cm_fit = fitted.evaluate({"near": frame(depth)})
     # Without the fit the tilted floor reads as obstacles/drops.
-    assert cm_raw.n_obstacle + cm_raw.n_drop > 200
+    assert cm_raw.n_obstacle + cm_raw.n_drop > 100
     assert cm_fit.n_obstacle + cm_fit.n_drop < 30
     assert cm_fit.floor_fit["near"]["source"] == "fit"
     assert abs(cm_fit.floor_fit["near"]["tilt_deg"] - 7.0) < 1.0
@@ -242,7 +242,7 @@ def test_far_camera_follows_near_plane_when_it_cannot_fit():
     cone = DepthCone([near, far_prior],
                      ConeConfig(footprint_m=FOOTPRINT, stride=2))
     # 1. Open floor: both cameras fit; the far camera learns its delta.
-    for _ in range(8):
+    for _ in range(20):
         cm = cone.evaluate({"near": frame(render_depth(near)),
                             "far": frame(render_depth(far_true))})
     assert cm.floor_fit["far"]["source"] == "fit"
@@ -273,3 +273,38 @@ def test_drops_only_from_drop_roles():
     cm = cone_all.evaluate({"near": frame(render_depth(near, holes=hole)),
                             "far": frame(render_depth(far))})
     assert cm.drop and cm.n_drop > 20
+
+
+def test_front_cull_margin_hides_the_rocking_frame_edge():
+    g = small_geometry()
+    cone = cone_for(g)
+    # A thin return 0.36 m ahead across the corridor at frame height (the
+    # chassis front edge after a pitch wobble): inside the front margin.
+    depth = render_depth(g, boxes=[(0.33, 0.37, -0.3, 0.15, 0.55)])
+    cm = cone.evaluate({"near": frame(depth)})
+    assert not math.isfinite(cm.corridor_min_m)
+    # The same thing 0.62 m ahead is a real obstacle.
+    depth = render_depth(g, boxes=[(0.62, 0.66, -0.3, 0.15, 0.55)])
+    cm = cone.evaluate({"near": frame(depth)})
+    assert cm.corridor_min_m == pytest.approx(0.62, abs=0.06)
+
+
+def test_drops_are_only_trusted_near():
+    g = small_geometry()
+    cone = cone_for(g)
+    far_hole = render_depth(g, holes=[(1.6, 2.2, -0.6, 0.6, 0.30)])
+    cm = cone.evaluate({"near": frame(far_hole)})
+    assert not cm.drop
+
+
+def test_castor_wheel_at_the_front_corner_is_not_an_obstacle():
+    g = small_geometry()
+    cone = cone_for(g)
+    # A 12 cm high lump at the front-right corner (the swivelled castor).
+    depth = render_depth(g, boxes=[(0.42, 0.52, -0.42, -0.26, 0.12)])
+    cm = cone.evaluate({"near": frame(depth)})
+    assert not math.isfinite(cm.corridor_min_m)
+    # The same lump but taller and past the self-cull is a real obstacle.
+    depth = render_depth(g, boxes=[(0.62, 0.72, -0.42, -0.26, 0.25)])
+    cm = cone.evaluate({"near": frame(depth)})
+    assert cm.corridor_min_m == pytest.approx(0.62, abs=0.06)

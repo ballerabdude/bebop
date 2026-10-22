@@ -185,8 +185,25 @@ class ConeConfig:
     obstacle_max_z_m: float = 1.80
     drop_z_m: float = -0.12
     # Chassis footprint [x0, x1, y0, y1] in the body frame + dilation.
+    # The front gets a larger margin: the robot rocks on its castors when
+    # it accelerates and the frame's front edge then lands a few cm past
+    # the box; a return at exactly the cull boundary kept the corridor
+    # "blocked" at 0.38 m for a whole run (2026-10-21) and made the driver
+    # zigzag because it was never allowed to steer straight.
     footprint_m: tuple = (-0.13, 0.32, -0.34, 0.19)
     footprint_margin_m: float = 0.06
+    # Self-returns (frame rails, castor forks, mast bracket) were seen out
+    # to x = 0.47 m while driving; 0.56 m keeps them out.  Nothing within
+    # 0.56 m of the mast (0.24 m of the bumper) is visible, which is fine:
+    # the driver stops at 0.6 m and sees things before they get there.
+    footprint_front_margin_m: float = 0.24
+    # Castor envelopes: the front swivel wheels (wheel + fork ~11.5 cm
+    # high) swing outside the learned footprint after a turn and were read
+    # as an obstacle touching the bumper (live 2026-10-21: a persistent
+    # return at x 0.47, y -0.35, z 0.115).  Low returns inside these
+    # body-frame boxes [x0, x1, y0, y1, z_max] are never obstacles.
+    castor_zones_m: tuple = ((0.30, 0.60, -0.50, -0.18, 0.17),
+                             (0.30, 0.60, 0.03, 0.35, 0.17))
     # A drop this close to the body is rail-silhouette noise, not a hole
     # (the near camera cannot see a real drop that close anyway).
     drop_ego_margin_m: float = 0.15
@@ -220,7 +237,7 @@ class ConeConfig:
     floor_fit_min_inlier_frac: float = 0.45
     floor_fit_samples: int = 48
     floor_fit_subsample: int = 3
-    floor_fit_alpha: float = 0.4
+    floor_fit_alpha: float = 0.25
     # The reference camera (the one that sees the most floor) fits against
     # the nominal prior; every other camera's fit must agree with the
     # reference plane to within these bounds, otherwise it inherits it.
@@ -236,6 +253,9 @@ class ConeConfig:
     # vent; a real step gives dozens at stride 4.  (Live 2026-10-21: four
     # phantom points beside a crib parked the robot with 1.1 m clear.)
     drop_min_points: int = 15
+    # Drops are only trusted this close (the near camera's floor view ends
+    # ~1.7 m out; beyond that under-floor points are plane-fit error).
+    drop_max_range_m: float = 1.5
     # Only these cameras may report drops.  The far camera's residual plane
     # error (~1 deg vs the near camera) is several cm at 2 m and produced
     # phantom drops live; the near camera sees any real drop in time at
@@ -272,14 +292,15 @@ class ClearanceMap:
     corridor_min_m: float           # nearest obstacle/drop in the corridor
     corridor_observed_m: float      # farthest floor seen in the corridor
     drop: bool                      # any drop point in the corridor
-    n_floor: int
-    n_obstacle: int
-    n_drop: int
-    valid_frac: float
-    trusted: bool                   # enough valid pixels to act on
-    stamp_us: int
-    recv_ts: float
-    roles: tuple
+    corridor_point: tuple | None = None   # (x, y, z) of the nearest corridor return
+    n_floor: int = 0
+    n_obstacle: int = 0
+    n_drop: int = 0
+    valid_frac: float = 0.0
+    trusted: bool = False           # enough valid pixels to act on
+    stamp_us: int = 0
+    recv_ts: float = 0.0
+    roles: tuple = ()
     floor_fit: dict = dataclasses.field(default_factory=dict)
 
     def age_s(self, now=None) -> float:
@@ -301,6 +322,7 @@ class ClearanceMap:
                                else round(self.corridor_min_m, 3)),
             "corridor_observed_m": round(self.corridor_observed_m, 3),
             "drop": self.drop,
+            "corridor_point": self.corridor_point,
             "n_floor": self.n_floor,
             "n_obstacle": self.n_obstacle,
             "n_drop": self.n_drop,
@@ -333,11 +355,13 @@ class DepthCone:
         self._sector_w = 2 * half / (c.n_sectors - 1)
         x0, x1, y0, y1 = c.footprint_m
         m = c.footprint_margin_m
-        self._fp = (x0 - m, x1 + m, y0 - m, y1 + m)
-        self._fp_drop = (x0 - c.drop_ego_margin_m, x1 + c.drop_ego_margin_m,
+        fm = max(m, c.footprint_front_margin_m)
+        self._fp = (x0 - m, x1 + fm, y0 - m, y1 + m)
+        dm = max(c.drop_ego_margin_m, fm)
+        self._fp_drop = (x0 - c.drop_ego_margin_m, x1 + dm,
                          y0 - c.drop_ego_margin_m, y1 + c.drop_ego_margin_m)
         self._corr_y = (y0 - c.corridor_margin_m, y1 + c.corridor_margin_m)
-        self._corr_x0 = x1 + m
+        self._corr_x0 = x1 + fm
         # Per-role floor plane (unit normal n, offset d: n.p + d = 0) and
         # the last fit report.  Starts at the nominal floor z = 0.
         self._floor = {role: (np.array([0.0, 0.0, 1.0]), 0.0)
@@ -605,6 +629,9 @@ class DepthCone:
         x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
         fx0, fx1, fy0, fy1 = self._fp
         in_fp = (x >= fx0) & (x <= fx1) & (y >= fy0) & (y <= fy1)
+        for cx0, cx1, cy0, cy1, cz in c.castor_zones_m:
+            in_fp |= ((x >= cx0) & (x <= cx1) & (y >= cy0) & (y <= cy1)
+                      & (z <= cz))
         dx0, dx1, dy0, dy1 = self._fp_drop
         in_fp_drop = (x >= dx0) & (x <= dx1) & (y >= dy0) & (y <= dy1)
         rng = np.hypot(x, y)
@@ -612,7 +639,7 @@ class DepthCone:
         obstacle = ((z >= c.obstacle_min_z_m) & (z <= c.obstacle_max_z_m)
                     & ~in_fp)
         drop = ((z <= c.drop_z_m - c.drop_slope_m_per_m * rng)
-                & ~in_fp_drop & (rng <= c.lookahead_m))
+                & ~in_fp_drop & (rng <= min(c.lookahead_m, c.drop_max_range_m)))
         if drop_allowed is not None:
             drop &= drop_allowed
         block = obstacle | drop
@@ -640,8 +667,14 @@ class DepthCone:
         in_corr = ((y >= cy0) & (y <= cy1) & (x >= self._corr_x0)
                    & (x <= c.lookahead_m))
         corr_block = block & in_corr
-        corridor_min = float(np.min(x[corr_block])) if np.any(corr_block) \
-            else math.inf
+        corridor_point = None
+        if np.any(corr_block):
+            k = int(np.argmin(np.where(corr_block, x, np.inf)))
+            corridor_min = float(x[k])
+            corridor_point = (round(float(x[k]), 3), round(float(y[k]), 3),
+                              round(float(z[k]), 3))
+        else:
+            corridor_min = math.inf
         corr_floor = floor & in_corr
         corridor_obs = float(np.max(x[corr_floor])) if np.any(corr_floor) \
             else 0.0
@@ -654,6 +687,7 @@ class DepthCone:
             corridor_min_m=corridor_min,
             corridor_observed_m=min(corridor_obs, c.lookahead_m),
             drop=bool(np.count_nonzero(drop & in_corr) >= c.drop_min_points),
+            corridor_point=corridor_point,
             n_floor=int(np.count_nonzero(floor)),
             n_obstacle=int(np.count_nonzero(obstacle)),
             n_drop=int(np.count_nonzero(drop)),

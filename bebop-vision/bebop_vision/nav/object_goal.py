@@ -52,6 +52,10 @@ class ObjectGoalConfig:
     # when nothing is open, back up a little first.  The stop-cone only
     # sees +-60 deg, so this is local exploration, not planning.
     max_detours: int = 3
+    # A leg that has not finished in this long is cancelled and treated
+    # as blocked (the driver can dither for a minute on a hard leg).
+    leg_timeout_s: float = 25.0
+    scan_timeout_s: float = 12.0
     detour_min_clear_m: float = 1.0
     detour_reverse_m: float = 0.4
     image_width: int = 640            # downscale for the VLM
@@ -171,6 +175,7 @@ class ObjectSeeker:
         self._detouring = False
         self._last_bearing = 0.0
         self._retry_scan = None
+        self._goal_t0 = 0.0
 
     # -- thread ---------------------------------------------------------------
 
@@ -361,7 +366,18 @@ class ObjectSeeker:
                 return
             if self._waiting_goal:
                 if nav.get("active") or nav.get("arming"):
-                    return
+                    limit = (c.scan_timeout_s if self._scanning
+                             else c.leg_timeout_s)
+                    if time.monotonic() - self._goal_t0 > limit:
+                        self._log(f"[object] leg timed out after {limit:.0f} s: "
+                                  "cancelling, treating as blocked")
+                        try:
+                            self.drive.cancel()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        nav_state = "aborted_blocked"
+                    else:
+                        return
                 self._waiting_goal = False
                 was_scan = self._scanning
                 was_detour = self._detouring
@@ -413,6 +429,7 @@ class ObjectSeeker:
                         self._scan_turned = target
                         self._scanning = True
                         self._waiting_goal = True
+                        self._goal_t0 = time.monotonic()
                         self._log(f"[object] scanning: turn {delta:+.0f} deg")
                     return
                 if self._misses >= c.max_misses:
@@ -438,6 +455,7 @@ class ObjectSeeker:
                 return
             self._legs += 1
             self._waiting_goal = True
+            self._goal_t0 = time.monotonic()
             self._log(f"[object] leg {self._legs}: bearing {bearing:+.1f} deg, "
                       f"range {rng}, step {step:.2f} m")
 
@@ -485,6 +503,7 @@ class ObjectSeeker:
             return False
         self._detouring = True
         self._waiting_goal = True
+        self._goal_t0 = time.monotonic()
         return True
 
     def _finish(self, state: str):

@@ -392,3 +392,48 @@ def test_sweep_blocked_big_turn_prefers_an_arc_heading():
     assert cmd.state == "drive" and cmd.detail["mode"] == "arc"
     assert cmd.detail["heading_deg"] == pytest.approx(34.3, abs=0.1)
     assert cmd.vx > 0 and cmd.wz > 0
+
+
+def test_side_latch_never_steers_away_from_a_goal_on_the_other_side():
+    c = BearingController()
+    c.set_goal(Goal(0.6, 1.0), (0, 0, 0))            # goal at +59 deg, 1.2 m
+    m = cmap(clear=0.5, corridor=0.5)
+    for i, b in enumerate(m.bearings_rad):
+        if abs(abs(math.degrees(b)) - 34) < 1 or abs(abs(math.degrees(b)) - 43) < 1:
+            m.clearance_m[i] = m.obstacle_m[i] = 2.0
+    c._side_commit = (-1.0, 10.0)                    # latched RIGHT earlier
+    cmd = c.step((0, 0, 0), m, now=0.0)
+    assert cmd.detail["heading_deg"] > 0             # goes left, toward the goal
+    assert c._side_commit is None or c._side_commit[0] > 0
+
+
+def test_direct_sector_decision_does_not_flap():
+    c = BearingController(ControllerConfig(commit_s=3.0))
+    c.set_goal(Goal(0.6, 1.0), (0, 0, 0))            # +59 deg, 1.17 m away
+    # Corridor blocked; clearance on the goal bearing hovers around the
+    # goal distance from tick to tick.
+    def m(goal_clear):
+        mm = cmap(clear=0.5, corridor=0.5)
+        for i, b in enumerate(mm.bearings_rad):
+            if math.degrees(b) >= 30:
+                mm.clearance_m[i] = mm.obstacle_m[i] = goal_clear
+        return mm
+    first = c.step((0, 0, 0), m(1.10), now=0.0)      # 1.10 < 1.17: sector
+    assert first.detail["mode"] == "sector"
+    second = c.step((0, 0, 0), m(1.25), now=0.2)     # would be direct now
+    assert second.detail.get("mode") != "direct"     # ...but stays put
+    c._turn_commit = None                            # let the turn finish
+    later = c.step((0, 0, 0), m(1.25), now=3.5)
+    assert later.detail["mode"] == "direct"
+
+
+def test_stalled_reverse_escape_gives_up():
+    c = BearingController(ControllerConfig(blocked_timeout_s=1.0))
+    boxed = cmap(clear=0.4, corridor=0.4)
+    c.set_goal(Goal(2.0, 0.0), (0, 0, 0))
+    cmd = c.step((0, 0, 0), boxed, now=0.0)
+    assert cmd.state == "escape" and cmd.vx == pytest.approx(-0.22)
+    cmd = c.step((0, 0, 0), boxed, now=1.0)          # robot has not moved
+    assert cmd.state == "escape"
+    cmd = c.step((0, 0, 0), boxed, now=1.7)
+    assert cmd.state == "blocked" and cmd.detail.get("escape") == "reverse stalled"
