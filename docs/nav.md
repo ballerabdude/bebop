@@ -204,9 +204,12 @@ check: a doll on the floor to the robot's left reads as an obstacle at
 its head clears the 10 cm obstacle floor).
 
 The raw depth is quiet; **hole filling** is what invents raised points, and
-one such point inside the corridor brakes the driver. The near camera now
-runs High Accuracy with `[noise, temporal]` (zero phantoms), accepting
-~12 % holes, and the corridor minimum is the third-nearest blocking return
+one such point inside the corridor brakes the driver. The near camera was
+switched to `[noise, temporal]` (zero phantoms, ~12 % holes) and then
+**reverted to `[temporal, hole]` at the operator's request** (2026-10-22);
+the measurements stand and the YAML options (`depth_filters`,
+`depth_range_mm`, `depth_noise_params`) remain for a later decision. The
+corridor minimum is the third-nearest blocking return
 (`corridor_min_points`) so an isolated pixel can never block. The far
 camera keeps `[temporal, hole]` for coverage; it is not the drop authority,
 but its hole-filled phantoms would still count in the sector map, so it
