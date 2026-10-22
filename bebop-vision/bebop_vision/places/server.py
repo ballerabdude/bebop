@@ -20,6 +20,15 @@ memory over a small JSON API:
     GET    /places/graph                 nodes (places) + route edges
     POST   /places/{from}/edges/{to}     record one A->B traversal
 
+    POST   /routes/teach/start {from?, label?}   begin recording a trail
+    POST   /routes/teach/stop  {to?, facts?}     finish: store route + edge
+    POST   /routes/teach/cancel
+    GET    /routes/teach                 teach status
+    GET    /routes[?from=&to=]           taught routes
+    GET    /routes/{id}                  one route with nodes
+    GET    /routes/{id}/nodes/{seq}/keyframe?role=far
+    DELETE /routes/{id}
+
 When a System 1 router is attached (`router=`), it also proxies that:
 
     GET    /router/status                router state + rolling event list
@@ -72,6 +81,8 @@ class PlacesService:
         self.router = router
         self.scout = scout
         self.importer = importer
+        # Route teach mode (set after construction; needs a pose source).
+        self.teacher = None
         self.host = host
         self.port = int(port)
         self.min_score = float(min_score)
@@ -101,6 +112,8 @@ class PlacesService:
         _log(f"listening on :{self.bound_port} (root={self.store.root})")
 
     def stop(self) -> None:
+        if self.teacher is not None:
+            self.teacher.stop_thread()
         if self.scout is not None:
             self.scout.stop()
         if self._httpd is not None:
@@ -421,6 +434,14 @@ class _PlacesHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         return parts, query
 
+    def _teacher(self):
+        teacher = self.svc.teacher
+        if teacher is None:
+            self._err(503, "route teach mode not configured (needs --nav "
+                           "for the gyro pose)")
+            return None
+        return teacher
+
     def _router(self):
         """The attached System 1 router, or None after sending a 503."""
         router = self.svc.router
@@ -438,6 +459,41 @@ class _PlacesHandler(BaseHTTPRequestHandler):
         try:
             if parts == ["healthz"]:
                 return self._json(svc.status())
+            if parts == ["routes", "teach"]:
+                teacher = self._teacher()
+                if teacher is None:
+                    return
+                return self._json(teacher.status())
+            if parts == ["routes"]:
+                routes = svc.store.list_routes(
+                    from_place=(query.get("from") or [None])[0],
+                    to_place=(query.get("to") or [None])[0])
+                return self._json({"routes": [
+                    r.to_dict(root=svc.store.root, nodes=False)
+                    for r in routes]})
+            if len(parts) == 2 and parts[0] == "routes":
+                route = svc.store.get_route(parts[1])
+                if route is None:
+                    return self._err(404, "no such route")
+                return self._json({"route": route.to_dict(root=svc.store.root)})
+            if (len(parts) == 5 and parts[0] == "routes"
+                    and parts[2] == "nodes" and parts[4] == "keyframe"):
+                role = (query.get("role") or ["far"])[0]
+                try:
+                    seq = int(parts[3])
+                except ValueError:
+                    return self._err(400, "bad node seq")
+                path = svc.store.route_keyframe_path(parts[1], seq, role)
+                if path is None or not path.is_file():
+                    return self._err(404, "no such keyframe")
+                data = path.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if parts == ["places"]:
                 return self._json({
                     "places": [p.to_dict(root=svc.store.root)
@@ -494,6 +550,27 @@ class _PlacesHandler(BaseHTTPRequestHandler):
         svc = self.svc
         try:
             body = self._body()
+            if len(parts) == 3 and parts[:2] == ["routes", "teach"]:
+                teacher = self._teacher()
+                if teacher is None:
+                    return
+                action = parts[2]
+                try:
+                    if action == "start":
+                        return self._json(teacher.start(
+                            body.get("from") or body.get("from_place"),
+                            label=str(body.get("label") or "")), status=201)
+                    if action == "stop":
+                        return self._json(teacher.stop(
+                            body.get("to") or body.get("to_place"),
+                            facts=body.get("facts")), status=201)
+                    if action == "cancel":
+                        return self._json(teacher.cancel())
+                except KeyError as exc:
+                    return self._err(404, f"no such place: {exc.args[0]}")
+                except RuntimeError as exc:
+                    return self._err(409, str(exc))
+                return self._err(404, "not found")
             if parts == ["router", "assess"]:
                 router = self._router()
                 if router is None:
@@ -600,6 +677,10 @@ class _PlacesHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         parts, _ = self._path()
         svc = self.svc
+        if len(parts) == 2 and parts[0] == "routes":
+            if not svc.store.delete_route(parts[1]):
+                return self._err(404, "no such route")
+            return self._json({"ok": True})
         if len(parts) == 2 and parts[0] == "places":
             ok = svc.store.delete_place(parts[1])
             if not ok:

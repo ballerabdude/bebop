@@ -189,6 +189,10 @@ class NavDrive:
                 "history": list(self._history[-10:]),
             }
 
+    def current_pose(self) -> Pose | None:
+        with self._lock:
+            return self._pose
+
     def clearance(self) -> dict | None:
         with self._lock:
             cm = self._cmap

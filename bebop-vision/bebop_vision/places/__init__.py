@@ -24,7 +24,8 @@ from .importer import PlaceImporter
 from .scout import PlaceScout, ScoutConfig
 from .server import DEFAULT_PORT, DEFAULT_ROOT, PlacesService
 from .store import (Fact, Keyframe, Match, Place, PlaceEdge, PlaceMap,
-                    PlaceStore, Tag)
+                    PlaceStore, Route, RouteNode, Tag)
+from .trail import TrailConfig, TrailTeacher
 
 __all__ = [
     "Capture",
@@ -44,6 +45,10 @@ __all__ = [
     "Place",
     "PlaceMap",
     "PlaceEdge",
+    "Route",
+    "RouteNode",
+    "TrailConfig",
+    "TrailTeacher",
     "Fact",
     "Keyframe",
     "Tag",

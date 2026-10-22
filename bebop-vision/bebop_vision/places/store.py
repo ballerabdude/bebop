@@ -30,7 +30,9 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import shutil
 import statistics
+import uuid
 import threading
 import time
 from dataclasses import dataclass, field
@@ -111,6 +113,34 @@ CREATE TABLE IF NOT EXISTS place_maps (
     revision        INTEGER NOT NULL,
     created_at      REAL NOT NULL,
     updated_at      REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS routes (
+    id              TEXT PRIMARY KEY,
+    from_place      TEXT NOT NULL REFERENCES places(id) ON DELETE CASCADE,
+    to_place        TEXT NOT NULL REFERENCES places(id) ON DELETE CASCADE,
+    label           TEXT,
+    status          TEXT NOT NULL DEFAULT 'taught',
+    length_m        REAL NOT NULL,
+    duration_s      REAL NOT NULL,
+    node_count      INTEGER NOT NULL,
+    heading_source  TEXT,
+    created_at      REAL NOT NULL,
+    updated_at      REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS route_nodes (
+    route_id        TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+    seq             INTEGER NOT NULL,
+    x               REAL NOT NULL,
+    y               REAL NOT NULL,
+    theta           REAL NOT NULL,
+    dist_m          REAL NOT NULL,
+    t_s             REAL NOT NULL,
+    keyframes_json  TEXT NOT NULL,
+    vec             BLOB,
+    dim             INTEGER,
+    vec_role        TEXT,
+    created_at      REAL NOT NULL,
+    PRIMARY KEY (route_id, seq)
 );
 CREATE TABLE IF NOT EXISTS place_edges (
     from_place        TEXT NOT NULL REFERENCES places(id) ON DELETE CASCADE,
@@ -213,6 +243,72 @@ class PlaceMap:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+
+@dataclass
+class RouteNode:
+    """One taught waypoint: pose in the route frame (origin + heading at
+    the start of the teach drive), distance along the route, keyframes."""
+
+    seq: int
+    x: float
+    y: float
+    theta: float
+    dist_m: float
+    t_s: float
+    keyframes: dict            # role -> jpeg path
+    has_descriptor: bool
+    vec_role: str | None
+
+    def to_dict(self, *, root: Path | None = None) -> dict:
+        return {
+            "seq": self.seq,
+            "x": round(self.x, 4), "y": round(self.y, 4),
+            "theta": round(self.theta, 4),
+            "dist_m": round(self.dist_m, 3), "t_s": round(self.t_s, 2),
+            "keyframes": {role: (str(Path(p).relative_to(root))
+                                 if root and str(p).startswith(str(root))
+                                 else str(p))
+                          for role, p in self.keyframes.items()},
+            "has_descriptor": self.has_descriptor,
+            "vec_role": self.vec_role,
+        }
+
+
+@dataclass
+class Route:
+    """A taught trail from one place to another."""
+
+    id: str
+    from_place: str
+    to_place: str
+    from_name: str
+    to_name: str
+    label: str | None
+    status: str
+    length_m: float
+    duration_s: float
+    node_count: int
+    heading_source: str | None
+    created_at: float
+    updated_at: float
+    nodes: list[RouteNode] = field(default_factory=list)
+
+    def to_dict(self, *, root: Path | None = None, nodes: bool = True) -> dict:
+        out = {
+            "id": self.id,
+            "from_place": self.from_place, "to_place": self.to_place,
+            "from_name": self.from_name, "to_name": self.to_name,
+            "label": self.label, "status": self.status,
+            "length_m": round(self.length_m, 3),
+            "duration_s": round(self.duration_s, 2),
+            "node_count": self.node_count,
+            "heading_source": self.heading_source,
+            "created_at": self.created_at, "updated_at": self.updated_at,
+        }
+        if nodes:
+            out["nodes"] = [n.to_dict(root=root) for n in self.nodes]
+        return out
 
 
 @dataclass
@@ -1128,6 +1224,170 @@ class PlaceStore:
             raise RuntimeError("place edge vanished after record")
         return edge, created
 
+    # -- routes (taught trails) ---------------------------------------------
+
+    def create_route(
+        self,
+        from_place: str,
+        to_place: str,
+        nodes: list[dict],
+        *,
+        length_m: float,
+        duration_s: float,
+        label: str | None = None,
+        heading_source: str | None = None,
+        record_edge: bool = True,
+    ) -> Route:
+        """Persist a taught trail and (by default) record the A->B edge.
+
+        Each node dict: ``{x, y, theta, dist_m, t_s, keyframes: {role:
+        jpeg bytes}, vec: array | None, vec_role: str | None}``.  Keyframe
+        JPEGs land under ``routes/<route_id>/``.  Raises KeyError for an
+        unknown place and ValueError for fewer than two nodes.
+        """
+        src = self.get_place(from_place)
+        if src is None:
+            raise KeyError(from_place)
+        dst = self.get_place(to_place)
+        if dst is None:
+            raise KeyError(to_place)
+        if len(nodes) < 2:
+            raise ValueError("a route needs at least two nodes")
+        ts = _now()
+        route_id = f"route-{uuid.uuid4().hex[:10]}"
+        rdir = self.root / "routes" / route_id
+        rdir.mkdir(parents=True, exist_ok=True)
+        rows = []
+        for seq, n in enumerate(nodes):
+            paths = {}
+            for role, jpeg in (n.get("keyframes") or {}).items():
+                if not jpeg:
+                    continue
+                path = rdir / f"{seq:04d}_{role}.jpg"
+                path.write_bytes(bytes(jpeg))
+                paths[str(role)] = str(path)
+            vec = n.get("vec")
+            blob = dim = None
+            if vec is not None:
+                arr = np.asarray(vec, dtype=np.float32).reshape(-1)
+                if arr.size:
+                    arr = arr / (np.linalg.norm(arr) + 1e-12)
+                    blob, dim = arr.tobytes(), int(arr.size)
+            rows.append((route_id, seq, float(n["x"]), float(n["y"]),
+                         float(n["theta"]), float(n.get("dist_m", 0.0)),
+                         float(n.get("t_s", 0.0)),
+                         json.dumps(paths, separators=(",", ":")),
+                         blob, dim, n.get("vec_role"), ts))
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO routes (id, from_place, to_place, label, status,"
+                " length_m, duration_s, node_count, heading_source,"
+                " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (route_id, src.id, dst.id, label, "taught", float(length_m),
+                 float(duration_s), len(rows), heading_source, ts, ts))
+            self._conn.executemany(
+                "INSERT INTO route_nodes (route_id, seq, x, y, theta, dist_m,"
+                " t_s, keyframes_json, vec, dim, vec_role, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            self._conn.commit()
+        if record_edge:
+            guide = [[float(n["x"]), float(n["y"])] for n in nodes]
+            self.record_traversal(src.id, dst.id, success=True,
+                                  duration_s=duration_s, guide_path=guide)
+        route = self.get_route(route_id)
+        if route is None:  # pragma: no cover
+            raise RuntimeError("route vanished after insert")
+        return route
+
+    def list_routes(self, *, from_place: str | None = None,
+                    to_place: str | None = None) -> list[Route]:
+        clauses, args = [], []
+        if from_place:
+            src = self.get_place(from_place)
+            if src is None:
+                return []
+            clauses.append("r.from_place = ?"); args.append(src.id)
+        if to_place:
+            dst = self.get_place(to_place)
+            if dst is None:
+                return []
+            clauses.append("r.to_place = ?"); args.append(dst.id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT r.*, a.name AS from_name, b.name AS to_name"
+                " FROM routes r JOIN places a ON a.id = r.from_place"
+                " JOIN places b ON b.id = r.to_place" + where +
+                " ORDER BY r.created_at DESC", args).fetchall()
+        return [self._row_to_route(r, []) for r in rows]
+
+    def get_route(self, route_id: str) -> Route | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT r.*, a.name AS from_name, b.name AS to_name"
+                " FROM routes r JOIN places a ON a.id = r.from_place"
+                " JOIN places b ON b.id = r.to_place WHERE r.id = ?",
+                (route_id,)).fetchone()
+            if row is None:
+                return None
+            nrows = self._conn.execute(
+                "SELECT seq, x, y, theta, dist_m, t_s, keyframes_json,"
+                " dim, vec_role FROM route_nodes WHERE route_id = ?"
+                " ORDER BY seq", (route_id,)).fetchall()
+        nodes = [RouteNode(int(n["seq"]), float(n["x"]), float(n["y"]),
+                           float(n["theta"]), float(n["dist_m"]),
+                           float(n["t_s"]), json.loads(n["keyframes_json"]),
+                           n["dim"] is not None, n["vec_role"])
+                 for n in nrows]
+        return self._row_to_route(row, nodes)
+
+    def route_descriptors(self, route_id: str):
+        """(seqs[int], vecs[N, dim] float32 L2-normalised) for the nodes
+        that carry a descriptor; empty arrays when none."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT seq, vec, dim FROM route_nodes WHERE route_id = ?"
+                " AND vec IS NOT NULL ORDER BY seq", (route_id,)).fetchall()
+        if not rows:
+            return np.zeros(0, dtype=np.int64), np.zeros((0, 0), np.float32)
+        seqs = np.array([int(r["seq"]) for r in rows], dtype=np.int64)
+        vecs = np.stack([np.frombuffer(r["vec"], dtype=np.float32)
+                         for r in rows])
+        return seqs, vecs
+
+    def route_keyframe_path(self, route_id: str, seq: int,
+                            role: str) -> Path | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT keyframes_json FROM route_nodes WHERE route_id = ?"
+                " AND seq = ?", (route_id, int(seq))).fetchone()
+        if row is None:
+            return None
+        path = json.loads(row["keyframes_json"]).get(role)
+        return Path(path) if path else None
+
+    def delete_route(self, route_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM routes WHERE id = ?",
+                                     (route_id,))
+            self._conn.commit()
+            deleted = cur.rowcount > 0
+        if deleted:
+            shutil.rmtree(self.root / "routes" / route_id, ignore_errors=True)
+        return deleted
+
+    def _row_to_route(self, row: sqlite3.Row, nodes: list) -> Route:
+        return Route(
+            id=str(row["id"]), from_place=str(row["from_place"]),
+            to_place=str(row["to_place"]), from_name=str(row["from_name"]),
+            to_name=str(row["to_name"]), label=row["label"],
+            status=str(row["status"]), length_m=float(row["length_m"]),
+            duration_s=float(row["duration_s"]),
+            node_count=int(row["node_count"]),
+            heading_source=row["heading_source"],
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]), nodes=nodes)
+
     def get_edge(self, from_place: str, to_place: str) -> PlaceEdge | None:
         src = self.get_place(from_place)
         dst = self.get_place(to_place)
@@ -1180,6 +1440,15 @@ class PlaceStore:
                 for r in rows
             ]
         edges = [e.to_dict() for e in self.list_edges()]
+        with self._lock:
+            rrows = self._conn.execute(
+                "SELECT id, from_place, to_place FROM routes").fetchall()
+        by_pair: dict = {}
+        for r in rrows:
+            by_pair.setdefault((r["from_place"], r["to_place"]), []).append(
+                str(r["id"]))
+        for e in edges:
+            e["route_ids"] = by_pair.get((e["from"], e["to"]), [])
         return {
             "nodes": nodes,
             "edges": edges,

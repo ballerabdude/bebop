@@ -325,6 +325,16 @@ def run_record_navd(args):
                            max_frame_age_s=max_frame_age_s,
                            roles=nav_roles).start()
             nav_server = NavServer(nav, port=args.nav_port).start()
+            if places is not None:
+                from bebop_vision.places import TrailConfig, TrailTeacher
+                places.teacher = TrailTeacher(
+                    pstore, pcapture, penc, nav.current_pose,
+                    TrailConfig(step_m=args.teach_step_m,
+                                turn_deg=args.teach_turn_deg),
+                    recognize=lambda: places.whereami(),
+                ).start_thread()
+                print("[trail] route teach mode on the places service "
+                      "(POST /routes/teach/start|stop)", flush=True)
         except Exception as exc:
             stop_nav()
             stop_live_slam()
@@ -623,6 +633,10 @@ def main():
     parser.add_argument("--nav-stop-m", type=float, default=0.60,
                         help="clearance from the mast below which forward "
                              "motion stops (default 0.60)")
+    parser.add_argument("--teach-step-m", type=float, default=0.6,
+                        help="route teach: new node every this many metres")
+    parser.add_argument("--teach-turn-deg", type=float, default=25.0,
+                        help="route teach: new node after this heading change")
     parser.add_argument("--no-places", action="store_true",
                         help="do not start the semantic place-memory service "
                              "(see bebop_vision/places; default: started)")

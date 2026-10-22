@@ -157,6 +157,9 @@
   is down (motor power off); fix that and clear it from the app.
 - Mode gate: the driver switches to DIAL_IN itself (arming requires it) and
   the recorder's `--auto` captures every nav drive as an MCAP session.
+- **Wheel odometry heading is wrong on in-place turns** (~2x over-read on
+  carpet). `:9097/pose` is the gyro-corrected pose; route teach mode
+  (`:9095/routes/teach/start|stop`, `docs/nav.md` §7) records trails in it.
 
 ## Gotchas (learned the hard way)
 

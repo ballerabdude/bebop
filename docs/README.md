@@ -17,6 +17,6 @@ to the code they describe.
 | [`place-router.md`](place-router.md) | Place memory: lofi scout capture into a pending queue, then operator batch import with optional model name suggestions (the legacy every-tick router is documented there too). |
 | [`slam.md`](slam.md)                 | Live RGB-D visual localization POC, tracking status, and visual-heading turn diagnostic. |
 | [`internal-map.md`](internal-map.md) | Per-place local structure submaps, the anchor frame, and the place graph of remembered routes, with honest status. |
-| [`nav.md`](nav.md)                   | Depth stop-cone + bearing waypoint driver (`--nav`, `:9097`): the fast obstacle-avoiding layer under vision-first navigation. |
+| [`nav.md`](nav.md)                   | Depth stop-cone + bearing waypoint driver (`--nav`, `:9097`): the fast obstacle-avoiding layer under vision-first navigation, plus route teach mode (`/routes/teach`). |
 
 If you're new, read them in the order above.

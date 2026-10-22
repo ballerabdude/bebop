@@ -136,7 +136,39 @@ Offline: `.venv/bin/python tools/nav_cone_preview.py --near near.png
 --far far.png --out cone.png` on uint16 depth PNGs (e.g. the bench pair in
 `~/bench_e11/pair` on the robot).
 
-## 7. Live results (2026-10-21) and caveats
+## 7. Teach mode for routes
+
+`bebop_vision/places/trail.py` (`TrailTeacher`, started by `--nav` on the
+places service) records a **route** while the robot is driven, by teleop or
+by nav goals. A route is an ordered list of nodes in the route frame (origin
+and heading at the start of the drive), each with the distance along the
+trail, far + near keyframe JPEGs and a DINOv3 descriptor of the far view. The
+pose comes from `GET :9097/pose` (camera-gyro heading + odometry distance);
+teaching refuses to start until that heading source is the gyro. Nodes are
+taken every 0.6 m of travel or after a 25° heading change (`--teach-step-m`,
+`--teach-turn-deg`), plus the first and last pose.
+
+```
+POST :9095/routes/teach/start {"from": "office room", "label": "via hallway"}
+    ... drive ...
+POST :9095/routes/teach/stop  {"to": "Master Bedroom"}     # or a new name
+POST :9095/routes/teach/cancel
+GET  :9095/routes/teach                     status (nodes, length, pose)
+GET  :9095/routes[?from=&to=]               taught routes
+GET  :9095/routes/{id}                      nodes (poses, keyframes)
+GET  :9095/routes/{id}/nodes/{seq}/keyframe?role=far
+DELETE :9095/routes/{id}
+```
+
+`from` / `to` default to place recognition (`/whereami`), but recognition
+must clear its threshold or the call fails and asks for the name; a new `to`
+name creates the place from the current view. Stopping stores the route
+(`routes` + `route_nodes` tables, JPEGs under `routes/<id>/`) and records the
+A→B edge with the trail as its guide path, so `/places/graph` edges now carry
+`route_ids`. Nothing here moves the robot; following a route is the next
+piece.
+
+## 8. Live results (2026-10-21) and caveats
 
 - `fwd 0.5 m`: reached in 2.4 s (stopped 0.36 m in, the old 0.15 m reach
   tolerance; now 0.08 m).
