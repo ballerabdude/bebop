@@ -1,0 +1,351 @@
+"""Object goals: "go to the dresser" without a taught route.
+
+The VLM is the decision layer, called once per leg, never per tick:
+
+    1. grab the far view, ask the VLM for a bounding box of the object
+       (strict JSON), convert the box centre to a bearing through the far
+       color intrinsics;
+    2. read the far depth at that direction for the range (median over a
+       window; depth frame and color frame have different intrinsics, so
+       the direction is re-projected rather than the pixel copied);
+    3. hand the driver one bounded goal (bearing, min(step, range - standoff));
+    4. when the driver finishes that goal, look again; stop when the range
+       is within `standoff_m` + tolerance, or after too many legs / misses.
+
+Everything about motion safety stays with `NavDrive`.  `locate()` alone
+answers "where is it / are we there yet" without moving.
+"""
+from __future__ import annotations
+
+import dataclasses
+import json
+import math
+import re
+import threading
+import time
+
+import numpy as np
+
+from ..router.vlm import image_data_url
+
+
+@dataclasses.dataclass
+class ObjectGoalConfig:
+    standoff_m: float = 0.9           # stop this far from the object
+    arrive_tol_m: float = 0.25
+    step_m: float = 1.0               # longest single leg
+    min_step_m: float = 0.3
+    max_legs: int = 12
+    max_misses: int = 2               # consecutive "not found" before failing
+    max_blocked: int = 2
+    image_width: int = 640            # downscale for the VLM
+    depth_window_px: int = 24
+    depth_min_valid: int = 20
+    default_range_m: float = 1.5      # no depth: assume this far and step
+    min_confidence: float = 0.4
+    hz: float = 2.0
+
+
+LOCATE_PROMPT = (
+    "You are the forward camera of a small indoor robot. Find {what} in this "
+    "image. Reply with ONLY a JSON object: {{\"found\": true or false, "
+    "\"box\": [x0, y0, x1, y1] or null, \"confidence\": 0 to 1, "
+    "\"note\": \"at most 10 words\"}} where the box coordinates are "
+    "decimal fractions of the image width and height between 0 and 1 (never "
+    "pixels), x to the right, y down, and the box covers only {what}. If it "
+    "is not visible, found is false and box is null."
+)
+
+
+def parse_locate_reply(text: str, image_size=None, original_size=None) -> dict:
+    """Pull the JSON object out of a model reply (tolerates prose).
+
+    Box coordinates are fractions; a value above 1 is taken as pixels of
+    the image that was sent (`image_size` = (w, h)) when it fits, else of
+    the original frame (`original_size`), per axis.  The 27B has answered
+    in all three conventions, sometimes mixed in one box.
+    """
+    m = re.search(r"\{.*\}", text or "", re.S)
+    if not m:
+        raise ValueError(f"no JSON in reply: {text[:120]!r}")
+    d = json.loads(m.group(0))
+    found = bool(d.get("found")) and d.get("box") is not None
+    box = None
+    if found:
+        b = [float(v) for v in d["box"]]
+        if len(b) != 4:
+            raise ValueError("box needs four numbers")
+        if max(b) > 1.5:
+            # Pixel coordinates (sometimes only on one axis): normalise
+            # each value by the sent image size when it exceeds 1.
+            if not image_size:
+                raise ValueError(f"box looks like pixels: {b}")
+            w, h = image_size
+            ow, oh = original_size or image_size
+
+            def norm_pair(lo, hi, sent, orig):
+                if lo <= 1.5 and hi <= 1.5:
+                    return lo, hi
+                # Pick the divisor that puts both ends of the axis in range,
+                # preferring the original frame size (what the 27B tends to
+                # answer in), then the sent size.
+                for div in (orig, sent):
+                    if lo / div <= 1.02 and hi / div <= 1.02:
+                        return lo / div, hi / div
+                raise ValueError(f"box out of range: {b}")
+            x0, x1 = norm_pair(b[0], b[2], w, ow)
+            y0, y1 = norm_pair(b[1], b[3], h, oh)
+            b = [x0, y0, x1, y1]
+        x0, y0, x1, y1 = (min(max(v, 0.0), 1.0) for v in b)
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError(f"degenerate box: {d.get('box')}")
+        box = [x0, y0, x1, y1]
+    return {"found": found and box is not None, "box": box,
+            "confidence": float(d.get("confidence") or 0.0),
+            "note": str(d.get("note") or "")[:80]}
+
+
+class ObjectSeeker:
+    def __init__(self, drive, vlm, capture, geometry, color_intrinsics: dict,
+                 *, config: ObjectGoalConfig | None = None, log=print):
+        """`geometry` is the far camera's CameraGeometry (depth intrinsics +
+        extrinsics); `color_intrinsics` has color_fx/fy/cx/cy/width/height."""
+        self.drive = drive
+        self.vlm = vlm
+        self.capture = capture
+        self.geom = geometry
+        self.ci = color_intrinsics
+        self.config = config or ObjectGoalConfig()
+        self._log = log
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._state = "idle"
+        self._what = ""
+        self._legs = 0
+        self._misses = 0
+        self._blocked = 0
+        self._last: dict = {}
+        self._waiting_goal = False
+        self._t0 = 0.0
+        self._history: list = []
+
+    # -- thread ---------------------------------------------------------------
+
+    def start_thread(self):
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._loop, name="object-goal",
+                                            daemon=True)
+            self._thread.start()
+        return self
+
+    def stop_thread(self, timeout: float = 3.0):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+            self._thread = None
+
+    def _loop(self):
+        period = 1.0 / max(0.5, self.config.hz)
+        while not self._stop.is_set():
+            t0 = time.monotonic()
+            try:
+                self.tick()
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"[object] tick error: {type(exc).__name__}: {exc}")
+                with self._lock:
+                    if self._state == "seeking":
+                        self._finish(f"failed: {exc}")
+            time.sleep(max(0.0, period - (time.monotonic() - t0)))
+
+    # -- perception -------------------------------------------------------------
+
+    def locate(self, what: str, frames=None) -> dict:
+        """Ask the VLM where `what` is; add bearing and range.  Never moves."""
+        import cv2
+
+        c = self.config
+        views = list(self.capture.grab()) if self.capture else []
+        view = next((v for v in views if v.role == "far"), None)
+        if view is None:
+            raise RuntimeError("no fresh far color frame")
+        img = cv2.imdecode(np.frombuffer(view.jpeg, np.uint8), cv2.IMREAD_COLOR)
+        h, w = img.shape[:2]
+        if w > c.image_width:
+            img_s = cv2.resize(img, (c.image_width, int(c.image_width * h / w)))
+        else:
+            img_s = img
+        ok, buf = cv2.imencode(".jpg", img_s, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        msgs = [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": image_data_url(buf.tobytes())}},
+            {"type": "text", "text": LOCATE_PROMPT.format(what=what)}]}]
+        t0 = time.monotonic()
+        reply = self.vlm.complete(msgs, max_tokens=120, temperature=0.0)
+        sizes = ((img_s.shape[1], img_s.shape[0]), (w, h))
+        try:
+            out = parse_locate_reply(reply, *sizes)
+        except ValueError as exc:
+            # One retry with the format spelled out; the 27B occasionally
+            # mixes pixel rows into a fractional box.
+            msgs[0]["content"][1]["text"] += (
+                " Your previous reply was invalid (" + str(exc)[:60] +
+                "). All four box numbers must be decimals between 0 and 1.")
+            reply = self.vlm.complete(msgs, max_tokens=120, temperature=0.0)
+            out = parse_locate_reply(reply, *sizes)
+        out["reply"] = reply.strip()[:160]
+        out["vlm_ms"] = round((time.monotonic() - t0) * 1000)
+        out["what"] = what
+        if not out["found"]:
+            return out
+        x0, y0, x1, y1 = out["box"]
+        cx_px = (x0 + x1) / 2 * w
+        cy_px = (y0 + y1) / 2 * h
+        # Bearing (+ left) and elevation (+ up) of the box centre.
+        bearing = -math.atan2(cx_px - self.ci["color_cx"], self.ci["color_fx"])
+        elev = -math.atan2(cy_px - self.ci["color_cy"], self.ci["color_fy"])
+        out["bearing_deg"] = round(math.degrees(bearing), 1)
+        out["elevation_deg"] = round(math.degrees(elev), 1)
+        out["range_m"] = self._range_at(bearing, elev, frames)
+        return out
+
+    def _range_at(self, bearing: float, elev: float, frames=None):
+        """Median far-camera depth (m) around the given direction, or None."""
+        c = self.config
+        cam = None
+        if frames is not None:
+            fr = frames.get("far")
+        else:
+            rig = getattr(self.capture, "rig", None)
+            cams = getattr(rig, "cameras", {}) or {}
+            cam = cams.get("far")
+            fr = cam.read() if cam is not None else None
+        if fr is None or getattr(fr, "depth", None) is None:
+            return None
+        g = self.geom
+        u = g.cx + g.fx * math.tan(-bearing)
+        v = g.cy + g.fy * math.tan(-elev)
+        if not (0 <= u < g.width and 0 <= v < g.height):
+            return None
+        k = c.depth_window_px
+        u0, u1 = max(0, int(u) - k), min(g.width, int(u) + k)
+        v0, v1 = max(0, int(v) - k), min(g.height, int(v) + k)
+        win = fr.depth[v0:v1, u0:u1].astype(np.float32)
+        scale = float(getattr(fr, "depth_scale_mm", None) or 1.0) / 1000.0
+        vals = win[win > 0] * scale
+        vals = vals[(vals > 0.2) & (vals < 8.0)]
+        if vals.size < c.depth_min_valid:
+            return None
+        return round(float(np.median(vals)), 3)
+
+    # -- API ------------------------------------------------------------------------
+
+    def seek(self, what: str) -> dict:
+        with self._lock:
+            if self._state == "seeking":
+                raise RuntimeError("already seeking an object")
+            what = str(what).strip()
+            if not what:
+                raise ValueError("what is required")
+            self._what = what
+            self._legs = 0
+            self._misses = 0
+            self._blocked = 0
+            self._last = {}
+            self._waiting_goal = False
+            self._state = "seeking"
+            self._t0 = time.monotonic()
+            self._log(f"[object] seeking {what!r}")
+            return self.status()
+
+    def stop(self) -> dict:
+        with self._lock:
+            if self._state == "seeking":
+                try:
+                    self.drive.cancel()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._finish("stopped")
+            return self.status()
+
+    def status(self) -> dict:
+        with self._lock:
+            return {"state": self._state, "what": self._what,
+                    "legs": self._legs, "misses": self._misses,
+                    "last": dict(self._last),
+                    "elapsed_s": (round(time.monotonic() - self._t0, 1)
+                                  if self._state == "seeking" else None),
+                    "history": list(self._history[-10:])}
+
+    # -- tick -----------------------------------------------------------------------
+
+    def tick(self) -> None:
+        c = self.config
+        with self._lock:
+            if self._state != "seeking":
+                return
+            nav = self.drive.status()
+            nav_state = nav.get("state")
+            if (nav.get("robot") or {}).get("estop_latched"):
+                self._finish("failed_estop")
+                return
+            if self._waiting_goal:
+                if nav.get("active") or nav.get("arming"):
+                    return
+                self._waiting_goal = False
+                if nav_state == "aborted_blocked":
+                    self._blocked += 1
+                    if self._blocked >= c.max_blocked:
+                        self._finish("failed_blocked")
+                        return
+                elif nav_state and nav_state.startswith("aborted"):
+                    self._finish(f"failed_{nav_state[8:]}")
+                    return
+            if self._legs >= c.max_legs:
+                self._finish("failed_max_legs")
+                return
+            what = self._what
+        # Look (one VLM call per leg) WITHOUT the lock: the call takes
+        # seconds and status()/stop() must stay responsive meanwhile.
+        try:
+            loc = self.locate(what)
+        except Exception as exc:  # noqa: BLE001
+            loc = {"found": False, "error": str(exc), "what": what}
+        with self._lock:
+            if self._state != "seeking":
+                return                      # stopped while we were looking
+            self._last = loc
+            if not loc.get("found") or loc.get("confidence", 0) < c.min_confidence:
+                self._misses += 1
+                self._log(f"[object] not found ({self._misses}): "
+                          f"{loc.get('note') or loc.get('error')}")
+                if self._misses >= c.max_misses:
+                    self._finish("failed_not_found")
+                return
+            self._misses = 0
+            rng = loc.get("range_m")
+            bearing = float(loc["bearing_deg"])
+            if rng is not None and rng <= c.standoff_m + c.arrive_tol_m:
+                self._finish("arrived")
+                return
+            remaining = (rng - c.standoff_m) if rng is not None \
+                else c.default_range_m - c.standoff_m
+            step = max(c.min_step_m, min(c.step_m, remaining))
+            try:
+                self.drive.set_goal(bearing_deg=bearing, distance_m=step,
+                                    label=f"object:{self._what}")
+            except RuntimeError as exc:
+                self._finish(f"failed: {exc}")
+                return
+            self._legs += 1
+            self._waiting_goal = True
+            self._log(f"[object] leg {self._legs}: bearing {bearing:+.1f} deg, "
+                      f"range {rng}, step {step:.2f} m")
+
+    def _finish(self, state: str):
+        entry = {"state": state, "what": self._what, "legs": self._legs,
+                 "duration_s": round(time.monotonic() - self._t0, 1),
+                 "last": dict(self._last), "ts": time.time()}
+        self._history.append(entry)
+        del self._history[:-50]
+        self._state = state
+        self._log(f"[object] {entry}")

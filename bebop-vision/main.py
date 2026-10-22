@@ -351,6 +351,18 @@ def run_record_navd(args):
                     recognize=lambda: places.whereami()).start_thread()
                 print("[trip] multi-leg trips on :%d (POST /trip)"
                       % args.nav_port, flush=True)
+                from bebop_vision.nav import ObjectSeeker
+                from bebop_vision.orbbec import load_intrinsics
+                far_geom = next((g for g in geoms if g.role == "far"), None)
+                if far_geom is not None:
+                    far_serial = next(
+                        s_ for s_, c_ in load_rig_config(args.rig)["robots"]
+                        ["default"]["cameras"].items() if c_["role"] == "far")
+                    nav.seeker = ObjectSeeker(
+                        nav, vlm, far_capture, far_geom,
+                        load_intrinsics(far_serial)).start_thread()
+                    print("[object] object goals on :%d (POST /object/seek)"
+                          % args.nav_port, flush=True)
         except Exception as exc:
             stop_nav()
             stop_live_slam()

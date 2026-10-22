@@ -18,6 +18,7 @@ from .pose import Pose, PoseConfig, PoseEstimator
 from .visual import MatchConfig, MatchResult, match_patches
 from .follow import FollowConfig, RouteFollower
 from .trip import TripRunner
+from .object_goal import ObjectGoalConfig, ObjectSeeker, parse_locate_reply
 
 __all__ = [
     "CameraGeometry", "ClearanceMap", "ConeConfig", "DepthCone",
@@ -27,4 +28,5 @@ __all__ = [
     "Pose", "PoseConfig", "PoseEstimator",
     "MatchConfig", "MatchResult", "match_patches",
     "FollowConfig", "RouteFollower", "TripRunner",
+    "ObjectGoalConfig", "ObjectSeeker", "parse_locate_reply",
 ]

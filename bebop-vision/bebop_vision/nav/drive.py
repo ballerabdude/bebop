@@ -25,6 +25,10 @@ a higher-level navigator set one goal at a time and watch the state:
     POST /trip {to [, from]}   plan over the place graph and drive every leg
     POST /trip/stop            stop the trip (and the follower, and the goal)
     GET  /trip                 trip state (plan, leg, follower)
+    POST /object/locate {what} ask the VLM where it is (bearing, range); no motion
+    POST /object/seek {what}   drive toward it, one VLM look per leg
+    POST /object/stop          stop seeking (and the goal)
+    GET  /object               seeker state
 """
 from __future__ import annotations
 
@@ -74,6 +78,7 @@ class NavDrive:
         # places are on).
         self.follower = None
         self.trip = None
+        self.seeker = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -476,6 +481,12 @@ class _NavHandler(BaseHTTPRequestHandler):
                 self._send(503, {"ok": False, "error": "trips not configured"})
             else:
                 self._send(200, t.status())
+        elif path == "/object":
+            o = self.nav.seeker
+            if o is None:
+                self._send(503, {"ok": False, "error": "object goals not configured"})
+            else:
+                self._send(200, o.status())
         elif path == "/route":
             f = self.nav.follower
             if f is None:
@@ -512,7 +523,9 @@ class _NavHandler(BaseHTTPRequestHandler):
                 "GET /healthz", "GET /status", "GET /clearance",
                 "GET /depth?role=near|far", "GET /route", "POST /goal",
                 "POST /stop", "POST /route/follow", "POST /route/stop",
-                "GET /trip", "POST /trip", "POST /trip/stop"]})
+                "GET /trip", "POST /trip", "POST /trip/stop",
+                "GET /object", "POST /object/locate", "POST /object/seek",
+                "POST /object/stop"]})
         else:
             self._send(404, {"ok": False, "error": "not found"})
 
@@ -543,6 +556,9 @@ class _NavHandler(BaseHTTPRequestHandler):
                 return
             self._send(202, {"ok": True, "goal": goal})
         elif path == "/stop":
+            o = self.nav.seeker
+            if o is not None:
+                o.stop()
             t = self.nav.trip
             if t is not None:
                 t.stop()
@@ -576,6 +592,30 @@ class _NavHandler(BaseHTTPRequestHandler):
                 self._send(409, {"ok": False, "error": str(exc)})
                 return
             self._send(202, {"ok": True, "status": st})
+        elif path in ("/object/locate", "/object/seek"):
+            o = self.nav.seeker
+            if o is None:
+                self._send(503, {"ok": False, "error": "object goals not configured"})
+                return
+            what = str(body.get("what") or "").strip()
+            if not what:
+                self._send(400, {"ok": False, "error": "what is required"})
+                return
+            try:
+                if path == "/object/locate":
+                    self._send(200, {"ok": True, "location": o.locate(what)})
+                else:
+                    self._send(202, {"ok": True, "status": o.seek(what)})
+            except RuntimeError as exc:
+                self._send(409, {"ok": False, "error": str(exc)})
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+        elif path == "/object/stop":
+            o = self.nav.seeker
+            if o is None:
+                self._send(503, {"ok": False, "error": "object goals not configured"})
+            else:
+                self._send(200, {"ok": True, "status": o.stop()})
         elif path == "/trip/stop":
             t = self.nav.trip
             if t is None:

@@ -1,0 +1,178 @@
+"""Object-goal seeker tests (scripted VLM, fake drive, synthetic depth)."""
+
+import json
+import math
+import time
+from types import SimpleNamespace
+
+import cv2
+import numpy as np
+import pytest
+
+from bebop_vision.nav import ObjectGoalConfig, ObjectSeeker, parse_locate_reply
+from bebop_vision.nav.synth import small_geometry
+from bebop_vision.places import StaticCapture, View
+
+COLOR = {"color_fx": 610.5, "color_fy": 610.4, "color_cx": 641.3,
+         "color_cy": 406.0, "color_width": 1280, "color_height": 800}
+
+
+def test_parse_locate_reply():
+    d = parse_locate_reply('Sure: {"found": true, "box": [0.1, 0.2, 0.3, 0.5], '
+                           '"confidence": 0.8, "note": "dark dresser"}')
+    assert d["found"] and d["box"] == [0.1, 0.2, 0.3, 0.5]
+    assert d["confidence"] == 0.8 and d["note"] == "dark dresser"
+    d = parse_locate_reply('{"found": false, "box": null}')
+    assert not d["found"] and d["box"] is None
+    with pytest.raises(ValueError):
+        parse_locate_reply("no json here")
+    with pytest.raises(ValueError):
+        parse_locate_reply('{"found": true, "box": [0.5, 0.5, 0.2, 0.9]}')
+    # Pixel boxes are converted when the sent image size is known.
+    d = parse_locate_reply('{"found": true, "box": [64, 40, 128, 100]}', (640, 400))
+    assert d["box"] == [0.1, 0.1, 0.2, 0.25]
+    with pytest.raises(ValueError):
+        parse_locate_reply('{"found": true, "box": [64, 40, 128, 100]}')
+    # Mixed: fractional x, pixel y (seen live), in sent-image pixels...
+    d = parse_locate_reply('{"found": true, "box": [0.4, 200, 0.5, 300]}', (640, 400))
+    assert d["box"] == [0.4, 0.5, 0.5, 0.75]
+    # ...or in original-frame pixels (also seen live: 407..528 of 800 rows).
+    d = parse_locate_reply('{"found": true, "box": [0.42, 407, 0.49, 528]}',
+                           (640, 400), (1280, 800))
+    assert d["box"][1] == pytest.approx(407 / 800) and d["box"][3] == pytest.approx(528 / 800)
+    # Out-of-range coordinates are clamped.
+    d = parse_locate_reply('{"found": true, "box": [-0.1, 0.0, 1.4, 0.5]}')
+    assert d["box"] == [0.0, 0.0, 1.0, 0.5]
+
+
+class ScriptedVLM:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = 0
+
+    def complete(self, messages, *, max_tokens=120, temperature=0.0):
+        self.calls += 1
+        assert messages[0]["content"][0]["type"] == "image_url"
+        return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+
+
+class FakeDrive:
+    def __init__(self):
+        self.goals = []
+        self.state = "idle"
+        self.active = False
+        self.estop = False
+        self.cancelled = 0
+
+    def status(self):
+        return {"state": self.state, "active": self.active, "arming": False,
+                "robot": {"estop_latched": self.estop}}
+
+    def set_goal(self, *, bearing_deg, distance_m, label=""):
+        self.goals.append((round(bearing_deg, 1), round(distance_m, 2)))
+        self.state, self.active = "drive", True
+
+    def finish(self, state="reached"):
+        self.state, self.active = state, False
+
+    def cancel(self):
+        self.cancelled += 1
+        self.state, self.active = "stopped", False
+
+
+def _jpeg():
+    ok, buf = cv2.imencode(".jpg", np.full((800, 1280, 3), 90, np.uint8))
+    return buf.tobytes()
+
+
+class Cap(StaticCapture):
+    """Static far view plus a rig whose far depth is a flat `depth_m` wall."""
+
+    def __init__(self, depth_m, geom):
+        super().__init__([View("far", _jpeg(), 1)])
+        d = np.full((geom.height, geom.width), int(depth_m * 1000), np.uint16)
+        self.rig = SimpleNamespace(cameras={"far": SimpleNamespace(
+            read=lambda: SimpleNamespace(depth=d, depth_scale_mm=1.0))})
+
+
+def box_reply(cx, cy=0.5, w=0.1, conf=0.9):
+    return json.dumps({"found": True, "box": [cx - w / 2, cy - 0.05, cx + w / 2, cy + 0.05],
+                       "confidence": conf, "note": "ok"})
+
+
+def _seeker(replies, depth_m=3.0, **cfg):
+    geom = small_geometry("far", 1.32, -17.4, width=848, height=480)
+    # Real-sized intrinsics for the depth re-projection.
+    geom = geom.__class__(**{**geom.__dict__, "fx": 414.0, "fy": 414.0,
+                             "cx": 419.7, "cy": 242.7})
+    drive = FakeDrive()
+    vlm = ScriptedVLM(replies)
+    s = ObjectSeeker(drive, vlm, Cap(depth_m, geom), geom, COLOR,
+                     config=ObjectGoalConfig(**cfg), log=lambda *a: None)
+    return s, drive, vlm
+
+
+def test_locate_gives_bearing_and_range():
+    s, drive, vlm = _seeker([box_reply(0.25)], depth_m=3.0)
+    loc = s.locate("the dresser")
+    assert loc["found"]
+    # Box centre at 25 % of the width is left of centre -> positive bearing.
+    expected = math.degrees(-math.atan2(0.25 * 1280 - 641.3, 610.5))
+    assert loc["bearing_deg"] == pytest.approx(expected, abs=0.1)
+    assert loc["range_m"] == pytest.approx(3.0, abs=0.01)
+    assert loc["vlm_ms"] >= 0
+    assert not drive.goals
+
+
+def test_seek_steps_toward_object_and_arrives():
+    # Range 2.6 -> 1.6 -> 1.0 as the fake depth shrinks per look.
+    s, drive, vlm = _seeker([box_reply(0.5)], depth_m=2.6, standoff_m=0.9,
+                            step_m=1.0)
+    s.seek("the dresser")
+    s.tick()
+    assert drive.goals[0][1] == 1.0 and abs(drive.goals[0][0]) < 0.2
+    assert s.status()["legs"] == 1
+    s.tick()                                   # goal still active: wait
+    assert len(drive.goals) == 1
+    drive.finish("reached")
+    s.capture.rig.cameras["far"].read().depth[:] = 1600
+    s.tick()
+    assert drive.goals[-1][1] == 0.7           # remaining 1.6 - 0.9
+    drive.finish("reached")
+    s.capture.rig.cameras["far"].read().depth[:] = 1000
+    s.tick()
+    st = s.status()
+    assert st["state"] == "arrived" and st["legs"] == 2
+    assert st["history"][-1]["last"]["range_m"] == pytest.approx(1.0)
+
+
+def test_seek_without_depth_uses_default_step_and_not_found_fails():
+    s, drive, vlm = _seeker([box_reply(0.5)], depth_m=0.0, default_range_m=1.5,
+                            standoff_m=0.9)
+    s.seek("the lamp")
+    s.tick()
+    assert drive.goals[0][1] == 0.6            # 1.5 - 0.9, no depth
+    s2, drive2, _ = _seeker(['{"found": false, "box": null}'], max_misses=2)
+    s2.seek("the unicorn")
+    s2.tick(); assert s2.status()["state"] == "seeking"
+    s2.tick(); assert s2.status()["state"] == "failed_not_found"
+    assert not drive2.goals
+
+
+def test_seek_handles_blocked_estop_and_stop():
+    s, drive, vlm = _seeker([box_reply(0.5)], depth_m=4.0, max_blocked=2)
+    s.seek("the chair")
+    s.tick(); drive.finish("aborted_blocked")
+    s.tick(); drive.finish("aborted_blocked")       # second leg also blocked
+    s.tick()
+    assert s.status()["state"] == "failed_blocked"
+    s.seek("the chair")
+    drive.estop = True
+    s.tick()
+    assert s.status()["state"] == "failed_estop"
+    drive.estop = False
+    s.seek("the chair")
+    with pytest.raises(RuntimeError):
+        s.seek("the chair")
+    s.stop()
+    assert s.status()["state"] == "stopped" and drive.cancelled == 1

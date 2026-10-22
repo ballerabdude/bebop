@@ -21,6 +21,7 @@ navd / BEV driving stack.
 | `bebop_vision/nav/visual.py` | DINOv3 patch matching -> heading correction |
 | `bebop_vision/nav/follow.py` | `RouteFollower`: teach-and-repeat over `NavDrive` |
 | `bebop_vision/places/planner.py`, `bebop_vision/nav/trip.py` | Dijkstra over taught routes; `TripRunner` chains legs |
+| `bebop_vision/nav/object_goal.py` | `ObjectSeeker`: VLM box -> bearing + depth range -> driver goals |
 | `tests/test_nav_*.py`, `tests/test_routes.py` | 69 hardware-free tests |
 
 ## 2. Depth stop-cone
@@ -251,7 +252,38 @@ tick (56-68 % of patches), both edges now carry measured median
 durations. Note that freshly taught places inside one room (0.8 m apart)
 shadow the room's own place in recognition; test places were deleted.
 
-## 10. Live results (2026-10-21) and caveats
+## 10. Object goals: "go to the dresser" without a route
+
+`bebop_vision/nav/object_goal.py` (`ObjectSeeker`, on the nav server) is
+the first use of the VLM as the decision layer, one look per leg:
+
+1. send the far view (downscaled to 640 px) to the 27B brain and ask for a
+   strict-JSON bounding box of the object; the box centre becomes a bearing
+   through the far color intrinsics (replies arrive as fractions, sent-image
+   pixels or original-frame pixels, sometimes mixed in one box; the parser
+   normalises per axis and retries once);
+2. read the far depth around that direction for the range (median window;
+   none beyond ~6 m, then a default 1.5 m assumption);
+3. give the driver one bounded goal (bearing, ≤ 1 m), wait for it, look
+   again; `arrived` when the range is within 0.9 m + 0.25 m, failure after
+   two misses, two blocked legs or 12 legs.
+
+```
+POST :9097/object/locate {"what": "the dresser"}   # bearing + range, no motion
+POST :9097/object/seek   {"what": "the dresser"}   # drive to it
+GET  :9097/object
+POST :9097/object/stop
+```
+
+Live 2026-10-21 (master bedroom): "the dresser" was 7.0 m away through an
+archway. Six 1 m legs (range 7.0 → 6.1 → 5.0 → 4.1 → 3.1 → 2.0 m, bearing
+within ±6°, the VLM naming "black dresser with drawers and mirror" at
+confidence 1.0, ~2 s per look) were interrupted by an operator stop during a
+code fix; the resumed seek reported `arrived` at 1.1 m. The basketball and
+the fireplace located at 2.3 m and 7.6 m from the same spot. Each look costs
+one 27B call, so a seek is a handful of calls, never per tick.
+
+## 11. Live results (2026-10-21) and caveats
 
 - `fwd 0.5 m`: reached in 2.4 s (stopped 0.36 m in, the old 0.15 m reach
   tolerance; now 0.08 m).
