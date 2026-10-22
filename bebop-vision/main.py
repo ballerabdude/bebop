@@ -320,7 +320,8 @@ def run_record_navd(args):
                 footprint_m=tuple(footprint_from_rig(rig_path=args.rig))))
             ctrl = BearingController(ControllerConfig(
                 v_max=args.nav_v_max, w_max=args.nav_w_max,
-                stop_m=args.nav_stop_m))
+                stop_m=args.nav_stop_m,
+                footprint_m=tuple(footprint_from_rig(rig_path=args.rig))))
             nav = NavDrive(rig, robot, cone, ctrl, hz=args.nav_hz,
                            max_frame_age_s=max_frame_age_s,
                            roles=nav_roles).start()

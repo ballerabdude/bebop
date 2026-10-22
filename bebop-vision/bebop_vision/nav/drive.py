@@ -104,6 +104,7 @@ class NavDrive:
         self._ticks = 0
         self._tick_ms = 0.0
         self._last_cmd: Command = Command(0.0, 0.0, "idle")
+        self._last_detail: dict = {}
         self._history: list[dict] = []
         self._cancel = False
 
@@ -163,6 +164,7 @@ class NavDrive:
             self._goal_current = goal
             self._goal_set_ts = time.monotonic()
             self._goal_started_odom = odom
+            self._last_detail = {}
             self._cancel = False
             self._arm_error = None
         self._log(f"[nav] goal {goal.label or ''} -> pose ({goal.x:.2f}, "
@@ -316,6 +318,8 @@ class NavDrive:
         with self._lock:
             cmd = self.controller.step(est.as_tuple(), self._cmap, now)
             self._last_cmd = cmd
+            if cmd.detail:
+                self._last_detail = dict(cmd.detail, state=cmd.state)
         if cmd.state in TERMINAL_STATES or cmd.state.startswith("aborted"):
             self._log(f"[nav] {cmd.state}: {cmd.detail}")
             self._finish(cmd.state)
@@ -401,6 +405,7 @@ class NavDrive:
                     math.hypot(od[0] - started[0], od[1] - started[1]), 3)),
                 "end_pose": [round(float(v), 3) for v in od],
                 "heading_source": (est.heading_source if est else "odom"),
+                "last": dict(self._last_detail),
                 "ts": time.time(),
             }
             with self._lock:

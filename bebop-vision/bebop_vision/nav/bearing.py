@@ -38,7 +38,7 @@ def wrap_pi(a: float) -> float:
 class ControllerConfig:
     v_max: float = 0.30
     w_max: float = 0.9
-    w_min: float = 0.2          # rotate-in-place floor (static friction)
+    w_min: float = 0.35         # rotate-in-place floor (carpet friction)
     k_heading: float = 1.8
     reach_tol_m: float = 0.08
     turn_tol_rad: float = 0.07      # ~4 deg, rotate-only goals
@@ -51,9 +51,25 @@ class ControllerConfig:
     goal_sigma_deg: float = 20.0
     goal_bias: float = 2.0
     turn_penalty: float = 0.4    # score factor lost at the edge of the FOV
-    # Rotating in place sweeps the footprint corners (~0.47 m from the
-    # mast); refuse when any sector has a return closer than this.
-    turn_clearance_m: float = 0.50
+    # Rotating in place sweeps the footprint corners through arcs; a turn is
+    # refused only when a return sits inside an arc a corner will actually
+    # sweep (see `sweep_blocked`), with this margin on the corner radius.
+    # `turn_floor_m` is a hard floor: anything closer than this anywhere in
+    # view refuses every turn.
+    footprint_m: tuple = (-0.13, 0.32, -0.34, 0.19)
+    sweep_margin_m: float = 0.04
+    turn_floor_m: float = 0.28
+    # Escape when blocked: turn toward the most open sector whose sweep is
+    # clear, or back up this far once per goal, before giving up.
+    escape: bool = True
+    escape_reverse_m: float = 0.30
+    escape_min_clear_m: float = 0.85
+    escape_timeout_s: float = 4.0
+    arc_margin_rad: float = 0.08      # about half a sector on each arc end
+    # Commitment: an escape turn is driven to its heading as one unit, and
+    # sector steering keeps its side for this long, so the choice does not
+    # flip every tick as the view rotates (the robot used to oscillate).
+    commit_s: float = 3.0
     max_map_age_s: float = 0.4
     blocked_timeout_s: float = 4.0
     max_goal_m: float = 6.0
@@ -71,6 +87,39 @@ class ControllerConfig:
             raise ValueError("stop_m must be < slow_m")
         if self.reach_tol_m <= 0:
             raise ValueError("reach_tol_m must be > 0")
+
+
+def sweep_blocked(cmap: ClearanceMap, delta_rad: float, footprint_m,
+                  margin_m: float = 0.06, floor_m: float = 0.30,
+                  arc_margin_rad: float = 0.10) -> bool:
+    """Would rotating in place by `delta_rad` (+ left) hit a return?
+
+    Each footprint corner at polar (b_c, r_c) sweeps the arc from b_c to
+    b_c + delta at radius r_c.  A sector return at (b, r) blocks the turn
+    when r < r_c + margin and b lies on that arc.  Returns outside every
+    arc do not block, so the robot may turn away from a wall it is facing.
+    Anything closer than `floor_m` blocks regardless.
+    """
+    obst = cmap.obstacle_m
+    if np.any(obst < floor_m):
+        return True
+    x0, x1, y0, y1 = footprint_m
+    corners = [(x1, y1), (x1, y0), (x0, y1), (x0, y0)]
+    for cx, cy in corners:
+        bc = math.atan2(cy, cx)
+        rc = math.hypot(cx, cy) + margin_m
+        for b, r in zip(cmap.bearings_rad, obst):
+            if not math.isfinite(r) or r >= rc:
+                continue
+            # Is bearing b on the arc from bc to bc + delta?
+            rel = wrap_pi(float(b) - bc)
+            if delta_rad >= 0:
+                if -arc_margin_rad <= rel <= delta_rad + arc_margin_rad:
+                    return True
+            else:
+                if delta_rad - arc_margin_rad <= rel <= arc_margin_rad:
+                    return True
+    return False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -130,6 +179,11 @@ class BearingController:
         self.goal: Goal | None = None
         self._blocked_since: float | None = None
         self.last: Command = Command(0.0, 0.0, "idle")
+        self._escape = None              # ("reverse", start_odom, dist_m)
+        self._escape_t0 = None
+        self._escapes_used = 0
+        self._turn_commit = None         # (target_heading, deadline)
+        self._side_commit = None         # (+1 | -1, deadline)
 
     # -- goal management ------------------------------------------------------
 
@@ -145,11 +199,18 @@ class BearingController:
                 f"{self.config.max_goal_m}")
         self.goal = goal
         self._blocked_since = None
+        self._escape = None
+        self._escapes_used = 0
+        self._turn_commit = None
+        self._side_commit = None
         return goal
 
     def clear(self, state: str = "stopped") -> None:
         self.goal = None
         self._blocked_since = None
+        self._escape = None
+        self._turn_commit = None
+        self._side_commit = None
         self.last = Command(0.0, 0.0, state)
 
     # -- one tick -------------------------------------------------------------
@@ -186,23 +247,45 @@ class BearingController:
 
         half_fov = float(cmap.bearings_rad[0])
         min_obstacle = float(np.min(cmap.obstacle_m))
-        can_turn = min_obstacle >= c.turn_clearance_m
         detail["min_obstacle_m"] = (None if not math.isfinite(min_obstacle)
                                     else round(min_obstacle, 3))
+
+        def can_turn(delta):
+            return not sweep_blocked(cmap, delta, c.footprint_m,
+                                     c.sweep_margin_m, c.turn_floor_m,
+                                     c.arc_margin_rad)
+
+        # --- an escape in progress (reverse / committed turn) ---------------
+        esc = self._escape_step(odom, cmap, now, detail)
+        if esc is not None:
+            return esc
+        if self._turn_commit is not None:
+            target, deadline = self._turn_commit
+            err = wrap_pi(target - th)
+            if abs(err) <= c.turn_tol_rad or now > deadline:
+                self._turn_commit = None
+            elif can_turn(err):
+                detail["escape"] = f"turn to {math.degrees(target):+.0f} deg"
+                return self._rotate(err, detail)
+            else:
+                self._turn_commit = None     # the committed side closed up
 
         # --- pick a heading -------------------------------------------------
         if abs(goal_b) > half_fov:
             # Goal outside the depth field of view: turn toward it first.
-            if not can_turn:
-                return self._blocked(now, "turn_blocked", detail)
+            if not can_turn(goal_b):
+                return self._escape_or_block(odom, cmap, now, goal_b,
+                                             "turn_blocked", detail, can_turn)
             return self._rotate(goal_b, detail)
 
         goal_clear = cmap.clearance_at(goal_b)
         if cmap.drop:
-            # A drop in the corridor is never steered around: the near
-            # camera is the only drop sensor and it only sees the corridor.
+            # A drop in the corridor is never driven across.  Turning away
+            # toward an open sector (drops count as blocks in the sector
+            # map) or backing up is allowed; creeping forward is not.
             detail["drop"] = True
-            return self._blocked(now, "drop_in_corridor", detail)
+            return self._escape_or_block(odom, cmap, now, goal_b,
+                                         "drop_in_corridor", detail, can_turn)
         corridor_ok = cmap.corridor_min_m >= c.stop_m
         # Head straight for the goal only while the chassis-width corridor
         # is clear; otherwise fall through to sector steering so a return
@@ -217,11 +300,14 @@ class BearingController:
                 eligible = eligible & (np.abs(cmap.bearings_rad)
                                        >= math.radians(15.0))
             if not np.any(eligible):
-                if can_turn and abs(goal_b) > math.radians(c.rotate_deg):
+                if (abs(goal_b) > math.radians(c.rotate_deg)
+                        and can_turn(goal_b)):
                     # Nothing ahead is clear but the goal is well off to
                     # the side: rotate to look that way.
                     return self._rotate(goal_b, detail)
-                return self._blocked(now, "no_clear_sector", detail)
+                return self._escape_or_block(odom, cmap, now, goal_b,
+                                             "no_clear_sector", detail,
+                                             can_turn)
             sigma = math.radians(c.goal_sigma_deg)
             w = 1.0 + c.goal_bias * np.exp(
                 -0.5 * ((cmap.bearings_rad - goal_b) / sigma) ** 2)
@@ -236,18 +322,31 @@ class BearingController:
                 # check below; do not pick them.
                 eligible = eligible & (np.abs(cmap.bearings_rad)
                                        >= math.radians(15.0))
+            if self._side_commit is not None:
+                side, deadline = self._side_commit
+                same = eligible & (np.sign(cmap.bearings_rad) == side)
+                if now > deadline or not np.any(same):
+                    self._side_commit = None
+                else:
+                    eligible = same
             score = np.where(eligible, useful ** 1.5 * w * turn_pen, -1.0)
             i = int(np.argmax(score))
             chosen = float(cmap.bearings_rad[i])
             chosen_clear = float(cmap.clearance_m[i])
+            if abs(chosen) >= math.radians(15.0) and self._side_commit is None:
+                self._side_commit = (float(np.sign(chosen)), now + c.commit_s)
             detail["mode"] = "sector"
         detail["heading_deg"] = round(math.degrees(chosen), 1)
         detail["clearance_m"] = round(chosen_clear, 3)
 
         # --- act --------------------------------------------------------------
         if abs(chosen) > math.radians(c.rotate_deg):
-            if not can_turn:
-                return self._blocked(now, "turn_blocked", detail)
+            if not can_turn(chosen):
+                return self._escape_or_block(odom, cmap, now, goal_b,
+                                             "turn_blocked", detail, can_turn)
+            # Commit to the whole rotation: finish turning to that heading
+            # before re-choosing, so a 180 is one confident turn.
+            self._turn_commit = (wrap_pi(th + chosen), now + c.commit_s * 2)
             return self._rotate(chosen, detail)
 
         detail["corridor_min_m"] = (None if not math.isfinite(cmap.corridor_min_m)
@@ -257,9 +356,11 @@ class BearingController:
         if not corridor_ok and abs(chosen) < math.radians(15.0):
             # The chassis-width corridor is blocked and the chosen heading
             # is essentially straight: do not creep forward.
-            return self._blocked(now, "corridor_blocked", detail)
+            return self._escape_or_block(odom, cmap, now, goal_b,
+                                         "corridor_blocked", detail, can_turn)
         if chosen_clear < c.stop_m:
-            return self._blocked(now, "too_close", detail)
+            return self._escape_or_block(odom, cmap, now, goal_b,
+                                         "too_close", detail, can_turn)
 
         self._blocked_since = None
         speed = c.v_max * min(1.0, (chosen_clear - c.stop_m)
@@ -276,6 +377,9 @@ class BearingController:
         c = self.config
         err = wrap_pi(self.goal.rotate_to - odom[2])
         detail = {"turn_remaining_deg": round(math.degrees(err), 1)}
+        esc = self._escape_step(odom, cmap, now, detail)
+        if esc is not None:
+            return esc
         if abs(err) <= c.turn_tol_rad:
             self.goal = None
             self.last = Command(0.0, 0.0, "reached", detail)
@@ -284,8 +388,13 @@ class BearingController:
             return self._hold("no_depth", detail)
         if cmap.age_s(now) > c.max_map_age_s:
             return self._hold("stale_depth", detail)
-        if float(np.min(cmap.obstacle_m)) < c.turn_clearance_m:
+        if sweep_blocked(cmap, err, c.footprint_m, c.sweep_margin_m,
+                         c.turn_floor_m, c.arc_margin_rad):
             detail["min_obstacle_m"] = round(float(np.min(cmap.obstacle_m)), 3)
+            # Back up once to free the sweep, then retry on later ticks.
+            esc = self._start_reverse_escape(odom, detail)
+            if esc is not None:
+                return esc
             return self._blocked(now, "turn_blocked", detail)
         return self._rotate(err, detail)
 
@@ -309,6 +418,70 @@ class BearingController:
         vx = -c.reverse_v * min(1.0, max(0.3, remaining / c.approach_m))
         wz = max(-0.4, min(0.4, 1.5 * hold))
         self.last = Command(round(vx, 4), round(wz, 4), "reverse", detail)
+        return self.last
+
+    # -- escapes ------------------------------------------------------------------
+
+    def _escape_or_block(self, odom, cmap, now, goal_b, reason, detail,
+                         can_turn) -> Command:
+        """Blocked while driving: turn toward the most open sector whose
+        sweep is clear, else back up once, else count toward the abort."""
+        c = self.config
+        if c.escape:
+            best = None
+            for b, cl in zip(cmap.bearings_rad, cmap.clearance_m):
+                b = float(b)
+                if cl < c.escape_min_clear_m or abs(b) < math.radians(12.0):
+                    continue
+                score = float(cl) - 0.4 * abs(wrap_pi(b - goal_b))
+                if (best is None or score > best[0]) and can_turn(b):
+                    best = (score, b, float(cl))
+            if best is not None:
+                detail["escape"] = f"turn {math.degrees(best[1]):+.0f} deg"
+                self._blocked_since = None
+                self._turn_commit = (wrap_pi(odom[2] + best[1]),
+                                     now + c.commit_s * 2)
+                self._side_commit = (float(np.sign(best[1])), now + c.commit_s)
+                return self._rotate(best[1], detail)
+            esc = self._start_reverse_escape(odom, detail)
+            if esc is not None:
+                return esc
+        return self._blocked(now, reason, detail)
+
+    def _start_reverse_escape(self, odom, detail) -> Command | None:
+        c = self.config
+        if not c.escape or self._escapes_used >= 1:
+            return None
+        self._escapes_used += 1
+        self._escape = ("reverse", tuple(odom), c.escape_reverse_m)
+        self._escape_t0 = None
+        self._blocked_since = None
+        detail["escape"] = f"reverse {c.escape_reverse_m} m"
+        return self._reverse_cmd(odom, detail)
+
+    def _escape_step(self, odom, cmap, now, detail) -> Command | None:
+        if self._escape is None:
+            return None
+        if self._escape_t0 is None:
+            self._escape_t0 = now
+        if now - self._escape_t0 > self.config.escape_timeout_s:
+            self._escape = None            # did not get anywhere: give up
+            return None
+        _kind, start, dist = self._escape
+        x, y, th = odom
+        travelled = -((x - start[0]) * math.cos(start[2])
+                      + (y - start[1]) * math.sin(start[2]))
+        if travelled >= dist - 0.03:
+            self._escape = None
+            return None
+        detail["escape"] = f"reverse {dist} m ({travelled:.2f})"
+        return self._reverse_cmd(odom, detail, start_th=start[2])
+
+    def _reverse_cmd(self, odom, detail, start_th=None) -> Command:
+        c = self.config
+        hold = 0.0 if start_th is None else wrap_pi(start_th - odom[2])
+        self.last = Command(-c.reverse_v, max(-0.4, min(0.4, 1.5 * hold)),
+                            "escape", detail)
         return self.last
 
     # -- helpers ----------------------------------------------------------------

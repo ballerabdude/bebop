@@ -119,6 +119,10 @@ def test_drop_in_corridor_is_flagged():
     cm = cone.evaluate({"near": frame(depth)})
     assert cm.n_drop > 20
     assert cm.drop
+    # A handful of under-floor points is noise, not a drop.
+    few = cone.evaluate_points(np.array(
+        [[0.8, 0.0, -0.3]] * 5 + [[0.8, 0.1, 0.0]] * 50, dtype=np.float32))
+    assert not few.drop and few.n_drop == 5
     # The hole starts at 0.9 m: observed floor stops there even though
     # the far rim (1.6 m+) is floor again.
     assert 0.8 < cm.clearance_at(0.0) < 1.2

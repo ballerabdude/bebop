@@ -115,7 +115,7 @@ def test_holds_without_depth_or_with_stale_or_untrusted_depth():
 
 
 def test_corridor_blocked_stops_and_aborts_after_timeout():
-    c = BearingController(ControllerConfig(blocked_timeout_s=1.0))
+    c = BearingController(ControllerConfig(blocked_timeout_s=1.0, escape=False))
     c.set_goal(Goal(2.0, 0.0), (0, 0, 0))
     # Everything ahead is closer than stop_m.
     m = cmap(clear=0.4, corridor=0.4)
@@ -129,10 +129,15 @@ def test_corridor_blocked_stops_and_aborts_after_timeout():
 
 
 def test_drop_in_corridor_blocks_forward_motion():
-    c = BearingController()
+    c = BearingController(ControllerConfig(escape=False))
     c.set_goal(Goal(2.0, 0.0), (0, 0, 0))
     cmd = c.step((0, 0, 0), cmap(drop=True), now=0.0)
     assert cmd.state == "blocked" and cmd.vx == 0.0
+    # With escapes: never forward, but turning toward an open side is fine.
+    c2 = BearingController()
+    c2.set_goal(Goal(2.0, 0.0), (0, 0, 0))
+    cmd = c2.step((0, 0, 0), cmap(drop=True), now=0.0)
+    assert cmd.vx <= 0.0 and cmd.state in ("rotate", "escape")
 
 
 def test_obstacle_on_goal_line_steers_around():
@@ -183,12 +188,17 @@ def test_set_goal_rejects_far_goals_and_validates_config():
 
 
 def test_turn_refused_when_something_is_hugging_the_chassis():
-    c = BearingController()
+    c = BearingController(ControllerConfig(escape=False))
     c.set_goal(Goal(-1.0, 0.0), (0, 0, 0))   # behind: needs a turn
-    m = cmap(obstacle=[(30, 0.35)])          # a return 35 cm away
+    m = cmap(obstacle=[(30, 0.35)])          # a return 35 cm away at a corner
     cmd = c.step((0, 0, 0), m, now=0.0)
     assert cmd.state == "blocked" and cmd.detail["reason"] == "turn_blocked"
     assert cmd.vx == 0.0 and cmd.wz == 0.0
+    # With escapes on, the same situation backs up instead of sitting.
+    c2 = BearingController()
+    c2.set_goal(Goal(-1.0, 0.0), (0, 0, 0))
+    cmd = c2.step((0, 0, 0), m, now=0.0)
+    assert cmd.state == "escape" and cmd.vx < 0
 
 
 def test_reverse_backs_up_straight_and_reaches():
@@ -241,7 +251,125 @@ def test_turn_goal_rotates_in_place_and_reaches():
     cmd, states = run(c, sim, lambda s: cmap())
     assert cmd.state == "reached" and "drive" not in states
     assert abs(wrap_pi(sim.odom[2] - math.radians(90))) < 0.08
-    # Refused next to a close return, held without depth.
+    # A return in the sweep: back up first (escape), then held without depth.
     c.set_goal(Goal.turn((0, 0, 0), math.radians(-90)), (0, 0, 0))
-    assert c.step((0, 0, 0), cmap(obstacle=[(0, 0.3)]), now=0.0).state == "blocked"
+    assert c.step((0, 0, 0), cmap(obstacle=[(0, 0.3)]), now=0.0).state == "escape"
+    c.set_goal(Goal.turn((0, 0, 0), math.radians(-90)), (0, 0, 0))
     assert c.step((0, 0, 0), None, now=0.0).state == "no_depth"
+
+
+def test_sweep_geometry_lets_the_robot_turn_away_from_a_wall():
+    from bebop_vision.nav.bearing import sweep_blocked
+    fp = (-0.13, 0.32, -0.34, 0.19)
+    wall = cmap(obstacle=[(0, 0.45), (8.6, 0.45), (-8.6, 0.45)])
+    # Small turns either way do not sweep a corner through the wall.
+    assert not sweep_blocked(wall, math.radians(20), fp)
+    assert not sweep_blocked(wall, math.radians(-20), fp)
+    # A big LEFT turn drags the front-right corner (bearing -47 deg,
+    # radius 0.47 m) through the wall; the same size RIGHT turn only moves
+    # the nearer front-left corner (0.37 m) across it and is fine.
+    assert sweep_blocked(wall, math.radians(90), fp)
+    assert not sweep_blocked(wall, math.radians(-60), fp)
+    # Bring the wall inside the front-left corner's radius: now the right
+    # turn is refused too.
+    near = cmap(obstacle=[(0, 0.40), (8.6, 0.40), (-8.6, 0.40)])
+    assert sweep_blocked(near, math.radians(-60), fp)
+    # Closer than the hard floor: everything is refused.
+    assert sweep_blocked(cmap(obstacle=[(50, 0.2)]), math.radians(-10), fp)
+    # Something off to the far left does not stop a right turn.
+    assert not sweep_blocked(cmap(obstacle=[(60, 0.4)]), math.radians(-90), fp)
+
+
+def test_blocked_ahead_escapes_toward_the_open_side():
+    c = BearingController()
+    c.set_goal(Goal(2.0, 0.3), (0, 0, 0))
+    # Wall ahead at 0.5 m across the corridor, wide open to the left.
+    m = cmap(clear=0.5, corridor=0.5)
+    for i, b in enumerate(m.bearings_rad):
+        if math.degrees(b) >= 34:
+            m.clearance_m[i] = 2.0
+            m.obstacle_m[i] = 2.0
+    cmd = c.step((0, 0, 0), m, now=0.0)
+    # Sector steering already heads for the open side (no creep forward
+    # into the wall): heading well off straight, turning left.
+    assert cmd.state in ("drive", "rotate") and cmd.wz > 0
+    assert cmd.detail["heading_deg"] >= 15
+    # With nothing eligible for sector steering, the explicit escape turns
+    # toward the open side instead of parking.
+    m2 = cmap(clear=0.5, corridor=0.5)
+    for i, b in enumerate(m2.bearings_rad):
+        if math.degrees(b) >= 50:
+            m2.clearance_m[i] = 0.9          # open-ish, but under the goal
+            m2.obstacle_m[i] = 0.9
+    c.set_goal(Goal(2.0, 0.3), (0, 0, 0))
+    cmd = c.step((0, 0, 0), m2, now=0.0)
+    assert cmd.state in ("drive", "rotate") and cmd.wz > 0
+
+
+def test_blocked_with_nothing_open_backs_up_once_then_aborts():
+    c = BearingController(ControllerConfig(blocked_timeout_s=1.0))
+    sim = Sim()
+    c.set_goal(Goal(2.0, 0.0), sim.odom)
+    boxed = cmap(clear=0.4, corridor=0.4)
+    cmd = c.step(sim.odom, boxed, now=0.0)
+    assert cmd.state == "escape" and cmd.vx < 0
+    t = 0.0
+    while cmd.state == "escape" and t < 5.0:
+        sim.step(cmd.vx, cmd.wz, 0.1)
+        t += 0.1
+        cmd = c.step(sim.odom, boxed, now=t)
+    assert sim.odom[0] < -0.25                      # backed up ~0.3 m
+    assert cmd.state == "blocked"                   # still boxed in: no 2nd escape
+    cmd = c.step(sim.odom, boxed, now=t + 1.5)
+    assert cmd.state == "aborted_blocked"
+
+
+def test_big_turn_is_committed_as_one_heading():
+    c = BearingController()
+    sim = Sim()
+    c.set_goal(Goal(2.0, 0.0), sim.odom)
+    # Boxed in ahead; the only open sector is at +60.
+    m = cmap(clear=0.5, corridor=0.5)
+    i = int(np.argmin(np.abs(np.degrees(m.bearings_rad) - 60)))
+    m.clearance_m[i] = 2.0
+    m.obstacle_m[i] = 2.0
+    cmd = c.step(sim.odom, m, now=0.0)
+    assert cmd.state == "rotate" and cmd.wz > 0
+    target = c._turn_commit[0]
+    assert target == pytest.approx(math.radians(60), abs=0.05)
+    # While turning, the map now says everything is open (the open sector
+    # rotated with us): the controller still finishes the committed turn
+    # instead of re-choosing every tick, and never flips direction.
+    t = 0.0
+    seen = 0
+    while c._turn_commit is not None and c._turn_commit[0] == target and t < 5:
+        sim.step(cmd.vx, cmd.wz, 0.1)
+        t += 0.1
+        cmd = c.step(sim.odom, cmap(), now=t)
+        if c._turn_commit is not None and c._turn_commit[0] == target:
+            assert cmd.state == "rotate" and cmd.wz > 0
+            seen += 1
+    assert seen > 3
+    assert abs(wrap_pi(sim.odom[2] - target)) < 0.15
+
+
+def test_sector_side_is_kept_for_a_while():
+    c = BearingController(ControllerConfig(commit_s=3.0))
+    c.set_goal(Goal(3.0, 0.0), (0, 0, 0))
+
+    def two_sided(left_clear, right_clear):
+        m = cmap(clear=0.5, corridor=0.5)
+        for i, b in enumerate(m.bearings_rad):
+            if abs(math.degrees(b) - 34) < 1:
+                m.clearance_m[i] = m.obstacle_m[i] = left_clear
+            if abs(math.degrees(b) + 34) < 1:
+                m.clearance_m[i] = m.obstacle_m[i] = right_clear
+        return m
+    cmd = c.step((0, 0, 0), two_sided(2.2, 2.0), now=0.0)
+    assert cmd.detail["heading_deg"] > 0
+    # The right side now looks clearly better: keep the left while committed.
+    cmd = c.step((0, 0, 0), two_sided(2.0, 3.0), now=1.0)
+    assert cmd.detail["heading_deg"] > 0
+    # After the commitment expires it may switch.
+    cmd = c.step((0, 0, 0), two_sided(2.0, 3.0), now=4.5)
+    assert cmd.detail["heading_deg"] < 0

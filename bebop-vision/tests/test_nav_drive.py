@@ -26,6 +26,7 @@ class FakeRobot:
         self.state.wheel_armed = {"left": False, "right": False}
         self.state.last_telemetry_ts = time.monotonic()
         self.twists = []
+        self.twists_with_heading = []
         self.calls = []
         self._lock = threading.Lock()
         self._last = time.monotonic()
@@ -47,6 +48,7 @@ class FakeRobot:
         with self._lock:
             self._tick()
             self.twists.append((vx, wz))
+            self.twists_with_heading.append((vx, wz, self.state.odom[2]))
         return True
 
     def set_mode(self, mode):
@@ -201,7 +203,7 @@ def test_estop_during_arming_is_reported_and_mode_restored():
     assert all(vx == 0.0 for vx, _ in robot.twists)
 
 
-def test_blocked_wall_never_moves_forward():
+def test_blocked_wall_is_not_driven_into():
     g = small_geometry()
     depth = render_depth(g, walls=[(0.5, -2, 2, 0.8)])
     drive, robot = make_drive(depth=depth, blocked_timeout_s=0.5)
@@ -209,11 +211,19 @@ def test_blocked_wall_never_moves_forward():
     try:
         assert wait_for(lambda: drive.clearance() is not None)
         drive.set_goal(bearing_deg=0.0, distance_m=1.5)
-        assert wait_for(lambda: drive.status()["state"] == "aborted_blocked",
-                        6.0)
+        # Either it turns away / backs off (escape) or it aborts; it never
+        # drives forward while facing the wall.
+        assert wait_for(lambda: drive.status()["state"] in (
+            "aborted_blocked", "reached", "rotate", "drive", "escape")
+            and drive.status()["ticks"] > 20, 6.0)
+        time.sleep(1.0)
     finally:
         drive.stop()
-    assert all(vx == 0.0 for vx, _ in robot.twists)
+    # Arcing away is allowed (small forward component while turning); a
+    # real approach speed straight at the wall is not.
+    for vx, wz, th in robot.twists_with_heading:
+        if vx > 0.05:
+            assert abs(math.degrees(th)) > 15, (vx, math.degrees(th))
 
 
 def test_stale_telemetry_aborts():

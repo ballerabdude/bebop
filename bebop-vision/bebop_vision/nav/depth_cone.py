@@ -183,7 +183,7 @@ class ConeConfig:
     floor_tol_m: float = 0.06
     obstacle_min_z_m: float = 0.10
     obstacle_max_z_m: float = 1.80
-    drop_z_m: float = -0.10
+    drop_z_m: float = -0.12
     # Chassis footprint [x0, x1, y0, y1] in the body frame + dilation.
     footprint_m: tuple = (-0.13, 0.32, -0.34, 0.19)
     footprint_margin_m: float = 0.06
@@ -232,7 +232,10 @@ class ConeConfig:
     # Depth noise grows with range: widen the drop threshold by this much
     # per metre, and only flag a corridor drop on a few agreeing points.
     drop_slope_m_per_m: float = 0.03
-    drop_min_points: int = 4
+    # A handful of under-floor points is depth noise on dark fabric or a
+    # vent; a real step gives dozens at stride 4.  (Live 2026-10-21: four
+    # phantom points beside a crib parked the robot with 1.1 m clear.)
+    drop_min_points: int = 15
     # Only these cameras may report drops.  The far camera's residual plane
     # error (~1 deg vs the near camera) is several cm at 2 m and produced
     # phantom drops live; the near camera sees any real drop in time at
@@ -660,5 +663,6 @@ class DepthCone:
             recv_ts=float(recv),
             roles=tuple(roles),
             floor_fit={r: dict(self._floor_report.get(r, {}),
-                               plane=self.plane(r)) for r in roles},
+                               plane=(self.plane(r) if r in self._floor
+                                      else None)) for r in roles},
         )
