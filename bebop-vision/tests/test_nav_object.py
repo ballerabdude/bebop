@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from bebop_vision.nav import ObjectGoalConfig, ObjectSeeker, parse_locate_reply
+from bebop_vision.nav.object_goal import strip_hints
 from bebop_vision.nav.synth import small_geometry
 from bebop_vision.places import StaticCapture, View
 
@@ -68,8 +69,12 @@ class FakeDrive:
         return {"state": self.state, "active": self.active, "arming": False,
                 "robot": {"estop_latched": self.estop}}
 
-    def set_goal(self, *, bearing_deg, distance_m, label=""):
-        self.goals.append((round(bearing_deg, 1), round(distance_m, 2)))
+    def set_goal(self, *, bearing_deg=None, distance_m=None, turn_deg=None,
+                 label=""):
+        if turn_deg is not None:
+            self.goals.append(("turn", round(turn_deg, 1)))
+        else:
+            self.goals.append((round(bearing_deg, 1), round(distance_m, 2)))
         self.state, self.active = "drive", True
 
     def finish(self, state="reached"):
@@ -152,11 +157,47 @@ def test_seek_without_depth_uses_default_step_and_not_found_fails():
     s.seek("the lamp")
     s.tick()
     assert drive.goals[0][1] == 0.6            # 1.5 - 0.9, no depth
-    s2, drive2, _ = _seeker(['{"found": false, "box": null}'], max_misses=2)
+    s2, drive2, _ = _seeker(['{"found": false, "box": null}'], max_misses=2,
+                            scan=False)
     s2.seek("the unicorn")
     s2.tick(); assert s2.status()["state"] == "seeking"
     s2.tick(); assert s2.status()["state"] == "failed_not_found"
     assert not drive2.goals
+
+
+def test_miss_scans_hinted_side_first_then_finds():
+    replies = ['{"found": false, "box": null}', '{"found": false, "box": null}',
+               box_reply(0.5), box_reply(0.5)]
+    s, drive, vlm = _seeker(replies, depth_m=2.0)
+    s.seek("the mirror on the left")
+    s.tick()                                     # miss -> turn +45 (left first)
+    assert drive.goals == [("turn", 45.0)] and s.status()["scanning"]
+    s.tick()                                     # goal active: wait
+    drive.finish("reached")
+    s.tick()                                     # miss -> next left heading +90
+    assert drive.goals[-1] == ("turn", 45.0)     # delta from 45 to 90
+    drive.finish("reached")
+    s.tick()                                     # found: drive toward it
+    assert drive.goals[-1][0] != "turn" and not s.status()["scanning"]
+    assert s.status()["state"] == "seeking"
+
+
+def test_scan_order_by_hint():
+    s, drive, vlm = _seeker([box_reply(0.5)])
+    assert s._plan_scan("the mirror on the left")[:2] == [45, 90]
+    assert s._plan_scan("the door on the right")[:2] == [-45, -90]
+    assert s._plan_scan("the chair behind you")[0] == 180
+    assert s._plan_scan("the lamp")[:2] == [45, -45]
+
+
+def test_scan_exhausted_fails():
+    s, drive, vlm = _seeker(['{"found": false, "box": null}'], max_misses=2,
+                            scan_headings_deg=(45,))
+    s.seek("the yeti")
+    s.tick(); drive.finish("reached")            # one scan turn
+    s.tick()                                     # miss again, no scans left
+    assert s.status()["state"] == "failed_not_found"
+
 
 
 def test_seek_handles_blocked_estop_and_stop():
@@ -176,3 +217,25 @@ def test_seek_handles_blocked_estop_and_stop():
         s.seek("the chair")
     s.stop()
     assert s.status()["state"] == "stopped" and drive.cancelled == 1
+
+
+def test_hints_are_stripped_from_what_the_model_is_asked():
+    assert strip_hints("the mirror on the left") == "the mirror"
+    assert strip_hints("the door to the right side") == "the door"
+    assert strip_hints("the chair behind you") == "the chair"
+    assert strip_hints("the lamp") == "the lamp"
+    assert strip_hints("on the left") == "on the left"      # nothing else to keep
+
+
+def test_seen_object_gets_a_relook_before_scanning():
+    replies = [box_reply(0.5), '{"found": false, "box": null}',
+               box_reply(0.5), box_reply(0.5)]
+    s, drive, vlm = _seeker(replies, depth_m=3.0)
+    s.seek("the mirror on the left")
+    assert s.status()["asked"] == "the mirror"
+    s.tick(); drive.finish("reached")            # seen, leg 1
+    s.tick()                                     # miss: re-look, no turn
+    assert s.status()["misses"] == 1 and not s.status()["scanning"]
+    assert all(g[0] != "turn" for g in drive.goals)
+    s.tick()                                     # seen again, leg 2
+    assert s.status()["misses"] == 0 and s.status()["legs"] == 2

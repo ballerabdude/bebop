@@ -58,8 +58,7 @@ def parse_command(text: str, place_names: list[str]) -> dict:
         deg = float(amount) if amount else (180.0 if side == "around" else 90.0)
         deg = max(5.0, min(180.0, deg))
         sign = 1.0 if side == "left" else (-1.0 if side == "right" else 1.0)
-        return {"kind": "relative", "bearing_deg": sign * deg,
-                "distance_m": 0.25, "command": raw}
+        return {"kind": "turn", "turn_deg": sign * deg, "command": raw}
     m = _REL.match(raw)
     if m:
         direction, amount, unit = m.groups()
@@ -129,6 +128,10 @@ class Navigator:
                 self._start_place(intent)
             elif intent["kind"] == "object":
                 self._start_object(intent)
+            elif intent["kind"] == "turn":
+                self.drive.set_goal(turn_deg=intent["turn_deg"],
+                                    label=f"cmd:{text[:24]}")
+                intent["runner"] = "goal"
             elif intent["kind"] == "reverse":
                 self.drive.set_goal(reverse_m=intent["distance_m"],
                                     label=f"cmd:{text[:24]}")
@@ -273,6 +276,8 @@ class Navigator:
             if m.get("runner") == "seek" and runner:
                 last = runner.get("last") or {}
                 rng = last.get("range_m")
+                if runner.get("scanning"):
+                    return f"Looking around for {what}."
                 return (f"Heading for {what}"
                         + (f", about {rng:.1f} metres away." if rng else
                            ", looking for it."))

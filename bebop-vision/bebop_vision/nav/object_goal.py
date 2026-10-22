@@ -37,6 +37,15 @@ class ObjectGoalConfig:
     min_step_m: float = 0.3
     max_legs: int = 12
     max_misses: int = 2               # consecutive "not found" before failing
+    # Search: on a miss, turn to the next scan heading (relative to where
+    # the search began) and look again.  The far camera sees ~46 deg to
+    # each side, so 45 deg steps tile the surroundings.  A hint in the
+    # words ("on the left") orders the scan to that side first.
+    scan: bool = True
+    scan_headings_deg: tuple = (45, -45, 90, -90, 135, -135, 180)
+    # Once the object has been seen, a single miss (a turn step put it just
+    # outside the frame, or the model blinked) re-looks before scanning.
+    relook_after_seen: int = 1
     max_blocked: int = 2
     image_width: int = 640            # downscale for the VLM
     depth_window_px: int = 24
@@ -55,6 +64,23 @@ LOCATE_PROMPT = (
     "pixels), x to the right, y down, and the box covers only {what}. If it "
     "is not visible, found is false and box is null."
 )
+
+
+_HINT_RE = re.compile(
+    r"\b(?:on|to|at)\s+(?:the|my|your|our)?\s*(?:left|right)(?:\s+side)?\b"
+    r"|\b(?:behind|in front of)\s+(?:you|me|us|the robot)\b"
+    r"|\b(?:over|back)\s+there\b", re.I)
+
+
+def strip_hints(what: str) -> str:
+    """Remove positional hints ("on the left") from an object description.
+
+    The hint orders the scan; it must not reach the model, which otherwise
+    answers "not visible on the left" once the robot has turned to face it
+    (seen live 2026-10-21)."""
+    out = _HINT_RE.sub("", what)
+    out = re.sub(r"\s{2,}", " ", out).strip(" ,.")
+    return out or what
 
 
 def parse_locate_reply(text: str, image_size=None, original_size=None) -> dict:
@@ -129,6 +155,11 @@ class ObjectSeeker:
         self._waiting_goal = False
         self._t0 = 0.0
         self._history: list = []
+        self._scan_plan: list = []
+        self._scan_turned = 0.0           # cumulative turn since the search began
+        self._scanning = False
+        self._ask = ""                    # description sent to the model
+        self._seen = False
 
     # -- thread ---------------------------------------------------------------
 
@@ -247,15 +278,35 @@ class ObjectSeeker:
             if not what:
                 raise ValueError("what is required")
             self._what = what
+            self._ask = strip_hints(what)
+            self._seen = False
             self._legs = 0
             self._misses = 0
             self._blocked = 0
             self._last = {}
             self._waiting_goal = False
+            self._scan_plan = self._plan_scan(what)
+            self._scan_turned = 0.0
+            self._scanning = False
             self._state = "seeking"
             self._t0 = time.monotonic()
             self._log(f"[object] seeking {what!r}")
             return self.status()
+
+    def _plan_scan(self, what: str) -> list:
+        """Scan headings (deg, relative to the search start), hinted side
+        first."""
+        if not self.config.scan:
+            return []
+        hs = list(self.config.scan_headings_deg)
+        w = what.lower()
+        if "left" in w:
+            hs.sort(key=lambda h: (h < 0, abs(h)))
+        elif "right" in w:
+            hs.sort(key=lambda h: (h > 0, abs(h)))
+        elif "behind" in w or "back" in w:
+            hs.sort(key=lambda h: -abs(h))
+        return hs
 
     def stop(self) -> dict:
         with self._lock:
@@ -270,7 +321,11 @@ class ObjectSeeker:
     def status(self) -> dict:
         with self._lock:
             return {"state": self._state, "what": self._what,
+                    "asked": self._ask, "seen": self._seen,
                     "legs": self._legs, "misses": self._misses,
+                    "scanning": self._scanning,
+                    "scan_turned_deg": self._scan_turned,
+                    "scans_left": len(self._scan_plan),
                     "last": dict(self._last),
                     "elapsed_s": (round(time.monotonic() - self._t0, 1)
                                   if self._state == "seeking" else None),
@@ -303,7 +358,7 @@ class ObjectSeeker:
             if self._legs >= c.max_legs:
                 self._finish("failed_max_legs")
                 return
-            what = self._what
+            what = self._ask or self._what
         # Look (one VLM call per leg) WITHOUT the lock: the call takes
         # seconds and status()/stop() must stay responsive meanwhile.
         try:
@@ -318,10 +373,31 @@ class ObjectSeeker:
                 self._misses += 1
                 self._log(f"[object] not found ({self._misses}): "
                           f"{loc.get('note') or loc.get('error')}")
+                if self._seen and self._misses <= c.relook_after_seen:
+                    return                   # look again before turning away
+                if self._scan_plan:
+                    # Turn to the next scan heading and look again.
+                    target = self._scan_plan.pop(0)
+                    delta = target - self._scan_turned
+                    delta = (delta + 180.0) % 360.0 - 180.0
+                    if abs(delta) >= 1.0:
+                        try:
+                            self.drive.set_goal(turn_deg=delta,
+                                                label=f"scan:{self._what}")
+                        except RuntimeError as exc:
+                            self._finish(f"failed: {exc}")
+                            return
+                        self._scan_turned = target
+                        self._scanning = True
+                        self._waiting_goal = True
+                        self._log(f"[object] scanning: turn {delta:+.0f} deg")
+                    return
                 if self._misses >= c.max_misses:
                     self._finish("failed_not_found")
                 return
             self._misses = 0
+            self._scanning = False
+            self._seen = True
             rng = loc.get("range_m")
             bearing = float(loc["bearing_deg"])
             if rng is not None and rng <= c.standoff_m + c.arrive_tol_m:

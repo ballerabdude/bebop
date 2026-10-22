@@ -276,6 +276,20 @@ GET  :9097/object
 POST :9097/object/stop
 ```
 
+**Searching.** The far camera sees ~46° to each side, so an object out of
+view is a miss. On a miss the seeker turns to the next scan heading
+(45, −45, 90, −90, 135, −135, 180° from where the search began; a hint such
+as "on the left" puts that side first) with a rotate-only driver goal and
+looks again; the hint words are stripped from what the model is asked,
+because "mirror on the left" made it answer "not visible on the left" once
+the robot had turned to face it. After the object has been seen, one miss
+re-looks before turning away. Live 2026-10-21: "go to the mirror on the
+left" from the dresser: first look missed, one 45° left turn found "a
+full-length mirror on a stand" at 4.2 m, two legs closed to 3.6 m, a miss
+then re-scanned to 180° where it found a second mirror and closed to 2.6 m
+before the corridor was blocked by furniture (`failed_blocked`, as
+designed).
+
 Live 2026-10-21 (master bedroom): "the dresser" was 7.0 m away through an
 archway. Six 1 m legs (range 7.0 → 6.1 → 5.0 → 4.1 → 3.1 → 2.0 m, bearing
 within ±6°, the VLM naming "black dresser with drawers and mirror" at
@@ -296,7 +310,8 @@ words). It resolves the words without a model call:
 | a taught place (fuzzy match: "the kitchen" → `Kitchen`) with a route chain from the recognised current place | trip over the graph | one per route node, leg by leg |
 | a taught place with no chain, or the current place unrecognised | object seeker with the place name as the description | one per VLM look |
 | anything else ("the dresser", "the red chair by the window") | object seeker | one per VLM look |
-| "forward 1 m", "back half a metre", "turn left 90", "turn around" | one bounded driver goal | one |
+| "forward 1 m", "back half a metre" | one bounded driver goal | one |
+| "turn left 90", "turn around" | a rotate-only driver goal (`turn_deg`) | one |
 | "stop" / "halt" / "wait" | stops everything | — |
 
 A new command replaces the active one. `GET /navigate` returns one state

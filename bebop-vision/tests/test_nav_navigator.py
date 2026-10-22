@@ -28,9 +28,9 @@ def test_parse_places_objects_and_moves():
     assert parse_command("back up 2 metres", NAMES)["kind"] == "reverse"
     assert parse_command("reverse half a metre", NAMES)["distance_m"] == 0.5
     t = parse_command("turn left", NAMES)
-    assert t["kind"] == "relative" and t["bearing_deg"] == 90
-    assert parse_command("turn around", NAMES)["bearing_deg"] == 180
-    assert parse_command("rotate right 30 degrees", NAMES)["bearing_deg"] == -30
+    assert t["kind"] == "turn" and t["turn_deg"] == 90
+    assert parse_command("turn around", NAMES)["turn_deg"] == 180
+    assert parse_command("rotate right 30 degrees", NAMES)["turn_deg"] == -30
     assert parse_command("Stop!", NAMES)["kind"] == "stop"
     with pytest.raises(ValueError):
         parse_command("   ", NAMES)
@@ -159,6 +159,8 @@ def test_objects_moves_and_stop(tmp_path):
     assert nav.status()["summary"] == "Done: forward 1 m."
     nav.command("back 0.5 m")
     assert drive.goals[-1]["reverse_m"] == 0.5
+    nav.command("turn left 45")
+    assert drive.goals[-1]["turn_deg"] == 45
     st = nav.command("stop")
     assert st["state"] == "stopped" and drive.cancelled >= 1
     assert "Stopped" in st["summary"]

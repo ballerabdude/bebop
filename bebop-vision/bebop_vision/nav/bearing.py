@@ -41,6 +41,7 @@ class ControllerConfig:
     w_min: float = 0.2          # rotate-in-place floor (static friction)
     k_heading: float = 1.8
     reach_tol_m: float = 0.08
+    turn_tol_rad: float = 0.07      # ~4 deg, rotate-only goals
     # Clearances are measured from the body origin (mast); the footprint
     # front is ~0.32 m ahead, so 0.60 keeps ~0.28 m between the bumper and
     # the nearest return before forward motion stops.
@@ -87,6 +88,13 @@ class Goal:
     start_x: float = 0.0
     start_y: float = 0.0
     start_th: float = 0.0
+    # Rotate-only goal: turn in place to this absolute heading (rad).
+    rotate_to: float | None = None
+
+    @classmethod
+    def turn(cls, odom, delta_rad: float, label: str = "") -> "Goal":
+        ox, oy, th = odom
+        return cls(ox, oy, label, rotate_to=wrap_pi(th + delta_rad))
 
     @classmethod
     def reverse(cls, odom, distance_m: float, label: str = "") -> "Goal":
@@ -155,6 +163,8 @@ class BearingController:
         ox, oy, th = odom
         if self.goal.reverse_m > 0:
             return self._reverse_step(odom)
+        if self.goal.rotate_to is not None:
+            return self._turn_step(odom, cmap, now)
         dx, dy = self.goal.x - ox, self.goal.y - oy
         dist = math.hypot(dx, dy)
         goal_b = wrap_pi(math.atan2(dy, dx) - th)
@@ -259,6 +269,25 @@ class BearingController:
         wz = max(-c.w_max, min(c.w_max, c.k_heading * chosen))
         self.last = Command(round(vx, 4), round(wz, 4), "drive", detail)
         return self.last
+
+    def _turn_step(self, odom, cmap, now) -> Command:
+        """Rotate in place to the goal heading; the same sweep-clearance
+        rule as any other in-place turn, and the depth map must be live."""
+        c = self.config
+        err = wrap_pi(self.goal.rotate_to - odom[2])
+        detail = {"turn_remaining_deg": round(math.degrees(err), 1)}
+        if abs(err) <= c.turn_tol_rad:
+            self.goal = None
+            self.last = Command(0.0, 0.0, "reached", detail)
+            return self.last
+        if cmap is None:
+            return self._hold("no_depth", detail)
+        if cmap.age_s(now) > c.max_map_age_s:
+            return self._hold("stale_depth", detail)
+        if float(np.min(cmap.obstacle_m)) < c.turn_clearance_m:
+            detail["min_obstacle_m"] = round(float(np.min(cmap.obstacle_m)), 3)
+            return self._blocked(now, "turn_blocked", detail)
+        return self._rotate(err, detail)
 
     def _reverse_step(self, odom) -> Command:
         """Back straight up along the heading held at set time; no depth

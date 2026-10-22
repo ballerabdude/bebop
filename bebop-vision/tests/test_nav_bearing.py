@@ -230,3 +230,18 @@ def test_corridor_obstacle_is_steered_around_not_parked_at():
     assert cmd.state in ("drive", "rotate")
     assert cmd.detail["mode"] == "sector"
     assert abs(cmd.detail["heading_deg"]) >= 15
+
+
+def test_turn_goal_rotates_in_place_and_reaches():
+    c = BearingController()
+    sim = Sim()
+    c.set_goal(Goal.turn(sim.odom, math.radians(90)), sim.odom)
+    first = c.step(sim.odom, cmap(), now=0.0)
+    assert first.state == "rotate" and first.vx == 0.0 and first.wz > 0
+    cmd, states = run(c, sim, lambda s: cmap())
+    assert cmd.state == "reached" and "drive" not in states
+    assert abs(wrap_pi(sim.odom[2] - math.radians(90))) < 0.08
+    # Refused next to a close return, held without depth.
+    c.set_goal(Goal.turn((0, 0, 0), math.radians(-90)), (0, 0, 0))
+    assert c.step((0, 0, 0), cmap(obstacle=[(0, 0.3)]), now=0.0).state == "blocked"
+    assert c.step((0, 0, 0), None, now=0.0).state == "no_depth"

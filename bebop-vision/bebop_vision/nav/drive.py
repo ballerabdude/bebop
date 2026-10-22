@@ -24,6 +24,7 @@ drives:
     POST /goal {bearing_deg, distance_m [, label]}   relative waypoint
     POST /goal {x, y [, label]}                      odom-frame waypoint
     POST /goal {reverse_m [, label]}                 straight reverse (blind)
+    POST /goal {turn_deg [, label]}                  rotate in place (+ = left)
     POST /stop                 cancel the goal (stops, disarms)
     POST /route/follow {route_id | to [, from]}      follow a taught route
     POST /route/stop           stop following (and the goal)
@@ -128,7 +129,7 @@ class NavDrive:
     # -- goal API (thread-safe) --------------------------------------------
 
     def set_goal(self, *, bearing_deg=None, distance_m=None, x=None, y=None,
-                 reverse_m=None, label: str = "") -> dict:
+                 reverse_m=None, turn_deg=None, label: str = "") -> dict:
         st = self.robot.state
         if not st.connected:
             raise RuntimeError("robot runtime not connected")
@@ -139,7 +140,11 @@ class NavDrive:
         with self._lock:
             est = self._pose
         odom = est.as_tuple() if est is not None else tuple(st.odom)
-        if reverse_m is not None:
+        if turn_deg is not None:
+            if not (1.0 <= abs(float(turn_deg)) <= 180.0):
+                raise ValueError("turn_deg must be between 1 and 180 in magnitude")
+            goal = Goal.turn(odom, math.radians(float(turn_deg)), label)
+        elif reverse_m is not None:
             if float(reverse_m) <= 0:
                 raise ValueError("reverse_m must be > 0")
             goal = Goal.reverse(odom, float(reverse_m), label)
@@ -152,7 +157,7 @@ class NavDrive:
                                      float(distance_m), label)
         else:
             raise ValueError(
-                "goal needs bearing_deg+distance_m, x+y, or reverse_m")
+                "goal needs bearing_deg+distance_m, x+y, reverse_m or turn_deg")
         with self._lock:
             self.controller.set_goal(goal, odom)
             self._goal_current = goal
@@ -239,6 +244,8 @@ class NavDrive:
                "label": goal.label}
         if goal.reverse_m > 0:
             out["reverse_m"] = round(goal.reverse_m, 3)
+        if goal.rotate_to is not None:
+            out["rotate_to_deg"] = round(math.degrees(goal.rotate_to), 1)
         return out
 
     # -- loop -----------------------------------------------------------------
@@ -561,6 +568,7 @@ class _NavHandler(BaseHTTPRequestHandler):
                     distance_m=body.get("distance_m"),
                     x=body.get("x"), y=body.get("y"),
                     reverse_m=body.get("reverse_m"),
+                    turn_deg=body.get("turn_deg"),
                     label=str(body.get("label") or ""))
             except (ValueError, TypeError) as exc:
                 self._send(400, {"ok": False, "error": str(exc)})

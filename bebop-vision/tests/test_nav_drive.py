@@ -289,3 +289,20 @@ def test_reverse_goal_over_http():
     assert robot.state.odom[0] < -0.25
     with pytest.raises(ValueError):
         drive.set_goal(reverse_m=-1)
+
+
+def test_turn_goal_over_the_drive():
+    drive, robot = make_drive()
+    drive.start()
+    try:
+        assert wait_for(lambda: drive.clearance() is not None)
+        g = drive.set_goal(turn_deg=60, label="turn")
+        assert g["rotate_to_deg"] == pytest.approx(60, abs=0.1)
+        assert wait_for(lambda: drive.status()["state"] == "reached", 8.0)
+    finally:
+        drive.stop()
+    assert all(vx == 0.0 for vx, _ in robot.twists)
+    assert any(wz > 0 for _, wz in robot.twists)
+    assert math.degrees(robot.state.odom[2]) == pytest.approx(60, abs=5)
+    with pytest.raises(ValueError):
+        drive.set_goal(turn_deg=0.5)
