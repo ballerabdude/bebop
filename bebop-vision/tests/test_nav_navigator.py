@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bebop_vision.nav import NavServer, Navigator, parse_command
+from bebop_vision.nav import NavServer, Navigator, parse_command, split_steps
 from bebop_vision.places import PlaceStore
 
 NAMES = ["Kitchen", "office room", "Master Bedroom", "front-entryway"]
@@ -199,3 +199,70 @@ def test_http_navigate(tmp_path):
         assert code == 200
     finally:
         server.stop()
+
+
+def test_split_steps_and_filler():
+    assert split_steps("turn around and navigate to the window") == [
+        "turn around", "navigate to the window"]
+    assert split_steps("back up 1 m then turn left then go to the dresser") == [
+        "back up 1 m", "turn left", "go to the dresser"]
+    assert split_steps("go to the red chair and the table") == [
+        "go to the red chair and the table"]
+    steps = split_steps("turn around, and way into the distance, there is a "
+                        "black window curtain. Navigate to it.")
+    assert steps[0] == "turn around"
+    assert parse_command(steps[1], [])["target"] == "black window curtain"
+
+
+def test_multi_step_command_runs_steps_in_order(tmp_path):
+    nav, drive, trip, seeker, a, b = _nav(tmp_path)
+    st = nav.command("turn around and go to the dresser")
+    assert st["state"] == "running" and st["steps_left"] == 1
+    assert drive.goals[-1]["turn_deg"] == 180
+    assert st["summary"].startswith("Step 1 of 2")
+    nav.tick()                                    # still turning
+    assert not seeker.seeks
+    drive.active = False
+    drive.state = "reached"
+    assert nav.status()["state"] == "running"     # a step remains
+    nav.tick()                                    # step 2 starts
+    assert seeker.seeks == ["the dresser"]
+    st = nav.status()
+    assert st["summary"].startswith("Step 2 of 2") and st["steps_left"] == 0
+    seeker.state = "arrived"
+    assert nav.status()["state"] == "arrived"
+    assert nav.status()["summary"] == "Step 2 of 2: Arrived at dresser."
+
+
+def test_failed_step_drops_the_rest(tmp_path):
+    nav, drive, trip, seeker, a, b = _nav(tmp_path)
+    nav.command("forward 1 m then go to the dresser")
+    drive.active = False
+    drive.state = "aborted_blocked"
+    nav.tick()
+    assert nav.status()["state"] == "aborted_blocked"
+    assert not seeker.seeks and nav.status()["steps_left"] == 0
+
+
+def test_blocked_turn_backs_up_and_retries_once(tmp_path):
+    nav, drive, trip, seeker, a, b = _nav(tmp_path)
+    nav.command("turn around then go to the dresser")
+    drive.active = False
+    drive.state = "aborted_blocked"
+    assert nav.status()["state"] == "running"       # recovery pending
+    nav.tick()
+    assert drive.goals[-1]["reverse_m"] == 0.4
+    drive.active = False
+    drive.state = "reached"
+    nav.tick()                                      # retry the turn
+    assert drive.goals[-1]["turn_deg"] == 180
+    drive.active = False
+    drive.state = "reached"
+    nav.tick()                                      # turn done -> step 2
+    assert seeker.seeks == ["the dresser"]
+    # Blocked again after the retry: the command fails.
+    nav.command("turn left")
+    drive.active = False; drive.state = "aborted_blocked"; nav.tick()
+    drive.active = False; drive.state = "reached"; nav.tick()
+    drive.active = False; drive.state = "aborted_blocked"; nav.tick()
+    assert nav.status()["state"] == "aborted_blocked"

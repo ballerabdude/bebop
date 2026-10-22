@@ -43,6 +43,50 @@ _TURN = re.compile(
     r"^\s*(?:turn|rotate|spin|face)\s*(?:to the\s+)?(left|right|around)\s*"
     r"(?:by\s+)?([\d.]+)?\s*(deg|degrees|°)?", re.I)
 _WORDNUM = {"a": 1.0, "one": 1.0, "half a": 0.5, "half": 0.5}
+_SEQ_SPLIT = re.compile(r"(\s*(?:,\s*)?\b(?:and then|then|and|after that)\b\s*|\s*[.;]\s+)", re.I)
+_FILLER = [
+    re.compile(r"^(?:way |far |over |off )?(?:in|into|in to) the distance,?\s*", re.I),
+    re.compile(r"^there(?:'s| is| are)\s+", re.I),
+    re.compile(r"[.,]?\s*(?:and\s+)?(?:please\s+)?(?:navigate|go|drive|head|move)\s+(?:to|towards|toward)\s+(?:it|that|there)\.?$", re.I),
+    re.compile(r"^(?:you(?:'ll| will) see|you can see)\s+", re.I),
+]
+
+
+def clean_target(text: str) -> str:
+    out = text.strip()
+    for _ in range(2):
+        for rx in _FILLER:
+            out = rx.sub("", out).strip(" ,.")
+    return out or text.strip()
+
+
+def split_steps(text: str) -> list[str]:
+    """'turn around and go to the window' -> ['turn around', 'go to the window'].
+
+    Splits on then/and/sentence breaks, but only keeps a split when the
+    first part is a move or turn (so 'the chair and the table' stays one
+    object description)."""
+    raw = (text or "").strip()
+    pieces = _SEQ_SPLIT.split(raw)           # text, sep, text, sep, ...
+    texts = [pieces[i] for i in range(0, len(pieces), 2)]
+    seps = [pieces[i] for i in range(1, len(pieces), 2)]
+    if len(texts) <= 1:
+        return [raw]
+    steps = []
+    buf = texts[0].strip(" ,.")
+    for sep, nxt in zip(seps, texts[1:]):
+        nxt = nxt.strip(" ,.")
+        if not nxt:
+            continue
+        if not buf or _TURN.match(buf) or _REL.match(buf) or _STOP.match(buf):
+            if buf:
+                steps.append(buf)
+            buf = nxt
+        else:
+            buf = f"{buf}{sep}{nxt}"         # keep the original joiner
+    if buf:
+        steps.append(buf)
+    return steps or [raw]
 
 
 def parse_command(text: str, place_names: list[str]) -> dict:
@@ -78,7 +122,8 @@ def parse_command(text: str, place_names: list[str]) -> dict:
                     "command": raw}
         return {"kind": "relative", "bearing_deg": 0.0, "distance_m": val,
                 "command": raw}
-    target = _LEAD.sub("", raw, count=1).strip().rstrip(".!?")
+    target = _LEAD.sub("", clean_target(raw), count=1).strip().rstrip(".!?")
+    target = clean_target(target)
     target = _THE.sub("", target).strip() or raw
     # Place match: exact / substring / fuzzy against taught names.
     low = target.lower()
@@ -109,42 +154,143 @@ class Navigator:
         self._mission: dict | None = None
         self._t0 = 0.0
         self._history: list = []
+        self._steps: list = []            # remaining step texts
+        self._step_no = 0
+        self._step_total = 0
+        self._command_text = ""
+        self._stop_evt = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    # -- thread: advances multi-step commands --------------------------------
+
+    def start_thread(self):
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._loop, name="navigator",
+                                            daemon=True)
+            self._thread.start()
+        return self
+
+    def stop_thread(self, timeout: float = 3.0):
+        self._stop_evt.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+            self._thread = None
+
+    def _loop(self):
+        while not self._stop_evt.is_set():
+            try:
+                self.tick()
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"[navigate] tick error: {type(exc).__name__}: {exc}")
+            time.sleep(0.5)
+
+    def tick(self) -> None:
+        """Recover a blocked turn, then start the next step when the
+        current one has arrived."""
+        with self._lock:
+            if self._mission is None:
+                return
+            state = self._runner_state()
+            if state == "running":
+                return
+            if self._recover_turn(state):
+                return
+            if not self._steps:
+                return
+            if state in ("arrived", "arrived_unconfirmed"):
+                nxt = self._steps.pop(0)
+                self._step_no += 1
+                self._log(f"[navigate] step {self._step_no}/{self._step_total}: "
+                          f"{nxt!r}")
+                try:
+                    self._start_step(nxt)
+                except Exception as exc:  # noqa: BLE001
+                    self._mission = dict(self._mission or {}, failed=str(exc))
+                    self._steps = []
+            else:
+                # The step failed or was stopped: drop the rest.
+                self._steps = []
+
+    def _recover_turn(self, state: str) -> bool:
+        """A turn refused for lack of sweep clearance: back up a little and
+        try once more (the seeker does the same for its scan turns)."""
+        m = self._mission
+        if m is None or m.get("runner") != "goal" or m.get("kind") != "turn":
+            return False
+        phase = m.get("recover")
+        if state == "aborted_blocked" and phase is None:
+            try:
+                self.drive.set_goal(reverse_m=0.4, label="unblock:turn")
+            except RuntimeError:
+                return False
+            m["recover"] = "reversing"
+            self._log("[navigate] turn blocked: backing up 0.4 m to retry")
+            return True
+        if phase == "reversing" and state == "arrived":
+            try:
+                self.drive.set_goal(turn_deg=m["turn_deg"],
+                                    label=f"cmd:{m['command'][:24]}")
+            except RuntimeError:
+                return False
+            m["recover"] = "retried"
+            self._log("[navigate] retrying the turn")
+            return True
+        return False
 
     # -- commands -------------------------------------------------------------
 
     def command(self, text: str) -> dict:
-        names = [p.name for p in self.store.list_places(status="confirmed")]
-        intent = parse_command(text, names)
-        with self._lock:
-            if intent["kind"] == "stop":
+        text = (text or "").strip()
+        if _STOP.match(text):
+            with self._lock:
                 self.stop()
                 return self.status()
+        steps = split_steps(text)
+        with self._lock:
             if self._active():
                 self._log(f"[navigate] replacing active mission with {text!r}")
                 self._stop_runners()
-            intent["started_at"] = time.time()
+            self._command_text = text
+            self._steps = steps[1:]
+            self._step_no = 1
+            self._step_total = len(steps)
             self._t0 = time.monotonic()
-            if intent["kind"] == "place":
-                self._start_place(intent)
-            elif intent["kind"] == "object":
-                self._start_object(intent)
-            elif intent["kind"] == "turn":
-                self.drive.set_goal(turn_deg=intent["turn_deg"],
-                                    label=f"cmd:{text[:24]}")
-                intent["runner"] = "goal"
-            elif intent["kind"] == "reverse":
-                self.drive.set_goal(reverse_m=intent["distance_m"],
-                                    label=f"cmd:{text[:24]}")
-                intent["runner"] = "goal"
-            else:
-                self.drive.set_goal(bearing_deg=intent["bearing_deg"],
-                                    distance_m=intent["distance_m"],
-                                    label=f"cmd:{text[:24]}")
-                intent["runner"] = "goal"
-            self._mission = intent
-            self._log(f"[navigate] {text!r} -> {intent['kind']} "
-                      f"{intent.get('target', '')} via {intent['runner']}")
+            self._start_step(steps[0])
             return self.status()
+
+    def _start_step(self, text: str) -> None:
+        names = [p.name for p in self.store.list_places(status="confirmed")]
+        intent = parse_command(text, names)
+        if intent["kind"] == "stop":
+            self._steps = []
+            self._stop_runners()
+            self._mission = dict(intent, runner="none", stopped=True)
+            return
+        intent["started_at"] = time.time()
+        if intent["kind"] == "place":
+            self._start_place(intent)
+        elif intent["kind"] == "object":
+            self._start_object(intent)
+        elif intent["kind"] == "turn":
+            self.drive.set_goal(turn_deg=intent["turn_deg"],
+                                label=f"cmd:{text[:24]}")
+            intent["runner"] = "goal"
+        elif intent["kind"] == "reverse":
+            self.drive.set_goal(reverse_m=intent["distance_m"],
+                                label=f"cmd:{text[:24]}")
+            intent["runner"] = "goal"
+        else:
+            self.drive.set_goal(bearing_deg=intent["bearing_deg"],
+                                distance_m=intent["distance_m"],
+                                label=f"cmd:{text[:24]}")
+            intent["runner"] = "goal"
+        intent["step"] = self._step_no
+        intent["steps"] = self._step_total
+        intent["full_command"] = self._command_text
+        self._mission = intent
+        self._log(f"[navigate] {text!r} -> {intent['kind']} "
+                  f"{intent.get('target', '')} via {intent['runner']} "
+                  f"(step {self._step_no}/{self._step_total})")
 
     def _start_place(self, intent):
         target = intent["target"]
@@ -207,6 +353,7 @@ class Navigator:
     def stop(self) -> dict:
         with self._lock:
             was = self._active()
+            self._steps = []
             self._stop_runners()
             if self._mission is not None and was:
                 self._mission["stopped"] = True
@@ -218,6 +365,8 @@ class Navigator:
             return "idle"
         if m.get("stopped"):
             return "stopped"
+        if m.get("failed"):
+            return "failed: " + m["failed"]
         r = m.get("runner")
         if r == "none":
             return "arrived"
@@ -252,9 +401,18 @@ class Navigator:
                     d = self.drive.status()
                     runner = {"state": d.get("state"),
                               "detail": d.get("command", {}).get("detail")}
+            if state in ("arrived", "arrived_unconfirmed") and self._steps:
+                state = "running"           # next step starts on the tick
+            if (m and m.get("kind") == "turn" and m.get("recover") == "reversing"
+                    and state == "arrived"):
+                state = "running"           # the retry starts on the tick
+            if (m and m.get("kind") == "turn" and m.get("recover") is None
+                    and state == "aborted_blocked"):
+                state = "running"           # the recovery starts on the tick
             return {
                 "state": state,
                 "mission": dict(m) if m else None,
+                "steps_left": len(self._steps),
                 "elapsed_s": (round(time.monotonic() - self._t0, 1)
                               if m and state == "running" else None),
                 "runner": runner,
@@ -267,7 +425,27 @@ class Navigator:
         if m is None:
             return "No navigation command has been given."
         what = m.get("target") or m.get("command")
+        prefix = ""
+        if (m.get("steps") or 1) > 1:
+            prefix = f"Step {m.get('step')} of {m.get('steps')}: "
         if state == "running":
+            return prefix + Navigator._running_summary(m, runner, what)
+        if state == "arrived":
+            if m.get("runner") == "goal":
+                return prefix + f"Done: {m.get('command')}."
+            if m.get("note") == "already there":
+                return prefix + f"Already at {what}."
+            return prefix + f"Arrived at {what}."
+        if state == "arrived_unconfirmed":
+            return prefix + (f"Reached the end of the route to {what}, but I do "
+                             "not recognise it.")
+        if state == "stopped":
+            return prefix + f"Stopped on the way to {what}."
+        return prefix + f"Could not get to {what}: {state.replace('_', ' ')}."
+
+    @staticmethod
+    def _running_summary(m, runner, what) -> str:
+        if True:
             if m.get("runner") == "trip" and runner:
                 leg = runner.get("leg")
                 legs = runner.get("legs")
@@ -282,14 +460,3 @@ class Navigator:
                         + (f", about {rng:.1f} metres away." if rng else
                            ", looking for it."))
             return f"Driving: {m.get('command')}."
-        if state == "arrived":
-            if m.get("runner") == "goal":
-                return f"Done: {m.get('command')}."
-            if m.get("note") == "already there":
-                return f"Already at {what}."
-            return f"Arrived at {what}."
-        if state == "arrived_unconfirmed":
-            return f"Reached the end of the route to {what}, but I do not recognise it."
-        if state == "stopped":
-            return f"Stopped on the way to {what}."
-        return f"Could not get to {what}: {state.replace('_', ' ')}."

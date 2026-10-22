@@ -314,6 +314,19 @@ words). It resolves the words without a model call:
 | "turn left 90", "turn around" | a rotate-only driver goal (`turn_deg`) | one |
 | "stop" / "halt" / "wait" | stops everything | — |
 
+A command can be a sequence: "turn around then go to the window", "back
+up one metre and go to the dresser". It is split on then/and/sentence
+breaks (only after a move or turn, so "the chair and the table" stays one
+description), filler such as "way into the distance, there is ... navigate
+to it" is trimmed, and the steps run in order; a failed step drops the
+rest. A turn refused for sweep clearance backs up 0.4 m and retries once.
+
+When a leg toward an object is blocked, the seeker **detours**: it drives
+up to 1 m into the most open sector near the object's bearing (from the
+live clearance map) and looks again, or backs up 0.4 m when nothing is
+open; three detours, then `failed_blocked`. A blocked scan turn backs up
+and retries the same heading.
+
 A new command replaces the active one. `GET /navigate` returns one state
 (`running`, `arrived`, `arrived_unconfirmed`, `stopped`, `failed_*`) plus a
 spoken-style `summary` ("Heading for dresser, about 3.0 metres away.",
@@ -326,6 +339,13 @@ Voice: `voice_server.py` advertises `navigate(command)`,
 `motion_enabled` switch as `move_relative`; the brain only relays words and
 reads back the summary, so "are we there yet" is a `navigation_status`
 call. The voice service must be restarted to pick the tools up.
+
+Live 2026-10-21, by voice: "the baby crib" → five legs, arrived in 48 s.
+"turn around and navigate to the window" ran only the turn (fixed: steps),
+"the window curtain" found the curtain but two legs were blocked by the
+bed (fixed: detours). After the fixes, "turn around then go to the baby
+crib": turn refused → backed up 0.3 m → turn retried → crib found at
+1.05 m → arrived.
 
 Live 2026-10-21: `{"command": "go to the dresser"}` from 1 m away →
 `arrived` on the first look; the tool path (`_run_tool("navigate",

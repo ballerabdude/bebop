@@ -1126,10 +1126,12 @@ NAV_TOOLS: list[dict[str, Any]] = [
                 "own: a remembered room ('the kitchen'), something it can "
                 "see ('the dresser', 'the basketball'), or a relative move "
                 "('forward one metre', 'turn left 90', 'back half a metre'). "
-                "Pass the user's destination words as given. Returns "
+                "Pass the user's destination words as given, including a "
+                "sequence such as 'turn around then go to the window' or "
+                "'back up one metre and go to the dresser'. Returns "
                 "immediately with what the robot is doing; it keeps driving "
-                "afterwards. Only when the user asks the robot to go "
-                "somewhere."
+                "afterwards, step by step. Only when the user asks the robot "
+                "to go somewhere."
             ),
             "parameters": {
                 "type": "object",

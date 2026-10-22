@@ -19,7 +19,7 @@ from .visual import MatchConfig, MatchResult, match_patches
 from .follow import FollowConfig, RouteFollower
 from .trip import TripRunner
 from .object_goal import ObjectGoalConfig, ObjectSeeker, parse_locate_reply
-from .navigator import Navigator, parse_command
+from .navigator import Navigator, parse_command, split_steps
 
 __all__ = [
     "CameraGeometry", "ClearanceMap", "ConeConfig", "DepthCone",
@@ -30,5 +30,5 @@ __all__ = [
     "MatchConfig", "MatchResult", "match_patches",
     "FollowConfig", "RouteFollower", "TripRunner",
     "ObjectGoalConfig", "ObjectSeeker", "parse_locate_reply",
-    "Navigator", "parse_command",
+    "Navigator", "parse_command", "split_steps",
 ]

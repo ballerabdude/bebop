@@ -47,6 +47,13 @@ class ObjectGoalConfig:
     # outside the frame, or the model blinked) re-looks before scanning.
     relook_after_seen: int = 1
     max_blocked: int = 2
+    # Detours: when a leg toward the object is blocked, drive up to 1 m
+    # into the most open sector near the object's bearing and look again;
+    # when nothing is open, back up a little first.  The stop-cone only
+    # sees +-60 deg, so this is local exploration, not planning.
+    max_detours: int = 3
+    detour_min_clear_m: float = 1.0
+    detour_reverse_m: float = 0.4
     image_width: int = 640            # downscale for the VLM
     depth_window_px: int = 24
     depth_min_valid: int = 20
@@ -160,6 +167,10 @@ class ObjectSeeker:
         self._scanning = False
         self._ask = ""                    # description sent to the model
         self._seen = False
+        self._detours = 0
+        self._detouring = False
+        self._last_bearing = 0.0
+        self._retry_scan = None
 
     # -- thread ---------------------------------------------------------------
 
@@ -288,6 +299,10 @@ class ObjectSeeker:
             self._scan_plan = self._plan_scan(what)
             self._scan_turned = 0.0
             self._scanning = False
+            self._detours = 0
+            self._detouring = False
+            self._last_bearing = 0.0
+            self._retry_scan = None
             self._state = "seeking"
             self._t0 = time.monotonic()
             self._log(f"[object] seeking {what!r}")
@@ -324,6 +339,7 @@ class ObjectSeeker:
                     "asked": self._ask, "seen": self._seen,
                     "legs": self._legs, "misses": self._misses,
                     "scanning": self._scanning,
+                    "detours": self._detours, "detouring": self._detouring,
                     "scan_turned_deg": self._scan_turned,
                     "scans_left": len(self._scan_plan),
                     "last": dict(self._last),
@@ -347,14 +363,20 @@ class ObjectSeeker:
                 if nav.get("active") or nav.get("arming"):
                     return
                 self._waiting_goal = False
+                was_scan = self._scanning
+                was_detour = self._detouring
+                self._detouring = False
                 if nav_state == "aborted_blocked":
                     self._blocked += 1
-                    if self._blocked >= c.max_blocked:
-                        self._finish("failed_blocked")
+                    if self._try_unblock(was_scan, was_detour):
                         return
+                    self._finish("failed_blocked")
+                    return
                 elif nav_state and nav_state.startswith("aborted"):
                     self._finish(f"failed_{nav_state[8:]}")
                     return
+                elif nav_state == "reached" and not was_scan and not was_detour:
+                    self._blocked = 0
             if self._legs >= c.max_legs:
                 self._finish("failed_max_legs")
                 return
@@ -387,6 +409,7 @@ class ObjectSeeker:
                         except RuntimeError as exc:
                             self._finish(f"failed: {exc}")
                             return
+                        self._retry_scan = (target, self._scan_turned)
                         self._scan_turned = target
                         self._scanning = True
                         self._waiting_goal = True
@@ -400,6 +423,7 @@ class ObjectSeeker:
             self._seen = True
             rng = loc.get("range_m")
             bearing = float(loc["bearing_deg"])
+            self._last_bearing = bearing
             if rng is not None and rng <= c.standoff_m + c.arrive_tol_m:
                 self._finish("arrived")
                 return
@@ -416,6 +440,52 @@ class ObjectSeeker:
             self._waiting_goal = True
             self._log(f"[object] leg {self._legs}: bearing {bearing:+.1f} deg, "
                       f"range {rng}, step {step:.2f} m")
+
+    def _try_unblock(self, was_scan: bool, was_detour: bool) -> bool:
+        """After a blocked goal: detour into the most open sector, or back
+        up a little.  Returns True when a recovery goal was issued."""
+        c = self.config
+        if self._detours >= c.max_detours:
+            return False
+        self._detours += 1
+        cm = None
+        try:
+            cm = self.drive.clearance()
+        except Exception:  # noqa: BLE001
+            cm = None
+        best = None
+        if cm and not was_scan:
+            bearings = cm.get("bearings_deg") or []
+            clears = cm.get("clearance_m") or []
+            for b, cl in zip(bearings, clears):
+                if cl is None or cl < c.detour_min_clear_m:
+                    continue
+                # Prefer open sectors near the object's last bearing.
+                score = cl - 0.01 * abs(b - self._last_bearing)
+                if best is None or score > best[0]:
+                    best = (score, b, cl)
+        try:
+            if best is not None:
+                _, b, cl = best
+                dist = max(c.min_step_m, min(c.step_m, cl - 0.7))
+                self.drive.set_goal(bearing_deg=b, distance_m=dist,
+                                    label=f"detour:{self._what}")
+                self._log(f"[object] detour {self._detours}: bearing {b:+.0f} "
+                          f"deg, {dist:.2f} m")
+            else:
+                self.drive.set_goal(reverse_m=c.detour_reverse_m,
+                                    label=f"unblock:{self._what}")
+                self._log(f"[object] unblock {self._detours}: reverse "
+                          f"{c.detour_reverse_m} m")
+                if was_scan and self._retry_scan is not None:
+                    target, before = self._retry_scan
+                    self._scan_plan.insert(0, target)
+                    self._scan_turned = before      # the turn did not happen
+        except RuntimeError:
+            return False
+        self._detouring = True
+        self._waiting_goal = True
+        return True
 
     def _finish(self, state: str):
         entry = {"state": state, "what": self._what, "legs": self._legs,

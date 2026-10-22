@@ -64,15 +64,21 @@ class FakeDrive:
         self.active = False
         self.estop = False
         self.cancelled = 0
+        self.cmap = None
+
+    def clearance(self):
+        return self.cmap
 
     def status(self):
         return {"state": self.state, "active": self.active, "arming": False,
                 "robot": {"estop_latched": self.estop}}
 
     def set_goal(self, *, bearing_deg=None, distance_m=None, turn_deg=None,
-                 label=""):
+                 reverse_m=None, label=""):
         if turn_deg is not None:
             self.goals.append(("turn", round(turn_deg, 1)))
+        elif reverse_m is not None:
+            self.goals.append(("reverse", round(reverse_m, 2)))
         else:
             self.goals.append((round(bearing_deg, 1), round(distance_m, 2)))
         self.state, self.active = "drive", True
@@ -201,10 +207,10 @@ def test_scan_exhausted_fails():
 
 
 def test_seek_handles_blocked_estop_and_stop():
-    s, drive, vlm = _seeker([box_reply(0.5)], depth_m=4.0, max_blocked=2)
+    s, drive, vlm = _seeker([box_reply(0.5)], depth_m=4.0, max_blocked=2,
+                            max_detours=0)
     s.seek("the chair")
     s.tick(); drive.finish("aborted_blocked")
-    s.tick(); drive.finish("aborted_blocked")       # second leg also blocked
     s.tick()
     assert s.status()["state"] == "failed_blocked"
     s.seek("the chair")
@@ -239,3 +245,50 @@ def test_seen_object_gets_a_relook_before_scanning():
     assert all(g[0] != "turn" for g in drive.goals)
     s.tick()                                     # seen again, leg 2
     assert s.status()["misses"] == 0 and s.status()["legs"] == 2
+
+
+def test_blocked_leg_detours_into_open_sector_then_looks_again():
+    s, drive, vlm = _seeker([box_reply(0.5)], depth_m=4.0)
+    drive.cmap = {"bearings_deg": [60, 30, 0, -30, -60],
+                  "clearance_m": [0.5, 2.2, 0.5, 1.4, 0.5]}
+    s.seek("the window")
+    s.tick()                                    # leg 1 toward the object
+    drive.finish("aborted_blocked")
+    s.tick()                                    # detour: most open sector (+30)
+    assert drive.goals[-1] == (30.0, 1.0) and s.status()["detouring"]
+    assert s.status()["detours"] == 1
+    drive.finish("reached")
+    s.tick()                                    # looks again, drives on
+    assert drive.goals[-1][0] != "turn" and not s.status()["detouring"]
+    assert s.status()["state"] == "seeking"
+
+
+def test_blocked_with_nothing_open_backs_up_then_fails_after_max_detours():
+    s, drive, vlm = _seeker([box_reply(0.5)], depth_m=4.0, max_detours=2)
+    drive.cmap = {"bearings_deg": [30, 0, -30], "clearance_m": [0.4, 0.3, 0.4]}
+    s.seek("the window")
+    s.tick(); drive.finish("aborted_blocked")
+    s.tick()
+    assert drive.goals[-1] == ("reverse", 0.4)
+    drive.finish("reached")
+    s.tick(); drive.finish("aborted_blocked")  # leg again, blocked again
+    s.tick()
+    assert drive.goals[-1] == ("reverse", 0.4) and s.status()["detours"] == 2
+    drive.finish("reached")
+    s.tick(); drive.finish("aborted_blocked")
+    s.tick()
+    assert s.status()["state"] == "failed_blocked"
+
+
+def test_blocked_scan_turn_backs_up_and_retries_the_turn():
+    replies = ['{"found": false, "box": null}']
+    s, drive, vlm = _seeker(replies, depth_m=4.0)
+    s.seek("the lamp")
+    s.tick()                                    # miss -> scan turn +45
+    assert drive.goals[-1] == ("turn", 45.0)
+    drive.finish("aborted_blocked")
+    s.tick()                                    # unblock: reverse, scan kept
+    assert drive.goals[-1] == ("reverse", 0.4)
+    drive.finish("reached")
+    s.tick()                                    # miss -> the same +45 retried
+    assert drive.goals[-1] == ("turn", 45.0)
