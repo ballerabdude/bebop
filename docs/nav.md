@@ -18,7 +18,9 @@ navd / BEV driving stack.
 | `bebop_vision/nav/drive.py` | `NavDrive` loop (arming, deadman, abort rules) + `NavServer` HTTP |
 | `bebop_vision/nav/synth.py` | synthetic depth renderer for tests/tools |
 | `tools/nav_cone_preview.py` | offline check on recorded depth PNGs, renders a top-down view |
-| `tests/test_nav_*.py` | 48 hardware-free tests |
+| `bebop_vision/nav/visual.py` | DINOv3 patch matching -> heading correction |
+| `bebop_vision/nav/follow.py` | `RouteFollower`: teach-and-repeat over `NavDrive` |
+| `tests/test_nav_*.py`, `tests/test_routes.py` | 69 hardware-free tests |
 
 ## 2. Depth stop-cone
 
@@ -168,7 +170,40 @@ A→B edge with the trail as its guide path, so `/places/graph` edges now carry
 `route_ids`. Nothing here moves the robot; following a route is the next
 piece.
 
-## 8. Live results (2026-10-21) and caveats
+## 8. Route following (teach-and-repeat)
+
+`bebop_vision/nav/follow.py` (`RouteFollower`, on the nav server) drives a
+taught route node by node:
+
+- the route frame is anchored to the live gyro pose at start (the robot is
+  assumed to stand at node 0, at the route's start place);
+- the target node's bearing and distance come from dead reckoning;
+- the live far view is matched against the node's keyframe with DINOv3
+  **patch** features (`nav/visual.py`: mutual-nearest-neighbour matches on
+  the 14x14 grid, median column offset, through the far color intrinsics).
+  A confident match replaces the dead-reckoned bearing and low-passes a yaw
+  correction into the route frame; an unconfident one falls back to dead
+  reckoning. Measured on the Thor: 53 ms per frame, bearing from a known
+  pixel shift within 0.5°, and the fraction gate (≥ 30 % of patches
+  matched) separates the taught scene from an unrelated view (16 %);
+- the result is streamed to the driver as a short goal (≤ 0.8 m lookahead)
+  at 3 Hz, so avoidance, arming and the E-STOP rules stay with `NavDrive`;
+- a node is passed within 0.35 m or once its segment is overshot; arriving
+  at the last node asks place recognition to confirm (`arrived` vs
+  `arrived_unconfirmed`); two driver aborts in a row fail the run. Every
+  outcome except an operator stop is recorded on the place graph edge.
+
+```
+POST :9097/route/follow {"route_id": "..."}            # or {"to": "Master Bedroom"[, "from": ...]}
+GET  :9097/route                                         state, target node, match, history
+POST :9097/route/stop
+```
+
+`to` without `from` uses place recognition for the start and takes the
+newest taught route between the two places. Only forward following exists:
+to come back, teach the return trip.
+
+## 9. Live results (2026-10-21) and caveats
 
 - `fwd 0.5 m`: reached in 2.4 s (stopped 0.36 m in, the old 0.15 m reach
   tolerance; now 0.08 m).

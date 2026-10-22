@@ -19,6 +19,9 @@ a higher-level navigator set one goal at a time and watch the state:
     POST /goal {x, y [, label]}                      odom-frame waypoint
     POST /goal {reverse_m [, label]}                 straight reverse (blind)
     POST /stop                 cancel the goal (stops, disarms)
+    POST /route/follow {route_id | to [, from]}      follow a taught route
+    POST /route/stop           stop following (and the goal)
+    GET  /route                follower state
 """
 from __future__ import annotations
 
@@ -64,6 +67,8 @@ class NavDrive:
             pose = PoseEstimator(list(cone.geometries.values()), taps)
         self.pose = pose
         self._pose: Pose | None = None
+        # Optional route follower (set by main.py when places are on).
+        self.follower = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -460,6 +465,13 @@ class _NavHandler(BaseHTTPRequestHandler):
                              "clearance_age_s": s["clearance_age_s"]})
         elif path == "/status":
             self._send(200, self.nav.status())
+        elif path == "/route":
+            f = self.nav.follower
+            if f is None:
+                self._send(503, {"ok": False, "error": "route following "
+                                 "not configured (needs places + --nav)"})
+            else:
+                self._send(200, f.status())
         elif path == "/pose":
             s = self.nav.status()
             self._send(200 if s["pose"] else 503,
@@ -487,7 +499,8 @@ class _NavHandler(BaseHTTPRequestHandler):
         elif path == "/":
             self._send(200, {"service": "nav", "endpoints": [
                 "GET /healthz", "GET /status", "GET /clearance",
-                "GET /depth?role=near|far", "POST /goal", "POST /stop"]})
+                "GET /depth?role=near|far", "GET /route", "POST /goal",
+                "POST /stop", "POST /route/follow", "POST /route/stop"]})
         else:
             self._send(404, {"ok": False, "error": "not found"})
 
@@ -518,7 +531,38 @@ class _NavHandler(BaseHTTPRequestHandler):
                 return
             self._send(202, {"ok": True, "goal": goal})
         elif path == "/stop":
+            f = self.nav.follower
+            if f is not None:
+                f.stop()
             self._send(200, {"ok": True, "status": self.nav.cancel()})
+        elif path == "/route/follow":
+            f = self.nav.follower
+            if f is None:
+                self._send(503, {"ok": False, "error": "route following "
+                                 "not configured"})
+                return
+            try:
+                st = f.follow(body.get("route_id"),
+                              to_place=body.get("to") or body.get("to_place"),
+                              from_place=body.get("from")
+                              or body.get("from_place"))
+            except KeyError as exc:
+                self._send(404, {"ok": False, "error": str(exc.args[0])})
+                return
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+                return
+            except RuntimeError as exc:
+                self._send(409, {"ok": False, "error": str(exc)})
+                return
+            self._send(202, {"ok": True, "status": st})
+        elif path == "/route/stop":
+            f = self.nav.follower
+            if f is None:
+                self._send(503, {"ok": False, "error": "route following "
+                                 "not configured"})
+            else:
+                self._send(200, {"ok": True, "status": f.stop()})
         else:
             self._send(404, {"ok": False, "error": "not found"})
 

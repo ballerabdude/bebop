@@ -335,6 +335,16 @@ def run_record_navd(args):
                 ).start_thread()
                 print("[trail] route teach mode on the places service "
                       "(POST /routes/teach/start|stop)", flush=True)
+                from bebop_vision.nav import FollowConfig, RouteFollower
+                far_capture = RigCapture(rig, roles=("far",), max_age_s=0.8)
+                nav.follower = RouteFollower(
+                    nav, pstore, penc, far_capture,
+                    recognize=lambda: places.whereami(),
+                    config=FollowConfig(
+                        patch_image_size=args.follow_patch_size),
+                ).start_thread()
+                print("[follow] route following on :%d "
+                      "(POST /route/follow)" % args.nav_port, flush=True)
         except Exception as exc:
             stop_nav()
             stop_live_slam()
@@ -637,6 +647,9 @@ def main():
                         help="route teach: new node every this many metres")
     parser.add_argument("--teach-turn-deg", type=float, default=25.0,
                         help="route teach: new node after this heading change")
+    parser.add_argument("--follow-patch-size", type=int, default=224,
+                        help="route following: DINOv3 input size for patch "
+                             "matching (224 -> 14x14 grid, 336 -> 21x21)")
     parser.add_argument("--no-places", action="store_true",
                         help="do not start the semantic place-memory service "
                              "(see bebop_vision/places; default: started)")

@@ -15,6 +15,8 @@ from .bearing import (BearingController, Command, ControllerConfig, Goal,
                       wrap_pi)
 from .drive import DEFAULT_PORT, NavDrive, NavServer
 from .pose import Pose, PoseConfig, PoseEstimator
+from .visual import MatchConfig, MatchResult, match_patches
+from .follow import FollowConfig, RouteFollower
 
 __all__ = [
     "CameraGeometry", "ClearanceMap", "ConeConfig", "DepthCone",
@@ -22,4 +24,6 @@ __all__ = [
     "BearingController", "Command", "ControllerConfig", "Goal", "wrap_pi",
     "NavDrive", "NavServer", "DEFAULT_PORT",
     "Pose", "PoseConfig", "PoseEstimator",
+    "MatchConfig", "MatchResult", "match_patches",
+    "FollowConfig", "RouteFollower",
 ]
