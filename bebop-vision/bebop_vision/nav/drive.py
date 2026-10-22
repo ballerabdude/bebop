@@ -25,6 +25,8 @@ drives:
     POST /goal {x, y [, label]}                      odom-frame waypoint
     POST /goal {reverse_m [, label]}                 straight reverse (blind)
     POST /goal {turn_deg [, label]}                  rotate in place (+ = left)
+    POST /goal {path: [[x, y], ...]}                 pure pursuit along pose-frame points
+    POST /goal {path_body: [[fwd, left], ...]}       same, offsets from the current pose
     POST /stop                 cancel the goal (stops, disarms)
     POST /route/follow {route_id | to [, from]}      follow a taught route
     POST /route/stop           stop following (and the goal)
@@ -135,7 +137,8 @@ class NavDrive:
     # -- goal API (thread-safe) --------------------------------------------
 
     def set_goal(self, *, bearing_deg=None, distance_m=None, x=None, y=None,
-                 reverse_m=None, turn_deg=None, label: str = "") -> dict:
+                 reverse_m=None, turn_deg=None, path=None, path_body=None,
+                 label: str = "") -> dict:
         st = self.robot.state
         if not st.connected:
             raise RuntimeError("robot runtime not connected")
@@ -146,7 +149,18 @@ class NavDrive:
         with self._lock:
             est = self._pose
         odom = est.as_tuple() if est is not None else tuple(st.odom)
-        if turn_deg is not None:
+        if path is not None or path_body is not None:
+            pts = path if path is not None else path_body
+            if not isinstance(pts, (list, tuple)) or not pts or any(
+                    not isinstance(p, (list, tuple)) or len(p) != 2 for p in pts):
+                raise ValueError("path must be a non-empty list of [x, y] pairs")
+            if len(pts) > 200:
+                raise ValueError("path too long (max 200 points)")
+            if path is not None:
+                goal = Goal.from_path(pts, label)
+            else:
+                goal = Goal.from_body_path(odom, pts, label)
+        elif turn_deg is not None:
             if not (1.0 <= abs(float(turn_deg)) <= 180.0):
                 raise ValueError("turn_deg must be between 1 and 180 in magnitude")
             goal = Goal.turn(odom, math.radians(float(turn_deg)), label)
@@ -162,8 +176,8 @@ class NavDrive:
             goal = Goal.from_bearing(odom, math.radians(float(bearing_deg)),
                                      float(distance_m), label)
         else:
-            raise ValueError(
-                "goal needs bearing_deg+distance_m, x+y, reverse_m or turn_deg")
+            raise ValueError("goal needs bearing_deg+distance_m, x+y, "
+                             "reverse_m, turn_deg, path or path_body")
         with self._lock:
             self.controller.set_goal(goal, odom)
             self._goal_current = goal
@@ -247,6 +261,8 @@ class NavDrive:
             "side": d.get("side"),
             "blocked_s": d.get("blocked_s"),
             "drop": d.get("drop"),
+            "path_progress": d.get("path_progress"),
+            "bend_deg": d.get("bend_deg"),
             "corridor_pt": (None if cm is None else cm.corridor_point),
             "floor_pitch_deg": (None if cm is None else
                                 (cm.floor_fit.get("near") or {}).get("plane", {}).get("pitch_deg")),
@@ -300,6 +316,8 @@ class NavDrive:
             out["reverse_m"] = round(goal.reverse_m, 3)
         if goal.rotate_to is not None:
             out["rotate_to_deg"] = round(math.degrees(goal.rotate_to), 1)
+        if goal.path:
+            out["path_points"] = len(goal.path)
         return out
 
     # -- loop -----------------------------------------------------------------
@@ -635,6 +653,7 @@ class _NavHandler(BaseHTTPRequestHandler):
                     x=body.get("x"), y=body.get("y"),
                     reverse_m=body.get("reverse_m"),
                     turn_deg=body.get("turn_deg"),
+                    path=body.get("path"), path_body=body.get("path_body"),
                     label=str(body.get("label") or ""))
             except (ValueError, TypeError) as exc:
                 self._send(400, {"ok": False, "error": str(exc)})

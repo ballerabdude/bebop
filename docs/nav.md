@@ -146,6 +146,29 @@ What the trace found on 2026-10-21 (master bedroom):
   points; mirror reflections produced 2,000 "under-floor" points at 1.8 m to
   the side.
 
+## 3c. Path goals (pure pursuit)
+
+A goal can be a list of pose-frame points (`POST /goal {"path": [[x, y],
+...]}`) or body-frame offsets from the current pose (`{"path_body":
+[[forward, left], ...]}`). The controller projects the robot onto the path
+(monotonically, never jumping back to an earlier leg), aims at the point
+0.6 m further along it (0.35 m when the corridor is tight), and feeds that
+bearing into the same sector / avoidance / escape machinery as a point
+goal. Speed is scaled by the distance to the **end** of the path, so
+intermediate points are passed without stopping, and capped by the bend
+ahead (full speed when the path direction at the lookahead matches the
+heading, 40 % at a right angle). Re-sending a path keeps progress: the new
+path is projected from the nearest segment, which is what the route
+follower will do after each yaw correction. `path_progress`, `path_seg`,
+`aim` and `bend_deg` appear in the status detail and the trace. Reached
+when the last point is within tolerance (or the projection has passed it
+and it is within 0.25 m).
+
+Tests cover an L-shaped path driven without a stop or an in-place turn at
+the corner, the corner speed cap, progress-preserving re-sends, obstacles
+still blocking, and the body-frame form. Next: the follower and trip runner
+sending whole trails as paths, and the seeker looking while driving.
+
 ## 4. Bearing controller
 
 A goal is a pose-frame point, set from a bearing + distance at the moment

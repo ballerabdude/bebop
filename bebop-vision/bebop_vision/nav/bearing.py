@@ -81,6 +81,13 @@ class ControllerConfig:
     blocked_timeout_s: float = 4.0
     max_goal_m: float = 6.0
     approach_m: float = 0.5      # start slowing this far from the goal
+    # Path goals (pure pursuit): aim at the point this far along the path
+    # ahead of the robot's projection; shorter when the corridor is tight.
+    lookahead_m: float = 0.6
+    lookahead_min_m: float = 0.35
+    # Speed cap from the bend ahead: full speed when the path direction at
+    # the lookahead matches the heading, `corner_speed_frac` of it at 90 deg.
+    corner_speed_frac: float = 0.4
     # Straight reverse (the rear is unobserved): slow, short, heading held.
     reverse_v: float = 0.15
     max_reverse_m: float = 1.0
@@ -146,11 +153,28 @@ class Goal:
     start_th: float = 0.0
     # Rotate-only goal: turn in place to this absolute heading (rad).
     rotate_to: float | None = None
+    # Path goal: pose-frame points to follow in order; (x, y) is the last.
+    path: tuple = ()
 
     @classmethod
     def turn(cls, odom, delta_rad: float, label: str = "") -> "Goal":
         ox, oy, th = odom
         return cls(ox, oy, label, rotate_to=wrap_pi(th + delta_rad))
+
+    @classmethod
+    def from_path(cls, points, label: str = "") -> "Goal":
+        pts = tuple((float(x), float(y)) for x, y in points)
+        if len(pts) < 1:
+            raise ValueError("path needs at least one point")
+        return cls(pts[-1][0], pts[-1][1], label, path=pts)
+
+    @classmethod
+    def from_body_path(cls, odom, offsets, label: str = "") -> "Goal":
+        """Offsets are (forward_m, left_m) pairs in the body frame at `odom`."""
+        ox, oy, th = odom
+        c, s = math.cos(th), math.sin(th)
+        pts = [(ox + c * dx - s * dy, oy + s * dx + c * dy) for dx, dy in offsets]
+        return cls.from_path(pts, label)
 
     @classmethod
     def reverse(cls, odom, distance_m: float, label: str = "") -> "Goal":
@@ -193,10 +217,86 @@ class BearingController:
         self._side_commit = None         # (+1 | -1, deadline)
         self._sector_until = None        # stay in sector mode until then
         self._escape_turns = 0
+        self._path_seg = 0               # path goals: current segment
+
+    # -- path goals -------------------------------------------------------------
+
+    def _path_aim(self, odom, cmap):
+        """Project the robot on the path (monotonic), return the lookahead
+        point, its path direction, the remaining length to the end and the
+        projection progress as a fraction."""
+        c = self.config
+        pts = self.goal.path
+        px, py, _ = odom
+        n = len(pts)
+        if n == 1:
+            x, y = pts[0]
+            return (x, y), None, math.hypot(x - px, y - py), 1.0
+        # Closest point on segments at or after the current one.
+        best = None
+        for i in range(self._path_seg, n - 1):
+            ax, ay = pts[i]
+            bx, by = pts[i + 1]
+            vx, vy = bx - ax, by - ay
+            L2 = vx * vx + vy * vy
+            t = 0.0 if L2 < 1e-9 else max(0.0, min(1.0, ((px - ax) * vx + (py - ay) * vy) / L2))
+            qx, qy = ax + t * vx, ay + t * vy
+            d = math.hypot(px - qx, py - qy)
+            # Prefer later segments only when clearly closer (no jumping
+            # back and forth between parallel legs).
+            if best is None or d < best[0] - 0.05:
+                best = (d, i, t, qx, qy)
+        _d, seg, t, qx, qy = best
+        self._path_seg = seg
+        # Walk the lookahead distance along the path from the projection.
+        ld = c.lookahead_m
+        if cmap is not None and math.isfinite(cmap.corridor_min_m) \
+                and cmap.corridor_min_m < 1.0:
+            ld = max(c.lookahead_min_m, ld * cmap.corridor_min_m / 1.0)
+        remaining = 0.0
+        ax, ay = qx, qy
+        aim = None
+        aim_dir = None
+        for j in range(seg, n - 1):
+            bx, by = pts[j + 1]
+            segl = math.hypot(bx - ax, by - ay)
+            if aim is None:
+                if remaining + segl >= ld and segl > 1e-9:
+                    f = (ld - remaining) / segl
+                    aim = (ax + f * (bx - ax), ay + f * (by - ay))
+                    aim_dir = math.atan2(by - ay, bx - ax)
+            remaining += segl
+            ax, ay = bx, by
+        if aim is None:
+            aim = pts[-1]
+            if n >= 2:
+                a2, b2 = pts[-2], pts[-1]
+                aim_dir = math.atan2(b2[1] - a2[1], b2[0] - a2[0])
+        total = sum(math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+                    for i in range(n - 1))
+        progress = 1.0 - (remaining / total if total > 1e-9 else 0.0)
+        return aim, aim_dir, remaining, max(0.0, min(1.0, progress))
 
     # -- goal management ------------------------------------------------------
 
     def set_goal(self, goal: Goal, odom) -> Goal:
+        # A re-sent path keeps its progress: start projecting from the
+        # nearest segment instead of segment 0.
+        self._path_seg = 0
+        if goal.path and self.goal is not None and self.goal.path:
+            best = None
+            px, py = odom[0], odom[1]
+            for i in range(len(goal.path) - 1):
+                ax, ay = goal.path[i]
+                bx, by = goal.path[i + 1]
+                vx, vy = bx - ax, by - ay
+                L2 = vx * vx + vy * vy
+                t = 0.0 if L2 < 1e-9 else max(0.0, min(1.0, ((px - ax) * vx + (py - ay) * vy) / L2))
+                d = math.hypot(px - (ax + t * vx), py - (ay + t * vy))
+                if best is None or d < best[0] - 0.05:
+                    best = (d, i)
+            if best is not None:
+                self._path_seg = best[1]
         d = math.hypot(goal.x - odom[0], goal.y - odom[1])
         if goal.reverse_m > 0 and goal.reverse_m > self.config.max_reverse_m:
             raise ValueError(
@@ -237,15 +337,41 @@ class BearingController:
             return self._reverse_step(odom)
         if self.goal.rotate_to is not None:
             return self._turn_step(odom, cmap, now)
-        dx, dy = self.goal.x - ox, self.goal.y - oy
-        dist = math.hypot(dx, dy)
-        goal_b = wrap_pi(math.atan2(dy, dx) - th)
-        detail = {"dist_m": round(dist, 3),
-                  "goal_bearing_deg": round(math.degrees(goal_b), 1)}
-        if dist <= c.reach_tol_m:
-            self.goal = None
-            self.last = Command(0.0, 0.0, "reached", detail)
-            return self.last
+        corner = 1.0
+        if self.goal.path:
+            aim, aim_dir, dist_end, progress = self._path_aim(odom, cmap)
+            dx, dy = aim[0] - ox, aim[1] - oy
+            dist_aim = math.hypot(dx, dy)
+            end_d = math.hypot(self.goal.x - ox, self.goal.y - oy)
+            # Past the last point, or at it: done.
+            dist = min(dist_end, end_d) if progress < 1.0 else end_d
+            goal_b = wrap_pi(math.atan2(dy, dx) - th)
+            detail = {"dist_m": round(dist, 3),
+                      "goal_bearing_deg": round(math.degrees(goal_b), 1),
+                      "path_progress": round(progress, 3),
+                      "path_seg": self._path_seg,
+                      "aim": [round(aim[0], 3), round(aim[1], 3)]}
+            if aim_dir is not None:
+                bend = abs(wrap_pi(aim_dir - th))
+                corner = max(c.corner_speed_frac,
+                             1.0 - (1.0 - c.corner_speed_frac)
+                             * min(1.0, bend / (math.pi / 2)))
+                detail["bend_deg"] = round(math.degrees(bend), 1)
+            if end_d <= c.reach_tol_m or (progress >= 1.0 and end_d <= 0.25):
+                self.goal = None
+                self.last = Command(0.0, 0.0, "reached", detail)
+                return self.last
+        else:
+            dx, dy = self.goal.x - ox, self.goal.y - oy
+            dist = math.hypot(dx, dy)
+            dist_aim = dist
+            goal_b = wrap_pi(math.atan2(dy, dx) - th)
+            detail = {"dist_m": round(dist, 3),
+                      "goal_bearing_deg": round(math.degrees(goal_b), 1)}
+            if dist <= c.reach_tol_m:
+                self.goal = None
+                self.last = Command(0.0, 0.0, "reached", detail)
+                return self.last
         if cmap is None:
             return self._hold("no_depth", detail)
         age = cmap.age_s(now)
@@ -308,7 +434,7 @@ class BearingController:
         # Head straight for the goal only while the chassis-width corridor
         # is clear; otherwise fall through to sector steering so a return
         # just inside the corridor edge is driven around, not parked at.
-        direct_ok = (dist <= goal_clear
+        direct_ok = (dist_aim <= goal_clear
                      and (corridor_ok or abs(goal_b) > math.radians(15.0))
                      and self._sector_until is None)
         if direct_ok:
@@ -412,6 +538,7 @@ class BearingController:
         speed = c.v_max * min(1.0, (chosen_clear - c.stop_m)
                               / max(1e-6, c.slow_m - c.stop_m))
         speed *= min(1.0, max(0.3, dist / c.approach_m))
+        speed *= corner
         vx = speed * max(0.0, math.cos(chosen))
         wz = max(-c.w_max, min(c.w_max, c.k_heading * chosen))
         self.last = Command(round(vx, 4), round(wz, 4), "drive", detail)

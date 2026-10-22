@@ -322,3 +322,36 @@ def test_turn_goal_over_the_drive():
     assert math.degrees(robot.state.odom[2]) == pytest.approx(60, abs=5)
     with pytest.raises(ValueError):
         drive.set_goal(turn_deg=0.5)
+
+
+def test_path_goals_over_the_drive_and_http():
+    drive, robot = make_drive()
+    drive.start()
+    server = NavServer(drive, host="127.0.0.1", port=0).start()
+    base = f"http://127.0.0.1:{server.bound_port}"
+
+    def post(path, body):
+        req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
+                                     method="POST",
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=3) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+    try:
+        assert wait_for(lambda: drive.clearance() is not None)
+        code, body = post("/goal", {"path": "nope"})
+        assert code == 400
+        code, body = post("/goal", {"path_body": [[0.4, 0.0], [0.8, 0.0], [0.8, 0.4]],
+                                    "label": "L"})
+        assert code == 202 and body["goal"]["path_points"] == 3
+        assert body["goal"]["x"] == pytest.approx(0.8, abs=1e-6)
+        assert wait_for(lambda: drive.status()["state"] == "reached", 15.0)
+        st = drive.status()
+        assert st["history"][-1]["travelled_m"] > 0.7
+        assert math.hypot(robot.state.odom[0] - 0.8, robot.state.odom[1] - 0.4) < 0.3
+    finally:
+        server.stop()
+        drive.stop()
+    assert robot.twists[-1] == (0.0, 0.0)

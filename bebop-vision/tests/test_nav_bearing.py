@@ -437,3 +437,102 @@ def test_stalled_reverse_escape_gives_up():
     assert cmd.state == "escape"
     cmd = c.step((0, 0, 0), boxed, now=1.7)
     assert cmd.state == "blocked" and cmd.detail.get("escape") == "reverse stalled"
+
+
+# --- path goals (pure pursuit) -------------------------------------------------
+
+def _speeds(cmds):
+    return [c.vx for c in cmds]
+
+
+def run_path(ctrl, sim, points, map_fn=lambda s: cmap(), max_steps=3000, dt=1 / 15):
+    ctrl.set_goal(Goal.from_path(points), sim.odom)
+    t = 0.0
+    cmds = []
+    traj = []
+    for _ in range(max_steps):
+        cmd = ctrl.step(sim.odom, map_fn(sim), now=t)
+        cmds.append(cmd)
+        traj.append(sim.odom)
+        if cmd.state in ("reached", "aborted_blocked", "stopped"):
+            return cmd, cmds, traj
+        sim.step(cmd.vx, cmd.wz, dt)
+        t += dt
+    raise AssertionError(f"did not finish: {cmds[-1]}")
+
+
+def test_path_goal_follows_an_l_shape_without_stopping_at_the_corner():
+    c = BearingController()
+    sim = Sim()
+    cmd, cmds, traj = run_path(c, sim, [(0.5, 0), (1.5, 0), (1.5, 1.0), (1.5, 2.0)])
+    assert cmd.state == "reached"
+    assert math.hypot(sim.odom[0] - 1.5, sim.odom[1] - 2.0) < 0.3
+    # The corner is passed slowed, not stopped: speed never drops to zero
+    # before the final approach, and the robot does not rotate in place.
+    before_end = [cm for cm in cmds[:-20]]
+    assert min(_speeds(before_end)) > 0.05
+    assert all(cm.state == "drive" for cm in before_end)
+    # Progress reported and monotonic.
+    prog = [cm.detail.get("path_progress", 0) for cm in cmds if cm.detail.get("path_progress") is not None]
+    assert prog[-1] >= 0.9 and all(b >= a - 1e-6 for a, b in zip(prog, prog[1:]))
+    # Passed through the corner area (within 0.35 m of (1.5, 0)).
+    assert min(math.hypot(x - 1.5, y) for x, y, _ in traj) < 0.35
+
+
+def test_path_corner_slows_but_straight_runs_full_speed():
+    c = BearingController()
+    sim = Sim()
+    cmd, cmds, _ = run_path(c, sim, [(1.0, 0), (2.0, 0), (3.0, 0)])
+    # Straight: full speed in the middle.
+    mid = cmds[len(cmds) // 2]
+    assert mid.vx == pytest.approx(c.config.v_max, abs=0.02)
+    c2 = BearingController()
+    sim2 = Sim()
+    cmd2, cmds2, _ = run_path(c2, sim2, [(0.6, 0), (1.0, 0), (1.0, 1.0)])
+    # Near the bend the speed cap applies (bend_deg reported, speed under max).
+    bends = [cm for cm in cmds2 if cm.detail.get("bend_deg", 0) > 45]
+    assert bends and all(cm.vx < c2.config.v_max for cm in bends)
+
+
+def test_resending_a_path_keeps_progress():
+    c = BearingController()
+    sim = Sim()
+    pts = [(0.5, 0), (1.0, 0), (1.5, 0), (2.0, 0.5)]
+    c.set_goal(Goal.from_path(pts), sim.odom)
+    t = 0.0
+    for _ in range(60):                       # drive ~1 m
+        cmd = c.step(sim.odom, cmap(), now=t)
+        sim.step(cmd.vx, cmd.wz, 1 / 15)
+        t += 1 / 15
+    assert sim.odom[0] > 0.9
+    # Re-send the same path (shifted a little, as a follower would after a
+    # yaw correction): the controller keeps aiming ahead, not at point 0.
+    shifted = [(x, y + 0.02) for x, y in pts]
+    c.set_goal(Goal.from_path(shifted), sim.odom)
+    cmd = c.step(sim.odom, cmap(), now=t)
+    assert c._path_seg >= 1
+    assert abs(cmd.detail["goal_bearing_deg"]) < 30
+    assert cmd.detail["aim"][0] > sim.odom[0]
+
+
+def test_path_goal_still_respects_obstacles():
+    c = BearingController(ControllerConfig(blocked_timeout_s=1.0, escape=False))
+    sim = Sim()
+    cmd, cmds, _ = run_path(c, sim, [(1.0, 0), (2.0, 0)],
+                            map_fn=lambda s: cmap(clear=0.4, corridor=0.4))
+    assert cmd.state == "aborted_blocked"
+    assert all(cm.vx <= 0.0 for cm in cmds)
+
+
+def test_body_path_and_validation():
+    g = Goal.from_body_path((1.0, 2.0, math.pi / 2), [(1.0, 0.0), (1.0, 0.5)])
+    assert g.path[0] == pytest.approx((1.0, 3.0))
+    assert g.path[1] == pytest.approx((0.5, 3.0))
+    assert (g.x, g.y) == pytest.approx((0.5, 3.0))
+    with pytest.raises(ValueError):
+        Goal.from_path([])
+    # A single-point path behaves like a point goal.
+    c = BearingController()
+    sim = Sim()
+    cmd, cmds, _ = run_path(c, sim, [(1.0, 0.0)])
+    assert cmd.state == "reached"
