@@ -7,7 +7,8 @@
 
 Pass the firmware's always-on system log(s) as extra paths to populate the
 `power` / `host` views (Protobuf `bebop.system.*`, `system_*.mcap`); they
-rotate hourly, so a long drive may span more than one file:
+rotate daily, so a drive across midnight spans two files. The live one has
+no MCAP footer yet; it is repaired into a temporary copy on load:
 
     python rerun_dashboards/open.py navd_session_*.mcap system_*.mcap
 
@@ -35,6 +36,7 @@ import argparse
 import os
 import shutil
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 
@@ -131,9 +133,20 @@ def main(argv=None):
             # make it the active/default so every new session picks it up.
             rec.send_blueprint(blueprint, make_active=True, make_default=True)
         print(f"loading {path}")
-        rec.log_file_from_path(path)
-        rec.flush()
-        rec.disconnect()
+        load_path, repaired = path, None
+        import mcap_to_rrd  # same directory; repairs a footer-less MCAP
+        if not mcap_to_rrd._has_footer(path):
+            fd, repaired = tempfile.mkstemp(suffix=".mcap")
+            os.close(fd)
+            mcap_to_rrd._repair_mcap(path, repaired)
+            load_path = repaired
+        try:
+            rec.log_file_from_path(load_path)
+            rec.flush()
+            rec.disconnect()
+        finally:
+            if repaired is not None:
+                os.remove(repaired)
     if args.save:
         print(f"wrote {args.save}")
 

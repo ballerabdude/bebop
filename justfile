@@ -46,16 +46,26 @@ deploy HOST:
 
 JETSON := "bebop@bebop.local"
 CAPTURES := "/var/lib/bebop-captures"
+# Firmware HTTP (capture listing + downloads; the capture dir itself is root-only).
+ROBOT_HTTP := "http://bebop.local:9090"
 
 # Start the navd recorder on the robot (teleop from the app; segments
 # open/close with the drive state). Ctrl-C or pkill -TERM to stop.
 collect:
     ssh -t {{JETSON}} 'cd ~/bebop/bebop-vision && sudo .venv/bin/python -u main.py --record-navd {{CAPTURES}} --auto'
 
-# Mirror sessions to the workstation, extract, and print the audit.
+# Mirror drive sessions AND the firmware's health logs to the workstation
+# over the firmware's HTTP capture API (the robot's capture dir is root-only,
+# so rsync as the bebop user cannot read it; the ledger joins the two by time
+# window), extract, print the audit, then write datasets/sessions/sessions.jsonl.
 pull-data:
-    rsync -av --partial {{JETSON}}:{{CAPTURES}}/navd_session_*.mcap bebop-vision/datasets/sessions/
+    cd bebop-vision && .venv/bin/python tools/pull_captures.py --robot {{ROBOT_HTTP}} --dst datasets/sessions
     cd bebop-vision && .venv/bin/python tools/extract_all_navd.py
+    cd bebop-vision && .venv/bin/python tools/session_ledger.py datasets/sessions
+
+# Session ledger only (no transfer): one row per mirrored drive session.
+ledger:
+    cd bebop-vision && .venv/bin/python tools/session_ledger.py datasets/sessions
 
 # Review dashboard: replay ticks, paint hand corrections (port 8099).
 review:
