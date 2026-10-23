@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 CONCEPTS = ["floor", "carpet", "rug", "ground"]
-CONF = 0.35
+CONF = 0.5
 
 
 def label_session(model, sess_dir, role):

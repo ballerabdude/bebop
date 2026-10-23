@@ -311,7 +311,7 @@ def main(argv=None):
                     help="label every Nth extracted frame (default: 3)")
     ap.add_argument("--sam-version", default="sam3.1",
                     help="SAM teacher checkpoint (default: sam3.1)")
-    ap.add_argument("--conf", type=float, default=0.35,
+    ap.add_argument("--conf", type=float, default=0.5,
                     help="SAM score threshold (default: 0.35)")
     ap.add_argument("--device", default="cuda",
                     help="torch device for SAM (default: cuda)")

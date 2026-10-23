@@ -79,7 +79,7 @@ class TRTEncoder:
 
 
 class Sam3ConceptSegmenter:
-    def __init__(self, concepts=None, conf=0.3, device=config.DEVICE, version="sam3.1", resolution=1008,
+    def __init__(self, concepts=None, conf=0.5, device=config.DEVICE, version="sam3.1", resolution=1008,
                  trt_engine=None):
         if resolution != 1008:
             raise ValueError(
@@ -105,7 +105,12 @@ class Sam3ConceptSegmenter:
 
         builder_device = "cuda" if device.startswith("cuda") else "cpu"
         self.model = build_sam3_image_model(checkpoint_path=ckpt, device=builder_device)
-        self.processor = Sam3Processor(self.model, resolution=resolution, device=builder_device)
+        # The processor applies its own score threshold before we ever see
+        # a mask (default 0.5); pass ours through so `conf` is effective below
+        # 0.5 as well.  The post-filter below keeps the same number for the
+        # scores it reports.
+        self.processor = Sam3Processor(self.model, resolution=resolution, device=builder_device,
+                                       confidence_threshold=conf)
         if trt_engine is not None:
             self.model.backbone.forward_image = TRTEncoder(trt_engine, device=builder_device)
             print(f"[sam3] TRT encoder active: {trt_engine}")
