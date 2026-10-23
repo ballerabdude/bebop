@@ -1,4 +1,4 @@
-"""Videoserver HTTP smoke tests (post-BEV-excision guard).
+"""Videoserver HTTP smoke tests.
 
 The 2026-09-09 trim orphaned _body inside _frame and dropped render_depth
 while the depth branch still called it — every request returned empty
@@ -6,16 +6,13 @@ replies. These tests exercise the real handler over HTTP so a handler
 break fails loudly.
 """
 
-import json
 import threading
 import time
 import urllib.request
 
-import cv2
 import numpy as np
 import pytest
 
-from bebop_vision.master_bev import BevGrid
 from bebop_vision.orbbec import StampedFrame
 from bebop_vision.videoserver import STREAMS, VideoServer
 
@@ -59,27 +56,8 @@ def _get(port, path, timeout=5):
                                   timeout=timeout)
 
 
-def _publish_bev(server):
-    shape = (120, 60)
-    grid = BevGrid(
-        occ=np.zeros(shape, np.uint8), raw=np.zeros(shape, np.uint8),
-        coverage=np.ones(shape, bool), source=np.full(shape, 3, np.uint8),
-        confidence=np.full(shape, 200, np.uint8), cell_m=0.05,
-        range_m=6.0, width_m=3.0, stamp_us=1, recv_ts=time.monotonic(),
-        per_camera_age_s={"near": 0.01, "far": 0.01}, plane_ok={},
-        plane={}, contributions={"model": {"engine": "fake.engine",
-                                           "infer_ms": 1.0}},
-        roles=["near", "far"], semantic=np.zeros(shape, np.uint8),
-        wall=np.zeros(shape, bool), ego=np.zeros(shape, bool))
-    ok, jpg = cv2.imencode(".jpg", np.zeros((48, 24, 3), np.uint8))
-    assert ok
-    server.publish_bev(grid, jpg.tobytes())
-    return grid
-
-
 def test_all_streams_serve_jpegs(server):
-    assert "bev" in STREAMS
-    _publish_bev(server)
+    assert STREAMS == ("color_near", "color_far", "depth_near", "depth_far")
     for stream in STREAMS:
         with _get(server._httpd.server_address[1],
                   f"/snapshot?stream={stream}") as r:
@@ -87,20 +65,6 @@ def test_all_streams_serve_jpegs(server):
             body = r.read()
             assert body[:2] == b"\xff\xd8"      # JPEG SOI
             assert len(body) > 100
-
-
-def test_bev_json_endpoint(server):
-    grid = _publish_bev(server)
-    with _get(server._httpd.server_address[1], "/bev") as r:
-        assert r.status == 200
-        assert r.headers.get_content_type() == "application/json"
-        payload = json.loads(r.read())
-    assert payload["rows"] == grid.rows
-    assert payload["cols"] == grid.cols
-    assert payload["encoding"] == "rle_pairs"
-    assert payload["counts"]["unknown"] >= 0
-    assert payload["contributions"]["model"]["engine"] == "fake.engine"
-    assert payload["published_age_s"] >= 0.0
 
 
 def test_register_replaces_and_closes_predecessor():

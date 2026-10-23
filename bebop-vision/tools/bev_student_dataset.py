@@ -14,7 +14,7 @@ Typical flow on the workstation::
     python tools/bev_student_dataset.py split --val-sessions <one-session>
     python tools/bev_student_dataset.py report
 
-    # 4. a run directory with TensorBoard
+    # 4. (removed 2026-10-23 with the BEV trainer) a run directory with TensorBoard
     python tools/bev_student_dataset.py init-run --run-id dino-vits16-m1
     tensorboard --logdir runs/bev-student
 

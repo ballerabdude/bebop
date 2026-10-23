@@ -1,5 +1,11 @@
 # BEV student overnight experiments — 2026-10-19
 
+> **Retired 2026-10-23.** The BEV student runtime, model, training and evaluation tools were removed
+> from the tree: the navigation redo does not use a BEV (see [`path-model.md`](path-model.md)).
+> The dataset extractor, the SAM x depth teacher, the learned chassis footprint and the geometry
+> helpers stay. This document is kept as the measurement record; file paths in it may be gone
+> (`git log -- bebop-vision/bebop_vision/bev_service.py`).
+
 Follow-up: [SegFormer-B5 and resolution experiments](bev-segformer.md).
 
 This is the lab notebook for the first improvement pass after the model-only

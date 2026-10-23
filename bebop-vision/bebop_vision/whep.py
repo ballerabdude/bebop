@@ -78,7 +78,7 @@ class WhepSession:
     """One client: NVENC H.264 -> RTP -> webrtcbin.
 
     `input_kind="jpeg"` takes camera MJPEG bytes; `input_kind="bgr"` takes
-    a BGR ndarray of `width`x`height` (server-rendered depth/BEV).
+    a BGR ndarray of `width`x`height` (server-rendered depth).
     Not thread-safe for concurrent `push`; the videoserver drives it from
     a single feeder thread.
     """

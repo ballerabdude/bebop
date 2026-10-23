@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 
 from bebop_vision.bev_student_labels import GridSpec, LabelConfig, ego_mask
-from bebop_vision.bev_student_runtime import BevStudentRuntime
 from bebop_vision.master_bev import load_ego_raster, rasterize_ego
 from tools.bev_ego_from_data import derive_ego_mask, extent_m
 
@@ -115,26 +114,6 @@ def test_label_config_mask_file_replaces_rectangle(tmp_path, monkeypatch):
     assert learned.any() and not np.array_equal(learned, rect)
     # the 55 cm rectangle reaches further forward than the learned 30 cm body
     assert rect.any(axis=1).sum() > learned.any(axis=1).sum()
-
-
-def test_runtime_uses_learned_ego_raster(tmp_path, monkeypatch):
-    import bebop_vision.bev_student_runtime as rt_mod
-    p_obs, p_body = _maps()
-    mask, _, _ = derive_ego_mask(p_obs, p_body, CELL)
-    _write_raster(tmp_path / "ego_mask.npz", mask)
-    monkeypatch.setattr(rt_mod, "CONFIG_DIR", tmp_path)
-    rt = BevStudentRuntime.__new__(BevStudentRuntime)
-    grid_meta = {"rows": 360, "cols": 640, "range_m": 6.0, "width_m": 4.0,
-                 "cell_m": None, "cell_x_m": 6.0 / 360, "cell_y_m": 4.0 / 640}
-    rt.configure_grid(grid_meta, {"bev_student": {"ego": {
-        "x_range_m": [0.0, 0.55], "y_range_m": [-0.22, 0.22],
-        "mask_file": "ego_mask.npz"}}})
-    assert rt.ego_source.endswith("ego_mask.npz")
-    learned = rt.ego_static.copy()
-    rt.configure_grid(grid_meta, {"bev_student": {"ego": {
-        "x_range_m": [0.0, 0.55], "y_range_m": [-0.22, 0.22]}}})
-    assert rt.ego_source == "rect"
-    assert learned.any() and not np.array_equal(learned, rt.ego_static)
 
 
 def test_apply_to_labels_rewrites_ego_layer(tmp_path):

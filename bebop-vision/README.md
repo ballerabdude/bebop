@@ -2,23 +2,23 @@
 
 Data-collection and dataset-labeling stack for the bebop robot: the
 Orbbec RGB-D rig is recorded into **navd MCAP sessions** (dual-camera
-color + lossless depth + cmd_vel/odom/goal + a geometric BEV teacher
-grid), auto-labeled with SAM 3.1 floor concepts fused by measured depth,
+color + lossless depth + cmd_vel/odom + camera IMU), auto-labeled with SAM 3.1 floor concepts fused by measured depth,
 and reviewed/corrected in a dashboard — the dataset any navigation
 approach (learned or classical) trains and evaluates from.
 
 This tree intentionally carries **no driving code**. Drive the robot
 from the app (manual teleop); the recorder captures whatever you do.
-The navigation research (BEV student, end-to-end trajectory student,
-TensorRT runtime) lives on the `exp/navd-ai-20260909` branch.
+The end-to-end trajectory student lives on the `exp/navd-ai-20260909`
+branch; the BEV student (2026-10) was removed from main on 2026-10-23. The
+current navigation direction is `docs/path-model.md`.
 
 ## How a session becomes training data
 
 ```
  record            extract              SAM 3.1 labels          fuse                    review
  teleop + app ----> navd MCAP  --------> tools/sam_floor_label -> tools/fuse_navd_labels -> dashboard
- goals + odom      (tools/             (floor/carpet/rug/     (SAM floor gated by     (paint corrections
- (app Navigate)    mcap_extract.py)    ground per camera)     measured depth -> 60x60  as `hand` labels)
+ twist + odom      (tools/             (floor/carpet/rug/     (SAM floor gated by     (paint corrections
+ + camera IMU      mcap_extract.py)    ground per camera)     measured depth -> 60x60  as `hand` labels)
                                                               teacher per tick)
 ```
 (The recorded MCAP carries no BEV grid — labels are generated purely
@@ -26,9 +26,9 @@ from SAM × measured depth.)
 
 - **Record** — `main.py --record-navd <dir> --auto` opens/closes MCAP
   segments with the drive state (wheels armed, no estop) and prunes under
-  a disk budget. Navigation goals from the app are recorded per tick —
-  **teleop toward an active waypoint**: goals in the data are the signal
-  goal-following models train on.
+  a disk budget. Each tick carries the operator twist, odometry and the
+  camera IMU; there is no goal concept in the pipeline (see
+  `docs/data-collection.md`).
 - **Extract** — `tools/extract_all_navd.py` unpacks MCAPs into
   `datasets/navd-v0/<session>/{color,color_far,depth,labels,manifest.jsonl}`.
 - **Label** — `tools/sam_floor_label.py near|far` prompts SAM 3.1 with
@@ -43,15 +43,14 @@ from SAM × measured depth.)
 
 | Path | Purpose |
 |---|---|
-| `main.py` | Entry point: navd MCAP recorder (rig + operator video + goals) |
+| `main.py` | Entry point: navd MCAP recorder (rig + operator video + places) |
 | `bebop_vision/orbbec.py` | Orbbec rig: cameras, sync, intrinsics, rig YAML |
 | `bebop_vision/camera.py` | Threaded MJPEG/RTSP/file consumer with reconnect |
-| `bebop_vision/robot.py` | Protobuf-over-WS runtime client (telemetry, goals) |
+| `bebop_vision/robot.py` | Protobuf-over-WS runtime client (telemetry, twists, estop) |
 | `bebop_vision/videoserver.py` | Operator WebRTC (WHEP) streams (`:9092/whep?stream=...`) |
 | `bebop_vision/whep.py` | webrtcbin H.264 pipeline + offer/answer per client |
 | `bebop_vision/recorder_mcap.py` | navd MCAP writer (10 Hz ticks, shared log_time) |
 | `bebop_vision/sam3_concepts.py` | SAM 3.1 text-prompted concept segmenter (teacher) |
-| `bebop_vision/goals.py` | Navigation-goal slot (heading / odom point) |
 | `tools/mcap_extract.py` | MCAP session -> navd-v0 training layout |
 | `tools/extract_all_navd.py` | Extract + audit every mirrored session |
 | `tools/sam_floor_label.py` | SAM 3.1 floor labels per extracted session |
@@ -63,9 +62,9 @@ from SAM × measured depth.)
 | `weights/` | Checkpoints (gitignored) |
 | `datasets/` | Extracted datasets (gitignored) |
 
-Navigation research (BEV student, trajectory student, TensorRT runtime,
-drive paths) lives on the `exp/navd-ai-20260909` branch — including its
-own README additions and `docs/navd-traj.md`.
+The trajectory-student research lives on the `exp/navd-ai-20260909`
+branch (its README additions and `docs/navd-traj.md`); the BEV student was
+removed from main on 2026-10-23 (`git log -- bebop-vision/train_bev_student.py`).
 
 ## Install
 
@@ -124,9 +123,9 @@ progress into telemetry.
 1. On the Jetson: `.venv/bin/python main.py --record-navd /var/lib/bebop-captures --auto`
 2. From the app: enable wheels, teleop. Segments open/close with the
    drive state automatically.
-3. Follow `docs/data-collection.md` for the per-session protocol —
-   especially **goal-conditioned legs** (app Navigate waypoint + teleop
-   toward it), which are the rarest and most valuable kind of tick.
+3. Follow `docs/data-collection.md` for the per-session protocol:
+   forward teleop, one mission per segment, repeated doorway and junction
+   passes, planted clutter and recovery starts (see `docs/path-model.md`).
 4. Pull to the workstation (`just pull-data`), extract + audit
    (`just extract`), then review in the dashboard
    (`tools/dashboard_api.py`, port 8099).

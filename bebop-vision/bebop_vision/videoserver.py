@@ -1,7 +1,7 @@
 """Operator video for the Orbbec rig — WebRTC (WHEP) only.
 
 Lives INSIDE the bebop-vision process that owns the cameras (camera
-exclusivity, docs §2.7) — main.py --goal-drive / --record-navd start it
+exclusivity, docs §2.7) — main.py --record-navd starts it
 after the rig opens.
 
 Routes:
@@ -17,7 +17,6 @@ The old MJPEG (`/video`) and fragmented-MP4 (`codec=h264|h265`) operator
 paths were removed once every client moved to WebRTC.
 """
 
-import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,7 +26,7 @@ import cv2
 import numpy as np
 
 PACING_S = 1.0 / 20.0      # serve at most 20 fps; frames arrive at 15
-STREAMS = ("color_near", "color_far", "depth_near", "depth_far", "bev")
+STREAMS = ("color_near", "color_far", "depth_near", "depth_far")
 DEPTH_VIEW = (424, 240)    # rendered depth size (matches render_depth)
 CONNECT_TIMEOUT_S = 15.0   # drop a session whose ICE never reaches CONNECTED
 IDLE_TIMEOUT_S = 8.0       # drop a connected session that stops getting frames
@@ -40,21 +39,6 @@ def render_depth(depth_mm):
     vis = cv2.applyColorMap(v.astype(np.uint8), cv2.COLORMAP_TURBO)
     vis[~m] = 0
     return cv2.resize(vis, DEPTH_VIEW, interpolation=cv2.INTER_AREA)
-
-
-class _BevCam:
-    """`read()`-shaped adapter so the WHEP feeder can stream the BEV JPEG.
-
-    Returns the current published slot dict; ``publish_bev`` replaces the
-    dict, so the feeder's identity check sees exactly one push per grid.
-    """
-
-    def __init__(self, server):
-        self.server = server
-
-    def read(self):
-        with self.server._bev_lock:
-            return self.server._bev
 
 
 def _whep_feed(session, cam, kind, label="", on_done=None):
@@ -103,9 +87,7 @@ def _whep_feed(session, cam, kind, label="", on_done=None):
             fr = cam.read() if cam else None
             if fr is not None and fr is not last:
                 last = fr
-                if kind == "bev":
-                    data = (fr or {}).get("jpeg")
-                elif kind == "color":
+                if kind == "color":
                     data = getattr(fr, "color_jpeg", None)
                 else:
                     data = render_depth(fr.depth) if fr.depth is not None else None
@@ -132,17 +114,6 @@ class VideoServer:
         self._thread = None
         self._sessions = {}
         self._sessions_lock = threading.Lock()
-        # Latest fused master-BEV grid + rendered JPEG, published by
-        # BevService.  Kept as one object so /bev and /snapshot?stream=bev
-        # always refer to the same tick.
-        self._bev = None
-        self._bev_lock = threading.Lock()
-
-    def publish_bev(self, grid, jpeg=None):
-        """Publish one fused master-BEV tick (grid + optional JPEG)."""
-        with self._bev_lock:
-            self._bev = {"grid": grid, "jpeg": jpeg,
-                         "ts": time.monotonic()}
 
     def _register(self, key, session):
         """Adopt `session` as the one for `key`, closing any predecessor.
@@ -178,21 +149,14 @@ class VideoServer:
                 name = (q.get("stream") or ["color_near"])[0]
                 if name not in STREAMS:
                     name = "color_near"
-                if name == "bev":
-                    return name, None, "bev"
                 kind, role = name.rsplit("_", 1)
                 return name, role, kind
 
             def _frame(self, role, kind):
-                if kind == "bev":
-                    with server._bev_lock:
-                        return server._bev
                 cam = server.rig.cameras.get(role)
                 return cam.read() if cam else None
 
             def _body(self, fr, kind):
-                if kind == "bev":
-                    return fr.get("jpeg") if fr else None
                 if kind == "color":
                     return fr.color_jpeg
                 if fr.depth is None:
@@ -207,23 +171,7 @@ class VideoServer:
                 # from a reconnecting client otherwise leaves a handler
                 # thread + socket alive until timeout, leaking fds.
                 self.close_connection = True
-                if self.path.startswith("/bev"):
-                    with server._bev_lock:
-                        slot = server._bev
-                    if slot is None or slot.get("grid") is None:
-                        self.send_error(503, "no bev grid")
-                        return
-                    payload = slot["grid"].to_dict()
-                    payload["published_age_s"] = round(
-                        time.monotonic() - slot["ts"], 3)
-                    body = json.dumps(payload).encode()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                elif self.path.startswith("/snapshot"):
+                if self.path.startswith("/snapshot"):
                     name, role, kind = self._pick()
                     fr = self._frame(role, kind)
                     if fr is None:
@@ -278,8 +226,7 @@ class VideoServer:
                 except ValueError:
                     length = 0
                 offer = self.rfile.read(length).decode("utf-8", "replace")
-                cam = (_BevCam(server) if kind == "bev"
-                       else server.rig.cameras.get(role))
+                cam = server.rig.cameras.get(role)
                 fr = None
                 deadline = time.monotonic() + 5.0
                 while fr is None and time.monotonic() < deadline:
@@ -290,9 +237,7 @@ class VideoServer:
                     self.send_error(503, "no frame")
                     return
                 fps = float(getattr(fr, "fps", 0) or 0) or 15.0
-                if kind == "bev":
-                    session_kwargs = dict(input_kind="jpeg", fps=10.0)
-                elif kind == "color":
+                if kind == "color":
                     session_kwargs = dict(input_kind="jpeg", fps=fps)
                 else:
                     session_kwargs = dict(input_kind="bgr", fps=fps,

@@ -16,7 +16,9 @@ The on-disk contract (all under ``bebop-vision/datasets/bev-student/``)::
     splits/drive_split.json          train/val by drive, never by frame
     meta/label_stats.json            aggregate label stats
 
-Training runs live outside the dataset::
+``RUNS_ROOT`` / ``ensure_run_layout`` give the ``runs/bev-student/<run_id>/{tb,checkpoints,export}``
+layout the BEV student trainer used (``train_bev_student.py``, removed from the tree
+2026-10-23); kept as a generic run-directory helper for the next trainer (docs/path-model.md).
 
     runs/bev-student/<run_id>/
         tb/                          TensorBoard event files

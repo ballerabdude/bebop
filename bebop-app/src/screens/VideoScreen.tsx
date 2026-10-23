@@ -46,14 +46,13 @@ export function VideoScreen({
   >("loading");
   const [conn, setConn] = useState<RuntimeConnectionState>("disconnected");
   // Concurrent tiles, same model as the teleop screen. All four camera
-  // views plus the BEV planner view open by default here — this screen
+  // views open by default here — this screen
   // exists to inspect the rig and what autonomy sees.
   const [videoStreams, setVideoStreams] = useState<string[]>([
     "color_near",
     "depth_near",
     "color_far",
     "depth_far",
-    "bev",
   ]);
   const toggleStream = (id: string) =>
     setVideoStreams((cur) =>
@@ -149,5 +148,4 @@ const VIDEO_STREAM_OPTIONS: { id: string; label: string }[] = [
   { id: "depth_near", label: "Depth" },
   { id: "color_far", label: "Far" },
   { id: "depth_far", label: "Far depth" },
-  { id: "bev", label: "BEV" },
 ];

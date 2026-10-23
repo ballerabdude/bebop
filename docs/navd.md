@@ -1,5 +1,12 @@
 # navd — Depth-based goal-conditioned obstacle avoidance
 
+> **Historical (retired 2026-10-23).** The navd planner (`--goal-drive` / `--navd-model`, removed in
+> d99a250, archived on `exp/navd-ai-20260909`), the stop-cone nav stack (1f22b61, 2026-10-22) and the
+> BEV student with its operator `bev` stream (`VideoServer.publish_bev`, removed 2026-10-23) are gone
+> from the tree; the current direction is [`path-model.md`](path-model.md). The Status header below is
+> the 2026-09-07 record. Still current: §2.8 (serial capture / GIL), §3 (rig, MCAP recorder), §6.2 (rig
+> geometry), §9 (OBSBOT retirement). File paths in it may be gone.
+
 Status: **Phase A + recorder v2 + OBSBOT retirement (§9, all four stages)
 + Phase B through export AND runtime swap shipped** (2026-09-07, deployed
 to the robot). Phase A (§6) is implemented and bench-verified except the

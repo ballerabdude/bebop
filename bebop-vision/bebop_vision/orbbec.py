@@ -547,7 +547,7 @@ class OrbbecCamera:
                 _dump_intrinsics(self._pipeline, self.serial, self.config_dir)
             except Exception as exc:
                 print(f"[orbbec] {self.role}: could not auto-provision intrinsics "
-                      f"({exc}); BEV will fail until they exist")
+                      f"({exc}); depth geometry consumers will fail until they exist")
         print(f"[orbbec] {self.role}({self.serial}): depth {w}x{h}@{fps} "
               f"color={'on' if self.color_profile else 'off'}"
               f"{' (' + str(self.color_format).split('.')[-1] + ')' if self.color_profile else ''}"
@@ -741,7 +741,7 @@ class OrbbecCamera:
 
 
 class OrbbecRig:
-    """Both cameras + the rig config; the BEV worker's capture front end.
+    """Both cameras + the rig config; the capture front end for the recorder.
 
     `roles` optionally restricts which configured cameras open (e.g.
     ("near",) for near-authoritative operation while the far camera's

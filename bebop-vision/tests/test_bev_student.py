@@ -479,14 +479,6 @@ def test_label_config_reads_splat_from_rig_yaml():
     assert LabelConfig.from_config({}).splat_footprint is False
 
 
-def test_grid_from_args_width_override():
-    from bebop_vision.bev_student import grid_from_args
-    g = grid_from_args({"bev_rows": 360, "bev_cols": 640, "bev_width": 4.0})
-    assert (g.rows, g.cols, g.width_m, g.range_m) == (360, 640, 4.0, 6.0)
-    assert g.cell_y_m == pytest.approx(4.0 / 640)
-    assert grid_from_args({}).width_m == 3.0
-
-
 def test_rect_cull_keeps_floor_beside_chassis_and_drops_inside():
     """The rectangular near-body cull replaces the 0.55 m dead disc: floor
     beside the chassis (inside the old disc) survives, points inside the

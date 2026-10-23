@@ -119,7 +119,7 @@
 ## Testing on the Jetson
 
 - Python tests: `cd ~/bebop/bebop-vision && .venv/bin/python -m pytest
-  tests/ -q` (135 tests, no hardware needed). Run after every deploy.
+  tests/ -q` (331 tests, no hardware needed). Run after every deploy.
 - Rust tests are CI-side (fmt + clippy + `cargo test`: the workspace in
   `jetson-agent`, and `firmware/bebop-linux`); on-Jetson builds are for
   deploy only, never for testing.
@@ -151,8 +151,11 @@
 - **Drop `--nav` from `/etc/bebop/vision.env` before deploying this**;
   `main.py` no longer accepts it and the service would fail to start.
 - The old `--goal-drive` / `--navd-model` planner is gone (d99a250,
-  2026-09-09; archived on `exp/navd-ai-20260909`). The BEV student is
-  disabled on the robot (`--no-bev`, ~5 W of GPU saved).
+  2026-09-09; archived on `exp/navd-ai-20260909`). The BEV student
+  (runtime, model, training and eval tools) was removed from the tree on
+  2026-10-23; the dataset extractor, SAM teacher, learned ego footprint and
+  geometry helpers stay. **Drop `--no-bev` from `/etc/bebop/vision.env`**
+  before deploying: `main.py` no longer accepts it.
 - Wheel odometry heading over-read in-place turns ~2x on carpet live on
   2026-10-21; the camera gyros are the heading truth (optical->body
   rotation, third row, as the removed `nav/pose.py` did). Fitted drive
@@ -204,14 +207,15 @@
 - GIL: pyorbbecsdk capture must stay serial (§2.8 of docs/navd.md);
   thread pools are fine for numpy/cv2 work only.
 - OpenBLAS/OpenMP: on the Thor, numpy's OpenBLAS worker pool spin-waits
-  after even tiny matmuls. A standalone `--bev` run measured 429% CPU with
-  five BLAS threads at 70-90% each; the actual BEV tick was ~35 ms. `main.py`
+  after even tiny matmuls. A standalone BEV run (since removed) measured 429% CPU
+  with five BLAS threads at 70-90% each for a ~35 ms tick. `main.py`
   and `master_bev.py` set `OPENBLAS_NUM_THREADS`/`OMP_NUM_THREADS`/`MKL_*`/
   `NUMEXPR_*`/`VECLIB_*` to 1 **before** numpy is imported. Keep that at the
   top of any new entry point; otherwise the idle pool burns cores.
 - Dual cameras run matched 30 fps under hardware sync (both cams negotiate
   848x480@30 on the Thor). The old "matched 15 fps / 30+30 starves the GIL"
   rule was measured on the Orin Nano with the old BEV worker; without a BEV
-  the Thor recorder sustains ~29 Hz at 30+30. The learned BEV
-  (`main.py --bev-model`, `docs/bev-student.md`) is a separate 10 Hz worker over
-  both depth streams; `--no-bev` disables it during `--record-navd`.
+  the Thor recorder sustains ~29 Hz at 30+30 (the 10 Hz BEV worker is gone).
+  The 2026-10-18 recorder stalls (2-18 per session, 0.5-1.2 s; frames, odom
+  and gyro lost together) have not recurred in 10 segments recorded since
+  `--no-bev`, but their cause is not established; see `docs/path-model.md`.
