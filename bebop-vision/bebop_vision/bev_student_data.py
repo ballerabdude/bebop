@@ -16,9 +16,6 @@ The on-disk contract (all under ``bebop-vision/datasets/bev-student/``)::
     splits/drive_split.json          train/val by drive, never by frame
     meta/label_stats.json            aggregate label stats
 
-``RUNS_ROOT`` / ``ensure_run_layout`` give the ``runs/bev-student/<run_id>/{tb,checkpoints,export}``
-layout the BEV student trainer used (``train_bev_student.py``, removed from the tree
-2026-10-23); kept as a generic run-directory helper for the next trainer (docs/path-model.md).
 
     runs/bev-student/<run_id>/
         tb/                          TensorBoard event files
@@ -42,7 +39,6 @@ from .bev_student_labels import (CLASS_NAMES, GridSpec, load_label_npz,
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ROOT = REPO_ROOT / "datasets" / "bev-student"
-RUNS_ROOT = REPO_ROOT / "runs" / "bev-student"
 
 
 def ensure_layout(root=DEFAULT_ROOT):
@@ -58,18 +54,6 @@ def ensure_layout(root=DEFAULT_ROOT):
         "meta": root / "meta",
     }
 
-
-def ensure_run_layout(run_id, root=RUNS_ROOT):
-    """Create a training-run directory (TensorBoard + checkpoints + export)."""
-    run = Path(root) / str(run_id)
-    for sub in ("tb", "checkpoints", "export"):
-        (run / sub).mkdir(parents=True, exist_ok=True)
-    return {
-        "run": run,
-        "tb": run / "tb",
-        "checkpoints": run / "checkpoints",
-        "export": run / "export",
-    }
 
 
 def session_dirs(root=DEFAULT_ROOT):

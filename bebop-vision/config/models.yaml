@@ -57,21 +57,6 @@ models:
     revision: main
     gated: true
 
-  # --- Local / on-robot trained --------------------------------------------
-  - id: navd
-    name: navd (BEV student)
-    description: Locally trained bird's-eye-view navigation model (ONNX).
-    kind: local
-    purpose: navigation
-    path: navd.onnx
-
-  - id: navd_traj
-    name: navd-traj
-    description: Locally trained end-to-end trajectory model (ONNX).
-    kind: local
-    purpose: navigation
-    path: navd_traj.onnx
-
   # --- Voice / speech-to-speech (TensorRT Edge-LLM) ------------------------
   # Full-repo snapshot: the Edge-LLM checkpoint-direct builder needs the whole
   # repo (config, tokenizer, chat template, safetensors shards), not a file

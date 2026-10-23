@@ -45,7 +45,6 @@ from SAM × measured depth.)
 |---|---|
 | `main.py` | Entry point: navd MCAP recorder (rig + operator video + places) |
 | `bebop_vision/orbbec.py` | Orbbec rig: cameras, sync, intrinsics, rig YAML |
-| `bebop_vision/camera.py` | Threaded MJPEG/RTSP/file consumer with reconnect |
 | `bebop_vision/robot.py` | Protobuf-over-WS runtime client (telemetry, twists, estop) |
 | `bebop_vision/videoserver.py` | Operator WebRTC (WHEP) streams (`:9092/whep?stream=...`) |
 | `bebop_vision/whep.py` | webrtcbin H.264 pipeline + offer/answer per client |

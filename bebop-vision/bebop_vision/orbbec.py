@@ -18,7 +18,7 @@ OrbbecViewer before running.
   setting (a preset bundles its own work mode). Replaces "High Density"
   with the built-in "High Accuracy" preset (2026-09-07); the G33X custom
   preset bin is Gemini 330-only (firmware ERR_MISMATCH on pid 2059).
-- Threading mirrors `camera.py`: one capture thread per camera feeding a
+- Threading mirrors the old OBSBOT `camera.py` reader: one capture thread per camera feeding a
   latest-wins slot. Open failure at startup is a hard error (bench tool);
   a mid-run drop leaves the slot stale so the deadman stops the robot —
   the control loop never crashes on a camera exception.

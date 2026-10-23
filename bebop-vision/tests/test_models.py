@@ -17,10 +17,9 @@ def test_real_catalog_loads_and_has_expected_entries():
     assert sam.purpose == "segmentation"
     assert sam.downloadable
 
-    # Local entries exist and are not downloadable.
-    local = [s for s in catalog.values() if s.kind == "local"]
-    assert local, "expected at least one local catalog entry"
-    assert all(not s.downloadable for s in local)
+    # Local (kind: local) entries are never downloadable.
+    local = models.spec_from_mapping({"id": "x", "kind": "local", "path": "x.onnx"})
+    assert not local.downloadable
     # Two segmentation models -> the operator can pick between them.
     assert sum(1 for s in catalog.values() if s.purpose == "segmentation") >= 2
 

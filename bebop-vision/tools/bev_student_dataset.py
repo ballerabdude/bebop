@@ -15,7 +15,6 @@ Typical flow on the workstation::
     python tools/bev_student_dataset.py report
 
     # 4. (removed 2026-10-23 with the BEV trainer) a run directory with TensorBoard
-    python tools/bev_student_dataset.py init-run --run-id dino-vits16-m1
     tensorboard --logdir runs/bev-student
 
 The original MCAPs are never modified.  Splits are by drive/session, never
@@ -33,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from bebop_vision.bev_student_data import (  # noqa: E402
-    DEFAULT_ROOT, RUNS_ROOT, dataset_report, ensure_layout, ensure_run_layout,
+    DEFAULT_ROOT, dataset_report, ensure_layout,
     print_report, session_dirs, split_by_drive, write_dataset_stats,
     write_sessions_manifest,
 )
@@ -59,7 +58,6 @@ def cmd_extract(args):
     write_sessions_manifest(args.root)
     print(f"layout: {paths['root']}")
     print(f"sessions: {paths['sessions']}")
-    print(f"runs: {RUNS_ROOT}")
 
 
 def cmd_index(args):
@@ -96,15 +94,6 @@ def cmd_report(args):
         raise SystemExit(1)
 
 
-def cmd_init_run(args):
-    paths = ensure_run_layout(args.run_id, args.runs_root)
-    print(f"run:         {paths['run']}")
-    print(f"tensorboard: {paths['tb']}")
-    print(f"checkpoints: {paths['checkpoints']}")
-    print(f"export:      {paths['export']}")
-    print(f"view:       tensorboard --logdir {Path(args.runs_root)}")
-
-
 def cmd_layout(args):
     paths = ensure_layout(args.root)
     print(f"root:     {paths['root']}")
@@ -112,7 +101,6 @@ def cmd_layout(args):
     print(f"sessions: {paths['sessions']}")
     print(f"splits:   {paths['splits']}")
     print(f"meta:     {paths['meta']}")
-    print(f"runs:     {RUNS_ROOT}")
 
 
 def main(argv=None):
@@ -143,10 +131,6 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_report)
 
-    p = sub.add_parser("init-run", help="create a TensorBoard run directory")
-    p.add_argument("--run-id", required=True)
-    p.add_argument("--runs-root", default=str(RUNS_ROOT))
-    p.set_defaults(func=cmd_init_run)
 
     p = sub.add_parser("layout", help="print the dataset/run layout")
     p.set_defaults(func=cmd_layout)
