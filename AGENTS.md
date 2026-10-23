@@ -35,7 +35,9 @@
   `/usr/local/bin/bebop-linux`; config `/etc/bebop/bebop_wheeled.yaml`.
 - Other services: `bebop-agent` owns port 9091 (its `/healthz` + setup
   WebSocket) — do NOT use 9091 for anything new. Firmware WS/HTTP is 9090,
-  the bebop-vision videoserver is 9092, the places service is 9095, voice is
+  the bebop-vision videoserver is 9092 (WHEP video, `/snapshot`, and the
+  drive-note routes `POST /intent`, `POST /event`, `GET /notes` that write
+  into the active MCAP segment), the places service is 9095, voice is
   9093, and the `bebop-models` supervisor is 9094. `bebop-vision.service`
   (root) runs the Python recorder; it and `bebop-voice.service` ship
   un-enabled so the operator owns the GPU and can start/stop them from the app
@@ -119,7 +121,7 @@
 ## Testing on the Jetson
 
 - Python tests: `cd ~/bebop/bebop-vision && .venv/bin/python -m pytest
-  tests/ -q` (331 tests, no hardware needed). Run after every deploy.
+  tests/ -q` (364 tests, no hardware needed). Run after every deploy.
 - Rust tests are CI-side (fmt + clippy + `cargo test`: the workspace in
   `jetson-agent`, and `firmware/bebop-linux`); on-Jetson builds are for
   deploy only, never for testing.

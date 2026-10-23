@@ -6,8 +6,10 @@ replies. These tests exercise the real handler over HTTP so a handler
 break fails loudly.
 """
 
+import json
 import threading
 import time
+import urllib.error
 import urllib.request
 
 import numpy as np
@@ -91,3 +93,71 @@ def test_register_replaces_and_closes_predecessor():
 
     v._unregister("color_near", b)
     assert "color_near" not in v._sessions
+
+
+def _post(port, path, payload):
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    return urllib.request.urlopen(req, timeout=5)
+
+
+def test_notes_routes_roundtrip():
+    from bebop_vision.session_notes import SessionNotes
+    notes = SessionNotes()
+    v = VideoServer(FakeRig(), port=0, notes=notes)
+    v.start()
+    try:
+        port = v._httpd.server_address[1]
+        # a marker with no segment recording is refused, not silently lost
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _post(port, "/event", {"kind": "exclude"})
+        assert ei.value.code == 409
+        notes.begin_segment("segment")
+        with _post(port, "/intent", {"text": "to the kitchen", "from": "office",
+                                     "to": "kitchen"}) as r:
+            assert r.status == 200
+            assert json.loads(r.read())["intent"]["to"] == "kitchen"
+        with _post(port, "/event", {"kind": "obstacle", "note": "sock at 1 m"}) as r:
+            assert r.status == 200
+        with _get(port, "/notes") as r:
+            snap = json.loads(r.read())
+        assert snap["intent"]["text"] == "to the kitchen"
+        assert snap["events_pending"] == 1
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _post(port, "/event", {"kind": "not a token!"})
+        assert ei.value.code == 400
+        with _post(port, "/intent", {"clear": True}) as r:
+            assert json.loads(r.read())["intent"]["text"] == ""
+    finally:
+        v.stop()
+
+
+def test_notes_routes_without_notes_are_503(server):
+    port = server._httpd.server_address[1]
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        _post(port, "/intent", {"text": "x"})
+    assert ei.value.code == 503
+
+
+def test_notes_routes_reject_missing_and_chunked_bodies():
+    import http.client
+    from bebop_vision.session_notes import SessionNotes
+    notes = SessionNotes()
+    notes.set_intent("keep me")
+    v = VideoServer(FakeRig(), port=0, notes=notes)
+    v.start()
+    try:
+        port = v._httpd.server_address[1]
+        for headers, body in (({"Content-Length": "0"}, b""),
+                              ({"Transfer-Encoding": "chunked"}, b"0\r\n\r\n"),
+                              ({"Content-Length": "5"}, b"[1,2]"),
+                              ({"Content-Length": "4"}, b"{oop")):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("POST", "/intent", body=body, headers=headers)
+            resp = conn.getresponse()
+            assert resp.status == 400, (headers, body, resp.status)
+            resp.read(); conn.close()
+        assert notes.intent().text == "keep me"     # nothing was cleared
+    finally:
+        v.stop()

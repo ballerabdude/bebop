@@ -325,6 +325,7 @@ answer is spoken — text streams and TTS is synthesised per sentence throughout
 | `where_am_i`, `list_places`, `place_facts` | read place memory (HTTP `:9095`) | `tools_enabled` |
 | `remember_place`, `add_place_fact`, `rename_place`, `forget_place` | write it | `tools_enabled` |
 | `robot_status` | read mode / E-STOP / armed wheels / odom / battery | `tools_enabled` |
+| `note_drive_intent`, `mark_drive_event` | write the drive intent / a marker into the active recording (HTTP `:9092` `/intent`, `/event`) | `tools_enabled` |
 | `move_relative` | bounded odom-relative motion | **`motion_enabled`** |
 
 The place tools go over HTTP because the places service lives in the

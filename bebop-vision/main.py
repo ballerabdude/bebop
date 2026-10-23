@@ -37,6 +37,23 @@ def _dir_bytes(path):
     return sum(f.stat().st_size for f in Path(path).glob("*.mcap") if f.is_file())
 
 
+def _session_path(out_dir, stamp):
+    """navd_session_<stamp>.mcap, suffixed _1, _2, ... when that name exists.
+
+    Segment names have whole-second resolution and the recorder opens its
+    file exclusively; without this a roll completing within the same second
+    would collide with the segment just closed.
+    """
+    base = Path(out_dir) / f"navd_session_{stamp}.mcap"
+    if not base.exists():
+        return base
+    for i in range(1, 1000):
+        cand = Path(out_dir) / f"navd_session_{stamp}_{i}.mcap"
+        if not cand.exists():
+            return cand
+    raise OSError(f"too many segments named {base.name}")
+
+
 def _prune_sessions(out_dir, budget_bytes):
     """Delete oldest navd session files until they fit the budget.
 
@@ -106,10 +123,14 @@ def run_record_navd(args):
     from bebop_vision.recorder_mcap import NavdRecorder
     from bebop_vision.videoserver import VideoServer
     from bebop_vision.robot import RobotClient
+    from bebop_vision.session_notes import SessionNotes
     import time as _time
     import math
 
     _acquire_recorder_lock()
+    # Operator notes (intent / events / places) shared by the video server's
+    # routes, the scout and every recorder segment.
+    notes = SessionNotes()
     robot = RobotClient(args.robot_url).start()
     if not robot.await_connection(5.0):
         _release_recorder_lock()
@@ -123,7 +144,7 @@ def run_record_navd(args):
         raise SystemExit("cameras did not produce fresh frames within 10 s")
     vserver = None
     if not args.no_video_server:
-        vserver = VideoServer(rig, port=args.video_port)
+        vserver = VideoServer(rig, port=args.video_port, notes=notes)
         vserver.start()
 
     # Semantic place memory (bebop_vision/places): teaches named rooms from
@@ -146,6 +167,7 @@ def run_record_navd(args):
                             timeout=args.router_timeout)
         scout = PlaceScout(
             pstore, penc, pcapture,
+            on_known=notes.add_place,
             config=ScoutConfig(
                 interval_s=args.place_scout_interval,
                 max_pending=args.place_pending_max,
@@ -271,10 +293,10 @@ def run_record_navd(args):
     rec_holder = {"rec": None}   # active segment recorder (set by new_segment)
 
     def new_segment():
-        path = out_dir / f"navd_session_{_time.strftime('%Y%m%d_%H%M%S')}.mcap"
+        path = _session_path(out_dir, _time.strftime('%Y%m%d_%H%M%S'))
         rec = NavdRecorder(
             rig, robot, path, rate_hz=rate,
-            max_frame_age_s=max_frame_age_s)
+            max_frame_age_s=max_frame_age_s, notes=notes)
         rec.start()
         rec_holder["rec"] = rec
         print(f"\n[record-navd] recording -> {path}")
@@ -285,7 +307,9 @@ def run_record_navd(args):
         if rec_holder["rec"] is rec:
             rec_holder["rec"] = None
         print(f"\n[record-navd] closed {path.name} "
-              f"({rec.frames} frames, {rec.bytes_written/1e6:.1f} MB)")
+              f"({rec.frames} frames, {rec.bytes_written/1e6:.1f} MB, "
+              f"{rec.runtime_frames} telemetry frames"
+              f"{', stale notes dropped: ' + str(rec.notes_stale) if rec.notes_stale else ''})")
         _prune_sessions(out_dir, budget)
 
     if not args.auto:

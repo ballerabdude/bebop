@@ -236,3 +236,24 @@ def test_pending_match_adds_diverse_evidence(store):
     # The exact same view is not added twice.
     scout.tick([_view(other, 3)], now=1.0)
     assert len(store.get_place(place.id).keyframes) == 2
+
+
+def test_known_match_calls_on_known(store):
+    jpeg = _jpeg(20)
+    place = store.create_place("Office")
+    store.add_descriptor(place.id, _descriptor([1, 0, 0, 0]))
+    seen = []
+    scout = PlaceScout(
+        store, FakeEncoder({jpeg: [1, 0, 0, 0]}), StaticCapture([]),
+        config=ScoutConfig(min_hits=3, min_dwell_s=2.0,
+                           new_pending_cooldown_s=0.0),
+        on_known=lambda pid, name, score, margin: seen.append((pid, name)))
+    assert scout.tick([_view(jpeg)], now=0.0)["action"] == "known"
+    assert seen == [(place.id, "Office")]
+
+    def boom(*a):
+        raise RuntimeError("callback failed")
+
+    scout.on_known = boom
+    assert scout.tick([_view(jpeg)], now=1.0)["action"] == "known"
+    assert "on_known" in scout._last_error

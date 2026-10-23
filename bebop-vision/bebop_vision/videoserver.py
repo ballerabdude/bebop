@@ -12,11 +12,20 @@ Routes:
        depth renders a turbo-colormapped 424x240 BGR view server-side.
   GET  /snapshot?stream=...  single JPEG of the latest frame (tools/tests)
   GET  /healthz              liveness
+  POST /intent {text, from, to}   operator intent (sticky; any time);
+                                  {"clear": true} clears it
+  POST /event  {kind, note}       marker in the current drive (obstacle,
+                                  recovery, exclude, note); 409 when no
+                                  segment is recording
+  GET  /notes                     current intent + queue counts
+  The note routes write into the active MCAP segment through
+  bebop_vision.session_notes (see the recorder's /intent, /event, /place).
 
 The old MJPEG (`/video`) and fragmented-MP4 (`codec=h264|h265`) operator
 paths were removed once every client moved to WebRTC.
 """
 
+import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +33,8 @@ from urllib.parse import parse_qs, urlparse
 
 import cv2
 import numpy as np
+
+from .session_notes import NotRecording
 
 PACING_S = 1.0 / 20.0      # serve at most 20 fps; frames arrive at 15
 STREAMS = ("color_near", "color_far", "depth_near", "depth_far")
@@ -107,9 +118,10 @@ def _whep_feed(session, cam, kind, label="", on_done=None):
 
 
 class VideoServer:
-    def __init__(self, rig, port=9092):
+    def __init__(self, rig, port=9092, notes=None):
         self.rig = rig
         self.port = port
+        self.notes = notes          # SessionNotes or None
         self._httpd = None
         self._thread = None
         self._sessions = {}
@@ -166,6 +178,61 @@ class VideoServer:
                     [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 return jpg.tobytes() if ok else None
 
+            def _send_json(self, code, payload):
+                body = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _read_json(self):
+                """A JSON object body, or ValueError (answered as 400).  A
+                missing or chunked body is an error, never an empty object:
+                an empty /intent would otherwise silently clear the intent."""
+                if self.headers.get("Transfer-Encoding"):
+                    raise ValueError("send a Content-Length body, not chunked")
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = 0
+                if length <= 0:
+                    raise ValueError("JSON object body required")
+                raw = self.rfile.read(min(length, 65536))
+                if not raw.strip():
+                    raise ValueError("JSON object body required")
+                payload = json.loads(raw.decode("utf-8", "replace"))
+                if not isinstance(payload, dict):
+                    raise ValueError("JSON object expected")
+                return payload
+
+            def _note(self, route):
+                notes = server.notes
+                if notes is None:
+                    self._send_json(503, {"error": "no session notes"})
+                    return
+                try:
+                    payload = self._read_json()
+                    if route == "/intent":
+                        if payload.get("clear"):
+                            intent = notes.clear_intent()
+                        else:
+                            intent = notes.set_intent(
+                                payload.get("text", ""),
+                                payload.get("from", payload.get("from_place", "")),
+                                payload.get("to", payload.get("to_place", "")))
+                        self._send_json(200, {"ok": True,
+                                              "intent": intent.to_dict()})
+                    else:
+                        ev = notes.add_event(payload.get("kind", "note"),
+                                             payload.get("note", ""))
+                        self._send_json(200, {"ok": True, "event": ev})
+                except NotRecording as exc:
+                    self._send_json(409, {"error": str(exc), "recording": False})
+                except (ValueError, TypeError, RecursionError) as exc:
+                    self._send_json(400, {"error": str(exc)})
+
             def do_GET(self):
                 # Don't hold keep-alive connections open: each WHEP POST
                 # from a reconnecting client otherwise leaves a handler
@@ -186,6 +253,11 @@ class VideoServer:
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
+                elif self.path.startswith("/notes"):
+                    if server.notes is None:
+                        self._send_json(503, {"error": "no session notes"})
+                    else:
+                        self._send_json(200, server.notes.snapshot())
                 elif self.path.startswith("/healthz"):
                     self.send_response(200)
                     self.send_header("Content-Length", "2")
@@ -210,6 +282,10 @@ class VideoServer:
                 self.close_connection = True
                 if self.path.startswith("/whep"):
                     self._whep()
+                elif self.path.startswith("/intent"):
+                    self._note("/intent")
+                elif self.path.startswith("/event"):
+                    self._note("/event")
                 else:
                     self.send_error(404)
 

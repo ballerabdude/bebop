@@ -17,6 +17,9 @@ Twist = telemetry_pb2.Twist
 Odom = telemetry_pb2.Odom
 ImuAccel = telemetry_pb2.ImuAccel
 ImuGyro = telemetry_pb2.ImuGyro
+Intent = telemetry_pb2.Intent
+Event = telemetry_pb2.Event
+PlaceSeen = telemetry_pb2.PlaceSeen
 
 
 def schema(message_cls):

@@ -97,11 +97,16 @@ class PlaceScout:
         *,
         config: ScoutConfig | None = None,
         clock=time.monotonic,
+        on_known=None,
     ) -> None:
         self.store = store
         self.encoder = encoder
         self.capture = capture
         self.config = config or ScoutConfig()
+        # Called on every confident match to a confirmed place:
+        # on_known(place_id, name, score, margin).  The recorder logs these
+        # as /place so a drive carries its own from/to anchors.
+        self.on_known = on_known
         self._clock = clock
         self._candidates: list[_Candidate] = []
         self._last_pending_at: float | None = None
@@ -201,6 +206,12 @@ class PlaceScout:
             self._known += 1
             self._touch_confirmed(top.place.id, now)
             self._drop_candidate(vec)
+            if self.on_known is not None:
+                try:
+                    self.on_known(top.place.id, top.place.name,
+                                  float(top.score), float(margin))
+                except Exception as exc:  # noqa: BLE001 - never kill the scan
+                    self._last_error = f"on_known: {exc}"
             return {
                 "action": "known",
                 "place_id": top.place.id,

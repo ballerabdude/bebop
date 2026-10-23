@@ -806,6 +806,9 @@ def _sentence_chunks(buf: str) -> tuple[list[str], str]:
 # explicit request, and reuse that API's guards (name uniqueness, cooldown,
 # per-place growth caps) instead of the router's autonomous path.
 PLACES_URL = "http://127.0.0.1:9095"
+# bebop-vision video server: also hosts the drive-note routes that write
+# into the active MCAP segment (POST /intent, POST /event).
+VISION_URL = "http://127.0.0.1:9092"
 
 PLACES_TOOLS: list[dict[str, Any]] = [
     {
@@ -928,6 +931,42 @@ def _place_arg(args: dict[str, Any]) -> str:
     return str(args.get("name") or "").strip()
 
 
+async def _drive_note(name: str, args: dict[str, Any]) -> str:
+    """note_drive_intent / mark_drive_event -> the recorder's note routes."""
+    import httpx
+
+    if name == "note_drive_intent":
+        path = "/intent"
+        text = str(args.get("text") or "").strip()
+        # An empty text is an explicit clear, whatever places came with it,
+        # so the spoken reply and the recorded /intent agree.
+        payload = ({"text": text,
+                    "from": str(args.get("from_place") or ""),
+                    "to": str(args.get("to_place") or "")}
+                   if text else {"clear": True})
+    else:
+        path = "/event"
+        payload = {"kind": str(args.get("kind") or "note"),
+                   "note": str(args.get("note") or "")}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(f"{VISION_URL}{path}", json=payload)
+    except Exception as exc:  # noqa: BLE001 - report, never break the turn
+        return f"The recorder is unavailable ({exc})."
+    if r.status_code == 409:
+        return "Not recording right now, so nothing was marked."
+    if r.status_code != 200:
+        return f"The recorder refused the note (HTTP {r.status_code})."
+    if path == "/intent":
+        if payload.get("clear"):
+            return "Cleared the drive intent."
+        route = (f" ({payload['from']} -> {payload['to']})"
+                 if payload["from"] or payload["to"] else "")
+        return f"Noted: this drive is {payload['text']!r}{route}."
+    note = f": {payload['note']}" if payload["note"] else ""
+    return f"Marked {payload['kind']}{note}."
+
+
 async def _run_tool(name: str, arguments: str) -> str:
     """Run one voice tool; return a short result for the model.
 
@@ -949,6 +988,8 @@ async def _run_tool(name: str, arguments: str) -> str:
         return await _robot_status_text()
     if name == "move_relative":
         return await _move_relative(args)
+    if name in ("note_drive_intent", "mark_drive_event"):
+        return await _drive_note(name, args)
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             if name == "remember_place":
@@ -1058,6 +1099,59 @@ MOTION_ANGULAR_RAD_S = 0.6
 MOTION_TOL_M = 0.03
 MOTION_TOL_RAD = 0.06           # ~3.5 deg
 MOTION_ARM_WAIT_S = 4.0
+
+# Drive notes: the operator says what a drive is for ("I'm driving from the
+# living room to the kitchen") or marks a moment ("mark that sock"); the
+# recorder writes them into the drive MCAP (/intent, /event) so the data
+# carries its own labels.  Read-write but harmless: they never move anything.
+DRIVE_NOTE_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "note_drive_intent",
+            "description": (
+                "Record what the current drive is for, so the recording "
+                "carries it: e.g. 'from the living room to the kitchen'. Use "
+                "when the operator says where they are driving to or what "
+                "this run is about. An empty text clears the intent."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string",
+                             "description": "the mission in the operator's words"},
+                    "from_place": {"type": "string"},
+                    "to_place": {"type": "string"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mark_drive_event",
+            "description": (
+                "Drop a marker into the current recording. kind: 'obstacle' "
+                "(a planted doll, sock, cable...), 'recovery' (starting "
+                "off-lane on purpose), 'exclude' (that stretch was a "
+                "mistake), or 'note'. Use when the operator says to mark or "
+                "note something during a drive. Markers only land while a "
+                "drive is being recorded (wheels armed); mark 'exclude' "
+                "before disarming."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string",
+                             "enum": ["obstacle", "recovery", "exclude", "note"]},
+                    "note": {"type": "string"},
+                },
+                "required": ["kind"],
+            },
+        },
+    },
+]
 
 ROBOT_STATUS_TOOL: dict[str, Any] = {
     "type": "function",
@@ -1374,7 +1468,7 @@ async def _run_turn_cascade(
     # brain can answer "where are we?" / "what do you know about the office?".
     tools: list[dict[str, Any]] = []
     if config.tools_enabled:
-        tools += PLACES_TOOLS + [ROBOT_STATUS_TOOL]
+        tools += PLACES_TOOLS + [ROBOT_STATUS_TOOL] + DRIVE_NOTE_TOOLS
     if config.motion_enabled:
         tools += [MOVE_TOOL]
     tools = tools or None

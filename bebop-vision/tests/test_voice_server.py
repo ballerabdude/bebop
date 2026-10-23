@@ -774,3 +774,52 @@ def test_config_tools_toggle(tmp_path, monkeypatch):
     client = TestClient(app)
     assert client.get("/config").json()["tools_enabled"] is True
     assert client.post("/config", json={"tools_enabled": False}).json()["tools_enabled"] is False
+
+
+def test_drive_note_tools_post_to_the_recorder(monkeypatch):
+    import asyncio
+    from bebop_vision import voice_server as vs
+
+    fake = _FakePlaces(monkeypatch, {("POST", "/intent"): _Resp(200, {"ok": True}),
+                                     ("POST", "/event"): _Resp(200, {"ok": True})})
+    out = asyncio.run(vs._run_tool(
+        "note_drive_intent",
+        json.dumps({"text": "to the kitchen", "from_place": "office",
+                    "to_place": "kitchen"})))
+    assert "to the kitchen" in out and "office -> kitchen" in out
+    assert fake.calls[-1] == ("POST", f"{vs.VISION_URL}/intent")
+    assert fake.bodies[-1] == {"text": "to the kitchen", "from": "office",
+                               "to": "kitchen"}
+    out = asyncio.run(vs._run_tool("mark_drive_event",
+                                   json.dumps({"kind": "obstacle", "note": "sock"})))
+    assert out == "Marked obstacle: sock."
+    assert fake.bodies[-1] == {"kind": "obstacle", "note": "sock"}
+    names = [t["function"]["name"] for t in vs.DRIVE_NOTE_TOOLS]
+    assert names == ["note_drive_intent", "mark_drive_event"]
+
+
+def test_drive_note_tool_reports_an_unavailable_recorder(monkeypatch):
+    import asyncio
+    import httpx
+    from bebop_vision import voice_server as vs
+
+    def boom(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "AsyncClient", boom)
+    out = asyncio.run(vs._run_tool("note_drive_intent", json.dumps({"text": "x"})))
+    assert out.startswith("The recorder is unavailable")
+
+
+def test_drive_note_tools_report_not_recording_and_clear(monkeypatch):
+    import asyncio
+    from bebop_vision import voice_server as vs
+
+    fake = _FakePlaces(monkeypatch, {("POST", "/intent"): _Resp(200, {"ok": True}),
+                                     ("POST", "/event"): _Resp(409, {"error": "no segment"})})
+    out = asyncio.run(vs._run_tool("mark_drive_event", json.dumps({"kind": "exclude"})))
+    assert out == "Not recording right now, so nothing was marked."
+    out = asyncio.run(vs._run_tool("note_drive_intent",
+                                   json.dumps({"text": "  ", "from_place": "office"})))
+    assert out == "Cleared the drive intent."
+    assert fake.bodies[-1] == {"clear": True}

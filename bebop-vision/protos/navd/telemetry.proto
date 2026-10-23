@@ -36,3 +36,31 @@ message ImuGyro {
   int64 stamp_ns = 4;
   int64 device_stamp_us = 5;
 }
+
+// Operator-declared mission for the current segment ("living room ->
+// kitchen"). Sticky: the recorder writes it at segment start and whenever
+// it changes, so every file carries the intent it was driven under.
+message Intent {
+  string text = 1;
+  string from_place = 2;
+  string to_place = 3;
+  int64 stamp_ns = 4;
+}
+
+// Operator marker during a drive: a planted obstacle, a recovery start, a
+// stretch to exclude. `kind` is a short token, `note` free text.
+message Event {
+  string kind = 1;
+  string note = 2;
+  int64 stamp_ns = 3;
+}
+
+// A confirmed place recognised by the 1 Hz scout (DINOv3 match), logged so
+// a drive carries its own from/to anchors for place-graph edge tracks.
+message PlaceSeen {
+  string place_id = 1;
+  string name = 2;
+  double score = 3;
+  double margin = 4;
+  int64 stamp_ns = 5;
+}

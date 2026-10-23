@@ -127,8 +127,13 @@ def extract(mcap_path, out_dir, tol_us=15_000):
                         (message.log_time, fmt, raw))
                 ticks.setdefault(message.log_time, {})[topic] = raw
             else:
-                ticks.setdefault(message.log_time, {})[topic] = \
-                    json.loads(message.data)
+                try:
+                    ticks.setdefault(message.log_time, {})[topic] = \
+                        json.loads(message.data)
+                except (TypeError, ValueError):
+                    # Protobuf channels this layout does not model
+                    # (/runtime, /intent, /event, /place): skip them.
+                    pass
 
     for topic, samples in sorted(imu.items()):
         kind = "accel" if "accel" in topic else "gyro"

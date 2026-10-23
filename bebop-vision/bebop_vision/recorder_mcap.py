@@ -67,14 +67,22 @@ class NavdRecorder:
 
     def __init__(self, rig, robot, out_path,
                  rate_hz=10.0, jpeg_quality=85, workers=6,
-                 max_frame_age_s=0.3, color_codec="h265"):
+                 max_frame_age_s=0.3, color_codec="h265", notes=None):
         self.rig = rig
         self.robot = robot
+        # Operator notes (bebop_vision.session_notes.SessionNotes): drained
+        # every tick into /intent, /event and /place.  Optional.
+        self.notes = notes
+        self._intent_version = 0
+        self.notes_stale = 0
+        self.runtime_frames = 0
+        self.runtime_dropped = 0
         # Segment start (monotonic): the cameras run across segments and keep
         # buffering IMU, so the first tick would otherwise flush the idle-period
         # backlog into this segment (IMU predating the video/depth). Drop any
         # sample older than this.
         self._t0 = time.monotonic()
+        self._t0_ns = time.time_ns()
         self.rate_hz = rate_hz
         # _pair_frames accepts the freshest anchor whose cross-camera partner
         # is within one frame period; older-but-better-aligned pairs are only
@@ -126,7 +134,10 @@ class NavdRecorder:
         # freezes/garbles playback until the next IDR). See _write_video_color.
         self._last_color = {}
         self._last_jpg = {}
-        self._file = open(out_path, "wb")
+        # Exclusive create: segment names have whole-second resolution, so a
+        # roll that lands in the same second must fail loudly rather than
+        # truncate the file just closed (main.py picks a unique name).
+        self._file = open(out_path, "xb")
         # No chunk compression: payloads are already-compressed JPEG/PNG,
         # and the zstd chunk path has proven lossy with this mcap build.
         # Small chunks (256 KiB) bound how much the in-memory chunk builder
@@ -186,6 +197,22 @@ class NavdRecorder:
             *navd_proto.schema(navd_proto.ImuAccel))
         self._sch_imu_gyro = self._writer.register_schema(
             *navd_proto.schema(navd_proto.ImuGyro))
+        # Firmware telemetry, verbatim: every ServerRuntimeMessage the WS
+        # client received during this segment (robot.py keeps the raw
+        # frames in a bounded deque).  Arrival-stamped.  Carries mode, the
+        # estop reason, operator/watchdog flags, per-wheel targets, bus and
+        # power state: everything the resampled /cmd_vel and /odom drop.
+        from .proto.bebop.runtime.v1 import bebop_runtime_pb2 as pb
+        self._ch["runtime"] = self._writer.register_channel(
+            "/runtime", "protobuf",
+            self._writer.register_schema(*navd_proto.schema(pb.ServerRuntimeMessage)))
+        # Operator notes: sticky intent, event markers, scout place sightings.
+        for key, topic, cls in (("intent", "/intent", navd_proto.Intent),
+                                ("event", "/event", navd_proto.Event),
+                                ("place", "/place", navd_proto.PlaceSeen)):
+            self._ch[key] = self._writer.register_channel(
+                topic, "protobuf",
+                self._writer.register_schema(*navd_proto.schema(cls)))
         self._imu_ch = {
             role: {"accel": self._writer.register_channel(
                        f"/imu_accel_{role}", "protobuf", self._sch_imu_accel),
@@ -231,6 +258,9 @@ class NavdRecorder:
         if self._running:
             return self
         self._running = True
+        if self.notes is not None:
+            # Events are accepted from now on (until stop()).
+            self.notes.begin_segment(self)
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="navd-recorder")
         self._thread.start()
@@ -325,6 +355,11 @@ class NavdRecorder:
                                   theta=float(st.odom[2]),
                                   stamp_ns=log_ns).SerializeToString(), log_ns)
         self._drain_imu(time.time_ns() - time.monotonic_ns())
+        try:
+            self._drain_runtime()
+            self._drain_notes(log_ns)
+        except Exception as exc:  # never lose the tick's frames to a note
+            print(f"[recorder] note/telemetry drain failed: {exc}")
         # Camera reads stay serial in this thread (pyorbbecsdk must not be
         # pooled — §2.8). BEV + PNG/JPEG encodes are numpy/cv2 (GIL-releasing)
         # and run as per-camera jobs in the pool; results are written
@@ -438,6 +473,73 @@ class NavdRecorder:
                     cid = chans["gyro"]
                 self._add(cid, msg.SerializeToString(), log_ns)
 
+    def _drain_runtime(self):
+        """Write every firmware telemetry frame received since the last tick.
+
+        Frames older than the segment start are the idle backlog and are
+        dropped.  Draining exactly the deque's capacity on a later tick means
+        the recorder thread stalled long enough for frames to be lost.
+        """
+        frames = getattr(self.robot, "frames", None)
+        if frames is None:
+            return
+        n = 0
+        while True:
+            try:
+                mono, wall_ns, raw = frames.popleft()
+            except IndexError:
+                break
+            n += 1
+            if mono < self._t0:
+                continue
+            self._add(self._ch["runtime"], raw, int(wall_ns))
+            self.runtime_frames += 1
+        if self.frames > 0 and n >= frames.maxlen:
+            self.runtime_dropped += 1
+            print(f"[recorder] /runtime deque hit capacity ({n}); telemetry "
+                  f"frames were probably lost (stall?)")
+
+    def _drain_notes(self, log_ns):
+        """Write the intent when it changes, and queued events / places.
+
+        Each note is built and written on its own, so one bad note cannot
+        strand the rest of the batch; the version is taken before the write
+        so a note that cannot be written is not retried every tick.
+        """
+        notes = self.notes
+        if notes is None:
+            return
+
+        def put(key, build, stamp):
+            try:
+                self._add(self._ch[key], build().SerializeToString(), stamp)
+            except Exception as exc:
+                print(f"[recorder] dropped a bad {key} note: {exc}")
+
+        intent = notes.intent()
+        if intent is not None and intent.version != self._intent_version:
+            self._intent_version = intent.version
+            put("intent", lambda: navd_proto.Intent(
+                text=intent.text, from_place=intent.from_place,
+                to_place=intent.to_place, stamp_ns=int(intent.stamp_ns)), log_ns)
+        for ev in notes.drain_events():
+            # Safety net: the notes object refuses events while no segment is
+            # open, so nothing older than this segment should be queued.
+            if ev["stamp_ns"] < self._t0_ns:
+                self.notes_stale += 1
+                continue
+            put("event", lambda ev=ev: navd_proto.Event(
+                kind=ev["kind"], note=ev["note"], stamp_ns=int(ev["stamp_ns"])),
+                int(ev["stamp_ns"]))
+        for seen in notes.drain_places():
+            if seen["stamp_ns"] < self._t0_ns:
+                self.notes_stale += 1
+                continue
+            put("place", lambda seen=seen: navd_proto.PlaceSeen(
+                place_id=seen["place_id"], name=seen["name"],
+                score=float(seen["score"]), margin=float(seen["margin"]),
+                stamp_ns=int(seen["stamp_ns"])), int(seen["stamp_ns"]))
+
     def _write_video_color(self, role, payload, kind, log_ns, meta):
         """Push one color frame through this role's NVENC and write the AUs.
 
@@ -512,9 +614,29 @@ class NavdRecorder:
 
     def stop(self):
         self._running = False
+        if self.notes is not None:
+            # Refuse new events before the final drain below, so every event
+            # that got a 200 lands in this file and none is accepted after.
+            self.notes.end_segment(self)
         if self._thread is not None:
             self._thread.join(timeout=5.0)
+            if self._thread.is_alive():
+                # The MCAP Writer and the encoders are single-threaded: never
+                # drain, flush or finish while a tick is still writing.
+                print("[recorder] tick still running after 5 s; waiting")
+                self._thread.join(timeout=30.0)
+            if self._thread.is_alive():
+                print("[recorder] tick hung; leaving this segment unterminated "
+                      "(recover it with tools/mcap_recover.py)")
+                self._pool.shutdown(wait=False)
+                return
         self._pool.shutdown(wait=True)
+        # The recorder thread is gone: take the telemetry / notes tail here.
+        try:
+            self._drain_runtime()
+            self._drain_notes(time.time_ns())
+        except Exception as exc:
+            print(f"[recorder] final drain failed: {exc}")
         # Drain each hardware encoder's tail (the last GOP-buffered AUs)
         # and write them at their original tick log_time.
         for role, enc in self._encoders.items():

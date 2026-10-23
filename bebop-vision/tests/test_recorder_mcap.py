@@ -90,6 +90,8 @@ class FakeRig:
 
 class FakeRobot:
     def __init__(self):
+        import collections
+        self.frames = collections.deque(maxlen=512)
         self.state = SimpleNamespace(cmd=(0.2, -0.1), odom=(0.5, 0.1, 0.02),
                                      connected=True, estop_latched=False,
                                      mode=pb.MODE_RUN_POLICY,
@@ -396,3 +398,102 @@ def test_imu_backlog_before_segment_dropped(tmp_path):
               for s, c, m in make_reader(f).iter_messages()
               if c.topic == "/imu_accel_near"]
     assert ax and all(v != 1.0 for v in ax), "stale pre-segment IMU leaked in"
+
+
+def test_runtime_and_notes_channels(tmp_path):
+    """Verbatim firmware frames and operator notes land in the segment; the
+    idle backlog and notes from before the segment do not."""
+    import sys
+    from pathlib import Path
+    from mcap.reader import make_reader
+    from bebop_vision import navd_proto
+    from bebop_vision.session_notes import NotRecording, SessionNotes
+    from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as pb
+
+    rig, robot = FakeRig(), FakeRobot()
+    notes = SessionNotes()
+    with pytest.raises(NotRecording):          # nothing is recording yet
+        notes.add_event("obstacle", "before the segment")
+    stale = pb.ServerRuntimeMessage()
+    stale.telemetry.host_unix_ms = 1
+    robot.frames.append((time.monotonic() - 5.0, time.time_ns() - 5_000_000_000,
+                         stale.SerializeToString()))
+    notes.set_intent("living room to kitchen", "living room", "kitchen")
+    path = tmp_path / "s.mcap"
+    rec = NavdRecorder(rig, robot, path, rate_hz=20.0, color_codec=None,
+                       notes=notes)
+    rec.start()
+    time.sleep(0.15)
+    fresh = pb.ServerRuntimeMessage()
+    fresh.telemetry.host_unix_ms = 2
+    fresh.telemetry.drive.operator_stale = True
+    robot.frames.append((time.monotonic(), time.time_ns(),
+                         fresh.SerializeToString()))
+    notes.add_event("recovery", "off-lane start")
+    notes.add_place("p1", "Kitchen", 0.91, 0.2)
+    notes.set_intent("kitchen to office", "kitchen", "office")
+    time.sleep(0.3)
+    rec.stop()
+    assert not notes.recording                 # the segment is closed ...
+    with pytest.raises(NotRecording):          # ... so late markers are refused
+        notes.add_event("exclude", "after the estop")
+
+    msgs = {}
+    with open(path, "rb") as f:
+        for s, c, m in make_reader(f).iter_messages():
+            msgs.setdefault(c.topic, []).append((s.name, m.data, m.log_time))
+    runtime = [pb.ServerRuntimeMessage.FromString(d) for _, d, _ in msgs["/runtime"]]
+    assert [m.telemetry.host_unix_ms for m in runtime] == [2]
+    assert runtime[0].telemetry.drive.operator_stale is True
+    assert msgs["/runtime"][0][0] == "bebop.runtime.v1.ServerRuntimeMessage"
+    intents = [navd_proto.Intent.FromString(d) for _, d, _ in msgs["/intent"]]
+    assert [i.text for i in intents] == ["living room to kitchen", "kitchen to office"]
+    assert intents[0].to_place == "kitchen"
+    events = [navd_proto.Event.FromString(d) for _, d, _ in msgs["/event"]]
+    assert [(e.kind, e.note) for e in events] == [("recovery", "off-lane start")]
+    places = [navd_proto.PlaceSeen.FromString(d) for _, d, _ in msgs["/place"]]
+    assert [(p.name, round(p.score, 2)) for p in places] == [("Kitchen", 0.91)]
+    assert rec.runtime_frames == 1 and rec.notes_stale == 0
+
+    # the segment file is opened exclusively
+    with pytest.raises(FileExistsError):
+        NavdRecorder(rig, robot, path, rate_hz=20.0, color_codec=None)
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from main import _session_path
+    p1 = _session_path(tmp_path, "20261023_120000")
+    p1.write_bytes(b"x")
+    assert p1.name == "navd_session_20261023_120000.mcap"
+    assert _session_path(tmp_path, "20261023_120000").name == "navd_session_20261023_120000_1.mcap"
+
+
+def test_a_bad_note_never_costs_the_tick(tmp_path, monkeypatch):
+    """A note the writer refuses is dropped on its own; the tick's frames and
+    the rest of the batch are still written."""
+    from mcap.reader import make_reader
+    from bebop_vision import navd_proto
+    from bebop_vision.session_notes import SessionNotes
+
+    rig, robot = FakeRig(), FakeRobot()
+    notes = SessionNotes()
+    path = tmp_path / "s.mcap"
+    rec = NavdRecorder(rig, robot, path, rate_hz=20.0, color_codec=None, notes=notes)
+    real_event = navd_proto.Event
+
+    def picky_event(**kw):
+        if kw.get("note") == "boom":
+            raise ValueError("unencodable")
+        return real_event(**kw)
+
+    monkeypatch.setattr(navd_proto, "Event", picky_event)
+    rec.start()
+    notes.add_event("note", "boom")
+    notes.add_event("obstacle", "fine")
+    time.sleep(0.3)
+    rec.stop()
+    topics = {}
+    with open(path, "rb") as f:
+        for s, c, m in make_reader(f).iter_messages():
+            topics.setdefault(c.topic, []).append(m.data)
+    assert [real_event.FromString(d).note for d in topics["/event"]] == ["fine"]
+    assert len(topics["/depth_near"]) >= 3

@@ -5,6 +5,7 @@ ServerRuntimeMessage per binary WS frame on GET /ws.
 """
 
 import asyncio
+import collections
 import threading
 import time
 
@@ -47,6 +48,12 @@ class RobotClient:
         self.reconnect_s = reconnect_s
         self.name = name
         self.state = RobotState()
+        # Every ServerRuntimeMessage as received, (monotonic, wall_ns, bytes):
+        # the recorder drains this into its `/runtime` channel so a drive
+        # file carries the firmware's telemetry verbatim (mode, estop reason,
+        # operator/watchdog flags, per-wheel targets, power) instead of the
+        # resampled subset in RobotState.  Bounded: ~17 s at 30 Hz, ~1 MB.
+        self.frames = collections.deque(maxlen=512)
         self.on_mode_changed = []
         self.on_estop = []
         self._loop = None
@@ -106,6 +113,7 @@ class RobotClient:
 
     async def _pump(self, ws):
         async for raw in ws:
+            self.frames.append((time.monotonic(), time.time_ns(), raw))
             msg = pb.ServerRuntimeMessage()
             msg.ParseFromString(raw)
             self._handle(msg)
