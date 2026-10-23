@@ -21,7 +21,7 @@
 //!   timestamp)
 //!
 //! All writers live in this thread; there is no high-rate producer, so no
-//! mpsc is needed. Files rotate hourly / by size and are pruned
+//! mpsc is needed. Files rotate daily / by size and are pruned
 //! oldest-first under a disk budget, mirroring `policy_capture`.
 
 use std::collections::BTreeMap;
@@ -64,8 +64,13 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// free, so we don't do it every second.
 const SYNC_INTERVAL: Duration = Duration::from_secs(5);
 /// Roll to a new file after this long even if the size budget is nowhere
-/// near — keeps individual files small and lets pruning work.
-const ROTATE_INTERVAL: Duration = Duration::from_secs(3600);
+/// near — bounds individual files and lets pruning work. Daily (it was
+/// hourly until 2026-10-23: at ~1 MB/h that made 24 near-empty files a
+/// day and buried the drive sessions in the app's capture list); the
+/// durability story is unchanged: flush (FLUSH_INTERVAL) and fsync
+/// (SYNC_INTERVAL) run on their own timers, independent of rotation, and
+/// `GET /captures/finalize-dl` still rolls the live file on demand.
+const ROTATE_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// Oldest system logs are pruned above this total. At ~1 Hz the log is a
 /// few tens of MB/day, so this holds months.

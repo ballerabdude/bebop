@@ -1669,8 +1669,10 @@ function formatModified(ms: number): string {
   return d.toLocaleString();
 }
 
-/// Lists every `policy_capture_*.mcap` segment on the robot and lets
-/// the operator download any of them. Polls the JSON endpoint on
+/// Lists every `.mcap` capture on the robot (drive sessions, policy
+/// captures and the always-on `system_*` health log) and lets the
+/// operator download any of them. The health log rolls daily and is
+/// hidden by default so the drive sessions stay findable. Polls the JSON endpoint on
 /// mount + on a manual refresh; downloads stream via the same HTTP
 /// server (`/captures/dl/<name>`) and are saved through a temporary
 /// blob-URL anchor so they work inside the Tauri webview the same way
@@ -1696,6 +1698,10 @@ function CaptureDownloads({
   /// pushing the rest of the dashboard off-screen.
   const PAGE_SIZE = 8;
   const [page, setPage] = useState(0);
+  /// The firmware's always-on health log (`system_*`, one file per day)
+  /// and the legged `policy_capture_*` segments are not drive data; hide
+  /// them unless asked so the list is the drives.
+  const [showSystem, setShowSystem] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -1723,11 +1729,19 @@ function CaptureDownloads({
   /// (e.g. after a refresh that returns fewer segments, or after the
   /// operator deleted captures out of band). Without this the user
   /// could be stranded on a page that has no rows.
-  const pageCount = files ? Math.max(1, Math.ceil(files.length / PAGE_SIZE)) : 1;
+  const isSystemLog = (name: string) =>
+    name.startsWith("system_") || name.startsWith("policy_capture_");
+  const visibleFiles = files
+    ? showSystem
+      ? files
+      : files.filter((f) => !isSystemLog(f.name))
+    : [];
+  const hiddenCount = files ? files.length - visibleFiles.length : 0;
+  const pageCount = Math.max(1, Math.ceil(visibleFiles.length / PAGE_SIZE));
   const safePage = Math.min(page, pageCount - 1);
   if (safePage !== page) setPage(safePage);
   const pageStart = safePage * PAGE_SIZE;
-  const pageFiles = files ? files.slice(pageStart, pageStart + PAGE_SIZE) : [];
+  const pageFiles = visibleFiles.slice(pageStart, pageStart + PAGE_SIZE);
 
   /// Build the direct download URL for a segment. We deliberately do
   /// NOT fetch + create a Blob for the download:
@@ -1804,12 +1818,34 @@ function CaptureDownloads({
         <Banner tone="error">Capture list error: {error}</Banner>
       ) : null}
 
+      {files !== null ? (
+        <label className="flex items-center gap-2 text-[12px] text-text-dim">
+          <input
+            type="checkbox"
+            checked={showSystem}
+            onChange={(e) => {
+              setShowSystem(e.target.checked);
+              setPage(0);
+            }}
+          />
+          Show system logs
+          {hiddenCount > 0 ? (
+            <span className="tabular-nums">({hiddenCount} hidden)</span>
+          ) : null}
+        </label>
+      ) : null}
+
       {files === null ? (
         <div className="text-[12px] text-text-dim italic">Loading…</div>
       ) : files.length === 0 ? (
         <div className="text-[12px] text-text-dim italic">
           No captures on robot yet. They appear as soon as the runtime
           enters DIAL_IN or RUN_POLICY.
+        </div>
+      ) : visibleFiles.length === 0 ? (
+        <div className="text-[12px] text-text-dim italic">
+          No drive sessions yet; only system logs are on the robot (tick
+          &ldquo;Show system logs&rdquo; to list them).
         </div>
       ) : (
         <div className="space-y-2">
@@ -1871,7 +1907,7 @@ function CaptureDownloads({
           {pageCount > 1 ? (
             <div className="flex items-center justify-between gap-2 pt-1">
               <span className="text-[11px] text-text-dim tabular-nums">
-                Showing {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, files.length)} of {files.length}
+                Showing {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, visibleFiles.length)} of {visibleFiles.length}
               </span>
               <div className="flex items-center gap-1.5">
                 <button
