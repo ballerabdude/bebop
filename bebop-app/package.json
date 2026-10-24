@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "test": "node --experimental-transform-types --no-warnings=ExperimentalWarning --test tests/*.test.mjs",
     "test:map": "node --experimental-strip-types --test tests/mapView.test.mjs",
     "test:twist": "node --experimental-strip-types --test tests/twistStream.test.mjs",
     "preview": "vite preview",

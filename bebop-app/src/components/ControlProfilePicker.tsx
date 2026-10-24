@@ -45,7 +45,7 @@ export function ControlProfilePicker({ full = false }: { full?: boolean }) {
                       ? "bg-accent/15 border-accent/40 text-accent"
                       : "bg-bg-elev border-border text-text hover:bg-bg-elev-2"
                   }`
-                : `h-8 px-2 rounded-md text-caption font-semibold uppercase tracking-wider cursor-pointer pointer-coarse:h-10 ${
+                : `h-8 px-2 rounded-md text-caption font-semibold uppercase tracking-wider cursor-pointer pointer-coarse:h-11 ${
                     p.id === active.id
                       ? "bg-accent/15 text-accent"
                       : "bg-transparent text-text-dim hover:text-text"

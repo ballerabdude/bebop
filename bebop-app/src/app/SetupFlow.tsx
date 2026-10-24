@@ -8,14 +8,14 @@
 // Hosted (AP) mode the robot stays at 192.168.42.1 and the operator routes
 // work against that address directly; nothing is gated on client Wi-Fi.
 
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { Link, Navigate, Route, Routes, useNavigate, useSearchParams } from "react-router";
 
 import { Banner, Button, Card, Field, INPUT_CLASS } from "../components/ui";
 import { HOTSPOT_HOST, normalizeHost, PORTS } from "../robot/endpoints";
 import { ConfigScreen } from "../screens/ConfigScreen";
 import { WifiScreen } from "../screens/WifiScreen";
-import { SetupTransport } from "../setup";
+import { useSetupTransport } from "../setup";
 import { robotPath, setupPath } from "./paths";
 import { probe, rememberRobot } from "./robots";
 
@@ -109,12 +109,6 @@ function ConnectStep() {
       </Button>
     </form>
   );
-}
-
-function useSetupTransport(host: string | null): SetupTransport | null {
-  const transport = useMemo(() => (host ? new SetupTransport(host) : null), [host]);
-  useEffect(() => () => transport?.disconnect(), [transport]);
-  return transport;
 }
 
 function WifiStep() {

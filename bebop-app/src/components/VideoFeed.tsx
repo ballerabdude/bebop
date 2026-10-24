@@ -11,11 +11,20 @@
 // did. There is no MSE/progressive/MJPEG fallback any more — if the
 // peer connection cannot be established the tile shows an error and
 // retries with exponential backoff.
+//
+// `fill` makes the tile fill its parent (the Drive page's full-bleed view)
+// instead of sizing itself to the stream's aspect; `onStats` reports
+// receive-side WebRTC stats (fps, bitrate, loss, jitter, latency estimate)
+// once a second from `RTCPeerConnection.getStats()`.
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import { Button, Spinner } from "./ui";
+import { Button, cn, Spinner } from "./ui";
+import { sampleFromReport, summarizeVideoStats } from "./videoStats";
+import type { VideoStats, VideoStatsSample } from "./videoStats";
+
+export type { VideoStats } from "./videoStats";
 
 export type VideoStreamState = "loading" | "live" | "error";
 
@@ -50,9 +59,23 @@ interface VideoFeedProps {
   /// Cap the container height (CSS length, e.g. "72dvh") so a wide stream
   /// on a landscape phone / short window doesn't overflow the viewport.
   maxHeight?: string;
+  /// Fill the parent box (letterboxed per `fit`) instead of sizing the
+  /// tile to the stream's aspect ratio.
+  fill?: boolean;
+  /// How the frame sits in a `fill` tile. Default "contain".
+  fit?: "contain" | "cover";
+  /// Smaller loading / error captions (thumbnails, grid cells).
+  compact?: boolean;
+  /// Receive-side stats once a second while connected (null on teardown).
+  onStats?: (stats: VideoStats | null) => void;
+  /// Extra line under a server-reported error (e.g. "Pick another stream").
+  errorHint?: string;
   /// Optional extra chrome layered on top of the video (badges, pickers).
   children?: ReactNode;
 }
+
+/// A failure the server explained (shown in the tile instead of "Stream lost").
+class WhepError extends Error {}
 
 /// Non-trickle WHEP: gather ICE candidates before POSTing the offer.
 function waitForIceGathering(
@@ -90,9 +113,16 @@ export function VideoFeed({
   onStreamState,
   className = "",
   maxHeight,
+  fill = false,
+  fit = "contain",
+  compact = false,
+  onStats,
+  errorHint,
   children,
 }: VideoFeedProps) {
   const [state, setState] = useState<VideoStreamState>("loading");
+  /// Why the last attempt failed, when the server said (e.g. viewer limit).
+  const [errorText, setErrorText] = useState<string | null>(null);
   const [frameSize, setFrameSize] = useState<{ w: number; h: number } | null>(
     null,
   );
@@ -113,6 +143,10 @@ export function VideoFeed({
   const whepUrl = `${offerUrl}${offerUrl.includes("?") ? "&" : "?"}r=${streamKey}`;
   const resourceRef = useRef(whepResource);
   resourceRef.current = whepResource;
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const onStatsRef = useRef(onStats);
+  onStatsRef.current = onStats;
+  const wantStats = !!onStats;
 
   const report = (s: VideoStreamState) => {
     setState(s);
@@ -166,6 +200,7 @@ export function VideoFeed({
     clearPendingRetry();
     lastFrameAtRef.current = Date.now();
     setState("loading");
+    setErrorText(null);
     setFrameSize(null);
     onStreamState?.("loading");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -182,11 +217,13 @@ export function VideoFeed({
     }
 
     const pc = new RTCPeerConnection({ iceServers: [] });
+    pcRef.current = pc;
     let disposed = false;
     // WHEP session resource (from the POST's Location), DELETEd on teardown.
     let sessionUrl: string | null = null;
-    const fail = () => {
+    const fail = (why?: string) => {
       if (disposed) return;
+      setErrorText(why ?? null);
       report("error");
       if (autoReconnect) scheduleRetry();
     };
@@ -216,15 +253,24 @@ export function VideoFeed({
         if (res.status === 503) {
           // Viewer limit (JSON body, Retry-After) or encoder unavailable.
           let detail = "";
+          let count = "";
           try {
-            const j = (await res.json()) as { error?: string; message?: string };
+            const j = (await res.json()) as {
+              error?: string;
+              message?: string;
+              viewers?: number;
+              max_viewers?: number;
+            };
             detail = j.error ?? j.message ?? "";
+            if (typeof j.viewers === "number" && typeof j.max_viewers === "number") {
+              count = ` (${j.viewers}/${j.max_viewers} viewers)`;
+            }
           } catch {
             /* not JSON */
           }
-          throw new Error(
+          throw new WhepError(
             detail === "viewer limit"
-              ? "Stream busy: too many viewers, retry in a few seconds"
+              ? `Stream busy${count}`
               : `Stream unavailable${detail ? `: ${detail}` : ""}`,
           );
         }
@@ -238,13 +284,14 @@ export function VideoFeed({
           return;
         }
         await pc.setRemoteDescription({ type: "answer", sdp: answer });
-      } catch {
-        fail();
+      } catch (e) {
+        fail(e instanceof WhepError ? e.message : undefined);
       }
     })();
 
     return () => {
       disposed = true;
+      if (pcRef.current === pc) pcRef.current = null;
       if (sessionUrl) {
         // keepalive lets the DELETE survive a page unload.
         void fetch(sessionUrl, { method: "DELETE", keepalive: true }).catch(() => {});
@@ -266,6 +313,45 @@ export function VideoFeed({
     // report/scheduleRetry close over refs and stable setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [whepUrl]);
+
+  // Receive stats, once a second, only while someone listens.
+  useEffect(() => {
+    if (!wantStats) return;
+    let prev: VideoStatsSample | null = null;
+    let prevPc: RTCPeerConnection | null = null;
+    let cancelled = false;
+    const poll = async () => {
+      const pc = pcRef.current;
+      if (!pc || pc.connectionState === "closed") {
+        prev = null;
+        onStatsRef.current?.(null);
+        return;
+      }
+      if (pc !== prevPc) {
+        prev = null;
+        prevPc = pc;
+      }
+      try {
+        const report = await pc.getStats();
+        if (cancelled) return;
+        const sample = sampleFromReport(
+          report as unknown as Parameters<typeof sampleFromReport>[0],
+          performance.now(),
+        );
+        if (!sample) return;
+        onStatsRef.current?.(summarizeVideoStats(prev, sample));
+        prev = sample;
+      } catch {
+        /* peer closed mid-call */
+      }
+    };
+    const interval = window.setInterval(() => void poll(), 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      onStatsRef.current?.(null);
+    };
+  }, [wantStats]);
 
   useEffect(() => () => {
     if (retryTimerRef.current !== null) {
@@ -308,32 +394,52 @@ export function VideoFeed({
 
   return (
     <div
-      className={`relative overflow-hidden bg-black ${className}`}
-      style={{
-        aspectRatio: frameSize ? `${frameSize.w} / ${frameSize.h}` : "16 / 9",
-        ...(maxHeight ? { maxHeight } : {}),
-      }}
+      className={cn("relative overflow-hidden bg-black", className)}
+      style={
+        fill
+          ? undefined
+          : {
+              aspectRatio: frameSize ? `${frameSize.w} / ${frameSize.h}` : "16 / 9",
+              ...(maxHeight ? { maxHeight } : {}),
+            }
+      }
     >
       {state === "loading" ? (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
           <Spinner />
-          <span className="text-text-dim text-sm">
-            Waiting for the first frame…
+          <span className={cn("text-text-dim", compact ? "text-caption" : "text-sm")}>
+            {compact ? "Connecting…" : "Waiting for the first frame…"}
           </span>
         </div>
       ) : null}
       {state === "error" ? (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-8 text-center">
+        <div
+          className={cn(
+            "absolute inset-0 flex flex-col items-center justify-center text-center",
+            compact ? "gap-1 px-2" : "gap-3 px-8",
+          )}
+        >
           {autoReconnect ? (
             <>
               <Spinner />
-              <span className="text-text-dim text-sm">
-                Stream lost — reconnecting
+              <span className={cn("text-text-dim", compact ? "text-caption" : "text-sm")}>
+                {errorText
+                  ? compact
+                    ? errorText
+                    : `${errorText} — retrying`
+                  : compact
+                    ? "Reconnecting"
+                    : "Stream lost — reconnecting"}
                 {secondsLeft !== null ? ` in ${secondsLeft}s` : ""}…
               </span>
-              <Button variant="ghost" size="sm" onClick={retryNow}>
-                Retry now
-              </Button>
+              {errorText && !compact && errorHint ? (
+                <span className="max-w-xs text-caption text-text-dim/80">{errorHint}</span>
+              ) : null}
+              {compact ? null : (
+                <Button variant="ghost" size="sm" onClick={retryNow}>
+                  Retry now
+                </Button>
+              )}
             </>
           ) : (
             <span className="text-text-dim text-sm">
@@ -348,7 +454,7 @@ export function VideoFeed({
         autoPlay
         muted
         playsInline
-        className="w-full h-full object-contain"
+        className={cn("h-full w-full", fit === "cover" ? "object-cover" : "object-contain")}
         onLoadedData={(e) => {
           lastFrameAtRef.current = Date.now();
           attemptsRef.current = 0;
@@ -364,6 +470,7 @@ export function VideoFeed({
           void el.play().catch(() => {
             /* muted autoplay; rejection is not fatal */
           });
+          setErrorText(null);
           report("live");
         }}
         onTimeUpdate={() => {

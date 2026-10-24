@@ -43,8 +43,8 @@ export function SegmentedControl<T extends string>({
             className={cn(
               "flex-1 rounded-[calc(var(--radius-card)-3px)] px-3 font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer",
               size === "sm"
-                ? "h-8 text-label pointer-coarse:h-10"
-                : "h-control-sm text-sm pointer-coarse:h-10",
+                ? "h-8 text-label pointer-coarse:h-11"
+                : "h-control-sm text-sm pointer-coarse:h-11",
               active ? "bg-accent text-white shadow-sm" : "text-text-dim hover:text-text",
             )}
           >

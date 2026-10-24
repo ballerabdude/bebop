@@ -8,7 +8,16 @@
 //
 // The socket opens lazily on the first request and re-opens on the next
 // request after a drop (e.g. the robot switching networks), so callers never
-// manage its lifecycle beyond a final `disconnect()`.
+// manage its lifecycle beyond `disconnect()`.
+//
+// `disconnect()` is not terminal: the next request opens a fresh socket. That
+// matters under React StrictMode, which runs an effect's cleanup and then the
+// effect again on the same memoized transport. A disconnect while a socket is
+// still CONNECTING abandons that attempt (its callers get "disconnected") but
+// never hands the dead attempt to later callers. Before this, the second
+// mount awaited the first mount's aborted socket and Settings › Network
+// showed "WebSocket error connecting to ws://…:9091/ws" against a healthy
+// agent.
 //
 // The runtime/operator surface (motors, telemetry, video) is separate; see
 // `src/robot/endpoints.ts`.
@@ -30,9 +39,9 @@ import {
   type AgentResponse,
   type ClientRequest,
   type NetworkConfig as ProtoNetworkConfig,
-} from "../proto/bebop_pb";
-import { endpoints } from "../robot/endpoints";
-import type { BebopTransport, WifiJoinResult } from "./transport";
+} from "../proto/bebop_pb.ts";
+import { endpoints } from "../robot/endpoints.ts";
+import type { BebopTransport, WifiJoinResult } from "./transport.ts";
 import type {
   ApBand,
   DeviceInfo,
@@ -41,7 +50,7 @@ import type {
   RobotConfig,
   WifiNetwork,
   WifiStatus,
-} from "./types";
+} from "./types.ts";
 
 const REQUEST_TIMEOUT_MS = 12_000;
 
@@ -60,6 +69,9 @@ export class SetupTransport implements BebopTransport {
   private pending = new Map<number, PendingResolver>();
 
   private opening: Promise<void> | null = null;
+  /// Bumped by `disconnect()`; an open attempt from an older generation
+  /// never becomes the live socket.
+  private generation = 0;
 
   constructor(readonly host: string) {}
 
@@ -70,38 +82,33 @@ export class SetupTransport implements BebopTransport {
       return Promise.resolve();
     }
     if (this.opening) return this.opening;
-    this.opening = this.open().finally(() => {
-      this.opening = null;
+    const opening = this.open().finally(() => {
+      if (this.opening === opening) this.opening = null;
     });
-    return this.opening;
+    this.opening = opening;
+    return opening;
   }
 
   private open(): Promise<void> {
-    if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
-      try {
-        this.ws.close();
-      } catch {
-        /* ignore */
-      }
-      this.ws = null;
-    }
+    const generation = this.generation;
     return new Promise((resolve, reject) => {
       const url = endpoints(this.host).setupWs;
       const ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
       this.ws = ws;
       let settled = false;
+      const stale = () => generation !== this.generation || this.ws !== ws;
 
       ws.onopen = () => {
         if (settled) return;
         settled = true;
-        if (this.ws !== ws) {
+        if (stale()) {
           try {
             ws.close();
           } catch {
             /* ignore */
           }
-          reject(new Error("disconnected during connect"));
+          reject(new Error("setup connection closed by the client"));
           return;
         }
         resolve();
@@ -109,7 +116,13 @@ export class SetupTransport implements BebopTransport {
       ws.onerror = () => {
         if (settled) return;
         settled = true;
-        reject(new Error(`WebSocket error connecting to ${url}`));
+        reject(
+          new Error(
+            stale()
+              ? "setup connection closed by the client"
+              : `WebSocket error connecting to ${url}`,
+          ),
+        );
       };
       ws.onclose = () => {
         if (this.ws === ws) {
@@ -121,15 +134,21 @@ export class SetupTransport implements BebopTransport {
           reject(new Error("WebSocket closed before open"));
         }
       };
-      ws.onmessage = (ev) => this.onMessage(ev);
+      ws.onmessage = (ev) => {
+        if (this.ws === ws) this.onMessage(ev);
+      };
     });
   }
 
+  /// Close the socket and fail in-flight requests. Not terminal: the next
+  /// request opens a new socket.
   disconnect(): void {
+    this.generation += 1;
+    this.opening = null;
     const ws = this.ws;
-    if (!ws) return;
     this.ws = null;
     this.failAllPending("WS disconnected by client");
+    if (!ws) return;
     try {
       ws.close();
     } catch {

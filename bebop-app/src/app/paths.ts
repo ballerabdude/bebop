@@ -6,7 +6,11 @@ export type RobotSection =
   | "autonomy"
   | "autonomy/memory"
   | "settings"
+  | `settings/${SettingsTab}`
   | `diagnostics/${DiagnosticsTab}`;
+
+export const SETTINGS_TABS = ["network", "models", "voice"] as const;
+export type SettingsTab = (typeof SETTINGS_TABS)[number];
 
 export const DIAGNOSTICS_TABS = [
   "motors",

@@ -26,7 +26,7 @@
     --color-warning: #f5b544;
     --color-warning-fg: #ffe1a6;
 
-    /* Canvas palette (MapScreen reads these through getComputedStyle) */
+    /* Canvas palette (the Memory map canvas reads these through getComputedStyle) */
     --color-canvas-free: rgba(53, 194, 143, 0.16);
     --color-canvas-obstacle: rgba(216, 222, 233, 0.3);
     --color-canvas-wall: #d8dee9;

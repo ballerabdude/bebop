@@ -47,7 +47,13 @@ export function formatAge(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "—";
   if (seconds < 1) return `${seconds.toFixed(2)} s`;
   if (seconds < 60) return `${seconds.toFixed(1)} s`;
-  return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  const whole = Math.floor(seconds);
+  const d = Math.floor(whole / 86_400);
+  const h = Math.floor((whole % 86_400) / 3_600);
+  const m = Math.floor((whole % 3_600) / 60);
+  if (whole < 3_600) return `${m}m ${whole % 60}s`;
+  if (whole < 86_400) return `${h}h ${m}m`;
+  return `${d}d ${h}h`;
 }
 
 // ---------------------------------------------------------------------------

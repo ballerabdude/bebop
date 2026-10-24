@@ -194,11 +194,18 @@ export function useRefreshSnapshot(): () => Promise<void> {
 
 /// Shared /places + /whereami poller (polls while any consumer is mounted).
 /// `enabled = false` reads the last values without keeping the poll alive.
-export function usePlaces(enabled = true): PlacesState & {
+/// `pending` also polls the pending-place queue (Memory only: it is large).
+export function usePlaces(
+  enabled = true,
+  { pending = false }: { pending?: boolean } = {},
+): PlacesState & {
   refresh: () => Promise<void>;
 } {
   const { places } = useSession();
-  useEffect(() => (enabled ? places.acquire() : undefined), [places, enabled]);
+  useEffect(
+    () => (enabled ? places.acquire({ pending }) : undefined),
+    [places, enabled, pending],
+  );
   const state = useSyncExternalStore(places.subscribe, places.getSnapshot);
   return { ...state, refresh: places.refresh };
 }

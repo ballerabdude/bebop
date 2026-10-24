@@ -1,7 +1,10 @@
-// Shared poller for the places service (:9095): the place list and the
-// current recognition (`/whereami`). The Memory screens and the shell's
+// Shared poller for the places service (:9095): the confirmed place list,
+// the pending (scout-captured, not yet imported) queue and the current
+// recognition (`/whereami`). The Memory screens and the shell's
 // status dot all read it, so the robot sees one poll loop per app instead of
-// one per screen. Polling runs only while at least one consumer is mounted.
+// one per screen. Polling runs only while at least one consumer is mounted,
+// and the pending queue (large: keyframes + facts per entry) is fetched only
+// while a consumer asked for it (`acquire({ pending: true })`).
 
 export const PLACES_POLL_MS = 15_000;
 export const WHEREAMI_POLL_MS = 3_000;
@@ -21,12 +24,16 @@ export interface WhereAmI {
   margin?: number;
   min_score?: number;
   reason?: string;
-  top?: { place: PlaceSummary; score: number }[];
+  top?: { id: string; name: string; score: number }[];
   [key: string]: unknown;
 }
 
 export interface PlacesState {
   places: PlaceSummary[];
+  /// Pending places waiting for review/import (`GET /places/pending`).
+  pending: PlaceSummary[];
+  /// False when the service predates the pending queue (404).
+  pendingSupported: boolean;
   whereami: WhereAmI | null;
   /// Places service reachable on the last /places request (null = unknown).
   reachable: boolean | null;
@@ -37,6 +44,8 @@ export interface PlacesState {
 
 const INITIAL: PlacesState = {
   places: [],
+  pending: [],
+  pendingSupported: true,
   whereami: null,
   reachable: null,
   error: null,
@@ -58,6 +67,7 @@ export class PlacesStore {
   private state: PlacesState = INITIAL;
   private listeners = new Set<() => void>();
   private consumers = 0;
+  private pendingConsumers = 0;
   private placesTimer: ReturnType<typeof setInterval> | null = null;
   private whereTimer: ReturnType<typeof setInterval> | null = null;
   private healthConsumers = 0;
@@ -76,17 +86,23 @@ export class PlacesStore {
 
   getSnapshot = (): PlacesState => this.state;
 
-  acquire(): () => void {
+  acquire(opts: { pending?: boolean } = {}): () => void {
+    const wantsPending = !!opts.pending;
     this.consumers += 1;
+    if (wantsPending) this.pendingConsumers += 1;
     if (this.consumers === 1 || this.placesTimer === null) {
       this.stopPolling();
       this.startPolling();
+    } else if (wantsPending && this.pendingConsumers === 1) {
+      // Polling already runs without the queue: fetch it now, not in 15 s.
+      void this.loadPlaces();
     }
     let released = false;
     return () => {
       if (released) return;
       released = true;
       this.consumers = Math.max(0, this.consumers - 1);
+      if (wantsPending) this.pendingConsumers = Math.max(0, this.pendingConsumers - 1);
       if (this.consumers === 0) this.stopPolling();
     };
   }
@@ -159,14 +175,36 @@ export class PlacesStore {
   private async loadPlaces(): Promise<void> {
     this.set({ loading: true });
     try {
-      const res = await fetch(this.url("/places"), {
-        cache: "no-store",
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
+      const opts = { cache: "no-store" as const, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) };
+      const withPending = this.pendingConsumers > 0;
+      const [res, pendingRes] = await Promise.all([
+        fetch(this.url("/places"), opts),
+        withPending ? fetch(this.url("/places/pending"), opts).catch(() => null) : null,
+      ]);
       if (!res.ok) throw new Error(await readError(res));
       const body = (await res.json()) as { places?: PlaceSummary[] };
+      // Older services have no pending queue (404); keep the confirmed list
+      // usable rather than failing the whole poll.
+      // A failed/garbled pending fetch keeps the last queue: /places itself
+      // answered, so the service is reachable.
+      let pending: PlaceSummary[] = this.state.pending;
+      let pendingSupported = this.state.pendingSupported;
+      if (pendingRes?.ok) {
+        try {
+          const pb = (await pendingRes.json()) as { places?: PlaceSummary[] };
+          pending = Array.isArray(pb?.places) ? pb.places : [];
+          pendingSupported = true;
+        } catch {
+          /* non-JSON 200: keep the previous queue */
+        }
+      } else if (pendingRes?.status === 404) {
+        pending = [];
+        pendingSupported = false;
+      }
       this.set({
         places: Array.isArray(body.places) ? body.places : [],
+        pending,
+        pendingSupported,
         reachable: true,
         error: null,
         loading: false,

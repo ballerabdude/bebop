@@ -1,227 +1,174 @@
-# Bebop
+# bebop-app
 
-The Bebop companion app. One customer-facing app for every interaction
-with a Bebop robot — first-time setup, ongoing Wi-Fi configuration, motor
-bench, and driving.
+The operator app for a Bebop robot: first-time setup, driving, the voice and
+text agent, place memory, diagnostics and settings. It is a web app (React +
+TypeScript + Vite, Tailwind 4) that talks **directly** to the robot's
+services from the browser, and it is built to work on phones, tablets and
+desktops alike. There is no backend of its own and no login.
 
-Built with [Tauri 2](https://tauri.app) + React + TypeScript + Vite.
-Runs on desktop today and targets iOS and Android.
+Many people can watch a robot at once; only one drives at a time (the
+firmware's drive seat). The E-STOP is on screen on every robot page.
 
-## Features
+## Pages
 
-* **Setup wizard** — the robot broadcasts a `Bebop-XXXX` hotspot when it has
-  no Wi-Fi. Join it, connect the app to the robot's setup server
-  (`192.168.42.1:9091`), then scan/join your Wi-Fi and name the robot.
-* **Dashboard** — live Wi-Fi state and a network-mode switch
-  (`auto` / `client` / `ap`), plus access to the operator screens.
-* **Connect by IP** — talk to the runtime controls server on a robot that is
-  already on the network.
-* **Motor bench** — live per-joint telemetry, dial-in slider with re-zero
-  affordance, power-board card, sticky toolbar with E-STOP.
-* **Live video** — the bebop-vision process's WebRTC (WHEP) streams
-  (`:9092/whep?stream=...`): color + depth for both Orbbec cameras, each a
-   toggleable tile (`VideoScreen`).
-* **Map** — open from the dashboard or motor bench to view the live colored
-  depth cloud and camera trajectory. Drag to orbit, wheel/pinch to zoom,
-  use **Fit** or **Top view**, and toggle cloud/path layers. The read-only
-  `:9096/map` feed requires live SLAM enabled in the Vision service; see
-  [SLAM setup](../docs/slam.md). This is a camera-relative odometry
-  reconstruction; geometry resets with a new tracking segment or service run.
-  **Robot POV** follows the tracked camera pose in perspective, looking
-  forward through the point cloud. It uses a 70° vertical viewer field of
-  view; orbit/zoom are locked while following. Select **Robot POV** again,
-  **Top view**, or **Fit** to return to an overview. Tracking loss or a paused
-  feed displays a waiting state rather than an assumed camera position.
-* **Teleop** — live video and driving in one screen (`TeleopScreen`): the
-  primary stream front and center with other open streams docked as
-  clickable thumbnails, a sticky HUD (link / mode / wheels / battery /
-  E-STOP), a one-tap "Start driving" quick-start, and every input path side
-  by side — on-screen joystick, WASD / arrows, or a gamepad connected to the
-  device running the app.
-* **App-side gamepad dial-in & drive** — connect an 8BitDo / DualSense /
-  Xbox / Switch Pro pad to your phone or laptop and drive the active joint's
-  target (legged) or the wheeled chassis directly. See
-  [Gamepad controls](#gamepad-controls).
+The router is a hash router (`#/...`), so the same build works under the
+Vite dev server, any static file server and a future native shell without
+an SPA fallback.
 
-## Architecture
+| Route | Page |
+|---|---|
+| `#/` | **Robots**: remembered robots with live status (probes `:9090` and `:9091` every 10 s), open, rename, remove, add by address, start setup |
+| `#/setup/connect` → `wifi` → `identity` | **Setup** wizard, outside the robot shell. Over the robot's hotspot the address is `192.168.42.1`. Finishes on the robot's Drive page |
+| `#/r/:host/drive` | **Drive**: video-first teleop (touch joystick, WASD / arrows, gamepad) |
+| `#/r/:host/autonomy` | **Autonomy**: the agent console (text and push-to-talk turns, tool and motion events, cancel) |
+| `#/r/:host/autonomy/memory[?view=map]` | **Memory**: pending-place review and import, teaching, known places; the per-place map and the place graph |
+| `#/r/:host/diagnostics/:tab` | **Diagnostics**: `motors`, `power-imu`, `captures`, `services`, `cameras` |
+| `#/r/:host/settings/:section` | **Settings**: `network` (Wi-Fi status, hotspot), `models` (GPU budget, model downloads), `voice` (agent engine, voice, persona) |
 
-Two independent transports, split by purpose:
+### The robot shell
 
-| Purpose      | Talks to                    | Transport                                          | Default port |
-|--------------|-----------------------------|----------------------------------------------------|--------------|
-| Provisioning | `bebop-agent` (setup server)| `SetupTransport` — protobuf over binary WebSocket  | 9091         |
-| Operating    | `bebop-linux` (runtime)     | `RuntimeTransport` — protobuf over binary WebSocket| 9090         |
+Everything under `#/r/:host/` sits in one shell (`src/app/AppShell.tsx`):
 
-`SetupTransport` (`src/ble/setupTransport.ts`) implements the
-`BebopTransport` interface (`src/ble/transport.ts`) and provides Wi-Fi
-scan/join, robot naming, and network-mode selection. It is reached either
-over the robot's setup hotspot or over the LAN.
+- **Phones (<768 px)**: status bar on top, bottom tab bar, and an E-STOP
+  dock directly above the tabs. Dock and tabs are part of the layout, not
+  overlays, so they never cover page content. The dock shows the latch
+  reason ("Right motor fault: DC bus over-voltage") and a small Reset.
+- **Tablets (768-1279 px)**: icon rail on the left, E-STOP at the right of
+  the status bar, and a full-width strip under it with the reason and Reset
+  while latched. Short viewports (≤500 px tall, i.e. landscape phones) drop
+  the strip and show the reason and Reset inline in the status bar.
+- **Desktop (≥1280 px)**: the same with a labeled rail.
+- **Drive** is full-bleed: the rail collapses, the phone tab bar becomes a
+  menu button, and on phones the E-STOP floats bottom-right at `z-40`
+  (above any page overlay up to `z-39`). Its footprint grows while latched
+  (about 240 x 112 px), so the shell publishes the measured corner as
+  `--estop-float-w` / `--estop-float-h` on `<html>` for Drive to pad against.
+- **Dialogs never cover the E-STOP**: the shell publishes
+  `--shell-top-inset` / `--shell-bottom-inset`, and `ui/Dialog` and the
+  nav sheet stop at those edges. Changing section scrolls the page to the
+  top.
+- **Space** triggers the E-STOP anywhere outside a text field. The button
+  latches optimistically and follows telemetry; a press that never reached
+  the robot turns into a pulsing RETRY. Reset is deliberately a quiet
+  secondary control.
 
-`RuntimeTransport` (`src/runtime/wsTransport.ts`) carries the high-rate
-operator API — telemetry, modes, motor/wheel control, twists — using the
-`bebop.runtime.v1.*` envelope and pushes telemetry at ~30 Hz.
+The status bar shows the robot's name and host, service dots (runtime,
+video, voice, places), battery, firmware mode and who holds the drive seat.
 
-Both envelopes are shared with the robot. TypeScript bindings are generated
-by [`@bufbuild/protoc-gen-es`](https://github.com/bufbuild/protobuf-es) and
-committed:
+## Services, ports and transports
 
-* `src/proto/bebop_pb.ts` — setup protocol (from `bebop.proto`).
-* `src/proto/bebop_runtime_pb.ts` — runtime protocol (from `bebop_runtime.proto`).
+Every port and URL comes from `src/robot/endpoints.ts`; screens never spell
+one. Schemes follow the page (`ws`/`http` on plain HTTP, `wss`/`https`
+behind a TLS proxy, see `src/runtime/urls.ts`).
 
-Regenerate after editing a `.proto`:
+| Port | Service | Transport | Used for |
+|---|---|---|---|
+| 9090 | `bebop-linux` firmware | WS `/ws`, binary protobuf (`bebop_runtime.proto`); HTTP `/healthz`, `/captures*` | Telemetry, twists, E-STOP, modes, unit start/stop, capture downloads. The safety authority |
+| 9091 | `bebop-agent` | WS `/ws`, binary protobuf (`bebop.proto`); HTTP `/healthz` | Setup: Wi-Fi scan/join, robot name, hotspot settings |
+| 9092 | `bebop-vision` videoserver | WHEP (`POST /whep?stream=…`, `DELETE` the session), H.264 over WebRTC; HTTP `/snapshot`, drive notes (`/intent`, `/event`, `/notes`) | Video (one encoder per stream shared by all viewers) |
+| 9093 | `bebop-voice` | WS `/voice` (JSON events + PCM16); HTTP `/healthz`, `/config` | Agent turns (`user_text`, typed events, cancel), voice settings. Protocol: `docs/voice.md` |
+| 9094 | `bebop-models` | HTTP `/healthz`, `/models`, `POST /models/{id}/load\|unload` (CORS `*`) | GPU budget and Edge-LLM backend lifecycle |
+| 9095 | places (inside `bebop-vision`) | HTTP `/places`, `/places/pending`, `/whereami`, `/places/graph`, `/places/{id}/map` | Place memory. One shared poller per robot session |
+| 9096 | live SLAM (only with `--live-slam`) | HTTP `/structure` | "Capture this place" on the Memory map |
 
-```sh
-npm run gen-proto
-```
+`RobotProvider` (`src/robot/session.tsx`) owns one firmware socket per host,
+a ref-counted telemetry store (rate = the fastest mounted consumer, link
+liveness, backoff reconnect), the shared places poller and the E-STOP
+latch. Pages use its hooks (`useTelemetry`, `useConnection`, `useEStop`,
+`usePlaces`, `useRuntimeAction`, ...) and never touch ports or sockets.
 
-## Gamepad controls
-
-The app-side gamepad flows use the
-[Web Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API)
-and work with any pad the browser/WebView surfaces. The pad stays paired to
-the device running the app and streams commands over the runtime WS — the
-robot's own Bluetooth stack is not involved.
-
-| Flow              | Drives                                                                 | Where it lives                                   |
-|-------------------|------------------------------------------------------------------------|--------------------------------------------------|
-| App-side dial-in  | Per-joint target position via `setMotorTarget` (legged)                | `src/input/`, `src/components/GamepadDriver.tsx` |
-| App-side drive    | Body twist (vx, wz) via `sendVelocityCommand` (wheeled)                | `src/input/`, `src/components/GamepadDrive.tsx`  |
-
-### Layout auto-detection
-
-The driver supports both common HID layouts and picks one per pad in
-`src/input/mapping.ts`:
-
-| Layout      | Picked when                              | Examples                                              |
-|-------------|------------------------------------------|-------------------------------------------------------|
-| `standard`  | `Gamepad.mapping === "standard"`         | Xbox Wireless, DualSense over BT, 8BitDo in **X-input** mode (hold START + Y for 3 s) |
-| `dinput`    | Anything else (8BitDo / generic HID)     | 8BitDo Mobile / Pro 2 / Zero 2 in their default Android mode, generic HID pads |
-
-The active layout name appears as a small badge on the controller card. Each
-layout knows the chord text printed on its physical pad, so the on-screen
-hints read **"LB / RB"** under standard and **"L1 / R1"** under D-input.
-Logical intents (`prevJoint`, `nextJoint`, `deadman`, `estop`, `resetEStop`,
-`armToggle`) are the same across layouts; consumers read `snapshot.logical.*`
-and don't deal with raw button indices.
-
-### Bindings
-
-**Motor bench (legged dial-in):**
-
-* **LB / L1**, **RB / R1** — cycle the active joint
-* **Left stick ↕** — nudge the active joint's target (rate scaled by trigger)
-* **RT / R2** held — deadman; release to halt immediately
-* **L3** — arm / disarm the active joint
-* **B / Circle** — latch the runtime E-STOP
-* **A / Cross** — clear a latched E-STOP
-
-**Wheeled drive** (motor bench + teleop):
-
-* **Sticks** — drive in *split* (default: left ↕ forward, right ↔ turn) or
-  *arcade* (left stick does both) layout; toggled on the card, persisted per
-  device. On the teleop screen with a camera, the right stick aims the camera
-  instead and the layout locks to arcade.
-* **RT / R2** held — deadman; release to halt immediately. Trigger pressure
-  scales the request.
-* **L3** — arm / disarm all wheels
-* **B / Circle** — latch the runtime E-STOP
-* **A / Cross** — clear a latched E-STOP
-
-The firmware holds the last commanded twist until told otherwise, so the
-bridge owns stopping: deadman release, E-STOP latch, pad disconnect, leaving
-the screen, hiding the tab, or any interruption of the gamepad poll loop
-(250 ms watchdog) all enqueue a zero twist exactly once per drive cycle.
-
-Every drive input (gamepad, on-screen joystick, WASD / arrows) goes through
-one twist stream, `src/runtime/twistStream.ts`. The robot zeroes any twist
-not refreshed within its `operator_timeout_ms` (500 ms), so the stream never
-waits for an Ack. It re-sends the held twist every 100 ms, sends changes at
-most every ~33 ms, skips frames while the WebSocket is backed up instead of
-queueing stale ones, and sends stops immediately.
-
-### Control profiles
-
-How sensitive the controls feel is a per-device setting switched in the app —
-pickers live on the drive card and both gamepad cards. A profile sizes every
-app-side input path at once and persists in localStorage under
-`bebop.controlProfile`. Defined in `src/input/profile.ts`:
-
-| Profile    | Stick deadzone | Expo | Drive limits        | Dial-in rate |
-|------------|----------------|------|---------------------|--------------|
-| Gentle     | 18%            | 0.5  | 0.5 m/s · 1.0 rad/s | 1.0 rad/s    |
-| Standard   | 12%            | —    | 1.0 m/s · 2.0 rad/s | 2.0 rad/s    |
-| Sport      | 8%             | —    | 1.5 m/s · 3.0 rad/s | 3.0 rad/s    |
-
-The firmware still clamps twists to each wheel's `vel_max` and dial-in steps
-to `slew.max_pos_step_per_tick`, so a faster profile can't exceed the robot's
-hard ceilings.
-
-### Keyboard chords per screen
-
-| Screen      | Drive (vx / wz)  | Camera PTZ      |
-|-------------|------------------|-----------------|
-| Video       | —                | WASD + arrows   |
-| Teleop      | WASD + arrows    | I / J / K / L   |
-
-Every pad stops-on-exit: keys held at unmount or at a `disabled` flip enqueue
-a stop/hold exactly once.
-
-## Running on the robot
-
-For bench work, the app can be served from the Jetson itself so any device on
-the same network (or the robot's Hosted Network) can open the UI in a browser:
-
-```sh
-# on the robot, from the repo root
-cd bebop-app && npm install          # once
-sudo ./bebop-app/deploy/install-app-dev.sh   # installs + enables the unit
-```
-
-This installs `bebop-app.service`, which runs `deploy/dev-server.sh`
-(`npm run dev`) as the `bebop` user on boot. Vite serves on `0.0.0.0:1420`
-(`vite.config.ts`), so open `http://bebop.local:1420` or
-`http://<robot-ip>:1420`. It's a development server, not a production build.
+Setup traffic uses `SetupTransport` (`src/setup/`), which opens lazily and
+reconnects on the next request; get one with `useSetupTransport(host)`.
 
 ## Developing
 
+Node 22 (`.nvmrc`). From `bebop-app/`:
+
 ```sh
-# from bebop/bebop-app
-nvm use        # use the node version from .nvmrc
 npm install
-npm run tauri dev      # desktop dev build
-npm run tauri android init && npm run tauri android dev
-npm run tauri ios init && npm run tauri ios dev
+npm run dev                  # Vite on :1420 (0.0.0.0)
+# then open http://localhost:1420/#/  and add the robot (bebop.local or its IP)
 ```
 
-Prerequisites:
+Any page can be opened straight at a robot, e.g.
+`http://localhost:1420/#/r/bebop.local/diagnostics/services`. The app
+fetches from the robot's services cross-origin, which all allow it (CORS
+`*`, no auth).
 
-* Node 20+ (managed via `nvm`)
-* Rust toolchain (`rustup` stable)
-* `protoc` on `PATH` (for regenerating bindings). On macOS:
-  `brew install protobuf`. On Debian/Ubuntu:
-  `sudo apt-get install -y protobuf-compiler`.
-* For mobile: Android Studio / Xcode toolchains (see Tauri docs)
+```sh
+npx tsc --noEmit             # type check
+npm test                     # node --test over tests/*.test.mjs
+npm run build                # tsc + vite build into dist/
+npm run gen-proto            # regenerate src/proto/* with buf (after .proto edits)
+```
 
-## Repo layout
+Tests are plain `node:test` files that import the TypeScript sources
+directly (`--experimental-transform-types`), so pure modules import their
+siblings with explicit `.ts` extensions. They cover the twist stream, drive
+input arbiter, telemetry/reconnect logic, E-STOP latch and reason text, the
+setup transport lifecycle, the agent turn model and the map helpers.
+
+## On the robot
+
+`deploy/install-app-dev.sh` installs `bebop-app.service`, which runs
+`deploy/dev-server.sh` (`npm run dev`) as the `bebop` user on boot, so any
+device on the robot's network (or its hotspot) can open
+`http://bebop.local:1420` or `http://<robot-ip>:1420`. It is the Vite dev
+server, not a production build: after `git pull` it picks up changes on its
+own; after a dependency change run `npm install` and restart the unit.
+
+The microphone (push-to-talk) needs a secure context: `localhost`, or
+HTTPS through a TLS proxy such as `../Caddyfile.dev`.
+
+## Structure
 
 ```
-bebop-app/
-├── src/                  # React + TypeScript UI
-│   ├── App.tsx           # App shell + flow orchestration
-│   ├── ble/              # SetupTransport + BebopTransport interface + types
-│   ├── runtime/          # bebop-linux runtime WS client (motor bench, teleop)
-│   ├── input/            # Web Gamepad API hook + per-layout button mapping
-│   ├── proto/            # Generated protobuf bindings (npm run gen-proto)
-│   │   ├── bebop_pb.ts            # Setup envelope
-│   │   └── bebop_runtime_pb.ts    # bebop-linux runtime envelope
-│   ├── components/       # Shared UI primitives + input bridges
-│   │   ├── VideoFeed.tsx          # WebRTC feed tile (video/teleop)
-│   │   ├── DriveJoystick.tsx      # Differential-drive pad (bench/teleop)
-│   │   └── GamepadDriver/Drive    # Web-gamepad → dial-in / drive bridges
-│   └── screens/          # Welcome, ConnectByIp, Wifi, Config, Dashboard,
-│                         # MotorBench, Teleop, Video
-├── src-tauri/            # Rust / Tauri shell
-│   └── src/lib.rs        # Tauri builder
-├── buf.gen.yaml          # protoc-gen-es codegen config (TS bindings)
-└── README.md
+src/
+├── app/            router, AppShell (status bar, nav, E-STOP), robot picker,
+│   │               setup wizard, remembered robots, route helpers
+│   └── routes/     one thin component per route
+├── robot/          RobotProvider + hooks, endpoints registry, telemetry,
+│                   places and E-STOP stores, E-STOP reason text
+├── runtime/        firmware WS client (protobuf), twist stream, URL schemes
+├── setup/          bebop-agent client (SetupTransport, useSetupTransport)
+├── voice/          agent session, voice I/O worklets, voice service HTTP
+├── input/          drive input arbiter, gamepad, keyboard, control profiles
+├── components/
+│   ├── ui/         the kit: Button, Card, Banner, StatusPill, Stat, Tabs,
+│   │               SegmentedControl, Switch, Field, Dialog/useConfirm, PageState
+│   └── *.tsx       VideoFeed, DriveJoystick, GamepadDrive, AIModelCard, ...
+├── screens/
+│   ├── drive/      Drive page
+│   ├── autonomy/   agent console and voice settings
+│   ├── memory/     PlacesView, PendingReview, KnownPlaces, MapView,
+│   │               LocalMapCanvas, PlaceGraphCard, pollers, mapView helpers
+│   ├── diagnostics/ one file per tab
+│   ├── settings/   Network, model supervisor
+│   └── WifiScreen, ConfigScreen (setup steps)
+├── proto/          generated protobuf bindings (do not edit)
+└── App.css         design tokens (dark only), type scale, control heights
 ```
+
+Design tokens live in `App.css` (`@theme`): surfaces, intent colors with
+`*-fg` tints, a dense type scale (`text-micro` … `text-body-sm`), control
+heights 36/44/56 and a 44 px touch minimum (`pointer-coarse:h-touch`). The
+app is dark-only.
+
+### Control profiles
+
+How sensitive the drive controls feel is a per-device setting
+(`src/input/profile.ts`, stored in localStorage as `bebop.controlProfile`):
+
+| Profile  | Stick deadzone | Expo | Drive limits        |
+|----------|----------------|------|---------------------|
+| Gentle   | 18%            | 0.5  | 0.5 m/s · 1.0 rad/s |
+| Standard | 12%            | —    | 1.0 m/s · 2.0 rad/s |
+| Sport    | 8%             | —    | 1.5 m/s · 3.0 rad/s |
+
+The firmware still clamps twists to each wheel's `vel_max`.
+
+## Tauri
+
+`src-tauri/` holds an unused Tauri 2 shell, kept for a future native app
+(mobile builds, microphone without HTTPS). Nothing in `src/` depends on it;
+`npm run tauri dev` still works if you want a desktop window.

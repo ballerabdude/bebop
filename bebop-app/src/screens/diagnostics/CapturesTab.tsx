@@ -6,6 +6,9 @@ import { useCallback, useEffect, useState } from "react";
 import { Banner, Button, Card, CardHeader } from "../../components/ui";
 import { useRobot } from "../../robot/session";
 
+const LINK_BTN =
+  "inline-flex h-control-sm items-center justify-center rounded-input border border-border bg-bg-elev-2 px-3 text-label font-semibold text-text no-underline transition-colors hover:border-text-dim/40 hover:bg-bg-elev pointer-coarse:h-touch";
+
 export function CapturesTab() {
   return <CaptureDownloads />;
 }
@@ -212,57 +215,49 @@ function CaptureDownloads() {
         </div>
       ) : (
         <div className="space-y-2">
-          <div className="overflow-x-auto">
-            <table className="w-full text-label tabular-nums">
-              <thead className="text-micro uppercase tracking-wider text-text-dim">
-                <tr className="border-b border-border">
-                  <th className="text-left font-medium py-1.5 pr-3">File</th>
-                  <th className="text-right font-medium py-1.5 px-3">Size</th>
-                  <th className="text-left font-medium py-1.5 px-3 hidden sm:table-cell">
-                    Modified
-                  </th>
-                  <th className="text-right font-medium py-1.5 pl-3">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pageFiles.map((f) => (
-                  <tr key={f.name} className="border-b border-border/40 last:border-b-0">
-                    <td className="py-1.5 pr-3 font-mono text-caption break-all text-text">
+          <ul className="m-0 flex list-none flex-col p-0">
+            {pageFiles.map((f) => (
+              <li
+                key={f.name}
+                className="flex flex-col gap-2 border-b border-border/40 py-2.5 last:border-b-0 sm:flex-row sm:items-center sm:gap-3"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-mono text-label text-text" title={f.name}>
                       {f.name}
-                    </td>
-                    <td className="py-1.5 px-3 text-right text-text-dim">
-                      {formatBytes(f.sizeBytes)}
-                    </td>
-                    <td className="py-1.5 px-3 text-text-dim hidden sm:table-cell">
-                      {formatModified(f.modifiedMs)}
-                    </td>
-                    <td className="py-1.5 pl-3 text-right whitespace-nowrap">
-                      {/* Plain copyable links: right-click / copy-link to
-                          paste the URL into Foxglove (raw MCAP) or Rerun
-                          (.rrd). The live segment uses the finalizing URL so
-                          the saved file has a footer. */}
-                      <a
-                        href={f.active ? finalizeDlUrl(f.name) : downloadUrl(f.name)}
-                        download={f.name}
-                        title={f.active ? "Finalizes the live segment, then downloads" : "Download the raw MCAP"}
-                        className="inline-flex h-8 items-center justify-center rounded-input border border-border bg-bg-elev-2 px-2.5 text-caption font-medium pointer-coarse:h-10 text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors no-underline"
-                      >
-                        {f.active ? "Finalize + download" : "Download"}
-                      </a>
-                      <a
-                        href={rerunUrl(f.name)}
-                        download={f.name.replace(/\.mcap$/, ".rrd")}
-                        title="Convert on the robot to a Rerun .rrd with the navd dashboard"
-                        className="ml-1.5 inline-flex h-8 items-center justify-center rounded-input border border-border bg-bg-elev-2 px-2.5 text-caption font-medium pointer-coarse:h-10 text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors no-underline"
-                      >
-                        Rerun
-                      </a>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                    </span>
+                    {f.active ? (
+                      <span className="shrink-0 rounded-full border border-success/40 bg-success/15 px-1.5 text-micro font-semibold uppercase text-success">
+                        live
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="text-caption tabular-nums text-text-dim">
+                    {formatBytes(f.sizeBytes)} · {formatModified(f.modifiedMs)}
+                  </div>
+                </div>
+                {/* Plain copyable links: copy the URL into Foxglove (raw MCAP)
+                    or Rerun (.rrd). The live segment uses the finalizing URL
+                    so the saved file has a footer. */}
+                <div className="grid shrink-0 grid-cols-2 gap-2 sm:flex">
+                  <a
+                    href={f.active ? finalizeDlUrl(f.name) : downloadUrl(f.name)}
+                    download={f.name}
+                    className={LINK_BTN}
+                  >
+                    {f.active ? "Finalize + download" : "Download"}
+                  </a>
+                  <a
+                    href={rerunUrl(f.name)}
+                    download={f.name.replace(/\.mcap$/, ".rrd")}
+                    className={LINK_BTN}
+                  >
+                    Rerun .rrd
+                  </a>
+                </div>
+              </li>
+            ))}
+          </ul>
 
           {/* Pagination row: only shown when there's more than one
               page. Prev/Next are disabled at the ends; the indicator
@@ -277,7 +272,7 @@ function CaptureDownloads() {
                   type="button"
                   onClick={() => setPage((p) => Math.max(0, p - 1))}
                   disabled={safePage === 0}
-                  className="inline-flex h-8 items-center justify-center rounded-input border border-border bg-bg-elev-2 px-3 text-caption font-medium pointer-coarse:h-10 text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                  className={`${LINK_BTN} cursor-pointer disabled:cursor-not-allowed disabled:opacity-40`}
                 >
                   Prev
                 </button>
@@ -288,7 +283,7 @@ function CaptureDownloads() {
                   type="button"
                   onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
                   disabled={safePage >= pageCount - 1}
-                  className="inline-flex h-8 items-center justify-center rounded-input border border-border bg-bg-elev-2 px-3 text-caption font-medium pointer-coarse:h-10 text-text hover:border-text-dim/40 hover:bg-bg-elev transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                  className={`${LINK_BTN} cursor-pointer disabled:cursor-not-allowed disabled:opacity-40`}
                 >
                   Next
                 </button>

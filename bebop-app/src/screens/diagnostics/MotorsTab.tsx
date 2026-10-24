@@ -338,11 +338,11 @@ function WheelRow({
         disabled={busy || estopLatched || (!wheel.armed && !canArm)}
       />
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="text-body-sm text-text font-medium truncate">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+          <span className="text-body-sm font-semibold text-text">
             {wheel.name}
           </span>
-          <span className="text-caption text-text-dim">id {wheel.nodeId}</span>
+          <span className="whitespace-nowrap text-caption text-text-dim">id {wheel.nodeId}</span>
           {faulted ? (
             <span className="text-micro px-1.5 py-0.5 rounded-full border border-danger/40 bg-danger/10 text-danger">
               error
@@ -361,12 +361,18 @@ function WheelRow({
             </span>
           ) : null}
         </div>
-        <div className="text-caption text-text-dim font-mono">
-          vel {fmt(wheel.velocity)} rad/s · target {fmt(wheel.targetVelocity)}
+        <div className="font-mono text-caption text-text-dim">
+          <span className="whitespace-nowrap">vel {fmt(wheel.velocity)} rad/s</span>{" "}
+          <span className="whitespace-nowrap">· target {fmt(wheel.targetVelocity)}</span>
+          {faulted ? (
+            <span className="block whitespace-nowrap text-danger-fg">
+              error 0x{wheel.errorCode.toString(16).toUpperCase()}
+            </span>
+          ) : null}
         </div>
       </div>
       <div className="flex items-center gap-2 shrink-0">
-        <div className="text-right text-label text-text-dim font-mono">
+        <div className="hidden text-right font-mono text-label text-text-dim sm:block">
           {wheel.velocity >= 0 ? "+" : ""}
           {wheel.velocity.toFixed(2)}
           <span className="text-text-dim/70"> rad/s</span>

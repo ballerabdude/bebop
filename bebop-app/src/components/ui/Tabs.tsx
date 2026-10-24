@@ -1,5 +1,6 @@
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { NavLink } from "react-router";
+import { NavLink, useLocation } from "react-router";
 
 import { cn } from "./cn";
 
@@ -29,11 +30,49 @@ export function Tabs({
   label: string;
   className?: string;
 }) {
+  const ref = useRef<HTMLElement>(null);
+  const { pathname } = useLocation();
+  // Which edges have hidden tabs beyond them, for the fade hint.
+  const [edges, setEdges] = useState({ left: false, right: false });
+  const measure = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const left = el.scrollLeft > 2;
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 2;
+    setEdges((e) => (e.left === left && e.right === right ? e : { left, right }));
+  }, []);
+  // Keep the selected tab in view on phones (e.g. a deep link to the last tab).
+  useLayoutEffect(() => {
+    const el = ref.current;
+    const active = el?.querySelector<HTMLElement>('[aria-current="page"], [aria-pressed="true"]');
+    if (el && active && el.scrollWidth > el.clientWidth) {
+      const a = active.offsetLeft - el.offsetLeft;
+      if (a < el.scrollLeft || a + active.offsetWidth > el.scrollLeft + el.clientWidth) {
+        el.scrollLeft = Math.max(0, a - (el.clientWidth - active.offsetWidth) / 2);
+      }
+    }
+    measure();
+  }, [pathname, value, measure]);
+  useEffect(() => {
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [measure]);
+  const fade =
+    edges.left && edges.right
+      ? "[mask-image:linear-gradient(to_right,transparent,black_28px,black_calc(100%-28px),transparent)]"
+      : edges.right
+        ? "[mask-image:linear-gradient(to_right,black_calc(100%-36px),transparent)]"
+        : edges.left
+          ? "[mask-image:linear-gradient(to_right,transparent,black_36px)]"
+          : "";
   return (
     <nav
+      ref={ref}
       aria-label={label}
+      onScroll={measure}
       className={cn(
         "-mx-4 flex gap-1.5 overflow-x-auto px-4 pb-1 [scrollbar-width:none] sm:mx-0 sm:px-0",
+        fade,
         className,
       )}
     >

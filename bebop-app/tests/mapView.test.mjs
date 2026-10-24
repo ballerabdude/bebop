@@ -6,6 +6,7 @@ import {
   decodePlaceLayer,
   decodeRleBase64,
   fitPlanView,
+  formatAge,
   formatPayloadBytes,
   graphEdgeLabel,
   gridBounds,
@@ -33,7 +34,7 @@ import {
   screenToWorld,
   worldToScreen,
   zoomPlanView,
-} from "../src/screens/mapView.ts";
+} from "../src/screens/memory/mapView.ts";
 
 // Canonical backend format: uint16 run lengths only, alternating from a 0-run.
 const u16Lengths = (lengths) => {
@@ -733,4 +734,15 @@ test("hasStructure is false until the plan carries drawable data", () => {
     hasStructure({ ...base, grid: { width: 4, height: 4, free_count: 3, occupied_count: 0 } }),
     true,
   );
+});
+
+test("formatAge scales units from seconds to days", () => {
+  assert.equal(formatAge(null), "—");
+  assert.equal(formatAge(0.25), "0.25 s");
+  assert.equal(formatAge(12.34), "12.3 s");
+  assert.equal(formatAge(125), "2m 5s");
+  assert.equal(formatAge(3599.9), "59m 59s");
+  assert.equal(formatAge(3600), "1h 0m");
+  assert.equal(formatAge(8821 * 60 + 44), "6d 3h");
+  assert.equal(formatAge(86_399), "23h 59m");
 });

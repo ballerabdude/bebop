@@ -1,6 +1,7 @@
-// `#/` — pick a robot. Remembered robots are probed on :9090 (runtime) and
-// :9091 (setup) in parallel so the operator sees at a glance whether a robot
-// is drivable, only provisionable, or offline.
+// `#/` — pick a robot. Remembered robots (per browser) are probed on :9090
+// (runtime) and :9091 (setup) in parallel, and again every 10 s, so the
+// operator sees at a glance whether a robot is drivable, only provisionable,
+// or offline. Robots can be renamed (a local label) or removed from the list.
 
 import { useState } from "react";
 import { Link, useNavigate } from "react-router";
@@ -12,54 +13,93 @@ import {
   Field,
   INPUT_CLASS,
   StatusDot,
+  StatusPill,
+  useConfirm,
 } from "../components/ui";
-import type { Tone } from "../components/ui";
+import type { ConfirmOptions, Tone } from "../components/ui";
 import { HOTSPOT_HOST, normalizeHost, PORTS } from "../robot/endpoints";
 import { robotPath, setupPath } from "./paths";
 import {
   forgetRobot,
   probe,
   rememberRobot,
+  renameRobot,
   useRememberedRobots,
   useRobotProbe,
 } from "./robots";
 import type { ProbeResult, RememberedRobot } from "./robots";
 
-function tone(p: ProbeResult): Tone {
-  return p === "up" ? "ok" : p === "down" ? "err" : "dim";
+const REPROBE_MS = 10_000;
+
+function summary(runtime: ProbeResult, setup: ProbeResult): { tone: Tone; label: string; hint: string } {
+  if (runtime === "up") return { tone: "ok", label: "Online", hint: "Runtime and controls reachable" };
+  if (setup === "up") return { tone: "warn", label: "Setup only", hint: "Setup agent answers; the runtime doesn't" };
+  if (runtime === "checking" || setup === "checking") return { tone: "dim", label: "Checking", hint: "Probing :9090 and :9091" };
+  return { tone: "err", label: "Offline", hint: "No answer on :9090 or :9091" };
 }
 
-function RobotRow({ robot, nonce }: { robot: RememberedRobot; nonce: number }) {
+function RobotRow({
+  robot,
+  nonce,
+  confirm,
+}: {
+  robot: RememberedRobot;
+  nonce: number;
+  confirm: (o: ConfirmOptions) => Promise<boolean>;
+}) {
   const navigate = useNavigate();
-  const { runtime, setup } = useRobotProbe(robot.host, nonce);
-  const status =
-    runtime === "up"
-      ? "Online"
-      : setup === "up"
-        ? "Setup only (runtime not answering)"
-        : runtime === "checking" || setup === "checking"
-          ? "Checking…"
-          : "Offline";
+  const { runtime, setup } = useRobotProbe(robot.host, nonce, REPROBE_MS);
+  const st = summary(runtime, setup);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(robot.name ?? "");
+  const title = robot.name || robot.host;
+
   return (
-    <li className="flex flex-col gap-3 rounded-card border border-border bg-bg-elev px-4 py-3 sm:flex-row sm:items-center">
-      <div className="min-w-0 flex-1">
-        <div className="truncate font-semibold">{robot.name || robot.host}</div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-label text-text-dim">
-          {robot.name ? <span className="font-mono">{robot.host}</span> : null}
-          <span className="inline-flex items-center gap-1.5">
-            <StatusDot tone={tone(runtime)} label={`runtime ${runtime}`} pulse={runtime === "checking"} />
-            runtime
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <StatusDot tone={tone(setup)} label={`setup ${setup}`} pulse={setup === "checking"} />
-            setup
-          </span>
-          <span>{status}</span>
+    <li className="flex flex-col gap-3 rounded-card border border-border bg-bg-elev px-4 py-3">
+      <div className="flex items-start gap-3">
+        <span className="mt-1.5">
+          <StatusDot tone={st.tone} pulse={st.label === "Checking"} label={st.label} />
+        </span>
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <form
+              className="flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                renameRobot(robot.host, draft);
+                setEditing(false);
+              }}
+            >
+              <input
+                className={INPUT_CLASS}
+                autoFocus
+                value={draft}
+                maxLength={40}
+                placeholder={robot.host}
+                aria-label={`Name for ${robot.host}`}
+                onChange={(e) => setDraft(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setEditing(false);
+                }}
+              />
+              <Button type="submit" size="sm">
+                Save
+              </Button>
+            </form>
+          ) : (
+            <div className="truncate text-base font-semibold">{title}</div>
+          )}
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-label text-text-dim">
+            {robot.name ? <span className="font-mono">{robot.host}</span> : null}
+            <StatusPill tone={st.tone}>{st.label}</StatusPill>
+            <span>{st.hint}</span>
+          </div>
         </div>
       </div>
-      <div className="flex gap-2">
+      <div className="grid grid-cols-3 gap-2 sm:flex sm:flex-wrap">
         <Button
-          className="flex-1 sm:flex-none"
+          className="col-span-3 sm:min-w-28"
+          variant={runtime === "up" ? "primary" : "secondary"}
           onClick={() => {
             rememberRobot(robot.host);
             navigate(robotPath(robot.host));
@@ -68,19 +108,36 @@ function RobotRow({ robot, nonce }: { robot: RememberedRobot; nonce: number }) {
           Open
         </Button>
         <Button
-          variant="secondary"
-          className="flex-1 sm:flex-none"
+          variant="ghost"
+          className="border border-border"
           disabled={setup !== "up"}
           onClick={() => navigate(setupPath("wifi", robot.host))}
         >
-          Setup
+          Wi-Fi
         </Button>
         <Button
           variant="ghost"
-          aria-label={`Forget ${robot.name || robot.host}`}
-          onClick={() => forgetRobot(robot.host)}
+          onClick={() => {
+            setDraft(robot.name ?? "");
+            setEditing((v) => !v);
+          }}
         >
-          Forget
+          {editing ? "Cancel" : "Rename"}
+        </Button>
+        <Button
+          variant="ghost"
+          className="text-danger-fg sm:ml-auto"
+          onClick={async () => {
+            const ok = await confirm({
+              title: `Remove ${title}?`,
+              body: "It's only removed from this device's list; the robot is not changed. Add it again by address any time.",
+              confirmLabel: "Remove",
+              tone: "danger",
+            });
+            if (ok) forgetRobot(robot.host);
+          }}
+        >
+          Remove
         </Button>
       </div>
     </li>
@@ -94,6 +151,7 @@ export function RobotPicker() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
+  const { confirm, dialog } = useConfirm();
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
@@ -128,6 +186,7 @@ export function RobotPicker() {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-5 px-4 pt-[max(1.5rem,env(safe-area-inset-top))] pb-[max(1.5rem,env(safe-area-inset-bottom))] sm:px-6">
+      {dialog}
       <header className="flex items-center justify-between gap-3">
         <div>
           <div className="text-label uppercase tracking-[0.08em] text-text-dim">Bebop</div>
@@ -141,7 +200,7 @@ export function RobotPicker() {
       {robots.length > 0 ? (
         <ul className="m-0 flex list-none flex-col gap-2 p-0">
           {robots.map((r) => (
-            <RobotRow key={r.host} robot={r} nonce={nonce} />
+            <RobotRow key={r.host} robot={r} nonce={nonce} confirm={confirm} />
           ))}
         </ul>
       ) : (

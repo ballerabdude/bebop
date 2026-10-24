@@ -66,6 +66,14 @@ export function rememberRobot(host: string, name?: string): void {
   write([next, ...list.filter((r) => r.host !== h)].slice(0, 20));
 }
 
+/// Set or clear (empty string) a robot's friendly name.
+export function renameRobot(host: string, name: string): void {
+  const list = read();
+  write(
+    list.map((r) => (r.host === host ? { ...r, name: name.trim() || undefined } : r)),
+  );
+}
+
 export function forgetRobot(host: string): void {
   write(read().filter((r) => r.host !== host));
 }
@@ -99,10 +107,12 @@ export async function probe(host: string, service: ServiceName): Promise<boolean
 }
 
 /// Probe the runtime (:9090) and setup (:9091) health endpoints in
-/// parallel. Re-probes when `host` or `nonce` changes.
+/// parallel. Re-probes when `host` or `nonce` changes, and every
+/// `everyMs` (0 = never) while the page is visible.
 export function useRobotProbe(
   host: string,
   nonce = 0,
+  everyMs = 0,
 ): { runtime: ProbeResult; setup: ProbeResult; recheck: () => void } {
   const [runtime, setRuntime] = useState<ProbeResult>("checking");
   const [setup, setSetup] = useState<ProbeResult>("checking");
@@ -112,16 +122,27 @@ export function useRobotProbe(
     let cancelled = false;
     setRuntime("checking");
     setSetup("checking");
-    void probe(host, "runtime").then((ok) => {
-      if (!cancelled) setRuntime(ok ? "up" : "down");
-    });
-    void probe(host, "setup").then((ok) => {
-      if (!cancelled) setSetup(ok ? "up" : "down");
-    });
+    const run = () => {
+      void probe(host, "runtime").then((ok) => {
+        if (!cancelled) setRuntime(ok ? "up" : "down");
+      });
+      void probe(host, "setup").then((ok) => {
+        if (!cancelled) setSetup(ok ? "up" : "down");
+      });
+    };
+    run();
+    // Background re-probes keep the last answer on screen (no "checking"
+    // flicker) and skip hidden tabs.
+    const id = everyMs > 0
+      ? window.setInterval(() => {
+          if (!document.hidden) run();
+        }, everyMs)
+      : 0;
     return () => {
       cancelled = true;
+      window.clearInterval(id);
     };
-  }, [host, nonce, local]);
+  }, [host, nonce, local, everyMs]);
   const recheck = useCallback(() => setLocal((n) => n + 1), []);
   return { runtime, setup, recheck };
 }

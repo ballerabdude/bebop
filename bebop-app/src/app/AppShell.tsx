@@ -1,17 +1,26 @@
 // Robot shell: status bar, navigation and the global E-STOP around every
 // operator page (`#/r/:host/*`).
 //
-//   phones   (<768)      bottom tab bar (safe-area aware), E-STOP floating
-//                        bottom-right above it
+//   phones   (<768)      bottom tab bar (safe-area aware) with the E-STOP
+//                        dock directly above it, both in the layout flow so
+//                        they never cover page content
 //   tablets  (768-1279)  compact icon rail on the left, E-STOP top-right
 //   desktop  (>=1280)    labeled side rail, E-STOP top-right
 //
 // The Drive page hides most chrome: the rail collapses to icons, the phone
 // tab bar is replaced by a menu button, and only the status bar and E-STOP
-// remain.
+// remain. On phones the E-STOP then floats bottom-right at z-40 (above any
+// page overlay up to z-39). Its size depends on the latch state (about
+// 240 x 112 px latched), so the shell publishes the measured corner as
+// `--estop-float-w` / `--estop-float-h` on <html>; Drive pads against those.
+//
+// The shell also publishes `--shell-top-inset` / `--shell-bottom-inset` (the
+// status bar, and the phone E-STOP dock + tab bar or floating E-STOP). Modal
+// layers (ui/Dialog, the nav sheet) stop at those edges, so the E-STOP is
+// never dimmed or covered while a confirm is open.
 
-import { Suspense, useEffect, useState } from "react";
-import type { ReactNode } from "react";
+import { Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { ReactNode, Ref, RefObject } from "react";
 import { Link, NavLink, Outlet, useLocation, useParams } from "react-router";
 
 import { cn, PageState, StatusDot, StatusPill } from "../components/ui";
@@ -19,13 +28,12 @@ import type { Tone } from "../components/ui";
 import {
   RobotProvider,
   useConnection,
-  useEStop,
   usePlacesReachable,
   useRobot,
   useTelemetry,
 } from "../robot/session";
 import type { RuntimeSnapshot } from "../runtime/types";
-import { EStopButton } from "./EStopButton";
+import { EStopBar, EStopDock, EStopHotkey, EStopStrip } from "./EStopButton";
 import {
   AutonomyIcon,
   DiagnosticsIcon,
@@ -70,7 +78,7 @@ const NAV: NavItem[] = [
   {
     label: "Settings",
     section: "settings",
-    match: (p) => p.endsWith("/settings"),
+    match: (p) => p.includes("/settings"),
     icon: SettingsIcon,
   },
 ];
@@ -120,16 +128,20 @@ const MODE_LABEL: Record<string, string> = {
   RUN_POLICY: "Policy",
 };
 
-function StatusBar({ onMenu, showMenu }: { onMenu: () => void; showMenu: boolean }) {
+function StatusBar({
+  onMenu,
+  showMenu,
+  headerRef,
+}: {
+  onMenu: () => void;
+  showMenu: boolean;
+  headerRef: Ref<HTMLElement>;
+}) {
   const { host } = useRobot();
   const link = useConnection();
   const s = useTelemetry(selectStatus, 5);
   const robots = useRememberedRobots();
   const name = robots.find((r) => r.host === host)?.name;
-  // Keep the pills clear of the fixed E-STOP (wider while Reset shows).
-  const estop = useEStop();
-  const latched = estop.latched;
-  const estopErr = !!estop.error;
   const placesUp = usePlacesReachable();
 
   const runtimeTone: Tone =
@@ -145,13 +157,11 @@ function StatusBar({ onMenu, showMenu }: { onMenu: () => void; showMenu: boolean
   const batteryTone: Tone = !s.socKnown ? "dim" : s.soc < 25 ? "err" : s.soc < 60 ? "warn" : "ok";
 
   return (
-    <header className="sticky top-0 z-30 border-b border-border bg-bg/90 pt-safe backdrop-blur-md">
-      <div
-        className={cn(
-          "flex min-h-14 items-center gap-2 px-3 py-1.5 sm:px-4 md:min-h-16",
-          estopErr ? (latched ? "md:pr-[440px]" : "md:pr-[340px]") : latched ? "md:pr-[250px]" : "md:pr-[130px]",
-        )}
-      >
+    <header
+      ref={headerRef}
+      className="sticky top-0 z-30 border-b border-border bg-bg/90 pt-safe backdrop-blur-md"
+    >
+      <div className="flex min-h-14 items-center gap-2 px-3 py-1.5 sm:px-4 md:min-h-16 [@media(max-height:500px)]:min-h-12 [@media(max-height:500px)]:py-1">
         {showMenu ? (
           <button
             type="button"
@@ -225,7 +235,9 @@ function StatusBar({ onMenu, showMenu }: { onMenu: () => void; showMenu: boolean
             </StatusPill>
           ) : null}
         </div>
+        <EStopBar className="ml-auto shrink-0" />
       </div>
+      <EStopStrip />
     </header>
   );
 }
@@ -265,12 +277,13 @@ function SideRail({ host, compact }: { host: string; compact: boolean }) {
   );
 }
 
-function BottomTabs({ host }: { host: string }) {
+function BottomTabs({ host, navRef }: { host: string; navRef: Ref<HTMLElement> }) {
   const { pathname } = useLocation();
   return (
     <nav
+      ref={navRef}
       aria-label="Robot sections"
-      className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-bg/95 pb-safe backdrop-blur-md md:hidden"
+      className="shrink-0 border-t border-border bg-bg pb-safe md:hidden"
     >
       <div className="grid grid-cols-5">
         {NAV.map((item) => {
@@ -281,7 +294,7 @@ function BottomTabs({ host }: { host: string }) {
               to={robotPath(host, item.section)}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "flex h-16 flex-col items-center justify-center gap-0.5 text-micro font-semibold",
+                "flex h-14 flex-col items-center justify-center gap-0.5 text-caption font-semibold",
                 active ? "text-accent" : "text-text-dim",
               )}
             >
@@ -298,7 +311,10 @@ function BottomTabs({ host }: { host: string }) {
 function NavSheet({ host, open, onClose }: { host: string; open: boolean; onClose: () => void }) {
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-[55] bg-black/55 md:hidden" onClick={onClose}>
+    <div
+      className="fixed inset-x-0 top-0 bottom-[var(--shell-bottom-inset,0px)] z-[55] bg-black/55 md:hidden"
+      onClick={onClose}
+    >
       <div
         className="absolute inset-x-0 bottom-0 rounded-t-card border-t border-border bg-bg-elev pb-safe"
         onClick={(e) => e.stopPropagation()}
@@ -331,46 +347,102 @@ function NavSheet({ host, open, onClose }: { host: string; open: boolean; onClos
 
 // ------------------------------------------------------------- shell
 
+const INSET_VARS = [
+  "--shell-top-inset",
+  "--shell-bottom-inset",
+  "--estop-float-w",
+  "--estop-float-h",
+] as const;
+
+/// Publish the shell's fixed edges as CSS variables on <html> (see the
+/// header comment). Re-measured on resize and whenever one of the parts
+/// changes size (the E-STOP grows while latched).
+function useShellInsets(
+  header: RefObject<HTMLElement | null>,
+  dock: RefObject<HTMLDivElement | null>,
+  tabs: RefObject<HTMLElement | null>,
+  layoutKey: string,
+): void {
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    const visible = (el: Element | null | undefined) => {
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 ? r : null;
+    };
+    const measure = () => {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const h = visible(header.current);
+      const d = visible(dock.current);
+      const t = visible(tabs.current);
+      const floating = !!dock.current?.hasAttribute("data-estop-float");
+      let bottomTop = vh;
+      if (d) bottomTop = Math.min(bottomTop, floating ? d.top - 8 : d.top);
+      if (t) bottomTop = Math.min(bottomTop, t.top);
+      const px = (n: number) => `${Math.max(0, Math.round(n))}px`;
+      root.style.setProperty("--shell-top-inset", px(h ? h.bottom : 0));
+      root.style.setProperty("--shell-bottom-inset", px(vh - bottomTop));
+      root.style.setProperty("--estop-float-w", px(floating && d ? vw - d.left : 0));
+      root.style.setProperty("--estop-float-h", px(floating && d ? vh - d.top : 0));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    for (const el of [header.current, dock.current, tabs.current]) if (el) ro.observe(el);
+    window.addEventListener("resize", measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+      for (const v of INSET_VARS) root.style.removeProperty(v);
+    };
+  }, [header, dock, tabs, layoutKey]);
+}
+
 function Shell() {
   const { host } = useRobot();
   const { pathname } = useLocation();
   const immersive = pathname.endsWith("/drive");
   const [menuOpen, setMenuOpen] = useState(false);
+  const headerRef = useRef<HTMLElement | null>(null);
+  const dockRef = useRef<HTMLDivElement | null>(null);
+  const tabsRef = useRef<HTMLElement | null>(null);
+  const mainRef = useRef<HTMLElement | null>(null);
+  useShellInsets(headerRef, dockRef, tabsRef, immersive ? "drive" : "page");
 
   useEffect(() => {
     rememberRobot(host);
   }, [host]);
 
+  // Every section shares one scroll container: start a new page at the top
+  // (keyed on the path, so Memory's ?view toggle keeps its place).
+  useEffect(() => {
+    mainRef.current?.scrollTo(0, 0);
+  }, [pathname]);
+
   return (
     <div className="flex h-dvh w-full overflow-hidden">
       <SideRail host={host} compact={immersive} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <StatusBar showMenu={immersive} onMenu={() => setMenuOpen(true)} />
+        <StatusBar headerRef={headerRef} showMenu={immersive} onMenu={() => setMenuOpen(true)} />
         <main
+          ref={mainRef}
           id="main"
           className={cn(
             "flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto",
-            // Room for the phone tab bar + floating E-STOP.
-            immersive
-              ? "pb-[calc(88px+env(safe-area-inset-bottom))] md:pb-0"
-              : "pb-[calc(152px+env(safe-area-inset-bottom))] md:pb-6",
+            immersive ? "" : "pb-6",
           )}
         >
           <Suspense fallback={<PageState kind="loading" />}>
             <Outlet />
           </Suspense>
         </main>
+        {/* Phones: E-STOP dock + tabs sit below the scroll area, in flow.
+            On the full-bleed Drive page the dock floats bottom-right. */}
+        <EStopDock rootRef={dockRef} floating={immersive} />
+        {immersive ? null : <BottomTabs host={host} navRef={tabsRef} />}
       </div>
-      {immersive ? null : <BottomTabs host={host} />}
       <NavSheet host={host} open={menuOpen} onClose={() => setMenuOpen(false)} />
-      <EStopButton
-        className={cn(
-          "fixed right-3 z-40 sm:right-4 md:top-[calc(4px+env(safe-area-inset-top))] md:bottom-auto",
-          immersive
-            ? "bottom-[calc(16px+env(safe-area-inset-bottom))]"
-            : "bottom-[calc(76px+env(safe-area-inset-bottom))]",
-        )}
-      />
+      <EStopHotkey />
     </div>
   );
 }

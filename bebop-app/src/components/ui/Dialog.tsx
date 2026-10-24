@@ -13,6 +13,11 @@ import { cn } from "./cn";
 /// - Focus moves into the dialog (the element marked `data-autofocus`, else
 ///   the first button) and Tab is trapped inside.
 /// - On phones it docks to the bottom edge, above the safe area.
+/// - Inside the robot shell it stops at `--shell-top-inset` /
+///   `--shell-bottom-inset` (status bar; phone E-STOP dock + tab bar), so the
+///   E-STOP stays visible and tappable while a dialog is open, and the
+///   sheet's buttons never land where the operator's thumb expects the stop.
+///   Cancel is the bottom-most button on phones, nearest the E-STOP.
 export function Dialog({
   open,
   onClose,
@@ -72,7 +77,7 @@ export function Dialog({
   if (!open) return null;
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-end justify-center bg-black/55 p-0 backdrop-blur-sm sm:items-center sm:p-4"
+      className="fixed inset-x-0 top-[var(--shell-top-inset,0px)] bottom-[var(--shell-bottom-inset,0px)] z-[60] flex items-end justify-center bg-black/55 p-0 backdrop-blur-sm sm:items-center sm:p-4"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -83,7 +88,7 @@ export function Dialog({
         aria-modal="true"
         aria-labelledby={titleId}
         className={cn(
-          "w-full max-w-md rounded-t-card border border-border bg-bg-elev shadow-2xl sm:rounded-card",
+          "flex max-h-full w-full max-w-md flex-col overflow-y-auto rounded-t-card border border-border bg-bg-elev shadow-2xl sm:rounded-card",
           className,
         )}
       >

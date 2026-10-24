@@ -1,7 +1,6 @@
-import { TeleopScreen } from "../../screens/TeleopScreen";
+import { DriveScreen } from "../../screens/drive/DriveScreen";
 
-/// `#/r/:host/drive`. The video-first Drive redesign comes later; for now
-/// this is the teleop screen inside the shell.
+/// `#/r/:host/drive`: the video-first Drive screen.
 export default function DriveRoute() {
-  return <TeleopScreen />;
+  return <DriveScreen />;
 }

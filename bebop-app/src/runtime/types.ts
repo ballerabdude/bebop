@@ -81,6 +81,10 @@ export interface DriveView {
   /// Name the seat holder announced via `ClientHello` ("" when none,
   /// or when the holder never sent one / on older firmware).
   activeOperatorName: string;
+  /// The seat holder declared itself autonomous in `ClientHello` (the
+  /// voice agent). A person's twist or stop preempts it at once. Always
+  /// false on firmware older than the PREEMPT change.
+  activeOperatorAutonomous: boolean;
   odomX: number; // m
   odomY: number; // m
   odomTheta: number; // rad

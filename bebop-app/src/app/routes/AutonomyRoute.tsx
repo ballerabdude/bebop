@@ -1,7 +1,7 @@
-import { VoiceScreen } from "../../screens/VoiceScreen";
+import { AutonomyScreen } from "../../screens/autonomy/AutonomyScreen";
 
-/// `#/r/:host/autonomy`. The voice + text agent console comes with the
-/// Autonomy redesign; for now this is push-to-talk inside the shell.
+/// `#/r/:host/autonomy`: the agent console (text + voice turns, transcript
+/// with tool cards, live camera and robot status).
 export default function AutonomyRoute() {
-  return <VoiceScreen />;
+  return <AutonomyScreen />;
 }
