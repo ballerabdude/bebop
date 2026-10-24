@@ -75,6 +75,7 @@ fn build_drive_state(sup: &Arc<Supervisor>, conn_id: u64) -> proto::DriveState {
         has_active_operator: op.has_active_operator,
         you_are_active_operator: op.you_are_active_operator,
         active_operator_name: op.active_operator_name,
+        active_operator_autonomous: op.active_operator_autonomous,
         odom_x: x,
         odom_y: y,
         odom_theta: theta,

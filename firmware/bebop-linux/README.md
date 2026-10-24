@@ -218,8 +218,21 @@ command port (10000) is gone.
   drive seat at a time; any number may watch. A stop from a client that
   doesn't hold the seat is ignored while someone else is driving;
   `EmergencyStop` from anyone always latches.
-- Name a connection with `ClientHello { name }`; the seat holder's name
-  rides `DriveState.active_operator_name` in telemetry.
+- Name a connection with `ClientHello { name, autonomous }`; the seat
+  holder's name rides `DriveState.active_operator_name` in telemetry and
+  `DriveState.active_operator_autonomous` says whether software holds it.
+- **Preemption.** A connection that sends `autonomous = true` (the voice
+  agent's `move_relative`) holds the seat only until a person touches the
+  controls: any drive command from a non-autonomous connection — a zero
+  twist included — takes a fresh autonomous seat at once, and the person's
+  twist applies (a stop halts the robot). A preempting stop claims a fresh
+  seat for `operator_grace_ms`, so the autonomous client can't take it back
+  (other people wait out that window too). The seat decision and the twist
+  write happen under one lock, so a holder's in-flight twist can never land
+  after the preempting stop. The reverse never happens: an
+  autonomous connection is rejected (its stops ignored) while anyone else
+  holds a fresh seat. Each preemption logs `operator preemption: ...` at
+  WARN. Person-vs-person arbitration is unchanged (`operator_grace_ms`).
 - Telemetry (`SubscribeTelemetry`) is latest-value per connection: on a
   slow link stale frames are dropped, never queued ahead of replies.
 

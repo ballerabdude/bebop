@@ -1521,9 +1521,11 @@ async def _move_relative(args: dict[str, Any]) -> str:
 
     from .robot import RobotClient
 
-    # Announced as "voice" (ClientHello), so the app shows who is driving.
+    # Announced as "voice" (ClientHello), so the app shows who is driving,
+    # and as autonomous: any person's drive input (a stop included) takes the
+    # seat from this connection at once — see _run_move for how voice yields.
     robot = RobotClient(url=ROBOT_WS_URL, name="bebop-voice-move",
-                        hello_name="voice").start()
+                        hello_name="voice", autonomous=True).start()
     before_mode = None
     changed_mode = False
     armed_by_us = False
@@ -1581,6 +1583,7 @@ async def _move_relative(args: dict[str, Any]) -> str:
                 return "The wheels did not arm, so I did not move."
 
         dist, turned, secs, stopped = await _run_move(robot, forward_m, turn_deg)
+        took_over = stopped is not None and stopped.startswith(_TOOK_OVER_PREFIX)
         # Report honestly from telemetry, not from what was asked for.
         direction = "forward" if forward_m > 0 else "back"
         if abs(forward_m) >= 0.01:
@@ -1589,6 +1592,11 @@ async def _move_relative(args: dict[str, Any]) -> str:
             body = f"{abs(math.degrees(turned)):.0f} deg {'left' if turn_deg > 0 else 'right'}"
         where = (f"now at x={st.odom[0]:.2f} m, y={st.odom[1]:.2f} m, "
                  f"heading {math.degrees(st.odom[2]):.0f} deg")
+        if took_over:
+            # A person took the controls mid-move: report it plainly; the
+            # turn goes on (or ends) with this as the tool result.
+            _tool_failed()
+            return f"{stopped} after {body} ({where}). I let them drive."
         if stopped is not None:
             _tool_failed()
             return f"I stopped early ({stopped}) after {body} ({where})."
@@ -1629,6 +1637,12 @@ async def _flush_window(seconds: float) -> None:
 
 
 MOTION_PROGRESS_S = 0.2  # motion_progress event period
+_TOOK_OVER_PREFIX = "stopped: "  # `stop_reason` when someone took the seat
+
+
+def _took_over_reason(st: Any) -> str:
+    who = getattr(st, "active_operator_name", "") or "another operator"
+    return f"{_TOOK_OVER_PREFIX}{who} took over"
 
 
 async def _run_move(
@@ -1638,10 +1652,17 @@ async def _run_move(
 
     Returns (distance_m, turned_rad, seconds, stopped) where `stopped` is None
     when the move completed, else why it stopped early: "E-STOP latched",
-    "link to the runtime lost", "another operator took the controls" or
-    "cancelled by the operator". The turn's cancel flag is checked every
-    control tick (50 ms); task cancellation also lands at each sleep. Either
-    way the `finally` zeroes the twist.
+    "link to the runtime lost", "stopped: <name> took over" or "cancelled by
+    the operator". The turn's cancel flag is checked every control tick
+    (50 ms); task cancellation also lands at each sleep. Either way the
+    `finally` zeroes the twist.
+
+    Preemption: voice's connection is autonomous (`ClientHello.autonomous`),
+    so the firmware gives the seat to a person the moment their app sends any
+    drive command, a stop included, and applies the person's twist. Telemetry
+    then shows `has_active_operator && !you_are_active_operator`; the next
+    tick sees it and returns without another non-zero twist — voice never
+    fights for the seat (the firmware would reject it anyway).
     """
     st = robot.state
     t0 = time.monotonic()
@@ -1675,7 +1696,7 @@ async def _run_move(
         if not st.connected:
             return "link to the runtime lost"
         if _seat_taken(st):
-            return "another operator took the controls"
+            return _took_over_reason(st)
         return None
 
     async def settle(axis: str, target: float) -> str | None:

@@ -24,7 +24,7 @@ use crate::safety::limits::{
 };
 use crate::safety::power_monitor::{PowerBoardSnapshot, PowerMonitor};
 use anyhow::{anyhow, Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -104,14 +104,28 @@ fn twist_is_stale(twist: Twist, age_ms: u64, timeout_ms: u64) -> bool {
 /// loses it on disconnect, operator staleness, E-STOP, or once
 /// `server.operator_grace_ms` passes without input (then anyone's
 /// next drive command takes over). Zero-twist stops follow
-/// [`stop_applies`]: honoured from the holder or while the seat is free,
+/// [`resolve_stop`]: honoured from the holder or while the seat is free,
 /// ignored from anyone else (E-STOP is the any-client halt).
+///
+/// **Preemption.** A connection that announced itself as autonomous
+/// (`ClientHello.autonomous`, e.g. the voice agent's `move_relative`)
+/// holds the seat only until a person touches the controls: any drive
+/// command — zero or non-zero — from a non-autonomous connection takes a
+/// fresh autonomous seat immediately and its twist applies (a zero
+/// twist is therefore a stop). The reverse never happens: an autonomous
+/// client cannot take a fresh seat from anyone.
 #[derive(Debug, Clone, Copy)]
 struct ActiveOperator {
     conn_id: u64,
-    /// Instant of the holder's last accepted non-zero drive command.
-    /// Other clients are rejected while this is fresher than the grace
-    /// window. Stops don't refresh it.
+    /// The holder announced itself autonomous when it took the seat.
+    autonomous: bool,
+    /// Instant of the holder's last accepted non-zero drive command —
+    /// or of a person's stop that preempted an autonomous holder (that
+    /// stop claims a fresh seat for `operator_grace_ms`, so the
+    /// autonomous client cannot take it straight back; for that window
+    /// other people are blocked too and telemetry shows the person as
+    /// the holder). Other clients are rejected while this is fresher
+    /// than the grace window. Ordinary stops don't refresh it.
     last_input: Instant,
 }
 
@@ -126,9 +140,19 @@ enum OperatorResolution {
     /// No fresh assignment (idle, expired, or released): the sender
     /// takes over — accept.
     Takeover,
+    /// A person (non-autonomous sender) takes a fresh seat away from an
+    /// autonomous holder — accept. Carries the preempted holder's id.
+    Preempted(u64),
     /// Another client's assignment is fresh: reject. Carries the
     /// holder's conn id for the error message.
     Rejected(u64),
+}
+
+/// True when `op`'s last input is within the grace window (arbitration
+/// enabled and the seat not yet lapsed).
+fn seat_is_fresh(op: ActiveOperator, now: Instant, grace_ms: u64) -> bool {
+    let age_ms = now.duration_since(op.last_input).as_millis() as u64;
+    grace_ms > 0 && age_ms <= grace_ms
 }
 
 /// Pure arbitration decision for a non-zero drive command from
@@ -137,47 +161,66 @@ enum OperatorResolution {
 /// The current holder always continues (no grace check for the same
 /// connection — a paused operator resumes seamlessly). A *different*
 /// client is rejected while the holder's last input is within
-/// `grace_ms`; once it is older, the new client takes over.
-/// `grace_ms == 0` disables arbitration: anyone takes over immediately.
+/// `grace_ms`; once it is older, the new client takes over — except
+/// that a non-autonomous sender preempts a fresh *autonomous* holder
+/// at once. `grace_ms == 0` disables arbitration: anyone takes over
+/// immediately.
 fn resolve_operator(
     active: Option<ActiveOperator>,
     conn_id: u64,
+    sender_autonomous: bool,
     now: Instant,
     grace_ms: u64,
 ) -> OperatorResolution {
     match active {
         None => OperatorResolution::Takeover,
         Some(op) if op.conn_id == conn_id => OperatorResolution::Continue,
-        Some(op) => {
-            let age_ms = now.duration_since(op.last_input).as_millis() as u64;
-            if grace_ms > 0 && age_ms <= grace_ms {
-                OperatorResolution::Rejected(op.conn_id)
-            } else {
-                OperatorResolution::Takeover
-            }
+        Some(op) if !seat_is_fresh(op, now, grace_ms) => OperatorResolution::Takeover,
+        Some(op) if op.autonomous && !sender_autonomous => {
+            OperatorResolution::Preempted(op.conn_id)
         }
+        Some(op) => OperatorResolution::Rejected(op.conn_id),
     }
 }
 
+/// Outcome of [`resolve_stop`] for one incoming zero-twist drive command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopResolution {
+    /// Apply the stop; the seat is untouched.
+    Apply,
+    /// A person stops an autonomous holder: the sender takes the seat
+    /// and the stop applies. Carries the preempted holder's id.
+    Preempt(u64),
+    /// Someone else holds a fresh seat: ignore the stop.
+    Ignore,
+}
+
 /// Pure decision for a zero-twist stop from `conn_id`: does it touch the
-/// commanded twist?
+/// commanded twist (and the seat)?
 ///
 /// A stop is applied when `conn_id` holds the seat, or when no *fresh*
 /// seat exists (nobody driving, the holder idle past `grace_ms`, or
-/// arbitration disabled with `grace_ms == 0`). A stop from any other
-/// client while someone holds a fresh seat is a no-op: a second device
-/// watching the stream whose joystick/keyboard releases (or whose
+/// arbitration disabled with `grace_ms == 0`). When a fresh seat is held
+/// by an autonomous connection and the sender is not autonomous, the
+/// sender preempts it: a person's stop always halts an autonomous move.
+/// Any other stop while someone holds a fresh seat is a no-op: a second
+/// device watching the stream whose joystick/keyboard releases (or whose
 /// keepalive stop fires) must not halt the operator who is driving.
 /// Anyone can still halt the robot with `EmergencyStop`, which is never
 /// arbitrated.
-fn stop_applies(active: Option<ActiveOperator>, conn_id: u64, now: Instant, grace_ms: u64) -> bool {
+fn resolve_stop(
+    active: Option<ActiveOperator>,
+    conn_id: u64,
+    sender_autonomous: bool,
+    now: Instant,
+    grace_ms: u64,
+) -> StopResolution {
     match active {
-        None => true,
-        Some(op) if op.conn_id == conn_id => true,
-        Some(op) => {
-            let age_ms = now.duration_since(op.last_input).as_millis() as u64;
-            !(grace_ms > 0 && age_ms <= grace_ms)
-        }
+        None => StopResolution::Apply,
+        Some(op) if op.conn_id == conn_id => StopResolution::Apply,
+        Some(op) if !seat_is_fresh(op, now, grace_ms) => StopResolution::Apply,
+        Some(op) if op.autonomous && !sender_autonomous => StopResolution::Preempt(op.conn_id),
+        Some(_) => StopResolution::Ignore,
     }
 }
 
@@ -187,7 +230,7 @@ pub enum DriveOutcome {
     /// The twist is now the commanded twist.
     Applied,
     /// A stop from a client that doesn't hold the seat while another
-    /// does: ignored on purpose (see [`stop_applies`]).
+    /// does: ignored on purpose (see [`resolve_stop`]).
     IgnoredNotHolder,
 }
 
@@ -216,6 +259,8 @@ pub struct OperatorView {
     pub you_are_active_operator: bool,
     /// The holder's `ClientHello` name ("" if none or no fresh seat).
     pub active_operator_name: String,
+    /// The holder announced itself autonomous (false if no fresh seat).
+    pub active_operator_autonomous: bool,
 }
 
 pub struct Supervisor {
@@ -255,6 +300,10 @@ pub struct Supervisor {
     /// Display names announced by WS connections (`ClientHello`), keyed
     /// by connection id; removed on disconnect.
     client_names: Arc<Mutex<HashMap<u64, String>>>,
+    /// Connections that announced `ClientHello.autonomous = true`; their
+    /// seat yields to any person's drive input (see [`ActiveOperator`]).
+    /// Removed on disconnect.
+    autonomous_clients: Arc<Mutex<HashSet<u64>>>,
     /// Dead-reckoning pose integrator (wheel-encoder-only odometry).
     odometry: Arc<Mutex<Odometry>>,
     /// Power-board monitor: `Some` iff `cfg.power` is set. Owns the
@@ -309,6 +358,7 @@ impl Supervisor {
             operator_stale: Arc::new(AtomicBool::new(false)),
             active_operator: Arc::new(Mutex::new(None)),
             client_names: Arc::new(Mutex::new(HashMap::new())),
+            autonomous_clients: Arc::new(Mutex::new(HashSet::new())),
             odometry: Arc::new(Mutex::new(Odometry::default())),
             power,
             mode: Arc::new(AtomicU8::new(Mode::Idle as u8)),
@@ -459,30 +509,58 @@ impl Supervisor {
     /// A drive command from WS connection `conn_id`.
     ///
     /// **Arbitration** (see [`ActiveOperator`]): a zero twist (stop)
-    /// never touches the assignment; it is applied from the holder or
-    /// while no fresh seat exists, and ignored
-    /// ([`DriveOutcome::IgnoredNotHolder`]) from anyone else — see
-    /// [`stop_applies`]. A non-zero twist requires holding
+    /// is applied from the holder or while no fresh seat exists, and
+    /// ignored ([`DriveOutcome::IgnoredNotHolder`]) from anyone else —
+    /// see [`resolve_stop`]. A non-zero twist requires holding
     /// the active-operator assignment: the first client to send one
     /// claims it, the holder keeps it (their input refreshes it), and
     /// other clients are rejected until `server.operator_grace_ms`
     /// passes without input from the holder — at which point the new
-    /// client takes over.
+    /// client takes over. **Preemption:** a seat held by an autonomous
+    /// connection is taken immediately by any drive command (stop
+    /// included) from a non-autonomous one; a preempting stop claims a
+    /// fresh seat for `operator_grace_ms` so the autonomous client can't
+    /// take it back (other people wait out that window too).
     pub fn drive_command(&self, conn_id: u64, twist: Twist) -> Result<DriveOutcome> {
-        let now = Instant::now();
         let grace_ms = self.cfg.server.operator_grace_ms;
+        let autonomous = self.client_autonomous(conn_id);
+        // Decide the seat, update it and write the twist in ONE critical
+        // section under the seat lock. That is what makes preemption
+        // atomic: each WS connection runs its own task, so without it an
+        // autonomous holder could resolve `Continue`, drop the lock, and
+        // land its non-zero twist *after* a person's preempting stop —
+        // overwriting the stop until the operator watchdog fired. `now`
+        // is read after taking the lock so a later write never carries
+        // an earlier timestamp. Logging happens after the guard drops.
         if twist == Twist::default() {
-            // A stop neither acquires nor refreshes a claim. Decide and
-            // apply under the seat lock so a concurrent takeover can't
-            // slip between the check and the write.
-            let g = match self.active_operator.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
+            // A stop neither acquires nor refreshes a claim — except a
+            // person's stop preempting an autonomous holder, which takes
+            // a fresh seat for `operator_grace_ms` (so the autonomous
+            // client cannot grab it straight back).
+            let preempted = {
+                let mut g = match self.active_operator.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                let now = Instant::now();
+                let preempted = match resolve_stop(*g, conn_id, autonomous, now, grace_ms) {
+                    StopResolution::Ignore => return Ok(DriveOutcome::IgnoredNotHolder),
+                    StopResolution::Apply => None,
+                    StopResolution::Preempt(holder) => {
+                        *g = Some(ActiveOperator {
+                            conn_id,
+                            autonomous,
+                            last_input: now,
+                        });
+                        Some(holder)
+                    }
+                };
+                self.set_cmd_vel(twist);
+                preempted
             };
-            if !stop_applies(*g, conn_id, now, grace_ms) {
-                return Ok(DriveOutcome::IgnoredNotHolder);
+            if let Some(holder) = preempted {
+                self.log_preemption(holder, conn_id, "stop");
             }
-            self.set_cmd_vel(twist);
             return Ok(DriveOutcome::Applied);
         }
         let resolution = {
@@ -490,27 +568,29 @@ impl Supervisor {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            let res = resolve_operator(*g, conn_id, now, grace_ms);
-            if matches!(
-                res,
-                OperatorResolution::Continue | OperatorResolution::Takeover
-            ) {
+            let now = Instant::now();
+            let res = resolve_operator(*g, conn_id, autonomous, now, grace_ms);
+            if !matches!(res, OperatorResolution::Rejected(_)) {
                 *g = Some(ActiveOperator {
                     conn_id,
+                    autonomous,
                     last_input: now,
                 });
+                self.set_cmd_vel(twist);
             }
             res
         };
         match resolution {
-            OperatorResolution::Continue | OperatorResolution::Takeover => {
-                if resolution == OperatorResolution::Takeover {
-                    info!(
-                        conn_id,
-                        grace_ms, "operator takeover: drive assignment changed"
-                    );
-                }
-                self.set_cmd_vel(twist);
+            OperatorResolution::Continue => Ok(DriveOutcome::Applied),
+            OperatorResolution::Takeover => {
+                info!(
+                    conn_id,
+                    grace_ms, "operator takeover: drive assignment changed"
+                );
+                Ok(DriveOutcome::Applied)
+            }
+            OperatorResolution::Preempted(holder) => {
+                self.log_preemption(holder, conn_id, "drive");
                 Ok(DriveOutcome::Applied)
             }
             OperatorResolution::Rejected(holder) => {
@@ -542,6 +622,44 @@ impl Supervisor {
         name
     }
 
+    /// Record whether connection `conn_id` is autonomous
+    /// (`ClientHello.autonomous`). Takes effect on its next seat claim.
+    pub fn set_client_autonomous(&self, conn_id: u64, autonomous: bool) {
+        let mut g = match self.autonomous_clients.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if autonomous {
+            g.insert(conn_id);
+        } else {
+            g.remove(&conn_id);
+        }
+    }
+
+    /// Whether connection `conn_id` announced itself autonomous.
+    pub fn client_autonomous(&self, conn_id: u64) -> bool {
+        let g = match self.autonomous_clients.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        g.contains(&conn_id)
+    }
+
+    fn log_preemption(&self, holder: u64, conn_id: u64, kind: &str) {
+        let label = |id: u64| match self.client_name(id) {
+            Some(name) => format!("{name:?} (connection {id})"),
+            None => format!("connection {id}"),
+        };
+        warn!(
+            preempted = holder,
+            by = conn_id,
+            input = kind,
+            "operator preemption: {} took the drive seat from autonomous {}",
+            label(conn_id),
+            label(holder)
+        );
+    }
+
     /// Connection `conn_id`'s display name, if it announced one.
     pub fn client_name(&self, conn_id: u64) -> Option<String> {
         let g = match self.client_names.lock() {
@@ -565,18 +683,16 @@ impl Supervisor {
                 Err(p) => p.into_inner(),
             };
             match *g {
-                Some(op) => {
-                    let age_ms = now.duration_since(op.last_input).as_millis() as u64;
-                    (grace_ms > 0 && age_ms <= grace_ms).then_some(op.conn_id)
-                }
-                None => None,
+                Some(op) if seat_is_fresh(op, now, grace_ms) => Some(op),
+                _ => None,
             }
         };
         match holder {
-            Some(holder) => OperatorView {
+            Some(op) => OperatorView {
                 has_active_operator: true,
-                you_are_active_operator: holder == conn_id,
-                active_operator_name: self.client_name(holder).unwrap_or_default(),
+                you_are_active_operator: op.conn_id == conn_id,
+                active_operator_name: self.client_name(op.conn_id).unwrap_or_default(),
+                active_operator_autonomous: op.autonomous,
             },
             None => OperatorView::default(),
         }
@@ -590,6 +706,9 @@ impl Supervisor {
     pub fn operator_disconnected(&self, conn_id: u64) {
         if let Ok(mut names) = self.client_names.lock() {
             names.remove(&conn_id);
+        }
+        if let Ok(mut auto) = self.autonomous_clients.lock() {
+            auto.remove(&conn_id);
         }
         let was_holder = {
             let mut g = match self.active_operator.lock() {
@@ -2335,17 +2454,30 @@ mod tests {
     fn holder(conn_id: u64, input_age: Duration) -> ActiveOperator {
         ActiveOperator {
             conn_id,
+            autonomous: false,
             last_input: Instant::now() - input_age,
         }
     }
 
+    fn auto_holder(conn_id: u64, input_age: Duration) -> ActiveOperator {
+        ActiveOperator {
+            autonomous: true,
+            ..holder(conn_id, input_age)
+        }
+    }
+
+    const FRESH: Duration = Duration::from_millis(100);
+    const LAPSED: Duration = Duration::from_millis(2500);
+
     #[test]
     fn arbitration_first_input_takes_over() {
         let now = Instant::now();
-        assert_eq!(
-            resolve_operator(None, 7, now, 2000),
-            OperatorResolution::Takeover
-        );
+        for sender_auto in [false, true] {
+            assert_eq!(
+                resolve_operator(None, 7, sender_auto, now, 2000),
+                OperatorResolution::Takeover
+            );
+        }
     }
 
     #[test]
@@ -2354,7 +2486,17 @@ mod tests {
         // Same connection resumes seamlessly — the grace check only
         // guards against *other* clients stealing a paused assignment.
         assert_eq!(
-            resolve_operator(Some(holder(7, Duration::from_secs(60))), 7, now, 2000),
+            resolve_operator(
+                Some(holder(7, Duration::from_secs(60))),
+                7,
+                false,
+                now,
+                2000
+            ),
+            OperatorResolution::Continue
+        );
+        assert_eq!(
+            resolve_operator(Some(auto_holder(7, FRESH)), 7, true, now, 2000),
             OperatorResolution::Continue
         );
     }
@@ -2363,12 +2505,18 @@ mod tests {
     fn arbitration_other_client_rejected_within_grace() {
         let now = Instant::now();
         assert_eq!(
-            resolve_operator(Some(holder(7, Duration::from_millis(100))), 9, now, 2000),
+            resolve_operator(Some(holder(7, FRESH)), 9, false, now, 2000),
             OperatorResolution::Rejected(7)
         );
         // Exactly at the boundary still blocks (inclusive window).
         assert_eq!(
-            resolve_operator(Some(holder(7, Duration::from_millis(2000))), 9, now, 2000),
+            resolve_operator(
+                Some(holder(7, Duration::from_millis(2000))),
+                9,
+                false,
+                now,
+                2000
+            ),
             OperatorResolution::Rejected(7)
         );
     }
@@ -2378,59 +2526,129 @@ mod tests {
         let now = Instant::now();
         // Well past the 2000 ms grace (the age is truncated to whole ms
         // inside the decision, so keep the margin clear of the boundary).
+        for (h, sender_auto) in [
+            (holder(7, LAPSED), false),
+            (holder(7, LAPSED), true),
+            (auto_holder(7, LAPSED), false),
+            (auto_holder(7, LAPSED), true),
+        ] {
+            assert_eq!(
+                resolve_operator(Some(h), 9, sender_auto, now, 2000),
+                OperatorResolution::Takeover
+            );
+        }
+    }
+
+    #[test]
+    fn arbitration_person_preempts_fresh_autonomous_holder() {
+        let now = Instant::now();
         assert_eq!(
-            resolve_operator(Some(holder(7, Duration::from_millis(2500))), 9, now, 2000),
-            OperatorResolution::Takeover
+            resolve_operator(Some(auto_holder(7, FRESH)), 9, false, now, 2000),
+            OperatorResolution::Preempted(7)
+        );
+        // Even the instant the holder last sent a twist.
+        assert_eq!(
+            resolve_operator(Some(auto_holder(7, Duration::ZERO)), 9, false, now, 2000),
+            OperatorResolution::Preempted(7)
+        );
+    }
+
+    #[test]
+    fn arbitration_autonomous_never_takes_a_fresh_seat() {
+        let now = Instant::now();
+        // From a person...
+        assert_eq!(
+            resolve_operator(Some(holder(7, FRESH)), 9, true, now, 2000),
+            OperatorResolution::Rejected(7)
+        );
+        // ...nor from another autonomous client.
+        assert_eq!(
+            resolve_operator(Some(auto_holder(7, FRESH)), 9, true, now, 2000),
+            OperatorResolution::Rejected(7)
         );
     }
 
     #[test]
     fn stop_from_holder_or_free_seat_applies() {
         let now = Instant::now();
-        assert!(stop_applies(None, 9, now, 2000));
-        assert!(stop_applies(
-            Some(holder(7, Duration::from_millis(100))),
-            7,
-            now,
-            2000
-        ));
+        for sender_auto in [false, true] {
+            assert_eq!(
+                resolve_stop(None, 9, sender_auto, now, 2000),
+                StopResolution::Apply
+            );
+        }
+        assert_eq!(
+            resolve_stop(Some(holder(7, FRESH)), 7, false, now, 2000),
+            StopResolution::Apply
+        );
+        assert_eq!(
+            resolve_stop(Some(auto_holder(7, FRESH)), 7, true, now, 2000),
+            StopResolution::Apply
+        );
     }
 
     #[test]
     fn stop_from_non_holder_is_ignored_while_seat_is_fresh() {
         let now = Instant::now();
         // A viewer's joystick release must not halt the driver.
-        assert!(!stop_applies(
-            Some(holder(7, Duration::from_millis(100))),
-            9,
-            now,
-            2000
-        ));
+        assert_eq!(
+            resolve_stop(Some(holder(7, FRESH)), 9, false, now, 2000),
+            StopResolution::Ignore
+        );
         // Inclusive window, like the takeover rule.
-        assert!(!stop_applies(
-            Some(holder(7, Duration::from_millis(2000))),
-            9,
-            now,
-            2000
-        ));
+        assert_eq!(
+            resolve_stop(
+                Some(holder(7, Duration::from_millis(2000))),
+                9,
+                false,
+                now,
+                2000
+            ),
+            StopResolution::Ignore
+        );
+        // An autonomous client's stop never halts anyone else's seat.
+        assert_eq!(
+            resolve_stop(Some(holder(7, FRESH)), 9, true, now, 2000),
+            StopResolution::Ignore
+        );
+        assert_eq!(
+            resolve_stop(Some(auto_holder(7, FRESH)), 9, true, now, 2000),
+            StopResolution::Ignore
+        );
+    }
+
+    #[test]
+    fn stop_from_person_preempts_fresh_autonomous_holder() {
+        let now = Instant::now();
+        assert_eq!(
+            resolve_stop(Some(auto_holder(7, FRESH)), 9, false, now, 2000),
+            StopResolution::Preempt(7)
+        );
     }
 
     #[test]
     fn stop_from_non_holder_applies_once_the_seat_lapses() {
         let now = Instant::now();
-        assert!(stop_applies(
-            Some(holder(7, Duration::from_millis(2500))),
-            9,
-            now,
-            2000
-        ));
+        for (h, sender_auto) in [
+            (holder(7, LAPSED), false),
+            (holder(7, LAPSED), true),
+            (auto_holder(7, LAPSED), false),
+            (auto_holder(7, LAPSED), true),
+        ] {
+            assert_eq!(
+                resolve_stop(Some(h), 9, sender_auto, now, 2000),
+                StopResolution::Apply
+            );
+        }
         // Arbitration disabled: everyone's stop counts.
-        assert!(stop_applies(
-            Some(holder(7, Duration::from_millis(0))),
-            9,
-            now,
-            0
-        ));
+        assert_eq!(
+            resolve_stop(Some(holder(7, Duration::ZERO)), 9, false, now, 0),
+            StopResolution::Apply
+        );
+        assert_eq!(
+            resolve_stop(Some(holder(7, Duration::ZERO)), 9, true, now, 0),
+            StopResolution::Apply
+        );
     }
 
     #[test]
@@ -2451,7 +2669,11 @@ mod tests {
         // grace_ms == 0 disables arbitration: any input takes over
         // immediately, even mid-drive.
         assert_eq!(
-            resolve_operator(Some(holder(7, Duration::from_millis(0))), 9, now, 0),
+            resolve_operator(Some(holder(7, Duration::ZERO)), 9, false, now, 0),
+            OperatorResolution::Takeover
+        );
+        assert_eq!(
+            resolve_operator(Some(holder(7, Duration::ZERO)), 9, true, now, 0),
             OperatorResolution::Takeover
         );
     }

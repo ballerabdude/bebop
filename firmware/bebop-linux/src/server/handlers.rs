@@ -99,12 +99,14 @@ fn dispatch(
     match payload {
         P::ClientHello(h) => {
             let name = sup.set_client_name(conn_id, &h.name);
+            sup.set_client_autonomous(conn_id, h.autonomous);
+            let kind = if h.autonomous { " (autonomous)" } else { "" };
             ack(
                 request_id,
                 if name.is_empty() {
-                    format!("connection {conn_id}: name cleared")
+                    format!("connection {conn_id}: name cleared{kind}")
                 } else {
-                    format!("connection {conn_id}: hello, {name}")
+                    format!("connection {conn_id}: hello, {name}{kind}")
                 },
             )
         }

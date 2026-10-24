@@ -34,6 +34,8 @@ class RobotState:
         self.has_active_operator = False
         self.you_are_active_operator = False
         self.active_operator_name = ""
+        # The seat holder announced itself autonomous (e.g. voice driving).
+        self.active_operator_autonomous = False
         self.wheel_armed = {}
         self.wheel_vel = {}
         self.wheel_feedback_stale = {}
@@ -48,7 +50,7 @@ class RobotClient:
     """Async WS client on a background thread; thread-safe command methods."""
 
     def __init__(self, url=DEFAULT_URL, telemetry_hz=30, reconnect_s=1.0, name="bebop-vision",
-                 hello_name=None):
+                 hello_name=None, autonomous=False):
         self.url = url
         self.telemetry_hz = telemetry_hz
         self.reconnect_s = reconnect_s
@@ -56,6 +58,10 @@ class RobotClient:
         # When set, announced via ClientHello on every (re)connect, so other
         # clients see who holds the drive seat (`DriveState.active_operator_name`).
         self.hello_name = hello_name
+        # Announced as `ClientHello.autonomous`: the firmware hands this
+        # connection's drive seat to any person's drive input at once (a stop
+        # included), and never lets it take a fresh seat from anyone.
+        self.autonomous = bool(autonomous)
         self.state = RobotState()
         # Every ServerRuntimeMessage as received, (monotonic, wall_ns, bytes):
         # the recorder drains this into `/runtime` (telemetry frames) and
@@ -100,9 +106,8 @@ class RobotClient:
                     print(f"[robot] connected to {self.url}")
                     outbox = asyncio.Queue(maxsize=64)
                     self._outbox = outbox
-                    if self.hello_name:
-                        hello = pb.ClientRuntimeMessage()
-                        hello.client_hello.name = str(self.hello_name)
+                    hello = self._hello_msg()
+                    if hello is not None:
                         outbox.put_nowait(hello.SerializeToString())
                     outbox.put_nowait(self._subscribe_msg().SerializeToString())
                     sender = asyncio.create_task(self._sender(ws, outbox))
@@ -165,6 +170,7 @@ class RobotClient:
             st.has_active_operator = t.drive.has_active_operator
             st.you_are_active_operator = t.drive.you_are_active_operator
             st.active_operator_name = t.drive.active_operator_name
+            st.active_operator_autonomous = t.drive.active_operator_autonomous
         st.wheel_armed = {w.name: w.armed for w in t.wheels}
         st.wheel_vel = {w.name: w.velocity_rad_s for w in t.wheels}
         st.wheel_feedback_stale = {w.name: w.feedback_stale for w in t.wheels}
@@ -183,6 +189,15 @@ class RobotClient:
     def _next_req_id(self):
         self._req_id = (self._req_id + 1) % (2**16)
         return self._req_id
+
+    def _hello_msg(self):
+        """ClientHello for this connection, or None when it has nothing to say."""
+        if not (self.hello_name or self.autonomous):
+            return None
+        m = pb.ClientRuntimeMessage()
+        m.client_hello.name = str(self.hello_name or "")
+        m.client_hello.autonomous = self.autonomous
+        return m
 
     def _subscribe_msg(self):
         m = pb.ClientRuntimeMessage()

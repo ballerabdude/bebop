@@ -154,6 +154,12 @@ message ClientRuntimeMessage {
 // Connection identity. See `ClientRuntimeMessage.client_hello`.
 message ClientHello {
   string name = 1;
+  // True for software drivers (the voice agent's `move_relative`). A
+  // drive seat held by an autonomous connection is preempted at once by
+  // any drive command — a stop included — from a non-autonomous one; an
+  // autonomous connection never takes a fresh seat from anyone. Default
+  // false (a person).
+  bool autonomous = 2;
 }
 
 // Server -> client. Streamed; not all messages are responses to a request.
@@ -301,6 +307,15 @@ message DriveState {
   // its joystick must not halt the driver). `EmergencyStop` is never
   // arbitrated: anyone can latch it.
   //
+  // Preemption: a seat held by an autonomous connection
+  // (`ClientHello.autonomous`, e.g. the voice agent) is taken at once by
+  // any drive command from a non-autonomous one — zero or non-zero; the
+  // person's twist applies (a zero twist stops the robot). A preempting
+  // stop claims a fresh seat for `operator_grace_ms`, so the autonomous
+  // client cannot take it straight back; for that window other clients
+  // are blocked too and the person shows as the active operator. An
+  // autonomous connection can never take a fresh seat from anyone.
+  //
   // `has_active_operator` reports that a *fresh* assignment exists;
   // `you_are_active_operator` is computed per connection so each client
   // knows whether it holds the assignment (broadcast telemetry frames
@@ -311,6 +326,10 @@ message DriveState {
   // nobody holds a fresh seat, or the holder never named itself — show
   // "another operator" then). Lets viewers see who is driving.
   string active_operator_name    = 7;
+  // The seat holder announced `ClientHello.autonomous` (e.g. the voice
+  // agent is driving). Any person's drive input — a stop included —
+  // takes such a seat immediately. False when nobody holds a fresh seat.
+  bool   active_operator_autonomous = 8;
 
   // Wheel-encoder odometry pose (m, m, rad). Reset via ResetOdometry.
   float odom_x     = 10;

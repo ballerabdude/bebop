@@ -486,10 +486,8 @@ def test_parse_speak_accepts_bools_and_falsey_strings():
 
 
 def test_move_stops_when_preempted_mid_move(robot):
-    # The firmware hands the seat to another client only after voice's input
-    # has been idle past operator_grace_ms (it is not a human override while
-    # voice streams twists); voice must still stop and leave the new holder's
-    # wheels and mode alone.
+    # Telemetry shows another client holds the seat: voice stops and leaves
+    # the new holder's wheels and mode alone.
     async def run(turn):
         async def human_grabs():
             await asyncio.sleep(0.3)
@@ -498,7 +496,126 @@ def test_move_stops_when_preempted_mid_move(robot):
         return await vs._move_relative({"forward_m": 2.0})
 
     out, ok, _ = _with_turn(run)
-    assert "another operator took the controls" in out and ok is False
+    assert out.startswith("stopped: another operator took over after"), out
+    assert ok is False
     assert robot.twists[-1] == (0.0, 0.0)
     assert robot.armed_calls == [True]   # armed by voice, not disarmed under the new holder
     assert robot.modes == [vs.pb.MODE_DIAL_IN]  # mode not restored either
+
+
+class _FirmwareSim(_Robot):
+    """Fake firmware client with the seat arbitration of bebop-linux.
+
+    Voice's connection is autonomous. `human_drive(vx, wz)` is a person's app
+    sending a twist: it preempts the voice seat at once and the twist applies.
+    Voice's non-zero twists while the person holds the seat are rejected
+    (recorded in `rejected`), its stops ignored. Telemetry (the state flags)
+    updates like the per-connection DriveState would.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.ctor_kwargs = {}
+        self.holder = None  # None | "voice" | "human"
+        self.cmd = (0.0, 0.0)
+        self.rejected = []
+        self.preempted_at = None
+        self.voice_twists_after_preempt = []
+
+    def _publish(self):
+        st = self.state
+        st.has_active_operator = self.holder is not None
+        st.you_are_active_operator = self.holder == "voice"
+        st.active_operator_name = {"voice": "voice", "human": "Pixel 8"}.get(self.holder, "")
+        st.active_operator_autonomous = self.holder == "voice"
+
+    def send_twist(self, vx, wz):
+        assert self.ctor_kwargs.get("autonomous") is True
+        if self.holder == "human":
+            self.voice_twists_after_preempt.append((vx, wz))
+            if (vx, wz) != (0.0, 0.0):
+                self.rejected.append((vx, wz))
+            return True  # stop ignored / twist rejected: no state change
+        if (vx, wz) != (0.0, 0.0):
+            self.holder = "voice"
+        super().send_twist(vx, wz)
+        self.cmd = (vx, wz)
+        self._publish()
+        return True
+
+    def human_drive(self, vx, wz):
+        if self.holder == "voice":
+            self.preempted_at = time.monotonic()
+        self.holder = "human"
+        self.cmd = (vx, wz)
+        self._publish()
+
+
+@pytest.fixture
+def firmware(monkeypatch):
+    fake = _FirmwareSim()
+
+    def ctor(*a, **k):
+        fake.ctor_kwargs = k
+        return fake
+    monkeypatch.setattr("bebop_vision.robot.RobotClient", ctor)
+    return fake
+
+
+@pytest.mark.parametrize("human_twist", [(0.0, 0.0), (0.3, 0.0)])
+def test_person_preempts_voice_move_within_a_tick(firmware, human_twist):
+    returned_at = {}
+
+    async def run(turn):
+        async def human_takes_over():
+            await asyncio.sleep(0.3)
+            firmware.human_drive(*human_twist)
+        asyncio.get_running_loop().create_task(human_takes_over())
+        out = await vs._move_relative({"forward_m": 2.0})
+        returned_at["t"] = time.monotonic()
+        return out
+
+    out, ok, events = _with_turn(run)
+    assert firmware.ctor_kwargs.get("autonomous") is True
+    assert firmware.ctor_kwargs.get("hello_name") == "voice"
+    assert out.startswith("stopped: Pixel 8 took over after"), out
+    assert "m forward" in out and ok is False
+    # The person's twist stands (a zero twist = stop); voice never fought.
+    assert firmware.holder == "human" and firmware.cmd == human_twist
+    assert firmware.rejected == []
+    assert all(t == (0.0, 0.0) for t in firmware.voice_twists_after_preempt)
+    # Detected on the next 50 ms tick; the rest is the cleanup flush.
+    assert firmware.preempted_at is not None
+    assert returned_at["t"] - firmware.preempted_at < 0.06 + 0.2 + 0.1
+    # Wheels and mode stay with the person.
+    assert firmware.armed_calls == [True]
+    assert firmware.modes == [vs.pb.MODE_DIAL_IN]
+    progress = [e for e in events if e["type"] == "motion_progress"]
+    assert progress and progress[-1]["done_m"] < 2.0
+
+
+def test_robot_client_hello_announces_autonomy():
+    from bebop_vision.robot import RobotClient
+
+    voice = RobotClient(hello_name="voice", autonomous=True)._hello_msg()
+    assert voice.client_hello.name == "voice" and voice.client_hello.autonomous
+    human = RobotClient(hello_name="Pixel 8")._hello_msg()
+    assert human.client_hello.name == "Pixel 8" and not human.client_hello.autonomous
+    assert RobotClient()._hello_msg() is None
+    unnamed = RobotClient(autonomous=True)._hello_msg()
+    assert unnamed.client_hello.autonomous and unnamed.client_hello.name == ""
+
+
+def test_robot_client_mirrors_autonomous_seat_holder():
+    from bebop_vision.robot import RobotClient
+
+    rc = RobotClient()
+    t = vs.pb.TelemetryFrame()
+    t.drive.present = True
+    t.drive.has_active_operator = True
+    t.drive.active_operator_name = "voice"
+    t.drive.active_operator_autonomous = True
+    rc._update_from_fields(t)
+    assert rc.state.has_active_operator and rc.state.active_operator_autonomous
+    assert rc.state.active_operator_name == "voice"
+    assert not rc.state.you_are_active_operator

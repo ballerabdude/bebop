@@ -422,24 +422,36 @@ the localisation note in `bebop_vision/places/__init__.py`). It:
 - clamps a single call to ≤2 m and ≤180°;
 - **refuses while another client holds the drive seat**
   (`DriveState.has_active_operator && !you_are_active_operator`);
-- **is not preempted by the joystick.** The firmware keeps the seat with the
-  client that is sending input and rejects everyone else (stops included)
-  until the holder has been idle for `server.operator_grace_ms` (2 s).
-  `move_relative` sends a twist every 50 ms, so while it drives, another
-  operator's joystick is refused ("\"voice\" is driving"). **A voice move
-  is stopped only by `cancel` (or `reset` / closing the socket) or the
-  E-STOP.** The app should show a prominent Cancel button whenever it is
-  receiving `motion_progress`. (Letting a human preempt the `voice` client
-  would be a firmware arbitration change.) If the seat does change hands
-  mid-move (e.g. after a gap longer than the grace), voice stops and leaves
-  the wheels and mode to the new holder instead of disarming them;
+- **yields to any person at once (preemption).** Voice's runtime
+  connection announces `ClientHello { name: "voice", autonomous: true }`.
+  The firmware hands an autonomous holder's seat to the first drive command
+  — **zero or non-zero** — from a non-autonomous connection, and applies
+  that twist. So deflecting a person's joystick takes over immediately, and
+  an explicit stop from the app (`twistStream.forceStop()`) halts the robot
+  and takes the seat. Note the app writes release stops only when it owes
+  one (it drove, or holds the seat), so a viewer who never drove sends no
+  stop on release: an app "Stop voice" control shown while
+  `active_operator_autonomous` is set must call `forceStop()`, not
+  `stop()`. A preempting stop claims a fresh seat for `operator_grace_ms`
+  (so voice can't take it back; other people wait out that window too, and
+  telemetry shows the person as driving). Voice sees
+  `has_active_operator && !you_are_active_operator` in the next telemetry
+  frame and stops within one 50 ms tick without sending another non-zero
+  twist (it never fights for the seat; the firmware would reject it while
+  the person's seat is fresh, and an autonomous client can never take a
+  fresh seat). The tool ends `ok: false` with
+  `stopped: <name> took over after <distance> (<pose>). I let them drive.`
+  and the turn continues with that result. Voice leaves the wheels armed and
+  the mode alone for the new holder instead of disarming them.
+  `DriveState.active_operator_autonomous` tells viewers voice is driving.
+  `cancel` / `reset` / closing the socket and the E-STOP stop it too;
 - if the wheels are **already armed** (a person armed them, in `DIAL_IN`), it
   drives as-is and **leaves them armed and the mode untouched**; otherwise it
   arms for the duration only — mode → `DIAL_IN` (arming requires it), enable
   the wheels, move — and on **every exit path** stops, then undoes only what
   it changed (disarm if it armed, restore the mode if it switched it);
 - stops within one 50 ms tick on `cancel` / disconnect, E-STOP, link loss or
-  a seat change, and reports how far it actually got (`ok: false`);
+  a person taking the seat, and reports how far it actually got (`ok: false`);
 - closes the loop on wheel odometry and reports the distance telemetry
   actually showed, not the distance requested;
 - relies on the firmware as the backstop: the operator-link watchdog zeroes a
