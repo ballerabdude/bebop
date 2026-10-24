@@ -638,6 +638,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
 
                 // Side effects for messages that affect telemetry state: do this
                 // after dispatch so the response is consistent with the new state.
+                let mut is_twist = false;
                 if let Ok(req) =
                     <proto::ClientRuntimeMessage as bebop_proto::Message>::decode(bytes.as_ref())
                 {
@@ -664,12 +665,15 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                     client_telemetry_subscribed = false;
                                 }
                             }
+                            proto::client_runtime_message::Payload::SetVelocityCommand(_) => {
+                                is_twist = true;
+                            }
                             _ => {}
                         }
                     }
                 }
 
-                if tx.send(response).await.is_err() {
+                if !queue_reply(&tx, response, is_twist).await {
                     break;
                 }
             }
@@ -719,6 +723,83 @@ struct TelemetryState {
 struct NavPushState {
     subscribed: bool,
     rate_hz: u32,
+}
+
+/// Queue a reply for this connection's writer task; false once the
+/// connection is gone.
+///
+/// The outbound queue (256 slots) is shared with 30 Hz telemetry, so on a
+/// slow downlink it fills. Waiting for a slot parks this reader, and the
+/// app streams twists without waiting for their Acks (bebop-app
+/// `twistStream.ts`), so the twists would pile up unread in the socket:
+/// each applied late, each re-arming the operator watchdog, with stops and
+/// E-STOP stuck behind them. A twist's reply (Ack, or the rare seat
+/// rejection, which the next twist repeats) is therefore dropped when the
+/// queue is full; the twist itself was already applied. Other replies keep
+/// waiting: their callers await them, and they are rare.
+async fn queue_reply(
+    tx: &mpsc::Sender<proto::ServerRuntimeMessage>,
+    reply: proto::ServerRuntimeMessage,
+    droppable: bool,
+) -> bool {
+    if droppable {
+        !matches!(
+            tx.try_send(reply),
+            Err(mpsc::error::TrySendError::Closed(_))
+        )
+    } else {
+        tx.send(reply).await.is_ok()
+    }
+}
+
+#[cfg(test)]
+mod reply_queue_tests {
+    use super::*;
+
+    fn ack(id: u32) -> proto::ServerRuntimeMessage {
+        proto::ServerRuntimeMessage {
+            request_id: id,
+            payload: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_twist_reply_never_waits_for_a_full_queue() {
+        let (tx, mut rx) = mpsc::channel::<proto::ServerRuntimeMessage>(1);
+        assert!(queue_reply(&tx, ack(1), true).await);
+        // Queue full: a twist reply is dropped at once instead of parking
+        // the reader (this would hang if it awaited a slot).
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            queue_reply(&tx, ack(2), true),
+        )
+        .await;
+        assert_eq!(res.ok(), Some(true));
+        assert_eq!(rx.recv().await.map(|m| m.request_id), Some(1));
+        assert!(
+            rx.try_recv().is_err(),
+            "the dropped reply must not be queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn other_replies_wait_and_a_closed_queue_stops_the_reader() {
+        let (tx, mut rx) = mpsc::channel::<proto::ServerRuntimeMessage>(1);
+        assert!(queue_reply(&tx, ack(1), false).await);
+        let pending = queue_reply(&tx, ack(2), false);
+        tokio::pin!(pending);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut pending)
+                .await
+                .is_err(),
+            "a non-twist reply waits for a slot"
+        );
+        assert_eq!(rx.recv().await.map(|m| m.request_id), Some(1));
+        assert!(pending.await);
+        drop(rx);
+        assert!(!queue_reply(&tx, ack(3), true).await);
+        assert!(!queue_reply(&tx, ack(4), false).await);
+    }
 }
 
 #[cfg(test)]
