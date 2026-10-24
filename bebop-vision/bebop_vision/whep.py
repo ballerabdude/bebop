@@ -416,8 +416,11 @@ def _await_promise(Gst, emit, timeout_s, what):
         except Exception:
             pass
         raise RuntimeError(f"{what} timed out after {timeout_s:.0f} s")
-    if p.get_result() != Gst.PromiseResult.REPLIED:
-        raise RuntimeError(f"{what} failed ({p.get_result().value_nick})")
+    # Already resolved, so wait() returns at once. (GstPromise has no
+    # get_result() in the robot's GStreamer 1.24 bindings.)
+    result = p.wait()
+    if result != Gst.PromiseResult.REPLIED:
+        raise RuntimeError(f"{what} failed ({result.value_nick})")
     return p.get_reply()
 
 
