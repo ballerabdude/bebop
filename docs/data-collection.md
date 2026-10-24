@@ -7,9 +7,10 @@ label (SAM × depth) → review → count it.
 ## What a session contains
 
 Each tick records both camera colors, lossless depth, the operator's
-teleop twist, and odometry, plus the firmware's telemetry stream verbatim
-(`/runtime`: mode, estop reason, operator and watchdog flags, per-wheel
-targets, bus and power state at the 30 Hz subscription) and the camera
+teleop twist, and odometry, plus the firmware's WebSocket stream: telemetry frames on `/runtime`
+(mode, estop reason, operator and watchdog flags, per-wheel targets, bus
+and power state at the 30 Hz subscription) and everything else on
+`/runtime_events` (acks, errors, mode and E-STOP events, nav goals) and the camera
 IMUs at 200 Hz. There is no navigation-goal concept in the
 pipeline — the data is *what the robot saw* + *what you did*. The label
 pipeline (SAM × depth fusion) turns that into drivable-area supervision

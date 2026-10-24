@@ -7,8 +7,9 @@
 
 Pass the firmware's always-on system log(s) as extra paths to populate the
 `power` / `host` views (Protobuf `bebop.system.*`, `system_*.mcap`); they
-rotate daily, so a drive across midnight spans two files. The live one has
-no MCAP footer yet; it is repaired into a temporary copy on load:
+rotate daily, so a drive across midnight spans two files; each joins the
+drive before it on the command line. The live one has no MCAP footer yet;
+it is repaired into a temporary copy on load (rerun_dashboards/mcap_prep.py):
 
     python rerun_dashboards/open.py navd_session_*.mcap system_*.mcap
 
@@ -34,6 +35,7 @@ the viewer.
 
 import argparse
 import os
+import uuid
 import shutil
 import sys
 import tempfile
@@ -120,11 +122,16 @@ def main(argv=None):
               file=sys.stderr)
 
     blueprint = navd_blueprint.build()
+    recording_id = None
     for path in paths:
-        # One recording per session, all under the dashboard's app id.
-        rec = rr.RecordingStream(navd_blueprint.NAME)
+        # One recording per session under the dashboard's app id; a system
+        # log joins the session before it, so its power / host series overlay
+        # the drive instead of opening as a recording the viewer switches to.
+        if recording_id is None or not os.path.basename(path).startswith("system_"):
+            recording_id = str(uuid.uuid4())
+        rec = rr.RecordingStream(navd_blueprint.NAME, recording_id=recording_id)
         if args.save:
-            rec.save(args.save, default_blueprint=blueprint)
+            rec.save(args.save)
             rec.send_blueprint(blueprint, make_active=True, make_default=True)
         else:
             rec.spawn(default_blueprint=blueprint)
@@ -134,13 +141,12 @@ def main(argv=None):
             # make it the active/default so every new session picks it up.
             rec.send_blueprint(blueprint, make_active=True, make_default=True)
         print(f"loading {path}")
-        load_path, repaired = path, None
-        import mcap_to_rrd  # same directory; repairs a footer-less MCAP
-        if not mcap_to_rrd._has_footer(path):
-            fd, repaired = tempfile.mkstemp(suffix=".mcap")
-            os.close(fd)
-            mcap_to_rrd._repair_mcap(path, repaired)
-            load_path = repaired
+        import mcap_prep  # same directory: footer repair + /runtime split
+        fd, tmp = tempfile.mkstemp(suffix=".mcap")
+        os.close(fd)
+        load_path, repaired = mcap_prep.prepare(path, tmp)
+        if repaired is None:
+            os.remove(tmp)
         try:
             rec.log_file_from_path(load_path)
             rec.flush()

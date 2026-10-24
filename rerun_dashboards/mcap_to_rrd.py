@@ -28,69 +28,6 @@ import rerun as rr  # noqa: E402
 import navd_blueprint  # noqa: E402
 import system_blueprint  # noqa: E402
 
-_MAGIC = b"\x89MCAP0\r\n"
-
-
-def _has_footer(path: str) -> bool:
-    try:
-        with open(path, "rb") as f:
-            f.seek(-len(_MAGIC), os.SEEK_END)
-            return f.read(len(_MAGIC)) == _MAGIC
-    except OSError:
-        return False
-
-
-def _repair_mcap(src: str, dst: str) -> int:
-    """Re-stream a footer-less MCAP into a terminated one. Drops any
-    trailing partial chunk. Returns the number of messages written."""
-    from mcap.exceptions import EndOfFile, McapError
-    from mcap.reader import StreamReader
-    from mcap.records import Channel, Message, Schema
-    from mcap.writer import Writer
-
-    schema_ids: dict = {}
-    channel_ids: dict = {}
-    n = 0
-    with open(src, "rb") as fin, open(dst, "wb") as fout:
-        writer = Writer(fout)
-        writer.start()
-        schemas: dict = {}
-        channels: dict = {}
-        try:
-            for record in StreamReader(fin).records:
-                if isinstance(record, Schema):
-                    schemas[record.id] = record
-                elif isinstance(record, Channel):
-                    channels[record.id] = record
-                elif isinstance(record, Message):
-                    channel = channels.get(record.channel_id)
-                    if channel is None:
-                        continue
-                    schema = schemas.get(channel.schema_id)
-                    if schema is not None:
-                        key = (schema.name, schema.encoding, schema.data)
-                        if key not in schema_ids:
-                            schema_ids[key] = writer.register_schema(
-                                schema.name, schema.encoding, schema.data)
-                        schema_id = schema_ids[key]
-                    else:
-                        schema_id = 0
-                    meta = tuple(sorted(channel.metadata.items()))
-                    ckey = (channel.topic, channel.message_encoding,
-                            schema_id, meta)
-                    if ckey not in channel_ids:
-                        channel_ids[ckey] = writer.register_channel(
-                            channel.topic, channel.message_encoding,
-                            schema_id, dict(meta))
-                    writer.add_message(channel_ids[ckey], record.log_time,
-                                       record.data, record.publish_time)
-                    n += 1
-        except (EndOfFile, McapError):
-            pass  # truncated tail: keep everything read so far
-        writer.finish()
-    return n
-
-
 def _blueprint_for(in_path: str):
     """(app id, blueprint) — the system dashboard for `system_*` logs, the
     navd dashboard otherwise."""
@@ -101,20 +38,17 @@ def _blueprint_for(in_path: str):
 
 
 def convert(in_path: str, out_path: str) -> None:
+    import mcap_prep  # same directory: footer repair + /runtime split
     app_id, blueprint = _blueprint_for(in_path)
-    load_path = in_path
-    repaired = None
-    if not _has_footer(in_path):
-        repaired = out_path + ".src.mcap"
-        _repair_mcap(in_path, repaired)
-        load_path = repaired
+    load_path, repaired = mcap_prep.prepare(in_path, out_path + ".src.mcap")
     try:
         rec = rr.RecordingStream(app_id)
-        rec.save(out_path, default_blueprint=blueprint)
+        rec.save(out_path)
         # The viewer keeps a per-app-id blueprint and prefers it over a file's
         # default, so a dashboard change would never show for anyone who has
-        # opened a session before. Ship it as the active layout as well
-        # (open.py does the same when it spawns the viewer).
+        # opened a session before: ship it as the active layout. make_default
+        # also makes it the default, so this is the only copy in the file
+        # (open.py does the same).
         rec.send_blueprint(blueprint, make_active=True, make_default=True)
         rec.log_file_from_path(load_path)
         rec.flush()

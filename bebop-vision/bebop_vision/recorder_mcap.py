@@ -76,6 +76,7 @@ class NavdRecorder:
         self._intent_version = 0
         self.notes_stale = 0
         self.runtime_frames = 0
+        self.runtime_events = 0
         self.runtime_dropped = 0
         # Segment start (monotonic): the cameras run across segments and keep
         # buffering IMU, so the first tick would otherwise flush the idle-period
@@ -203,9 +204,14 @@ class NavdRecorder:
         # estop reason, operator/watchdog flags, per-wheel targets, bus and
         # power state: everything the resampled /cmd_vel and /odom drop.
         from .proto.bebop.runtime.v1 import bebop_runtime_pb2 as pb
-        self._ch["runtime"] = self._writer.register_channel(
-            "/runtime", "protobuf",
-            self._writer.register_schema(*navd_proto.schema(pb.ServerRuntimeMessage)))
+        # /runtime carries telemetry frames only; acks, errors, mode / E-STOP
+        # events and nav goals go to /runtime_events with the same schema
+        # (Rerun plots a non-telemetry row as 0 in every telemetry panel).
+        self._runtime_msg = pb.ServerRuntimeMessage
+        sch_runtime = self._writer.register_schema(*navd_proto.schema(pb.ServerRuntimeMessage))
+        self._ch["runtime"] = self._writer.register_channel("/runtime", "protobuf", sch_runtime)
+        self._ch["runtime_events"] = self._writer.register_channel(
+            "/runtime_events", "protobuf", sch_runtime)
         # Operator notes: sticky intent, event markers, scout place sightings.
         for key, topic, cls in (("intent", "/intent", navd_proto.Intent),
                                 ("event", "/event", navd_proto.Event),
@@ -492,8 +498,16 @@ class NavdRecorder:
             n += 1
             if mono < self._t0:
                 continue
-            self._add(self._ch["runtime"], raw, int(wall_ns))
-            self.runtime_frames += 1
+            try:
+                kind = self._runtime_msg.FromString(raw).WhichOneof("payload")
+            except Exception:
+                kind = None
+            if kind == "telemetry":
+                self._add(self._ch["runtime"], raw, int(wall_ns))
+                self.runtime_frames += 1
+            else:
+                self._add(self._ch["runtime_events"], raw, int(wall_ns))
+                self.runtime_events += 1
         if self.frames > 0 and n >= frames.maxlen:
             self.runtime_dropped += 1
             print(f"[recorder] /runtime deque hit capacity ({n}); telemetry "
@@ -518,10 +532,15 @@ class NavdRecorder:
 
         intent = notes.intent()
         if intent is not None and intent.version != self._intent_version:
+            first = self._intent_version == 0
             self._intent_version = intent.version
-            put("intent", lambda: navd_proto.Intent(
-                text=intent.text, from_place=intent.from_place,
-                to_place=intent.to_place, stamp_ns=int(intent.stamp_ns)), log_ns)
+            # A cleared intent at segment start means "no intent": do not open
+            # every later segment with a blank /intent row. Clears made
+            # during a segment are still written.
+            if not (first and intent.empty):
+                put("intent", lambda: navd_proto.Intent(
+                    text=intent.text, from_place=intent.from_place,
+                    to_place=intent.to_place, stamp_ns=int(intent.stamp_ns)), log_ns)
         for ev in notes.drain_events():
             # Safety net: the notes object refuses events while no segment is
             # open, so nothing older than this segment should be queued.

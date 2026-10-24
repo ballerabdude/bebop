@@ -49,8 +49,9 @@ class RobotClient:
         self.name = name
         self.state = RobotState()
         # Every ServerRuntimeMessage as received, (monotonic, wall_ns, bytes):
-        # the recorder drains this into its `/runtime` channel so a drive
-        # file carries the firmware's telemetry verbatim (mode, estop reason,
+        # the recorder drains this into `/runtime` (telemetry frames) and
+        # `/runtime_events` (acks, mode / E-STOP events, nav goals), so a drive
+        # file carries the firmware's stream verbatim (mode, estop reason,
         # operator/watchdog flags, per-wheel targets, power) instead of the
         # resampled subset in RobotState.  Bounded: ~17 s at 30 Hz, ~1 MB.
         self.frames = collections.deque(maxlen=512)

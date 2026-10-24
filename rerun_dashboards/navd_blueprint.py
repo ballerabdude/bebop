@@ -1,7 +1,8 @@
 """Rerun blueprint (dashboard) for navd sessions.
 
 Layout: a 2x2 image/video grid (color and depth, near/far) on the left with
-the drive notes log under it (`/intent`, `/event`, `/place`), and three tabs
+the drive notes under it (`/intent` and `/event` in one log, `/place`
+sightings in a small log beside it), and three tabs
 of time-series on the right:
 
 - chassis: `/cmd_vel`, per-wheel velocity against target, mode, and the
@@ -11,8 +12,9 @@ of time-series on the right:
   system log's power / host views.
 
 The wheel, chassis and drive-power panels read `/runtime`, the firmware
-telemetry the recorder stores verbatim since 2026-10-23
-(`bebop.runtime.v1.ServerRuntimeMessage`): the selectors walk
+telemetry frames the recorder stores since 2026-10-23
+(`bebop.runtime.v1.ServerRuntimeMessage`; acks, mode / E-STOP events and nav
+goals go to `/runtime_events`, because Rerun plots a non-telemetry row as 0): the selectors walk
 `.payload.telemetry.<field>`, enums decode as `{name, value}` (so `.mode.value`
 plots 1 idle / 2 dial-in / 3 run-policy) and bools plot as 0/1 steps. Wheel
 index 0 is left and 1 is right, the firmware's config order. Older sessions
@@ -34,7 +36,7 @@ those two views stay empty, like the IMU views on old sessions.
 
 import rerun as rr
 import rerun.blueprint as rrb
-from rerun.blueprint.datatypes import (ComponentSourceKind,
+from rerun.blueprint.datatypes import (ComponentSourceKind, TextLogColumn,
                                        VisualizerComponentMapping)
 
 NAME = "bebop_navd"
@@ -116,9 +118,17 @@ POWER_RT = ("/runtime", "power (drive telemetry)", (
 # Events also map their kind (obstacle / recovery / exclude / note) to the
 # level column; intent and place rows are told apart by the entity column.
 NOTES = (
-    ("/intent", "bebop.navd.Intent:message", (("TextLog:text", ".text"),)),
+    # A selector cannot join fields, so the intent's destination rides in
+    # the level column (as an event's kind does): a route without text is
+    # not blank, and a clear shows empty level and body.
+    ("/intent", "bebop.navd.Intent:message", (("TextLog:text", ".text"),
+                                              ("TextLog:level", ".to_place"))),
     ("/event", "bebop.navd.Event:message", (("TextLog:text", ".note"),
                                             ("TextLog:level", ".kind"))),
+)
+# The scout reports a recognised place on every 1 Hz tick, so sightings get a
+# log of their own; mixed into NOTES they bury the rare intent / event rows.
+PLACES = (
     ("/place", "bebop.navd.PlaceSeen:message", (("TextLog:text", ".name"),)),
 )
 
@@ -163,17 +173,23 @@ def _telemetry_view(origin, title, specs, legend=True):
                               overrides={origin: visualizers}, **extra)
 
 
-def _notes_view():
+def _log_view(specs, name, columns=None):
     overrides = {}
-    for origin, source, fields in NOTES:
+    for origin, source, fields in specs:
         mappings = [VisualizerComponentMapping(
             target=target, source_kind=ComponentSourceKind.SourceComponent,
             source_component=source, selector=selector)
             for target, selector in fields]
         overrides[origin] = [rr.TextLog.from_fields().visualizer(mappings=mappings)]
-    return rrb.TextLogView(origin="/", contents=[o for o, _, _ in NOTES],
-                           name="notes (intent, events, places)",
-                           overrides=overrides)
+    return rrb.TextLogView(origin="/", contents=[o for o, _, _ in specs],
+                           name=name, overrides=overrides, columns=columns)
+
+
+# Places carry no level and one entity: show just time and name.
+_PLACE_COLUMNS = rrb.archetypes.TextLogColumns(text_log_columns=[
+    TextLogColumn("EntityPath", visible=False),
+    TextLogColumn("LogLevel", visible=False),
+    TextLogColumn("Body")])
 
 
 # Right-column tabs, in order (Tabs selects by index).
@@ -209,7 +225,9 @@ def build(active_tab="chassis"):
                       for origin, name in VIEWS],
                     grid_columns=2,
                 ),
-                _notes_view(),
+                rrb.Horizontal(_log_view(NOTES, "notes (intent, events)"),
+                               _log_view(PLACES, "places seen", _PLACE_COLUMNS),
+                               column_shares=[2.0, 1.0]),
                 row_shares=[3.0, 1.0],
             ),
             rrb.Tabs(chassis, motion, power, active_tab=TABS.index(active_tab)),

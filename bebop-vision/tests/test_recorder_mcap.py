@@ -429,6 +429,10 @@ def test_runtime_and_notes_channels(tmp_path):
     fresh.telemetry.drive.operator_stale = True
     robot.frames.append((time.monotonic(), time.time_ns(),
                          fresh.SerializeToString()))
+    event = pb.ServerRuntimeMessage()
+    event.mode_changed.mode = pb.MODE_RUN_POLICY       # not telemetry
+    robot.frames.append((time.monotonic(), time.time_ns(),
+                         event.SerializeToString()))
     notes.add_event("recovery", "off-lane start")
     notes.add_place("p1", "Kitchen", 0.91, 0.2)
     notes.set_intent("kitchen to office", "kitchen", "office")
@@ -446,6 +450,10 @@ def test_runtime_and_notes_channels(tmp_path):
     assert [m.telemetry.host_unix_ms for m in runtime] == [2]
     assert runtime[0].telemetry.drive.operator_stale is True
     assert msgs["/runtime"][0][0] == "bebop.runtime.v1.ServerRuntimeMessage"
+    # non-telemetry frames go to /runtime_events (Rerun would plot them as 0)
+    events_rt = [pb.ServerRuntimeMessage.FromString(d) for _, d, _ in msgs["/runtime_events"]]
+    assert [m.WhichOneof("payload") for m in events_rt] == ["mode_changed"]
+    assert rec.runtime_events == 1
     intents = [navd_proto.Intent.FromString(d) for _, d, _ in msgs["/intent"]]
     assert [i.text for i in intents] == ["living room to kitchen", "kitchen to office"]
     assert intents[0].to_place == "kitchen"
@@ -497,3 +505,22 @@ def test_a_bad_note_never_costs_the_tick(tmp_path, monkeypatch):
             topics.setdefault(c.topic, []).append(m.data)
     assert [real_event.FromString(d).note for d in topics["/event"]] == ["fine"]
     assert len(topics["/depth_near"]) >= 3
+
+
+def test_cleared_intent_is_not_replayed_at_segment_start(tmp_path):
+    from mcap.reader import make_reader
+    from bebop_vision import navd_proto
+    from bebop_vision.session_notes import SessionNotes
+    notes = SessionNotes()
+    notes.set_intent("to the kitchen")
+    notes.clear_intent()                    # cleared before this segment
+    rec = NavdRecorder(FakeRig(), FakeRobot(), tmp_path / "s.mcap", rate_hz=20.0,
+                       color_codec=None, notes=notes)
+    rec.start(); time.sleep(0.15)
+    notes.set_intent("to the office"); time.sleep(0.15)
+    notes.clear_intent(); time.sleep(0.15)  # a clear during the segment is kept
+    rec.stop()
+    with open(tmp_path / "s.mcap", "rb") as f:
+        texts = [navd_proto.Intent.FromString(m.data).text
+                 for s, c, m in make_reader(f).iter_messages() if c.topic == "/intent"]
+    assert texts == ["to the office", ""]

@@ -18,6 +18,7 @@ RERUN_VERSION="${RERUN_VERSION:-0.31.3}"
 PREFIX="${PREFIX:-/opt/bebop-rerun}"
 LIB_DIR="/usr/local/lib/bebop-rerun"
 WRAPPER="/usr/local/bin/bebop-mcap-to-rrd"
+CAPTURE_DIR="${CAPTURE_DIR:-/var/lib/bebop-captures}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -25,8 +26,8 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exit 1
 fi
 
-for f in rerun_dashboards/mcap_to_rrd.py rerun_dashboards/navd_blueprint.py \
-         rerun_dashboards/system_blueprint.py; do
+for f in rerun_dashboards/mcap_to_rrd.py rerun_dashboards/mcap_prep.py \
+         rerun_dashboards/navd_blueprint.py rerun_dashboards/system_blueprint.py; do
     if [[ ! -f "${REPO_ROOT}/${f}" ]]; then
         echo "missing ${REPO_ROOT}/${f} (run from the repo checkout)" >&2
         exit 1
@@ -46,6 +47,8 @@ install -m 0644 "${REPO_ROOT}/rerun_dashboards/navd_blueprint.py" \
     "${LIB_DIR}/navd_blueprint.py"
 install -m 0644 "${REPO_ROOT}/rerun_dashboards/system_blueprint.py" \
     "${LIB_DIR}/system_blueprint.py"
+install -m 0644 "${REPO_ROOT}/rerun_dashboards/mcap_prep.py" \
+    "${LIB_DIR}/mcap_prep.py"
 
 echo "==> installing wrapper -> ${WRAPPER}"
 cat > "${WRAPPER}" <<EOF
@@ -53,6 +56,15 @@ cat > "${WRAPPER}" <<EOF
 exec ${PREFIX}/venv/bin/python ${LIB_DIR}/mcap_to_rrd.py "\$@"
 EOF
 chmod 0755 "${WRAPPER}"
+
+# The firmware reuses <stem>.rrd while it is newer than its MCAP, so
+# conversions made by the previous converter / dashboard would keep being
+# served (each one activates the layout it was built with). Drop them; GET
+# /captures/rrd rebuilds them on demand.
+if [[ -d "${CAPTURE_DIR}" ]]; then
+    echo "==> dropping cached conversions in ${CAPTURE_DIR}"
+    find "${CAPTURE_DIR}" -maxdepth 1 -type f -name '*.rrd' -delete
+fi
 
 echo
 echo "Done. The firmware's --rerun-converter default points at ${WRAPPER}."
