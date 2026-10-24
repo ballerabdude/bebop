@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import models
@@ -289,6 +290,15 @@ class Supervisor:
 def build_app(supervisor: Supervisor | None = None) -> Any:
     sup = supervisor or Supervisor()
     app = FastAPI(title="bebop-models", docs_url=None, redoc_url=None)
+    # The operator app reads /healthz + /models and POSTs load/unload from
+    # another origin (the dev server, a static build, tauri://), so answer
+    # CORS preflights. Same policy as bebop-voice: no auth anywhere yet.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:

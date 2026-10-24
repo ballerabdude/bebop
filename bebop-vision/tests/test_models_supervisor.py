@@ -150,3 +150,32 @@ def test_load_evicts_when_the_budget_is_tight(spawned, monkeypatch, tmp_path):
     sup.load("second")  # 25 + 25 > 30 -> evict `first`
     assert sup.backends["first"].state == "stopped"
     assert sup.backends["second"].state == "ready"
+
+
+def test_cors_headers_and_preflight(monkeypatch, tmp_path):
+    """The app fetches :9094 cross-origin; GETs carry ACAO and POSTs preflight."""
+    monkeypatch.setattr(ms, "REGISTRY_PATH", tmp_path / "absent.yaml")
+    client = TestClient(ms.build_app(ms.Supervisor()))
+    origin = "http://127.0.0.1:5173"
+
+    r = client.get("/models", headers={"Origin": origin})
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "*"
+    r = client.get("/healthz", headers={"Origin": origin})
+    assert r.headers["access-control-allow-origin"] == "*"
+
+    pre = client.options(
+        "/models/vision/load",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert pre.status_code == 200
+    assert pre.headers["access-control-allow-origin"] == "*"
+    assert "POST" in pre.headers["access-control-allow-methods"]
+
+    r = client.post("/models/vision/load", headers={"Origin": origin})
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "*"
