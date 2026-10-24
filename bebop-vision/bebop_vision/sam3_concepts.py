@@ -3,8 +3,8 @@
 License note: SAM 3.x code and weights are under Meta's "SAM License" (NOT Apache).
 Commercial use and fine-tuning are permitted and you own your derivative works,
 but redistribution of SAM 3.x materials or derivatives must carry the SAM License.
-This module is teacher-side tooling (dataset recording / labeling); the robot's
-runtime uses the distilled SegFormer nav model only.
+This module is teacher-side tooling (offline labeling on the workstation, see
+tools/bev_student_labels.py); nothing on the robot's runtime path imports it.
 """
 
 import os
@@ -65,8 +65,6 @@ class TRTEncoder:
         self._stream = torch.cuda.current_stream().cuda_stream
 
     def __call__(self, image):
-        import tensorrt as trt  # noqa: F401  (keep enum import local)
-
         self.input_buf.copy_(image)
         self.context.execute_async_v3(self._stream)
         o = self.out_bufs
@@ -92,7 +90,7 @@ class Sam3ConceptSegmenter:
         if not os.path.exists(ckpt):
             raise FileNotFoundError(
                 f"{ckpt} not found. Request access at https://huggingface.co/facebook/{version}, "
-                "then run: python -m bebop_vision.download_sam3"
+                f"then run: python -m bebop_vision.download_model {version}"
             )
         if device == "auto":
             device = "cuda:0" if torch.cuda.is_available() else "cpu"

@@ -1,6 +1,6 @@
 """Draw the chassis self-mask on a live view — prints the YAML snippet.
 
-Runs on the workstation (no camera access): fetches MJPEG snapshots from
+Runs on the workstation (no camera access): fetches JPEG snapshots from
 the bebop-vision videoserver (:9092), shows the UNMASKED color feed plus
 the (already-masked) depth render, lets you freeze a frame and draw the
 chassis shape on the color view, converts it into DEPTH-frame pixel
@@ -18,7 +18,7 @@ Config accepts both forms per entry:
 
 Safe to run any time, including mid-recording: it only reads HTTP from
 the videoserver, it never opens a camera. Bebop-vision must be running
-(main.py --record-navd / --goal-drive).
+(main.py --record-navd).
 
 Usage (workstation, from bebop-vision/):
     .venv/bin/python tools/set_self_mask.py
@@ -51,15 +51,14 @@ right it brackets the chassis:
                 to project color->depth) at the nominal range --range
                 (default 0.7 m) — correct default
     no-trans    rotation only (extrinsic without the 23.6 mm baseline)
-    scale       intrinsics-only scaling (the fuse_navd_labels.py
-                convention; lands ~20 px off here)
+    scale       intrinsics-only scaling (zero-baseline approximation;
+                lands ~20 px off here)
 """
 
 import argparse
 import json
 import math
 import sys
-import time
 import urllib.request
 from pathlib import Path
 
@@ -389,7 +388,7 @@ def main(argv=None):
     args = parse_args(argv)
     if not check_server(args.host):
         sys.exit(f"videoserver {args.host} is not answering /healthz — "
-                 f"is bebop-vision running (main.py --record-navd / --goal-drive)?")
+                 f"is bebop-vision running (main.py --record-navd)?")
     print(f"[set-self-mask] server {args.host} ok; fetching "
           f"{args.stream} + {args.depth_stream}")
 

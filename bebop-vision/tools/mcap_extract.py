@@ -1,24 +1,21 @@
-"""Unpack a navd MCAP session into the navd-v0 training layout.
+"""Unpack a navd MCAP session into the navd-v0 layout (or bev-student).
 
-On the workstation, after scp'ing the session file off the robot:
+On the workstation, after pulling the session file off the robot:
 
     python tools/mcap_extract.py session.mcap datasets/navd-v0/session01
 
 Produces (per aligned tick — all channels of a tick share log_time):
-    color/{stamp}.jpg          PE camera frame (as recorded, JPEG)
-    color_far/{stamp}.jpg      ED camera frame (as recorded, JPEG)
+    color/{stamp}.jpg          PE (near) camera frame (JPEG)
+    color_far/{stamp}.jpg      ED (far) camera frame (JPEG)
     depth/{stamp}.npz          near, far  (uint16 mm)
-    labels/{stamp}.npz         teacher (uint8 60x60) — pre-fill for hand labeling
-    manifest.jsonl             stamp_ns, cmd_vel, odom, goal, plane_ok, paths
+    manifest.jsonl             stamp_ns, cmd_vel, odom, has_color(_far), calib
     imu_{accel,gyro}_{near,far}.npz  device_us, stamp_ns, x, y, z (full rate)
 
-Hand labels overwrite `labels/{stamp}.npz`'s `hand` array (same 60x60
-uint8 semantics: 0 navigable, 1 blocked, 2 caution); training prefers
-`hand` when present and falls back to `teacher`.
+`--layout bev-student` writes the labeler's layout instead (see
+`extract_bev_student`).
 """
 
 import argparse
-import base64
 import bisect
 import json
 import sys
@@ -30,11 +27,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
-    from bebop_vision.foxglove_proto import (CompressedImage,
-                                            CompressedVideo, RawImage)
+    from bebop_vision.foxglove_proto import CompressedImage, CompressedVideo
     from bebop_vision import navd_proto
     _PROTO = {m.DESCRIPTOR.full_name: m
-              for m in (CompressedImage, CompressedVideo, RawImage)}
+              for m in (CompressedImage, CompressedVideo)}
     _NAVD = {navd_proto.Twist.DESCRIPTOR.full_name: navd_proto.Twist,
              navd_proto.Odom.DESCRIPTOR.full_name: navd_proto.Odom}
     _IMU = {navd_proto.ImuAccel.DESCRIPTOR.full_name: navd_proto.ImuAccel,
@@ -50,17 +46,10 @@ except ImportError:  # pragma: no cover - standalone use
     from mcap_recover import iter_messages as iter_mcap_messages
 
 
-def _foxglove_blob(schema_name, message_encoding, data):
-    """(blob, format) from a Foxglove image/video message.
-
-    Protobuf is what the recorder writes now; JSON is kept so sessions
-    recorded before the protobuf migration still extract.
-    """
-    if message_encoding == "protobuf" and schema_name in _PROTO:
-        msg = _PROTO[schema_name].FromString(data)
-        return msg.data, getattr(msg, "format", None)
-    payload = json.loads(data)
-    return base64.b64decode(payload["data"]), payload.get("format")
+def _foxglove_blob(schema_name, data):
+    """(blob, format) from a Protobuf Foxglove image/video message."""
+    msg = _PROTO[schema_name].FromString(data)
+    return msg.data, getattr(msg, "format", None)
 
 
 def _decode_video(aus_by_role):
@@ -94,9 +83,8 @@ def _decode_video(aus_by_role):
 
 def extract(mcap_path, out_dir, tol_us=15_000):
     out = Path(out_dir)
-    for sub in ("color", "color_far", "depth", "labels"):
+    for sub in ("color", "color_far", "depth"):
         (out / sub).mkdir(parents=True, exist_ok=True)
-    IMAGE_TOPICS = ("/color_near", "/color_far", "/depth_near", "/depth_far")
     COLOR_ROLE = {"/color_near": "near", "/color_far": "far"}
     VIDEO_FORMATS = ("h264", "h265")
     ticks = {}  # log_us -> {topic: decoded payload}
@@ -117,11 +105,9 @@ def extract(mcap_path, out_dir, tol_us=15_000):
                 msg = _NAVD[schema.name].FromString(message.data)
                 ticks.setdefault(message.log_time, {})[topic] = {
                     f.name: getattr(msg, f.name) for f in msg.DESCRIPTOR.fields}
-            elif ((channel.message_encoding == "protobuf"
-                   and schema.name in _PROTO)
-                  or topic in IMAGE_TOPICS):
-                raw, fmt = _foxglove_blob(
-                    schema.name, channel.message_encoding, message.data)
+            elif (channel.message_encoding == "protobuf"
+                  and schema.name in _PROTO):
+                raw, fmt = _foxglove_blob(schema.name, message.data)
                 if fmt in VIDEO_FORMATS and topic in COLOR_ROLE:
                     video_aus[COLOR_ROLE[topic]].append(
                         (message.log_time, fmt, raw))
@@ -167,8 +153,6 @@ def extract(mcap_path, out_dir, tol_us=15_000):
             return best
         cmd = nearest("/cmd_vel") or {"vx": 0.0, "wz": 0.0}
         odom = nearest("/odom") or {"x": 0.0, "y": 0.0, "theta": 0.0}
-        goal = nearest("/goal") or {"type": "none"}
-        bev = nearest("/bev_teacher") or {}
         calib = next((c["/calib"] for c in ticks.values() if "/calib" in c), {})
         stamp_s = f"{stamp:020d}"
         cv2 = __import__("cv2")
@@ -191,16 +175,8 @@ def extract(mcap_path, out_dir, tol_us=15_000):
                 depth[role] = np.asarray(
                     __import__("cv2").imdecode(arr, __import__("cv2").IMREAD_UNCHANGED))
         np.savez_compressed(out / "depth" / f"{stamp_s}.npz", **depth)
-        # no BEV channel -> no recorded teacher; the npz is still written
-        # (fuse_navd_labels fills it with `fused` from SAM x depth)
-        payload = {}
-        if bev.get("raw"):
-            payload["teacher"] = np.frombuffer(
-                base64.b64decode(bev["raw"]), np.uint8).reshape(60, 60)
-        np.savez_compressed(out / "labels" / f"{stamp_s}.npz", **payload)
         row = {"stamp_ns": stamp, "dir": stamp_s,
-               "cmd_vel": cmd, "odom": odom, "goal": goal,
-               "plane_ok": bev.get("plane_ok", {}),
+               "cmd_vel": cmd, "odom": odom,
                "has_color": "/color_near" in chans,
                "has_color_far": "/color_far" in chans,
                "calib": calib}
@@ -334,10 +310,9 @@ def extract_bev_student(mcap_path, out_dir, *, sample_hz=10.0,
                 if p.is_file():
                     p.unlink()
 
-    IMAGE_TOPICS = ("/color_near", "/color_far", "/depth_near", "/depth_far")
     COLOR_ROLE = {"/color_near": "near", "/color_far": "far"}
     VIDEO_FORMATS = ("h264", "h265", "hevc")
-    STATE_TOPICS = ("/cmd_vel", "/odom", "/goal", "/bev_teacher")
+    STATE_TOPICS = ("/cmd_vel", "/odom")
 
     ticks = {}
     video_aus = {"near": [], "far": []}
@@ -365,9 +340,8 @@ def extract_bev_student(mcap_path, out_dir, *, sample_hz=10.0,
                 ticks.setdefault(log_time, {})[topic] = payload
                 continue
             if (channel.message_encoding == "protobuf"
-                    and schema_name in _PROTO) or topic in IMAGE_TOPICS:
-                raw, fmt = _foxglove_blob(
-                    schema_name, channel.message_encoding, message.data)
+                    and schema_name in _PROTO):
+                raw, fmt = _foxglove_blob(schema_name, message.data)
                 if fmt in VIDEO_FORMATS and topic in COLOR_ROLE:
                     role = COLOR_ROLE[topic]
                     video_aus[role].append((log_time, fmt, raw))
@@ -411,7 +385,6 @@ def extract_bev_student(mcap_path, out_dir, *, sample_hz=10.0,
         "recorded": calib,
         "intrinsics": intr_by_serial,
         "mounts": (calib or {}).get("mounts", {}),
-        "bev_student": cfg.get("bev_student"),
         "bev_student": cfg.get("bev_student"),
         "source_mcap": str(mcap_path),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -459,8 +432,6 @@ def extract_bev_student(mcap_path, out_dir, *, sample_hz=10.0,
 
         odom = _nearest_series(states["/odom"], stamp, tol_ns) or {}
         cmd = _nearest_series(states["/cmd_vel"], stamp, tol_ns) or {}
-        goal = _nearest_series(states["/goal"], stamp, tol_ns) or {}
-        bev = _nearest_series(states["/bev_teacher"], stamp, tol_ns) or {}
         rows.append({
             "stamp_ns": stamp,
             "stamp_us": stamp // 1000,
@@ -476,11 +447,7 @@ def extract_bev_student(mcap_path, out_dir, *, sample_hz=10.0,
                      "theta": float(odom.get("theta", 0.0))},
             "cmd_vel": {"vx": float(cmd.get("vx", 0.0)),
                         "wz": float(cmd.get("wz", 0.0))},
-            "goal": goal or {"type": "none"},
-            "plane_ok": bev.get("plane_ok", {}) if isinstance(bev, dict) else {},
             "split": None,
-            "has_color": True,
-            "camera_pair_delta_ms": None,
         })
 
     with open(index_path, "w") as f:

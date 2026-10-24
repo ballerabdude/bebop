@@ -1,7 +1,6 @@
 """Learn the chassis (ego) footprint from the robot's own recordings.
 
     .venv/bin/python tools/bev_ego_from_data.py --out config/ego_mask.npz
-    .venv/bin/python tools/bev_ego_from_data.py --apply-labels labels_grid360x640w4
 
 Self-supervised: the robot's own parts sit at the same body-frame
 coordinates in every frame while the scene changes.  Over many frames,
@@ -11,17 +10,12 @@ chassis (``p_body``); cells the cameras never observe right beside that core
 it too.  The convex hull of both is the footprint.  No tape measure, no
 hand-entered rectangle: the mask is a fine body-frame raster (1 cm) that any
 BEV grid rasterises (``master_bev.rasterize_ego``).
-
-``--apply-labels`` rewrites the ``ego`` layer of an existing label set in
-place (chassis cells become ego, semantic 255, coverage False) so the
-labels do not need SAM again.
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
-import json
 import os
 from pathlib import Path
 import sys
@@ -37,9 +31,7 @@ import cv2
 import numpy as np
 
 from bebop_vision.bev_student_data import DEFAULT_ROOT, read_index, session_dirs
-from bebop_vision.bev_student_labels import (
-    GridSpec, IGNORE, load_label_npz, specs_from_config, validate_label_arrays)
-from bebop_vision.master_bev import load_ego_raster, rasterize_ego
+from bebop_vision.bev_student_labels import specs_from_config
 from bebop_vision.orbbec import CONFIG_DIR, load_rig_config
 
 
@@ -208,46 +200,6 @@ def render_preview(p_obs, p_body, mask, core, shadow, x0, y0, cell, *,
     return np.hstack(out)
 
 
-def apply_to_labels(root, subdir, raster, sessions=None):
-    """Rewrite the ego layer of every label in ``subdir`` from the raster."""
-    total = 0
-    for session in session_dirs(root):
-        if sessions and session.name not in sessions:
-            continue
-        out = session / subdir
-        meta_path = out / "grid.json"
-        if not meta_path.exists():
-            continue
-        meta = json.loads(meta_path.read_text())
-        g = meta["grid"]
-        grid = GridSpec(range_m=g["range_m"], width_m=g["width_m"],
-                        rows_override=g["rows"], cols_override=g["cols"])
-        xc, yc = grid.centers()
-        ego = rasterize_ego(raster, xc, yc)
-        n = 0
-        for path in sorted(out.glob("*.npz")):
-            sem, _old, cov = load_label_npz(path, grid)
-            sem = sem.copy()
-            cov = cov.copy()
-            sem[ego] = IGNORE
-            cov[ego] = False
-            validate_label_arrays(sem, ego, cov, grid)
-            tmp = path.with_suffix(".tmp.npz")
-            np.savez_compressed(tmp, semantic=sem.astype(np.uint8),
-                                ego=ego.astype(bool), coverage=cov.astype(bool))
-            tmp.replace(path)
-            n += 1
-        meta.setdefault("label_config", {})["ego_mask_file"] = raster["name"]
-        meta["ego_mask"] = {"file": raster["name"], "cells": int(ego.sum()),
-                            "extent_m": [round(v, 4) for v in extent_m(
-                                raster["mask"], raster["x0"], raster["y0"],
-                                raster["cell"])]}
-        meta_path.write_text(json.dumps(meta, indent=2) + "\n")
-        print(f"{session.name}: {n} labels, ego {int(ego.sum())} cells", flush=True)
-        total += n
-    return total
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -266,64 +218,50 @@ def main():
     ap.add_argument("--shadow-reach", type=float, default=0.15)
     ap.add_argument("--out", type=Path, default=CONFIG_DIR / "ego_mask.npz")
     ap.add_argument("--preview", type=Path, default=None)
-    ap.add_argument("--apply-labels", default=None,
-                    help="label subdir whose ego layer is rewritten from --out "
-                         "(computes the mask first unless --reuse)")
-    ap.add_argument("--reuse", action="store_true",
-                    help="skip the accumulation; load --out as is")
     args = ap.parse_args()
 
-    if args.reuse:
-        raster = load_ego_raster(args.out)
-    else:
-        specs = full_res_specs()
-        sessions = session_dirs(args.root)
-        if args.sessions:
-            sessions = [s for s in sessions if s.name in args.sessions]
-        frames = []
-        for s in sessions:
-            for row in read_index(s)[::max(1, args.stride)]:
-                frames.append((s, int(row["stamp_ns"])))
-        if args.max_frames:
-            frames = frames[:args.max_frames]
-        print(f"accumulating {len(frames)} frames from {len(sessions)} drives",
-              flush=True)
-        p_obs, p_body, n = accumulate(frames, specs, args.x_range, args.y_range,
-                                      args.cell)
-        mask, core, shadow = derive_ego_mask(
-            p_obs, p_body, args.cell, persist=args.persist,
-            unobserved=args.unobserved, shadow_reach_m=args.shadow_reach)
-        x0, y0 = args.x_range[0], args.y_range[0]
-        ext = extent_m(mask, x0, y0, args.cell)
-        core_ext = extent_m(core, x0, y0, args.cell)
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
-            args.out, mask=mask, core=core, shadow=shadow,
-            p_obs=p_obs.astype(np.float32), p_body=p_body.astype(np.float32),
-            x0=x0, y0=y0, cell=args.cell, frames=n,
-            extent_m=np.asarray(ext, np.float32),
-            created=time.strftime("%Y-%m-%dT%H:%M:%S"))
-        raster = load_ego_raster(args.out)
-        print(f"frames {n}; core (seen chassis) x {core_ext[0]:+.2f}..{core_ext[1]:+.2f} "
-              f"y {core_ext[2]:+.2f}..{core_ext[3]:+.2f} m; "
-              f"footprint x {ext[0]:+.2f}..{ext[1]:+.2f} y {ext[2]:+.2f}..{ext[3]:+.2f} m "
-              f"({(ext[1]-ext[0]):.2f} x {(ext[3]-ext[2]):.2f} m, "
-              f"{mask.sum() * args.cell**2:.3f} m^2); wrote {args.out}", flush=True)
-        robot = load_rig_config()["robots"]["default"]
-        ego = (robot.get("bev_student") or {}).get("ego") or {}
-        ego_rect = (tuple(ego["x_range_m"]) + tuple(ego["y_range_m"])
-                    if "x_range_m" in ego else None)
-        cull = ((robot.get("bev_student") or {}).get("label") or {}).get("cull_rect_m")
-        preview = args.preview or args.out.with_suffix(".png")
-        cv2.imwrite(str(preview), render_preview(
-            p_obs, p_body, mask, core, shadow, x0, y0, args.cell,
-            ego_rect=ego_rect, cull_rect=tuple(cull) if cull else None))
-        print(f"preview {preview}", flush=True)
-
-    if args.apply_labels:
-        total = apply_to_labels(args.root, args.apply_labels, raster,
-                                sessions=args.sessions)
-        print(f"EGO_LABELS_APPLIED {args.apply_labels}: {total} labels", flush=True)
+    specs = full_res_specs()
+    sessions = session_dirs(args.root)
+    if args.sessions:
+        sessions = [s for s in sessions if s.name in args.sessions]
+    frames = []
+    for s in sessions:
+        for row in read_index(s)[::max(1, args.stride)]:
+            frames.append((s, int(row["stamp_ns"])))
+    if args.max_frames:
+        frames = frames[:args.max_frames]
+    print(f"accumulating {len(frames)} frames from {len(sessions)} drives",
+          flush=True)
+    p_obs, p_body, n = accumulate(frames, specs, args.x_range, args.y_range,
+                                  args.cell)
+    mask, core, shadow = derive_ego_mask(
+        p_obs, p_body, args.cell, persist=args.persist,
+        unobserved=args.unobserved, shadow_reach_m=args.shadow_reach)
+    x0, y0 = args.x_range[0], args.y_range[0]
+    ext = extent_m(mask, x0, y0, args.cell)
+    core_ext = extent_m(core, x0, y0, args.cell)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        args.out, mask=mask, core=core, shadow=shadow,
+        p_obs=p_obs.astype(np.float32), p_body=p_body.astype(np.float32),
+        x0=x0, y0=y0, cell=args.cell, frames=n,
+        extent_m=np.asarray(ext, np.float32),
+        created=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    print(f"frames {n}; core (seen chassis) x {core_ext[0]:+.2f}..{core_ext[1]:+.2f} "
+          f"y {core_ext[2]:+.2f}..{core_ext[3]:+.2f} m; "
+          f"footprint x {ext[0]:+.2f}..{ext[1]:+.2f} y {ext[2]:+.2f}..{ext[3]:+.2f} m "
+          f"({(ext[1]-ext[0]):.2f} x {(ext[3]-ext[2]):.2f} m, "
+          f"{mask.sum() * args.cell**2:.3f} m^2); wrote {args.out}", flush=True)
+    robot = load_rig_config()["robots"]["default"]
+    ego = (robot.get("bev_student") or {}).get("ego") or {}
+    ego_rect = (tuple(ego["x_range_m"]) + tuple(ego["y_range_m"])
+                if "x_range_m" in ego else None)
+    cull = ((robot.get("bev_student") or {}).get("label") or {}).get("cull_rect_m")
+    preview = args.preview or args.out.with_suffix(".png")
+    cv2.imwrite(str(preview), render_preview(
+        p_obs, p_body, mask, core, shadow, x0, y0, args.cell,
+        ego_rect=ego_rect, cull_rect=tuple(cull) if cull else None))
+    print(f"preview {preview}", flush=True)
 
 
 if __name__ == "__main__":

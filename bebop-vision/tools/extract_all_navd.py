@@ -2,7 +2,6 @@
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -17,13 +16,9 @@ def audit(out_dir):
     n = len(rows)
     color = sum(r["has_color"] for r in rows)
     color_far = sum(r["has_color_far"] for r in rows)
-    plane = [r["plane_ok"] for r in rows]
-    plane_near = sum(p.get("near", False) for p in plane)
-    plane_far = sum(p.get("far", False) for p in plane)
     # depth validity on a sample
     valid = {"near": [], "far": []}
     mid = {"near": [], "far": []}
-    import cv2
     for r in rows[:: max(1, n // 60)]:
         d = np.load(out_dir / "depth" / f"{r['stamp_ns']:020d}.npz")
         for role in ("near", "far"):
@@ -38,8 +33,6 @@ def audit(out_dir):
         "ticks": n,
         "has_color%": round(100 * color / n),
         "has_color_far%": round(100 * color_far / n),
-        "plane_near%": round(100 * plane_near / n),
-        "plane_far%": round(100 * plane_far / n),
         "valid_near%": round(100 * float(np.mean(valid["near"]))) if valid["near"] else -1,
         "valid_far%": round(100 * float(np.mean(valid["far"]))) if valid["far"] else -1,
         "med_near_m": round(float(np.median(mid["near"])), 2) if mid["near"] else -1,

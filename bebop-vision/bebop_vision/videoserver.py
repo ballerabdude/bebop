@@ -1,7 +1,7 @@
 """Operator video for the Orbbec rig — WebRTC (WHEP) only.
 
 Lives INSIDE the bebop-vision process that owns the cameras (camera
-exclusivity, docs §2.7) — main.py --record-navd starts it
+exclusivity: one process per camera) — main.py --record-navd starts it
 after the rig opens.
 
 Routes:
@@ -18,7 +18,8 @@ Routes:
                               keyframe_requests, viewers} | null,
                               sessions: {<sid6>: {state, au_in, au_sent,
                               au_dropped, pli, age_s}}}}, max_viewers}
-  GET    /snapshot?stream=... single JPEG of the latest frame (tools/tests)
+  GET    /snapshot?stream=... single JPEG of the latest frame (the voice
+                              agent's live context, tools, tests)
   GET    /healthz             liveness
   POST   /intent {text, from, to}   operator intent (sticky; any time);
                                     {"clear": true} clears it
@@ -131,7 +132,6 @@ class _StreamHub:
 
     def __init__(self, name, cam, kind, bitrate, idr_interval_s=1.0,
                  max_fps=DEFAULT_MAX_FPS, make_encoder=None):
-        self.name = name
         self._cam = cam
         self._kind = kind
         fr = _wait_frame(cam, FIRST_FRAME_TIMEOUT_S)
@@ -315,7 +315,7 @@ class VideoServer:
             def _route(self):
                 return urlparse(self.path).path.rstrip("/") or "/"
 
-            def _frame(self, role, kind):
+            def _frame(self, role):
                 cam = server.rig.cameras.get(role)
                 return cam.read() if cam else None
 
@@ -399,7 +399,7 @@ class VideoServer:
                 route = self._route()
                 if route == "/snapshot":
                     name, role, kind = self._pick()
-                    fr = self._frame(role, kind)
+                    fr = self._frame(role)
                     if fr is None:
                         self.send_error(503, "no frame")
                         return

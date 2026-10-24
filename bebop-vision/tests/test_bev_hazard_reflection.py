@@ -7,7 +7,7 @@ import numpy as np
 from bebop_vision.bev_student_labels import (
     FLOOR, HAZARD, camera_evidence, ego_mask, fit_plane,
     fuse_camera_evidence, prepare_observation)
-from test_bev_student import GRID, LABEL_CFG, make_spec, rc, render_scene
+from test_bev_student import GRID, LABEL_CFG, make_spec, render_scene
 
 
 def _band(out, x0, x1):

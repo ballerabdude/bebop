@@ -1,11 +1,11 @@
-"""navd recorder v2: teleop sessions -> one MCAP file per session (plan §7.1).
+"""navd recorder v2: teleop sessions -> one MCAP file per session.
 
-MCAP is the single data artifact: copied off the robot (scp) it carries
+MCAP is the single data artifact: copied off the robot it carries
 everything the workstation needs — color, both depths, the operator's
-teleop twist (the imitation label), odometry, and calibration. Indexed
-and seekable, opens in Foxglove and Rerun for review, and
-`tools/mcap_extract.py` unpacks it into the `datasets/navd-v0/` training
-layout.
+teleop twist (the imitation label), odometry, the firmware's telemetry,
+operator notes and calibration. Indexed and seekable, opens in Foxglove
+and Rerun for review, and `tools/mcap_extract.py` unpacks it into a
+dataset layout.
 
 Channels:
   /color_near   foxglove.CompressedVideo (H.265 access units, hardware
@@ -19,6 +19,12 @@ Channels:
   /odom         bebop.navd.Odom (Protobuf)
   /imu_accel_<role>  bebop.navd.ImuAccel (Protobuf, full accel rate)
   /imu_gyro_<role>   bebop.navd.ImuGyro  (Protobuf, full gyro rate)
+  /runtime      bebop.runtime.v1.ServerRuntimeMessage, telemetry frames
+                verbatim as the firmware sent them
+  /runtime_events  same schema: acks, errors, mode / E-STOP events
+  /intent       bebop.navd.Intent — the operator's sticky drive intent
+  /event        bebop.navd.Event — operator markers (obstacle, exclude, ...)
+  /place        bebop.navd.PlaceSeen — the scout's place sightings
   /calib        JSON intrinsics + rig extrinsics, written once at start
 
 All image/video/telemetry channels are Protobuf-encoded so Rerun's MCAP
@@ -36,8 +42,6 @@ the wire (the standard Foxglove protobuf schemas have no field for them).
 import json
 import threading
 import time
-
-import numpy as np
 
 from . import foxglove_proto
 from . import navd_proto
@@ -77,7 +81,6 @@ class NavdRecorder:
         self.notes_stale = 0
         self.runtime_frames = 0
         self.runtime_events = 0
-        self.runtime_dropped = 0
         # Segment start (monotonic): the cameras run across segments and keep
         # buffering IMU, so the first tick would otherwise flush the idle-period
         # backlog into this segment (IMU predating the video/depth). Drop any
@@ -92,17 +95,17 @@ class NavdRecorder:
         self.jpeg_quality = jpeg_quality
         self.max_frame_age_s = max_frame_age_s
         # Hardware (NVENC) color video: store H.265/H.264 access units in
-        # the MCAP instead of per-tick JPEG (docs/navd.md §3.2 — the Thor
-        # finally has an encoder; the Orin Nano did not). Falls back to
-        # JPEG (camera MJPEG passthrough) when no encoder is available, so
-        # workstation tests and non-Jetson hosts keep the old path.
+        # the MCAP instead of per-tick JPEG (the Thor has an NVENC encoder;
+        # the Orin Nano had none). Falls back to JPEG (camera MJPEG
+        # passthrough) when no encoder is available, so workstation tests
+        # and non-Jetson hosts keep the old path.
         #
         # H.265 is the default for storage efficiency. Reviewing in Foxglove
         # needs a client whose WebCodecs can decode HEVC (there is no
         # software path — see the CompressedVideo docs' platform caveat).
         # The native Rerun viewer decodes HEVC via system FFmpeg with no
-        # GPU, but its `foxglove` decoder maps Foxglove messages only when
-        # they are Protobuf-encoded (this recorder currently writes JSON).
+        # GPU; its `foxglove` decoder maps Foxglove messages only when they
+        # are Protobuf-encoded, which is what this recorder writes.
         self._HwVideoEncoder = None
         self._video_codec = None
         self._encoders = {}
@@ -115,14 +118,14 @@ class NavdRecorder:
             pass
         self.bytes_written = 0
         self.frames = 0
-        self._lock = threading.Lock()
         self._running = False
         self._thread = None
-        # Per-camera BEV + encode jobs run here. Only numpy/cv2 work is
-        # submitted (both release the GIL); every pyorbbecsdk call stays in
-        # the recorder thread and MCAP writes stay serial (Writer is not
-        # thread-safe). Same split as the excised BEV worker; the
-        # corruption in §2.8 was from pooling capture, not processing.
+        # Per-camera encode jobs run here. Only numpy/cv2 work is submitted
+        # (both release the GIL); every pyorbbecsdk call stays in the
+        # recorder thread and MCAP writes stay serial (Writer is not
+        # thread-safe). The heap corruption seen in 2026-09 (`malloc():
+        # unaligned fastbin chunk`) came from pooling capture, not
+        # processing.
         from concurrent.futures import ThreadPoolExecutor
         self._pool = ThreadPoolExecutor(max_workers=workers,
                                         thread_name_prefix="navd-rec")
@@ -204,9 +207,9 @@ class NavdRecorder:
         # estop reason, operator/watchdog flags, per-wheel targets, bus and
         # power state: everything the resampled /cmd_vel and /odom drop.
         from .proto.bebop.runtime.v1 import bebop_runtime_pb2 as pb
-        # /runtime carries telemetry frames only; acks, errors, mode / E-STOP
-        # events and nav goals go to /runtime_events with the same schema
-        # (Rerun plots a non-telemetry row as 0 in every telemetry panel).
+        # /runtime carries telemetry frames only; acks, errors and mode /
+        # E-STOP events go to /runtime_events with the same schema (Rerun
+        # plots a non-telemetry row as 0 in every telemetry panel).
         self._runtime_msg = pb.ServerRuntimeMessage
         sch_runtime = self._writer.register_schema(*navd_proto.schema(pb.ServerRuntimeMessage))
         self._ch["runtime"] = self._writer.register_channel("/runtime", "protobuf", sch_runtime)
@@ -274,15 +277,13 @@ class NavdRecorder:
 
     def _loop(self):
         interval = 1.0 / self.rate_hz
-        seq = 0
         while self._running:
             t0 = time.monotonic()
             log_ns = time.time_ns()
             try:
-                self._tick(log_ns, seq)
+                self._tick(log_ns)
             except Exception as exc:
                 print(f"[recorder] tick error: {type(exc).__name__}: {exc}")
-            seq += 1
             self.frames += 1
             time.sleep(max(0.0, interval - (time.monotonic() - t0)))
 
@@ -351,7 +352,7 @@ class NavdRecorder:
                        frame_id=frame_id, data=blob,
                        format=fmt).SerializeToString()
 
-    def _tick(self, log_ns, seq):
+    def _tick(self, log_ns):
         st = self.robot.state
         self._add(self._ch["cmd_vel"],
                   navd_proto.Twist(vx=float(st.cmd[0]), wz=float(st.cmd[1]),
@@ -367,11 +368,9 @@ class NavdRecorder:
         except Exception as exc:  # never lose the tick's frames to a note
             print(f"[recorder] note/telemetry drain failed: {exc}")
         # Camera reads stay serial in this thread (pyorbbecsdk must not be
-        # pooled — §2.8). BEV + PNG/JPEG encodes are numpy/cv2 (GIL-releasing)
-        # and run as per-camera jobs in the pool; results are written
-        # serially. With both cameras (PNG16 + JPEG + BEV each) the tick
-        # measures ~165 ms at 6 workers on the Orin Nano (vs ~330 ms fully
-        # serial, 2026-09-06); 6 cores — more workers oversubscribes.
+        # pooled: pooled capture corrupted the heap). PNG/JPEG encodes and
+        # the RGB->BGR conversion are numpy/cv2 (GIL-releasing) and run as
+        # per-camera jobs in the pool; results are written serially.
         #
         # Cross-camera pairing: hardware sync phase-locks the capture
         # instants (tools/orbbec_sync_test.py: host-clock phase spread
@@ -379,10 +378,8 @@ class NavdRecorder:
         # independent slot reads can land a frame period apart (measured
         # med 0.3 ms / max 76.6 ms, tools/orbbec_slot_probe.py). Pairing
         # takes the freshest same-instant pair from the per-camera
-        # histories; the residual |Δrecv| rides in the image messages
-        # (pair_ms) with the device stamp (stamp_us) so offline consumers
-        # can verify alignment.
-        frames, pair_ms = self._pair_frames(self.max_frame_age_s)
+        # histories; the residual is not written (see the module docstring).
+        frames, _ = self._pair_frames(self.max_frame_age_s)
         jobs = {}
         for role, f in frames.items():
             cached = self._cache.get(role)
@@ -427,7 +424,6 @@ class NavdRecorder:
                     job["jpg"] = jpg
                 jobs[role] = job
                 self._cache[role] = (f.stamp_us, job)
-            meta = {"stamp_us": f.stamp_us, "pair_ms": pair_ms.get(role)}
             self._add(self._ch[self._depth_topic(role)],
                       self._compressed_msg(
                           foxglove_proto.CompressedImage, f"depth_{role}",
@@ -435,7 +431,7 @@ class NavdRecorder:
                       log_ns)
             if self._video_codec:
                 self._write_video_color(role, job.get("color"),
-                                        job.get("color_kind"), log_ns, meta)
+                                        job.get("color_kind"), log_ns)
             else:
                 jpg = job.get("jpg")
                 if jpg is not None:
@@ -509,7 +505,6 @@ class NavdRecorder:
                 self._add(self._ch["runtime_events"], raw, int(wall_ns))
                 self.runtime_events += 1
         if self.frames > 0 and n >= frames.maxlen:
-            self.runtime_dropped += 1
             print(f"[recorder] /runtime deque hit capacity ({n}); telemetry "
                   f"frames were probably lost (stall?)")
 
@@ -559,7 +554,7 @@ class NavdRecorder:
                 score=float(seen["score"]), margin=float(seen["margin"]),
                 stamp_ns=int(seen["stamp_ns"])), int(seen["stamp_ns"]))
 
-    def _write_video_color(self, role, payload, kind, log_ns, meta):
+    def _write_video_color(self, role, payload, kind, log_ns):
         """Push one color frame through this role's NVENC and write the AUs.
 
         The encoder runs ~1 frame behind, so each AU is tagged with the
@@ -596,9 +591,8 @@ class NavdRecorder:
                 self._video_codec = None
                 return
             self._encoders[role] = enc
-        tag = (log_ns, meta.get("stamp_us"), meta.get("pair_ms"))
-        for au, out_tag in enc.push(payload, tag):
-            t_log = (out_tag if out_tag else tag)[0]
+        for au, out_tag in enc.push(payload, log_ns):
+            t_log = out_tag if out_tag is not None else log_ns
             self._add(self._ch[f"color_{role}"],
                       self._compressed_msg(
                           foxglove_proto.CompressedVideo, f"{role}_color",
@@ -607,13 +601,10 @@ class NavdRecorder:
 
     @staticmethod
     def _decode_bgr(f):
-        """BGR ndarray for the hardware encoder, from RGB or camera MJPEG."""
+        """BGR ndarray for the hardware encoder from a raw-RGB frame (None
+        when the frame carries no color)."""
         if f.color is not None:
             return cv2.cvtColor(f.color, cv2.COLOR_RGB2BGR)
-        if f.color_jpeg is not None:
-            bgr = cv2.imdecode(np.frombuffer(f.color_jpeg, np.uint8),
-                               cv2.IMREAD_COLOR)
-            return bgr
         return None
 
     @staticmethod
@@ -661,7 +652,7 @@ class NavdRecorder:
         for role, enc in self._encoders.items():
             try:
                 for au, tag in enc.flush():
-                    t_log = tag[0] if tag else time.time_ns()
+                    t_log = tag if tag is not None else time.time_ns()
                     self._add(self._ch[f"color_{role}"],
                               self._compressed_msg(
                                   foxglove_proto.CompressedVideo,
@@ -673,7 +664,6 @@ class NavdRecorder:
             finally:
                 enc.close()
         self._encoders = {}
-        with self._lock:
-            self._writer.finish()
-            self._file.close()
+        self._writer.finish()
+        self._file.close()
 

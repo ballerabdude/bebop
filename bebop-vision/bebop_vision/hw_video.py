@@ -1,12 +1,11 @@
 """Hardware video encoding (Jetson NVENC) via GStreamer `nvv4l2*enc`.
 
-The Orin Nano had no NVENC, which is why the operator stream and the navd
-recordings used software JPEG/MJPEG (see docs/navd.md §3.2). The Thor
-(JetPack 7) ships a real NVENC block: `nvv4l2h264enc` / `nvv4l2h265enc`
-are present and hardware-encode 1280x800 in a few ms. This module wraps a
-persistent GStreamer pipeline (`appsrc` raw BGR -> `nvvidconv` -> NVMM
-NV12 -> NVENC -> `appsink` Annex-B access units) so the recorder can store
-H.265/H.264 instead of per-frame JPEG.
+The Thor (JetPack 7) has an NVENC block: `nvv4l2h264enc` / `nvv4l2h265enc`
+hardware-encode 1280x800 in a few ms. This module wraps a persistent
+GStreamer pipeline (`appsrc` camera MJPEG -> `nvjpegdec`, or raw BGR ->
+`videoconvert`; then `nvvidconv` -> NVMM NV12 -> NVENC -> `appsink` Annex-B
+access units) so the recorder can store H.265 (or H.264) instead of
+per-frame JPEG.
 
 Why GStreamer and not PyAV: FFmpeg's `h264_v4l2m2m` / `hevc_v4l2m2m`
 encoders need a V4L2 mem2mem node, and the Tegra encoder is not exposed
@@ -15,10 +14,11 @@ that way (it is `/dev/nvhost-msenc`, reachable only through the
 software, so the training extractor stays on the existing `av` dependency.
 
 The system GStreamer python bindings (`gi`) live in
-`/usr/lib/python3/dist-packages`, which the venv does not include; we add
-that path lazily on first use. If anything is missing (non-Jetson dev box,
-no gi, no nvv4l2 element) the caller gets `HwEncodeUnavailable` and falls
-back to JPEG.
+`/usr/lib/python3/dist-packages`; the robot's venv sees them through
+`--system-site-packages`, and the path is appended on first use for a venv
+that does not. If anything is missing (non-Jetson dev box, no gi, no
+nvv4l2 element) the caller gets `HwEncodeUnavailable` and falls back to
+JPEG.
 """
 
 from __future__ import annotations
@@ -214,7 +214,6 @@ class HwVideoEncoder:
             ow = self.width - (self.width % 2)
             oh = self.height - (self.height % 2)
         self.fps = float(fps)
-        self.codec = codec
         self._dur_ns = int(round(Gst.SECOND / self.fps)) if self.fps else 0
         gop = int(iframe_interval if iframe_interval is not None
                   else max(1, round(self.fps)))

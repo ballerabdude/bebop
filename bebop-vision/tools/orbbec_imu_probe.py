@@ -10,8 +10,8 @@ truth (an IMU drifts; validate trajectories against tags/mocap instead):
   * how the IMU timestamps line up with the depth frames: the IMU<->camera
     time offset VIO needs, reported in the shared device-clock domain.
 
-Idle-safe: it refuses to run while the recorder / goal-drive holds the
-cameras (one process per camera). Stop that first, or pass --force.
+Idle-safe: it refuses to run while the recorder holds the cameras (one
+process per camera). Stop that first, or pass --force.
 
 Run on the Jetson with no other camera user:
   .venv/bin/python tools/orbbec_imu_probe.py                 # both cameras, 10 s
@@ -305,7 +305,7 @@ def main():
         busy, who = _busy()
         if busy:
             raise SystemExit(
-                "camera busy — recorder/goal-drive is running; stop it first "
+                "camera busy — the recorder is running; stop it first "
                 "(sudo pkill -TERM -f 'record-nav[d]'):\n" + who)
 
     ob = _sdk()

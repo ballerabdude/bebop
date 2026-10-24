@@ -43,7 +43,6 @@ class ViewerLimit(Exception):
     def __init__(self, stream, viewers, max_viewers):
         super().__init__(f"stream {stream} already has {viewers} viewers "
                          f"(max {max_viewers})")
-        self.stream = stream
         self.viewers = viewers
         self.max_viewers = max_viewers
 

@@ -1,7 +1,5 @@
 """Recorder v2 unit tests: MCAP round-trip with fake cameras/robot."""
 
-import base64
-import io
 import json
 import time
 from types import SimpleNamespace
@@ -114,7 +112,7 @@ def test_mcap_roundtrip(tmp_path):
     from bebop_vision import foxglove_proto as fp
     from bebop_vision import navd_proto
     _PROTO = {m.DESCRIPTOR.full_name: m for m in
-              (fp.CompressedImage, fp.CompressedVideo, fp.RawImage,
+              (fp.CompressedImage, fp.CompressedVideo,
                navd_proto.Twist, navd_proto.Odom,
                navd_proto.ImuAccel, navd_proto.ImuGyro)}
     with open(path, "rb") as f:
@@ -198,8 +196,8 @@ def test_extractor_layout(tmp_path):
     assert d.exists()
     data = np.load(d)
     assert data["near"].shape == (480, 848)
-    lab = np.load(out / "labels" / f"{row['stamp_ns']:020d}.npz")
-    assert "teacher" not in lab.files   # no BEV builder -> no recorded teacher
+    assert not (out / "labels").exists()   # no recorded teacher to unpack
+    assert "goal" not in row and "plane_ok" not in row
     assert row["cmd_vel"]["vx"] == pytest.approx(0.2)
     assert row["has_color"] is True and row["has_color_far"] is True
     import cv2
@@ -295,7 +293,7 @@ def test_prune_sessions(tmp_path):
         p.write_bytes(b"x" * size)
         import os
         os.utime(p, (time.time() + i, time.time() + i))  # s0 oldest
-    # the firmware's policy captures in the same dir must never be touched
+    # other files in the shared dir (e.g. old policy captures) are never touched
     policy = tmp_path / "policy_capture_x.mcap"
     policy.write_bytes(b"y" * 9999)
     _prune_sessions(tmp_path, budget_bytes=350)

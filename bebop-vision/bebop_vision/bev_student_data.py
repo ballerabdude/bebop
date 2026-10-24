@@ -1,4 +1,4 @@
-"""Dataset plumbing for the learned master-BEV student.
+"""Dataset plumbing for the SAM 3.1 x depth label set (bev-student layout).
 
 The on-disk contract (all under ``bebop-vision/datasets/bev-student/``)::
 
@@ -15,14 +15,6 @@ The on-disk contract (all under ``bebop-vision/datasets/bev-student/``)::
         preview/                     review artifacts
     splits/drive_split.json          train/val by drive, never by frame
     meta/label_stats.json            aggregate label stats
-
-
-    runs/bev-student/<run_id>/
-        tb/                          TensorBoard event files
-        checkpoints/
-        export/                      ONNX / TensorRT / metadata
-        train_log.jsonl
-        config.json
 """
 
 from __future__ import annotations
@@ -31,8 +23,6 @@ import json
 import random
 import time
 from pathlib import Path
-
-import numpy as np
 
 from .bev_student_labels import (CLASS_NAMES, GridSpec, load_label_npz,
                                  summarize_label_files)
@@ -98,9 +88,8 @@ def read_index(session_dir):
     return rows
 
 
-def label_path(session_dir, stamp_ns, labels_subdir="labels"):
-    return (Path(session_dir) / str(labels_subdir)
-            / f"{int(stamp_ns):020d}.npz")
+def label_path(session_dir, stamp_ns):
+    return Path(session_dir) / "labels" / f"{int(stamp_ns):020d}.npz"
 
 
 def find_labels(session_dir):
@@ -140,7 +129,6 @@ def validate_session(session_dir, grid=None, strict=True):
             except ValueError as exc:
                 errors.append(f"{lp.name}: {exc}")
 
-    known = {p.stem for p in labels}
     orphan = [p.name for p in find_labels(session_dir)
               if p.stem not in {f"{s:020d}" for s in stamps}]
     if missing_color:
@@ -215,7 +203,6 @@ def split_by_drive(root=DEFAULT_ROOT, val_sessions=None, val_fraction=0.2,
     only ever moves complete drives.
     """
     root = Path(root)
-    grid = GridSpec()
     usable = []
     for sd in session_dirs(root):
         if find_labels(sd):

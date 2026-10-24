@@ -1,10 +1,10 @@
-"""Semantic BEV labels for the learned master-BEV student.
+"""Semantic BEV labels from SAM 3.1 x depth (the offline labeler).
 
 The teacher is SAM 3.1 for semantics and the rig's depth streams for
 geometry.  Per labeled keyframe and camera:
 
-  1. every sampled depth pixel is deprojected into the body frame using the
-     the same mount / intrinsics model as the geometric BEV used to;
+  1. every sampled depth pixel is deprojected into the body frame through
+     the rig's mount / intrinsics model;
   2. the point is projected into the **color** frame through the camera's
      depth->color extrinsic, so the SAM mask is sampled at the exact pixel
      that saw that depth sample (no zero-baseline approximation);
@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import dataclasses
 import os
-import time
 from pathlib import Path
 
 # Keep the Thor's OpenBLAS pool from spin-waiting; main.py does the same
@@ -51,7 +50,7 @@ from .orbbec import (CONFIG_DIR, build_self_view_mask, load_intrinsics,
                      load_rig_config,
                      parse_self_mask_entries)
 
-# Label classes.  These are *not* the planner's FREE/OCCUPIED/HAZARD ids.
+# Label classes.
 FLOOR, WALL, OBSTACLE, HAZARD, IGNORE = 0, 1, 2, 3, 255
 
 CLASS_NAMES = {
@@ -89,7 +88,7 @@ PROMPT_CLASS = {
 }
 
 # BGR palette for review images.  Floor grey, wall blue, obstacle red,
-# hazard orange, ignore near-black.  The operator BEV keeps its own palette.
+# hazard orange, ignore near-black.
 LABEL_COLORS = {
     FLOOR: (120, 120, 120),
     WALL: (255, 120, 40),
@@ -155,23 +154,13 @@ class GridSpec:
     def cell_y_m(self):
         return self.width_m / self.cols if self.cols_override is not None else self.cell_m
 
-    def metadata(self):
-        square = np.isclose(self.cell_x_m, self.cell_y_m)
-        return {"rows": self.rows, "cols": self.cols,
-                "range_m": self.range_m, "width_m": self.width_m,
-                "cell_m": self.cell_x_m if square else None,
-                "cell_x_m": self.cell_x_m, "cell_y_m": self.cell_y_m,
-                "row0": "far", "col0": "right"}
-
     @property
     def shape(self):
         return (self.rows, self.cols)
 
     @classmethod
     def from_config(cls, cfg):
-        mb = (cfg.get("bev_student") or {}).get("grid")
-        if not mb:
-            mb = cfg.get("master_bev") or cfg.get("bev") or {}
+        mb = (cfg.get("bev_student") or {}).get("grid") or {}
         return cls(
             range_m=float(mb.get("range_m", 6.0)),
             width_m=float(mb.get("width_m", 3.0)),
@@ -192,11 +181,6 @@ class GridSpec:
         x = self.range_m - (np.arange(self.rows) + 0.5) * self.cell_x_m
         y = (np.arange(self.cols) + 0.5) * self.cell_y_m - self.width_m / 2.0
         return x, y
-
-    def contains(self, x, y):
-        return ((-0.5 * self.width_m <= y)
-                & (y < 0.5 * self.width_m)
-                & (0.0 <= x) & (x < self.range_m))
 
 
 @dataclasses.dataclass
@@ -231,16 +215,16 @@ class LabelConfig:
     # not a wall.  Tall pillars stay walls.
     wall_compact_m: float = 0.60
     wall_pillar_min_h_m: float = 2.00
-    # Local floor-height drops (rug/step edges) are noisy indoors; the
-    # master BEV leaves them off by default too.  Below-plane points are the
-    # primary negative-obstacle signal unless this is enabled.
+    # Local floor-height drops (rug/step edges) are noisy indoors, so they
+    # are off by default.  Below-plane points are the primary
+    # negative-obstacle signal unless this is enabled.
     local_drop_hazard: bool = False
     # Below-plane depth points on an unlabeled dark surface (sofa undersides,
     # shadows, rug fringes) are usually multipath noise, not holes.  Require
     # the point itself to be SAM floor/ground or stairs/hole.
     hazard_require_floor: bool = True
-    # Hazard ablations (see docs/bev-student.md).  Defaults preserve the
-    # original rule: any below-plane point on SAM floor/stairs is hazard.
+    # Hazard ablations; the defaults preserve the original rule: any
+    # below-plane point on SAM floor/stairs is hazard.
     # ``hazard_absolute=False`` disables that and leaves only local drop
     # evidence; ``hazard_prompt_only=True`` requires the SAM stairs/step/
     # hole prompt on the point itself (removes people/shadow false alarms).
@@ -301,8 +285,7 @@ class LabelConfig:
     @classmethod
     def from_config(cls, cfg):
         raw = (cfg.get("bev_student") or {}).get("label") or {}
-        geo = ((cfg.get("bev_student") or {}).get("geometry")
-               or cfg.get("master_bev") or {})
+        geo = (cfg.get("bev_student") or {}).get("geometry") or {}
         kw = {}
         for f in dataclasses.fields(cls):
             if f.name in raw:
@@ -398,10 +381,6 @@ class CameraSpec:
         if self.self_pixels is None:
             self.self_pixels = np.zeros(len(self.u_d), bool)
 
-    @property
-    def n_pixels(self):
-        return int(len(self.u_d))
-
 
 @dataclasses.dataclass
 class PreparedObservation:
@@ -415,9 +394,6 @@ class PreparedObservation:
     cols: np.ndarray              # (N,) int grid cols
     flat: np.ndarray              # (N,) row*cols + col
     in_grid: np.ndarray           # (N,) bool
-    u_c: np.ndarray               # (N,) color pixel (clipped)
-    v_c: np.ndarray
-    in_color: np.ndarray          # (N,) bool
     floor_conf: np.ndarray        # (N,) 0..1 sampled SAM confidence
     wall_conf: np.ndarray
     obstacle_conf: np.ndarray
@@ -427,7 +403,6 @@ class PreparedObservation:
     # per cell inside that sample's observed patch.  None = point projection.
     splat_src: np.ndarray = None
     splat_flat: np.ndarray = None
-    stamp_us: int = 0
 
 
 @dataclasses.dataclass
@@ -435,8 +410,6 @@ class LabelArrays:
     semantic: np.ndarray
     ego: np.ndarray
     coverage: np.ndarray
-    evidence: dict = None
-    planes: dict = None
     stats: dict = None
 
 
@@ -479,7 +452,7 @@ def range_weight(role, forward_m, cfg=None):
     return np.ones_like(f)
 
 
-def build_camera_spec(role, serial, cam_cfg, intr, cfg, grid):
+def build_camera_spec(role, serial, cam_cfg, intr, cfg):
     """CameraSpec from a rig-YAML camera block + cached intrinsics JSON."""
     width_d = int(intr.get("width") or 0)
     height_d = int(intr.get("height") or 0)
@@ -566,8 +539,7 @@ def specs_from_config(rig_cfg=None, config_dir=None, roles=None):
         if roles and role not in roles:
             continue
         intr = load_intrinsics(serial, config_dir)
-        specs[role] = build_camera_spec(role, serial, cam_cfg, intr,
-                                        cfg, grid)
+        specs[role] = build_camera_spec(role, serial, cam_cfg, intr, cfg)
     return specs, cfg, grid, label_cfg
 
 
@@ -628,14 +600,11 @@ def prepare_observation(spec, depth_mm, floor_conf=None, wall_conf=None,
         valid &= ~on_body
 
     if not valid.any():
-        n = 0
         return PreparedObservation(
             role=spec.role, points=np.zeros((0, 3), np.float32),
             ranges=np.zeros(0, np.float32), forward=np.zeros(0, np.float32),
             rows=np.zeros(0, np.int32), cols=np.zeros(0, np.int32),
             flat=np.zeros(0, np.int64), in_grid=np.zeros(0, bool),
-            u_c=np.zeros(0, np.int32), v_c=np.zeros(0, np.int32),
-            in_color=np.zeros(0, bool),
             floor_conf=np.zeros(0, np.float32),
             wall_conf=np.zeros(0, np.float32),
             obstacle_conf=np.zeros(0, np.float32),
@@ -687,7 +656,6 @@ def prepare_observation(spec, depth_mm, floor_conf=None, wall_conf=None,
     return PreparedObservation(
         role=spec.role, points=pts, ranges=ranges, forward=x,
         rows=rows, cols=cols, flat=flat, in_grid=in_grid,
-        u_c=u_i, v_c=v_i, in_color=in_color,
         floor_conf=sample(floor_conf), wall_conf=sample(wall_conf),
         obstacle_conf=sample(obstacle_conf),
         hazard_conf=sample(hazard_conf),
@@ -874,10 +842,7 @@ def camera_evidence(prep, plane, cfg, grid, fallback=False):
         "cov_w": np.zeros(n_cells, np.float32),
         "floor_n": np.zeros(n_cells, np.int32),
         "floor_h_sum": np.zeros(n_cells, np.float32),
-        "wall_n": np.zeros(n_cells, np.int32),
         "wall_h_max": np.full(n_cells, -np.inf, np.float32),
-        "wall_h_min": np.full(n_cells, np.inf, np.float32),
-        "cells": 0,
         "reflections": 0,
     }
     if prep is None or len(prep.points) == 0 or not prep.in_grid.any():
@@ -975,12 +940,8 @@ def camera_evidence(prep, plane, cfg, grid, fallback=False):
                                  minlength=n_cells).astype(np.int32)
     out["floor_h_sum"] = np.bincount(
         flat[floor], weights=h[floor], minlength=n_cells).astype(np.float32)
-    out["wall_n"] = np.bincount(flat[wall],
-                                minlength=n_cells).astype(np.int32)
     if wall.any():
         np.maximum.at(out["wall_h_max"], flat[wall], h[wall])
-        np.minimum.at(out["wall_h_min"], flat[wall], h[wall])
-    out["cells"] = int(np.sum(out["cov_n"] > 0))
     return out
 
 
@@ -1096,7 +1057,7 @@ def resolve_labels(floor_w, wall_w, obstacle_w, hazard_w, coverage, ego,
     }
 
 
-def fuse_camera_evidence(evidences, cfg, grid, ego=None, planes=None):
+def fuse_camera_evidence(evidences, cfg, grid, ego=None):
     """Sum camera evidence, fix compact walls, add drop hazards, resolve."""
     n_cells = grid.rows * grid.cols
     floor_w = np.zeros(n_cells, np.float32)
@@ -1104,10 +1065,8 @@ def fuse_camera_evidence(evidences, cfg, grid, ego=None, planes=None):
     obs_w = np.zeros(n_cells, np.float32)
     haz_w = np.zeros(n_cells, np.float32)
     cov_n = np.zeros(n_cells, np.int32)
-    cov_w = np.zeros(n_cells, np.float32)
     floor_n = np.zeros(n_cells, np.int32)
     floor_h_sum = np.zeros(n_cells, np.float32)
-    wall_n = np.zeros(n_cells, np.int32)
     wall_h_max = np.full(n_cells, -np.inf, np.float32)
     for ev in evidences.values():
         if ev is None:
@@ -1117,10 +1076,8 @@ def fuse_camera_evidence(evidences, cfg, grid, ego=None, planes=None):
         obs_w += ev["occ_w"]
         haz_w += ev["haz_w"]
         cov_n += ev["cov_n"]
-        cov_w += ev["cov_w"]
         floor_n += ev["floor_n"]
         floor_h_sum += ev["floor_h_sum"]
-        wall_n += ev["wall_n"]
         np.maximum(wall_h_max, ev["wall_h_max"], out=wall_h_max)
 
     coverage = (cov_n > 0).reshape(grid.rows, grid.cols)
@@ -1155,23 +1112,11 @@ def fuse_camera_evidence(evidences, cfg, grid, ego=None, planes=None):
                   & (obs_nb == 0) & coverage)
     haz_w2 = haz_drop2 + np.where(below_gate, haz_below2, 0.0)
 
-    semantic, masks = resolve_labels(
+    semantic, _ = resolve_labels(
         floor2, wall_w2, obs_w2, haz_w2,
         coverage, ego, cfg, grid)
-    evidence = {
-        "floor_w": floor2,
-        "wall_w": wall_w2,
-        "obstacle_w": obs_w2,
-        "hazard_w": haz_w2,
-        "hazard_below_w": haz_below2,
-        "hazard_drop_w": haz_drop2,
-        "cov_n": cov_n.reshape(grid.rows, grid.cols),
-        "cov_w": cov_w.reshape(grid.rows, grid.cols),
-        "wall_h_max": wall_h_max2,
-    }
     return LabelArrays(
         semantic=semantic, ego=ego, coverage=coverage,
-        evidence=evidence, planes=planes or {},
         stats=class_counts(semantic, ego, coverage))
 
 
@@ -1292,7 +1237,7 @@ class BevStudentLabeler:
             evidences[role] = camera_evidence(
                 prep, plane, self.label_cfg, self.grid, fallback=fallback)
         out = fuse_camera_evidence(
-            evidences, self.label_cfg, self.grid, ego=self.ego, planes=planes)
+            evidences, self.label_cfg, self.grid, ego=self.ego)
         out.stats["plane_ok"] = {r: bool(planes[r]["ok"]) for r in planes}
         out.stats["reflections"] = {r: int(evidences[r].get("reflections", 0))
                                     for r in evidences}
@@ -1341,7 +1286,8 @@ def draw_legend(img, items, y=None):
 
 def render_label_bev(semantic, ego, coverage, grid, *, scale=4,
                      show_hud=True):
-    """Semantic (R,C) -> BGR review image, mirrored like render_bev."""
+    """Semantic (R,C) -> BGR review image (columns mirrored so the robot's
+    left is on the image's left)."""
     semantic = np.asarray(semantic)
     small = np.zeros((grid.rows, grid.cols, 3), np.uint8)
     for cls, color in LABEL_COLORS.items():

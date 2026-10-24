@@ -1,4 +1,4 @@
-"""Synthetic tests for the learned master-BEV labels (no SAM, no hardware).
+"""Synthetic tests for the SAM 3.1 x depth labeler (no SAM, no hardware).
 
 The scene is ray-cast through the same mount model as master_bev, so the
 depth->body projection, color->depth sampling, floor plane, evidence
@@ -123,7 +123,6 @@ def test_rectangular_grid_keeps_metric_coordinates_and_ego():
     assert grid.shape == (360, 640)
     assert grid.cell_x_m == pytest.approx(6 / 360)
     assert grid.cell_y_m == pytest.approx(3 / 640)
-    assert grid.metadata()["cell_m"] is None
     x, y = grid.centers()
     for row, col in ((0, 0), (180, 320), (359, 639)):
         assert grid.cell_of(x[row], y[col]) == (row, col)
@@ -239,9 +238,7 @@ def test_config_loads_grid_and_ego():
     from bebop_vision.orbbec import load_rig_config
     cfg = load_rig_config()["robots"]["default"]
     lc = LabelConfig.from_config(cfg)
-    # Chassis rectangle measured from the near camera (2026-10-19); the
-    # runtime ORs the same rectangle onto the predicted ego, so the YAML is
-    # the single source for both.
+    # Chassis rectangle measured from the near camera (2026-10-19).
     assert lc.ego_x_range_m == (-0.10, 0.29)
     assert lc.ego_y_range_m == (-0.27, 0.17)
     assert lc.cull_rect_m is None and lc.cull_ego_margin_m == 0.02

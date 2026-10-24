@@ -1,12 +1,8 @@
-"""Runtime + teacher settings for the bebop robot.
+"""Defaults for the SAM 3.1 concept segmenter (bebop_vision/sam3_concepts.py).
 
-Default video source is the firmware's MJPEG endpoint — the firmware
-owns the camera and bebop-vision never opens a capture device directly
-(see `firmware/bebop-linux/src/video.rs` for the ownership split).
+Its callers (tools/bev_student_labels.py) pass the concepts and the device
+explicitly; these are the fallbacks.
 """
 
-DEFAULT_SOURCE = "http://bebop.local:9092/video"
-DEFAULT_NAV_MODEL = "weights/navseg"
-DEFAULT_CONFIDENCE = 0.5
 DEVICE = "auto"
 RECORD_CONCEPTS = ("floor", "wall", "person", "chair", "table", "door")

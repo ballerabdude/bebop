@@ -1,8 +1,9 @@
 # Bebop-vision project dependencies — ONE venv for the whole project.
 #
 # Target: Jetson AGX Thor, JetPack 7.2 / L4T 39.2, CUDA 13.2, Python 3.12.
-# The recorder/perception/places stack AND the voice stack (Qwen3-Omni via
-# TensorRT Edge-LLM) share `bebop-vision/.venv`.
+# The recorder/perception/places stack AND the voice stack (TensorRT
+# Edge-LLM: the ASR -> brain -> TTS cascade, or Qwen3-Omni) share
+# `bebop-vision/.venv`.
 #
 # The venv is created with --system-site-packages so JetPack's TensorRT
 # Python bindings (system dist-packages) are visible to the voice stack.
@@ -54,11 +55,13 @@ PyYAML>=6
 huggingface_hub>=0.26
 websockets>=12
 
-# --- student-model runtime (--navd-model) ---------------------------------
-# Pinned: the CUDA-EP build must match the platform's CUDA 13. Never install
-# plain `onnxruntime` alongside it — they share the import name.
+# --- ONNX Runtime (CUDA EP) -----------------------------------------------
+# The reference for checking engines built on the Thor against their ONNX
+# export (docs/path-model.md); nothing in the tree imports it today. Pinned:
+# the CUDA-EP build must match the platform's CUDA 13. Never install plain
+# `onnxruntime` alongside it — they share the import name. `onnx` itself
+# comes with tensorrt-edgellm[tools] below.
 onnxruntime-gpu==1.29.0
-onnx>=1.16
 
 # --- voice (TensorRT Edge-LLM) --------------------------------------------
 # Pinned exactly: the compiled engines AND the `edge_serve.py` compatibility

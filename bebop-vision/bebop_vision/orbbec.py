@@ -1,9 +1,8 @@
 """Orbbec Gemini 335Lg camera service for navd.
 
 Owns the two depth cameras directly (bebop-vision is the sole owner of the
-Orbbec rig; the firmware's OBSBOT webcam is unrelated and being retired —
-docs/navd.md Section 9). One process holds a camera at a time: close
-OrbbecViewer before running.
+Orbbec rig). One process holds a camera at a time: close OrbbecViewer
+before running.
 
 - Devices are matched by serial (never index — enumeration order is not
   stable with two identical devices on the same hub).
@@ -11,17 +10,18 @@ OrbbecViewer before running.
   actually advertises: the far camera on the unfixed USB 2.0 cable only
   offers 848x480@10, and negotiation drops to it automatically. Profiles
   restore when the cable is swapped — no config change needed.
-- Depth filters (SpatialModerate + Temporal + HoleFilling) run in the
-  capture thread, per Section 3.3 of the plan.
+- Depth post-filters (Temporal + HoleFilling by default, see
+  `_set_depth_filters`) run in the capture thread.
 - Depth preset (per-camera `depth_preset` in the rig YAML) is loaded at
-  open time via `load_preset` — this replaces the earlier work-mode
-  setting (a preset bundles its own work mode). Replaces "High Density"
-  with the built-in "High Accuracy" preset (2026-09-07); the G33X custom
-  preset bin is Gemini 330-only (firmware ERR_MISMATCH on pid 2059).
-- Threading mirrors the old OBSBOT `camera.py` reader: one capture thread per camera feeding a
-  latest-wins slot. Open failure at startup is a hard error (bench tool);
-  a mid-run drop leaves the slot stale so the deadman stops the robot —
-  the control loop never crashes on a camera exception.
+  open time via `load_preset` (a preset bundles its own work mode). The
+  built-in "High Accuracy" preset replaced "High Density" (2026-09-07); the
+  G33X custom preset bin is Gemini 330-only (firmware ERR_MISMATCH on pid
+  2059).
+- One capture thread per camera feeds a latest-wins slot (plus a short
+  arrival-ordered history). Open failure at startup is a hard error; a
+  mid-run drop leaves the slot stale (consumers judge staleness on
+  `recv_ts`) and the reader retries — a camera exception never takes the
+  recorder down.
 """
 
 import collections
@@ -131,12 +131,6 @@ class StampedFrame:
     color_jpeg: bytes = None   # camera-encoded MJPEG bytes, or None
     serial: str = ""
     role: str = ""
-    # Device timestamp of the color frame in the same FrameSet (None when
-    # the SDK/stream cannot supply it). Live RGB-D pairing requires it.
-    color_stamp_us: int = None
-    # SDK millimetres-per-raw-unit for the uint16 depth payload
-    # (get_depth_scale). None = unknown; consumers must not assume mm.
-    depth_scale_mm: float = None
 
     def age_s(self, now=None):
         return (now or time.monotonic()) - self.recv_ts
@@ -273,7 +267,7 @@ def _negotiate_imu_profile(sensor, ob, kind, want_hz):
     return max(below, key=lambda c: c[0]) if below else min(cands, key=lambda c: c[0])
 
 
-def _sensor_of_type(dev, ob, stream_type):
+def _sensor_of_type(dev, stream_type):
     sensors = dev.get_sensor_list()
     for i in range(sensors.get_count()):
         s = sensors.get_sensor_by_index(i)
@@ -283,11 +277,12 @@ def _sensor_of_type(dev, ob, stream_type):
 
 
 def _dump_intrinsics(pipeline, serial, config_dir=None):
-    """Fetch depth intrinsics from the open pipeline and cache to JSON.
+    """Fetch the camera calibration from the open pipeline and cache to JSON.
 
-    The JSON is the source of truth for BEV (plan Section 6.2); it is
-    normally written once by tools/orbbec_intrinsics.py — auto-provisioned
-    here only so a fresh rig still boots.
+    config/orbbec_intrinsics_<serial>.json carries the depth intrinsics, the
+    color intrinsics and the depth->color extrinsic. `OrbbecCamera` writes it
+    when the file is missing (a fresh rig); after a camera firmware update
+    that recalibrates, delete the file and restart bebop-vision to re-dump.
     """
     param = pipeline.get_camera_param()
     intr = param.depth_intrinsic
@@ -305,10 +300,11 @@ def _dump_intrinsics(pipeline, serial, config_dir=None):
                        "k5": float(dist.k5), "k6": float(dist.k6)},
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
-    # Color intrinsics + color->depth extrinsic: the semantic-fusion ray
-    # LUTs (tools/fuse_navd_labels.py) project through these. The ISP
-    # recalibrates them on firmware updates, so they belong in the same
-    # cached snapshot (depth values are unaffected by ISP changes).
+    # Color intrinsics + color->depth extrinsic: the label pipeline
+    # (bev_student_labels.build_camera_spec) and tools/set_self_mask.py
+    # project through these. The ISP recalibrates them on firmware updates,
+    # so they belong in the same cached snapshot (depth values are
+    # unaffected by ISP changes).
     rgb = getattr(param, "rgb_intrinsic", None)
     rgbd = getattr(param, "rgb_distortion", None)
     if rgb is not None and int(getattr(rgb, "width", 0)) > 0:
@@ -353,23 +349,18 @@ class OrbbecCamera:
 
     def __init__(self, serial, role, depth_profile=(848, 480, 30),
                  color_profile=None, config_dir=None, mask_rects=None,
-                 color_format="rgb", depth_work_mode=None, depth_preset=None,
+                 color_format="rgb", depth_preset=None,
                  mask_polys=None, depth_filters=None, imu=False, imu_hz=200.0,
-                 depth_range_mm=None, depth_precision_mm=None,
-                 depth_noise_params=None):
+                 depth_range_mm=None, depth_noise_params=None):
         self.serial = serial
         self.role = role
         self.depth_profile = tuple(depth_profile)
-        self.depth_work_mode = depth_work_mode
         self.depth_preset = depth_preset
-        # Optional device-side depth range clip [min_mm, max_mm] and
-        # precision level (mm per raw unit: 1.0, 0.8, 0.4, 0.2, 0.1) applied
-        # after the preset.  The frame's depth_scale_mm reports whatever the
-        # device ends up using, so consumers never assume millimetres.
+        # Optional depth range clip [min_mm, max_mm] applied after the
+        # preset: the device MIN/MAX depth properties when writable, else a
+        # host-side ThresholdFilter (the 335Lg rejects the device write).
         self.depth_range_mm = (tuple(depth_range_mm) if depth_range_mm
                                else None)
-        self.depth_precision_mm = (float(depth_precision_mm)
-                                   if depth_precision_mm else None)
         # On-device noise removal tuning (writable on the 335Lg):
         # {"max_speckle_size": int, "max_diff": int}; None keeps the preset's.
         self.depth_noise_params = dict(depth_noise_params or {})
@@ -389,8 +380,9 @@ class OrbbecCamera:
         self.imu_enabled = bool(imu)
         self.imu_hz = float(imu_hz)
         self._imu_buf = collections.deque(maxlen=8192) if imu else None
-        # Extra consumers (e.g. the nav pose estimator) each own a tap;
-        # drain_imu() serves only the primary buffer (the recorder).
+        # Extra consumers (e.g. the planned path follower's gyro heading,
+        # docs/path-model.md) each own a tap; drain_imu() serves only the
+        # primary buffer (the recorder).
         self._imu_taps = []
         self._imu_profiles = {}
         # Self-view shapes (rects [x0, y0, x1, y1] and/or polygons
@@ -402,7 +394,6 @@ class OrbbecCamera:
         # masking the floor a rect would cover.
         self.mask_rects, self.mask_polys = normalize_mask_shapes(
             mask_rects, mask_polys)
-        self.read_fps = 0.0
         self._lock = threading.Lock()
         self._frame = None
         # Short arrival-ordered history (≈0.2 s at 30 fps) — lets consumers
@@ -453,30 +444,18 @@ class OrbbecCamera:
             cfg.frames_per_trigger = 1
             dev.set_multi_device_sync_config(cfg)
 
-        # Depth preset / work mode: set before the pipeline starts. Devices
-        # power up in "Default", which over-smooths floor-level objects into
-        # the ground plane (see module docstring). A preset (`depth_preset`)
-        # bundles its own work mode and supersedes `depth_work_mode`.
-        preset_loaded = False
+        # Depth preset: set before the pipeline starts. Devices power up in
+        # "Default", which over-smooths floor-level objects into the ground
+        # plane (see module docstring). A preset bundles its own work mode.
         if self.depth_preset and hasattr(dev, "load_preset"):
             try:
                 if dev.get_current_preset_name() != self.depth_preset:
                     dev.load_preset(self.depth_preset)
-                preset_loaded = dev.get_current_preset_name() == self.depth_preset
                 print(f"[orbbec] {self.role}({self.serial}): preset "
                       f"'{self.depth_preset}' active")
             except Exception as exc:
                 print(f"[orbbec] {self.role}({self.serial}): depth preset "
                       f"'{self.depth_preset}' rejected: {exc}")
-        if not preset_loaded and self.depth_work_mode and \
-                hasattr(dev, "set_depth_work_mode"):
-            try:
-                current = dev.get_depth_work_mode()
-                if getattr(current, "name", None) != self.depth_work_mode:
-                    dev.set_depth_work_mode(self.depth_work_mode)
-            except Exception as exc:
-                print(f"[orbbec] {self.role}({self.serial}): depth work mode "
-                      f"'{self.depth_work_mode}' rejected: {exc}")
 
         depth_sensor = None
         sensors = dev.get_sensor_list()
@@ -521,7 +500,7 @@ class OrbbecCamera:
         if self.imu_enabled:
             for kind, stype in (("accel", ob.OBSensorType.ACCEL_SENSOR),
                                 ("gyro", ob.OBSensorType.GYRO_SENSOR)):
-                sensor = _sensor_of_type(dev, ob, stype)
+                sensor = _sensor_of_type(dev, stype)
                 prof = (_negotiate_imu_profile(sensor, ob, kind, self.imu_hz)
                         if sensor is not None else None)
                 if prof is None:
@@ -554,20 +533,8 @@ class OrbbecCamera:
               f"{' imu' + imu_note if imu_note else ''}")
 
     def _apply_depth_props(self, dev, ob):
-        """Device-side range clip and precision level (best effort, logged)."""
+        """Device-side range clip and noise tuning (best effort, logged)."""
         P = ob.OBPropertyID
-        if self.depth_precision_mm is not None:
-            try:
-                levels = {1.0: 0, 0.8: 1, 0.4: 2, 0.2: 3, 0.1: 4, 0.05: 5}
-                lvl = levels.get(self.depth_precision_mm)
-                if lvl is None:
-                    raise ValueError(f"unsupported precision {self.depth_precision_mm}")
-                dev.set_int_property(P.OB_PROP_DEPTH_PRECISION_LEVEL_INT, lvl)
-                got = dev.get_int_property(P.OB_PROP_DEPTH_PRECISION_LEVEL_INT)
-                print(f"[orbbec] {self.role}: depth precision level {got} "
-                      f"({self.depth_precision_mm} mm/unit)")
-            except Exception as exc:  # noqa: BLE001
-                print(f"[orbbec] {self.role}: depth precision rejected: {exc}")
         if self.depth_range_mm is not None:
             lo, hi = int(self.depth_range_mm[0]), int(self.depth_range_mm[1])
             rejected = False
@@ -599,8 +566,6 @@ class OrbbecCamera:
                 print(f"[orbbec] {self.role}: depth noise {key} rejected: {exc}")
 
     def _read_loop(self):
-        frames = 0
-        t = time.monotonic()
         ob = self._ob
         while self._running:
             try:
@@ -611,14 +576,10 @@ class OrbbecCamera:
                 depth = fs.get_depth_frame()
                 if depth is None:
                     continue
-                # Read device metadata from the SDK frame BEFORE post-filters:
-                # filter wrappers need not expose DepthFrame's timestamp/scale
-                # accessors, while filtering preserves both values.
+                # Read the device timestamp from the SDK frame BEFORE
+                # post-filters: filter wrappers need not expose DepthFrame's
+                # timestamp accessor, while filtering preserves the value.
                 stamp_us = int(depth.get_timestamp_us())
-                try:
-                    depth_scale_mm = float(depth.get_depth_scale())
-                except Exception:
-                    depth_scale_mm = None
                 for f in self._filters:
                     depth = f.process(depth)
                     if depth is None:
@@ -631,7 +592,6 @@ class OrbbecCamera:
                     arr[self._pix_mask] = 0
                 color = None
                 color_jpeg = None
-                color_stamp_us = None
                 if self.color_profile:
                     cf = fs.get_color_frame()
                     if cf is not None:
@@ -644,13 +604,9 @@ class OrbbecCamera:
                         else:
                             color = np.frombuffer(cdata, dtype=np.uint8).reshape(
                                 cf.get_height(), cf.get_width(), 3).copy()
-                        try:
-                            color_stamp_us = int(cf.get_timestamp_us())
-                        except Exception:
-                            color_stamp_us = None
             except Exception as exc:
-                # Mid-run drop: log, keep the slot stale (deadman stops the
-                # robot), and retry — never take down the control loop.
+                # Mid-run drop: log, keep the slot stale (consumers see the
+                # age), and retry — never take down the recorder.
                 print(f"[orbbec] {self.role} capture error: {type(exc).__name__}: {exc}")
                 time.sleep(0.5)
                 continue
@@ -658,17 +614,10 @@ class OrbbecCamera:
                 depth=arr, stamp_us=stamp_us, recv_ts=time.monotonic(),
                 width=self.width, height=self.height, fps=self.fps,
                 color=color, color_jpeg=color_jpeg, serial=self.serial,
-                role=self.role, color_stamp_us=color_stamp_us,
-                depth_scale_mm=depth_scale_mm)
+                role=self.role)
             with self._lock:
                 self._frame = frame
                 self._history.append(frame)
-            frames += 1
-            now = time.monotonic()
-            if now - t >= 1.0:
-                self.read_fps = frames / (now - t)
-                frames = 0
-                t = now
 
     def read(self):
         """Latest StampedFrame (copy) or None."""
@@ -759,8 +708,8 @@ class OrbbecRig:
             rects, polys = parse_self_mask_entries(c.get("self_mask_pixels"))
             # Keep the polygon in the config for consumers (the label
             # pipeline uses it to exclude self pixels) but stop zeroing the
-            # published depth when zero_self_pixels is false.  The master BEV
-            # has its own body-frame self_mask.
+            # published depth when zero_self_pixels is false.  The labeler
+            # also has its own body-frame robot.self_mask.
             if not bool(c.get("zero_self_pixels", True)):
                 rects, polys = None, None
             self.cameras[c["role"]] = OrbbecCamera(
@@ -773,17 +722,12 @@ class OrbbecRig:
                 mask_rects=rects,
                 mask_polys=polys,
                 color_format=c.get("color_format", "rgb"),
-                depth_work_mode=c.get("depth_work_mode"),
                 depth_preset=c.get("depth_preset"),
                 depth_filters=c.get("depth_filters"),
                 depth_range_mm=c.get("depth_range_mm"),
-                depth_precision_mm=c.get("depth_precision_mm"),
                 depth_noise_params=c.get("depth_noise_params"),
                 imu=bool(c.get("imu", False)),
                 imu_hz=float(c.get("imu_hz", 200.0)))
-
-    def get(self, role):
-        return self.cameras[role]
 
     def read_all(self):
         return {role: cam.read() for role, cam in self.cameras.items()}

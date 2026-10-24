@@ -1,4 +1,4 @@
-"""Build and inspect the learned master-BEV dataset / training-run layout.
+"""Build and inspect the bev-student (SAM 3.1 x depth label) dataset layout.
 
 Typical flow on the workstation::
 
@@ -13,9 +13,6 @@ Typical flow on the workstation::
     python tools/bev_student_dataset.py index
     python tools/bev_student_dataset.py split --val-sessions <one-session>
     python tools/bev_student_dataset.py report
-
-    # 4. (removed 2026-10-23 with the BEV trainer) a run directory with TensorBoard
-    tensorboard --logdir runs/bev-student
 
 The original MCAPs are never modified.  Splits are by drive/session, never
 by frame: adjacent 10 Hz frames are nearly identical and would leak.
@@ -33,7 +30,7 @@ sys.path.insert(0, str(ROOT))
 
 from bebop_vision.bev_student_data import (  # noqa: E402
     DEFAULT_ROOT, dataset_report, ensure_layout,
-    print_report, session_dirs, split_by_drive, write_dataset_stats,
+    print_report, split_by_drive, write_dataset_stats,
     write_sessions_manifest,
 )
 
@@ -131,8 +128,7 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_report)
 
-
-    p = sub.add_parser("layout", help="print the dataset/run layout")
+    p = sub.add_parser("layout", help="print the dataset layout")
     p.set_defaults(func=cmd_layout)
 
     args = ap.parse_args(argv)

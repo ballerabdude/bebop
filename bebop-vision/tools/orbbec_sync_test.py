@@ -11,12 +11,13 @@ Method — two domains, one verdict:
   * host monotonic domain: both cameras measured on the same clock. If
     capture instants are phase-locked to the primary's vsync, the
     host-domain phase offset is FLAT (constant per-camera USB/SDK latency);
-    if the pair free-runs, it sweeps the 66.7 ms frame period.
+    if the pair free-runs, it sweeps the 33.3 ms frame period.
   * strict SECONDARY check: in that mode the far camera captures ONLY on
     trigger (ObTypes.h) — frames flowing at all proves the trigger is
     physically delivered.
 
-Stages (depth-only 848x480@15, interleaved serial capture — §2.8):
+Stages (depth-only 848x480@30 like production, interleaved serial
+capture in one thread: pyorbbecsdk calls must not be pooled):
   A. read back persisted multi-device sync config of both devices
   B. stream both interleaved ~40 s with the production config and report
      both phase analyses
@@ -38,7 +39,7 @@ import pyorbbecsdk as ob  # noqa: E402
 
 from bebop_vision.orbbec import load_rig_config  # noqa: E402
 
-DEPTH_W, DEPTH_H, FPS = 848, 480, 15
+DEPTH_W, DEPTH_H, FPS = 848, 480, 30
 PERIOD_US = 1_000_000 // FPS
 
 
@@ -172,7 +173,7 @@ def main():
     for role, dev in devs.items():  # verify it stuck
         print(f"  {role}: {sync_cfg_str(dev)}")
     rows = stream_interleaved(devs, secs)
-    stamp = _phase_report(rows["near"], rows["far"], 0, "device-stamp")
+    _phase_report(rows["near"], rows["far"], 0, "device-stamp")
     host = _phase_report(rows["near"], rows["far"], 1, "host-clock")
     print("  ----")
     print("  device-stamp sweep is EXPECTED (independent crystal clocks, "

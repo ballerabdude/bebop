@@ -18,7 +18,7 @@ def _frames():
     tel = pb.ServerRuntimeMessage(); tel.telemetry.host_unix_ms = 5
     tel.telemetry.drive.cmd_linear_x = 0.2
     ack = pb.ServerRuntimeMessage(request_id=7); ack.ack.ok = True
-    mode = pb.ServerRuntimeMessage(); mode.mode_changed.mode = pb.MODE_RUN_POLICY
+    mode = pb.ServerRuntimeMessage(); mode.mode_changed.mode = pb.MODE_DIAL_IN
     estop = pb.ServerRuntimeMessage(); estop.estop_latched.reason = "operator"
     return [tel, ack, mode, tel, estop]
 

@@ -38,10 +38,7 @@ class RobotState:
         self.active_operator_autonomous = False
         self.wheel_armed = {}
         self.wheel_vel = {}
-        self.wheel_feedback_stale = {}
         self.battery_v = None
-        # camera_* state retired with the OBSBOT pipeline (plan §9): the
-        # deprecated proto fields are no longer sent by the firmware.
         self.telemetry_hz = 0.0
         self.last_telemetry_ts = 0.0
 
@@ -49,12 +46,11 @@ class RobotState:
 class RobotClient:
     """Async WS client on a background thread; thread-safe command methods."""
 
-    def __init__(self, url=DEFAULT_URL, telemetry_hz=30, reconnect_s=1.0, name="bebop-vision",
+    def __init__(self, url=DEFAULT_URL, telemetry_hz=30, reconnect_s=1.0,
                  hello_name=None, autonomous=False):
         self.url = url
         self.telemetry_hz = telemetry_hz
         self.reconnect_s = reconnect_s
-        self.name = name
         # When set, announced via ClientHello on every (re)connect, so other
         # clients see who holds the drive seat (`DriveState.active_operator_name`).
         self.hello_name = hello_name
@@ -65,7 +61,7 @@ class RobotClient:
         self.state = RobotState()
         # Every ServerRuntimeMessage as received, (monotonic, wall_ns, bytes):
         # the recorder drains this into `/runtime` (telemetry frames) and
-        # `/runtime_events` (acks, mode / E-STOP events, nav goals), so a drive
+        # `/runtime_events` (acks, errors, mode / E-STOP events), so a drive
         # file carries the firmware's stream verbatim (mode, estop reason,
         # operator/watchdog flags, per-wheel targets, power) instead of the
         # resampled subset in RobotState.  Bounded: ~17 s at 30 Hz, ~1 MB.
@@ -142,8 +138,8 @@ class RobotClient:
     def _handle(self, msg):
         which = msg.WhichOneof("payload")
         st = self.state
-        if which in ("telemetry", "snapshot"):
-            self._update_from_fields(msg.telemetry if which == "telemetry" else msg.snapshot)
+        if which == "telemetry":
+            self._update_from_fields(msg.telemetry)
         elif which == "mode_changed":
             st.mode = msg.mode_changed.mode
             print(f"[robot] mode -> {pb.Mode.Name(st.mode)}")
@@ -173,7 +169,6 @@ class RobotClient:
             st.active_operator_autonomous = t.drive.active_operator_autonomous
         st.wheel_armed = {w.name: w.armed for w in t.wheels}
         st.wheel_vel = {w.name: w.velocity_rad_s for w in t.wheels}
-        st.wheel_feedback_stale = {w.name: w.feedback_stale for w in t.wheels}
         if t.power.present:
             st.battery_v = t.power.battery_voltage_v
         st.last_telemetry_ts = time.monotonic()
@@ -227,16 +222,10 @@ class RobotClient:
         """Command a body-frame twist (m/s forward, rad/s yaw, + left)."""
         return self._submit(self._twist_msg(vx, wz))
 
-    # set_camera_pose() removed with the OBSBOT camera (plan §9 Stage 3).
-    # The firmware acks the deprecated SetCameraPose message as a no-op.
-
     def estop(self, reason="bebop-vision"):
         m = pb.ClientRuntimeMessage()
         m.emergency_stop.reason = reason
         return self._submit(m)
-
-    def reset_estop(self):
-        return self._submit(pb.ClientRuntimeMessage(reset_estop=pb.ResetEStop()))
 
     def set_mode(self, mode):
         m = pb.ClientRuntimeMessage()
@@ -247,12 +236,6 @@ class RobotClient:
         m = pb.ClientRuntimeMessage()
         m.set_all_wheels_enabled.enabled = bool(enabled)
         return self._submit(m)
-
-    def reset_odometry(self):
-        return self._submit(pb.ClientRuntimeMessage(reset_odometry=pb.ResetOdometry()))
-
-    def snapshot(self):
-        return self._submit(pb.ClientRuntimeMessage(get_snapshot=pb.GetSnapshot()))
 
     def await_connection(self, timeout=5.0):
         t0 = time.monotonic()

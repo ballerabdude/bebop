@@ -1,8 +1,5 @@
 """Self-supervised chassis footprint: derivation, rasterisation, wiring."""
 
-import json
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -114,35 +111,3 @@ def test_label_config_mask_file_replaces_rectangle(tmp_path, monkeypatch):
     assert learned.any() and not np.array_equal(learned, rect)
     # the 55 cm rectangle reaches further forward than the learned 30 cm body
     assert rect.any(axis=1).sum() > learned.any(axis=1).sum()
-
-
-def test_apply_to_labels_rewrites_ego_layer(tmp_path):
-    from tools.bev_ego_from_data import apply_to_labels
-    p_obs, p_body = _maps()
-    mask, _, _ = derive_ego_mask(p_obs, p_body, CELL)
-    f = tmp_path / "ego_mask.npz"
-    _write_raster(f, mask)
-    raster = load_ego_raster(f)
-    root = tmp_path
-    sess = root / "sessions" / "navd_session_20260101_000000"
-    sub = sess / "labels_gridtest"
-    sub.mkdir(parents=True)
-    (sess / "index.jsonl").write_text("")
-    grid = GridSpec(range_m=6.0, width_m=4.0, rows_override=36, cols_override=64)
-    (sub / "grid.json").write_text(json.dumps({"grid": grid.metadata(),
-                                               "label_config": {}}))
-    sem = np.zeros((36, 64), np.uint8)
-    cov = np.ones((36, 64), bool)
-    np.savez_compressed(sub / "00000000000000000001.npz", semantic=sem,
-                        ego=np.zeros((36, 64), bool), coverage=cov)
-    n = apply_to_labels(root, "labels_gridtest", raster)
-    assert n == 1
-    with np.load(sub / "00000000000000000001.npz") as d:
-        ego = d["ego"]
-        assert ego.any()
-        assert np.all(d["semantic"][ego] == 255)
-        assert not d["coverage"][ego].any()
-        assert np.all(d["coverage"][~ego])
-    meta = json.loads((sub / "grid.json").read_text())
-    assert meta["label_config"]["ego_mask_file"] == "ego_mask.npz"
-    assert meta["ego_mask"]["cells"] == int(ego.sum())

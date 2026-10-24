@@ -32,9 +32,10 @@ Requires the GStreamer `nice` plugin (`gstreamer1.0-nice`); without it
 `webrtcbin` refuses to leave NULL ("libnice elements are not available").
 
 H.264 only: WebRTC H.265 is Safari-only. The encoder is the Jetson NVENC
-chain the recorder uses (`nvv4l2h264enc`); on a box without NVENC it falls
-back to `x264enc` (ultrafast/zerolatency, constrained baseline) so the
-server still works on a dev machine.
+H.264 element (`nvv4l2h264enc`; the recorder stores H.265 through
+`nvv4l2h265enc`); on a box without NVENC it falls back to `x264enc`
+(ultrafast/zerolatency, constrained baseline) so the server still works on
+a dev machine.
 """
 
 from __future__ import annotations
@@ -194,7 +195,6 @@ class H264Encoder:
         backend = encoder_backend()
         if backend is None:
             raise RuntimeError("no H.264 encoder (nvv4l2h264enc / x264enc)")
-        self.backend = backend
         self._Gst = Gst
         self._input_kind = input_kind
         self._on_au = on_au
@@ -498,7 +498,6 @@ class WhepPeer:
                         pass
             return Gst.PadProbeReturn.OK
 
-        self._probe_cb = _upstream
         self._src.get_static_pad("src").add_probe(
             Gst.PadProbeType.EVENT_UPSTREAM, _upstream)
         self._watch_rtcp()
@@ -646,10 +645,6 @@ class WhepPeer:
             self.au_sent += 1
         self.watch.on_media(time.monotonic())
 
-    @property
-    def synced(self) -> bool:
-        return self._synced
-
     def state_name(self):
         w = self._webrtc
         if w is None:
@@ -680,10 +675,6 @@ class WhepPeer:
                 "au_sent": self.au_sent, "au_dropped": self.au_dropped,
                 "pli": self.pli}
 
-    @property
-    def closed(self) -> bool:
-        return self._closed
-
     def close(self) -> None:
         with self._lock:
             if self._closed:
@@ -700,7 +691,6 @@ class WhepPeer:
             self._webrtc = None
             self._src = None
             self._pay = None
-            self._probe_cb = None
             self._on_kf = None
             self._rtcp_handlers = None
         if handlers:

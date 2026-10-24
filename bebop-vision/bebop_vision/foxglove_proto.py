@@ -9,8 +9,7 @@ The `.proto` sources live in `bebop-vision/protos/foxglove/` and are
 compiled with:
 
     protoc -I protos -I /usr/include --python_out=bebop_vision/proto \\
-        foxglove/CompressedImage.proto foxglove/CompressedVideo.proto \\
-        foxglove/RawImage.proto
+        foxglove/CompressedImage.proto foxglove/CompressedVideo.proto
 """
 
 from google.protobuf import descriptor_pb2
@@ -18,11 +17,9 @@ from google.protobuf.timestamp_pb2 import Timestamp
 
 from bebop_vision.proto.foxglove import CompressedImage_pb2
 from bebop_vision.proto.foxglove import CompressedVideo_pb2
-from bebop_vision.proto.foxglove import RawImage_pb2
 
 CompressedImage = CompressedImage_pb2.CompressedImage
 CompressedVideo = CompressedVideo_pb2.CompressedVideo
-RawImage = RawImage_pb2.RawImage
 
 
 def timestamp(log_ns):

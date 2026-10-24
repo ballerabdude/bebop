@@ -1,4 +1,4 @@
-"""SAM 3.1 x depth -> semantic BEV labels for the learned student.
+"""SAM 3.1 x depth -> semantic BEV labels (the bev-student label set).
 
 Runs on the workstation (or the robot) against an extracted session::
 
@@ -35,9 +35,8 @@ sys.path.insert(0, str(ROOT))
 
 from bebop_vision.bev_student_labels import (  # noqa: E402
     ALL_PROMPTS, FLOOR, HAZARD, OBSTACLE, WALL, BevStudentLabeler,
-    LabelConfig, GridSpec, contact_sheet, label_stats, load_label_npz,
-    prompt_class, render_color_masks, render_label_bev, save_label_npz,
-    summarize_label_files,
+    contact_sheet, label_stats, prompt_class, render_color_masks,
+    render_label_bev, save_label_npz, summarize_label_files,
 )
 
 
@@ -173,9 +172,7 @@ def label_session(session_dir, labeler, segmenter, *, roles, stride,
             break
         depths = {}
         for role in roles:
-            p = session_dir / "depth" / f"{stamp:020d}.png"
-            if not p.exists():
-                p = session_dir / f"depth_{role}" / f"{stamp:020d}.png"
+            p = session_dir / f"depth_{role}" / f"{stamp:020d}.png"
             img = cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
             if img is None:
                 depths = None
@@ -188,9 +185,7 @@ def label_session(session_dir, labeler, segmenter, *, roles, stride,
         masks = {}
         missing_color = False
         for role in roles:
-            p = session_dir / "color" / f"{stamp:020d}.jpg"
-            if not p.exists():
-                p = session_dir / f"color_{role}" / f"{stamp:020d}.jpg"
+            p = session_dir / f"color_{role}" / f"{stamp:020d}.jpg"
             bgr = cv2.imread(str(p), cv2.IMREAD_COLOR)
             if bgr is None:
                 missing_color = True
@@ -312,7 +307,7 @@ def main(argv=None):
     ap.add_argument("--sam-version", default="sam3.1",
                     help="SAM teacher checkpoint (default: sam3.1)")
     ap.add_argument("--conf", type=float, default=0.5,
-                    help="SAM score threshold (default: 0.35)")
+                    help="SAM score threshold (default: 0.5)")
     ap.add_argument("--device", default="cuda",
                     help="torch device for SAM (default: cuda)")
     ap.add_argument("--trt-engine", default=None,

@@ -1,10 +1,11 @@
 """Probe: what the recorder's latest-slot reads see (recording-path skew).
 
 The hardware-sync bench (orbbec_sync_test.py) proves capture-instant lock;
-this quantifies the SECOND source of stopwatch-test error: the recorder and
-videoserver read each camera's independent latest-wins slot at 10 Hz, so the
-two stored frames can come from different capture instants. Reports the
-near/far slot-arrival delta the way the recorder sees it.
+this quantifies the SECOND source of stopwatch-test error: two independent
+latest-wins slot reads (what /snapshot and the operator video see) can come
+from different capture instants. The recorder pairs frames from the
+per-camera histories instead (recorder_mcap._pair_frames). Reports the
+near/far slot-arrival delta of independent latest reads.
 
   .venv/bin/python tools/orbbec_slot_probe.py [seconds]
 """
@@ -57,7 +58,7 @@ def main():
             print(f"  {role} slot age ms: {stats(ages[role])}")
         print(f"ticks with delta > half period ({HALF_PERIOD_MS:.1f} ms): "
               f"{unpaired}/{n} = {100.0 * unpaired / max(1, n):.1f}% "
-              f"(stored as 'same instant' by the recorder today)")
+              f"(naive latest-slot pairing would store these as one instant)")
     finally:
         rig.stop()
 

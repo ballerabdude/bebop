@@ -4,7 +4,6 @@ capture routes (listing, finalize, Range downloads)."""
 import json
 import sys
 import threading
-import time
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
