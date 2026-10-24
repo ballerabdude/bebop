@@ -67,5 +67,10 @@ def build():
             _view("/host", "host", HOST),
             column_shares=[1.0, 1.0],
         ),
+        # The layout is shipped as active on every load (mcap_to_rrd.py,
+        # open.py), so pin the viewer's side panels shut: the dashboard gets the
+        # width, and the panels open with one click when needed.
+        rrb.BlueprintPanel(state="collapsed"),
+        rrb.SelectionPanel(state="collapsed"),
         rrb.TimePanel(state="expanded"),
     )

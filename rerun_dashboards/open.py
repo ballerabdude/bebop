@@ -125,6 +125,7 @@ def main(argv=None):
         rec = rr.RecordingStream(navd_blueprint.NAME)
         if args.save:
             rec.save(args.save, default_blueprint=blueprint)
+            rec.send_blueprint(blueprint, make_active=True, make_default=True)
         else:
             rec.spawn(default_blueprint=blueprint)
             # The viewer persists a per-app-id blueprint and reuses it, so the

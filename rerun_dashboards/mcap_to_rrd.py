@@ -111,6 +111,11 @@ def convert(in_path: str, out_path: str) -> None:
     try:
         rec = rr.RecordingStream(app_id)
         rec.save(out_path, default_blueprint=blueprint)
+        # The viewer keeps a per-app-id blueprint and prefers it over a file's
+        # default, so a dashboard change would never show for anyone who has
+        # opened a session before. Ship it as the active layout as well
+        # (open.py does the same when it spawns the viewer).
+        rec.send_blueprint(blueprint, make_active=True, make_default=True)
         rec.log_file_from_path(load_path)
         rec.flush()
         rec.disconnect()
