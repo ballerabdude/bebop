@@ -2,11 +2,11 @@
 //!
 //! The Python vision/recorder stack (`bebop-vision/main.py`) runs as its
 //! own systemd unit rather than as a child of this process: `bebop-linux`
-//! runs sandboxed (`ProtectHome=true`, `PrivateTmp=true`, no camera device
-//! policy), so a child would inherit a sandbox that can't reach the venv,
-//! the Orbbec `/dev` nodes, or the shared `/tmp/navd_recorder.lock`. A
-//! separate `bebop-vision.service` avoids all of that and gives the service
-//! its own restart policy.
+//! runs sandboxed (`ProtectHome=read-only`, `PrivateTmp=true`, no camera
+//! device policy), so a child would inherit a sandbox that can't write under
+//! `/home`, reach the Orbbec `/dev` nodes, or share the
+//! `/tmp/navd_recorder.lock`. A separate `bebop-vision.service` avoids all of
+//! that and gives the service its own restart policy.
 //!
 //! This module owns the bridge: the WS handler calls [`VisionShared::request`]
 //! with the operator's intent, a background thread runs `systemctl` and
@@ -25,10 +25,6 @@ use std::time::Duration;
 /// systemd unit that runs the Python bebop-vision recorder.
 pub const VISION_SERVICE: &str = "bebop-vision.service";
 
-/// Human-readable run mode baked into the unit. Surfaced in telemetry so
-/// the UI can label the control without hard-coding the ExecStart line.
-pub const VISION_MODE: &str = "recorder";
-
 /// How often to re-poll systemd when idle. Keeps telemetry fresh without
 /// hammering PID1 with `systemctl show`.
 const POLL_PERIOD: Duration = Duration::from_millis(1500);
@@ -46,8 +42,6 @@ pub struct VisionSnapshot {
     pub detail: String,
     /// Unit name (constant, echoed for the UI).
     pub service: String,
-    /// Run mode label (constant).
-    pub mode: String,
     /// Most recent `systemctl` failure, or empty. Cleared once the unit
     /// reports running again.
     pub last_error: String,
@@ -61,7 +55,6 @@ impl Default for VisionSnapshot {
             state: String::new(),
             detail: String::new(),
             service: VISION_SERVICE.to_string(),
-            mode: VISION_MODE.to_string(),
             last_error: String::new(),
         }
     }
@@ -249,7 +242,6 @@ mod tests {
         assert_eq!(snap.state, "active");
         assert_eq!(snap.detail, "running");
         assert_eq!(snap.service, VISION_SERVICE);
-        assert_eq!(snap.mode, VISION_MODE);
     }
 
     #[test]

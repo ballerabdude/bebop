@@ -31,12 +31,13 @@
 //!
 //! # Velocity-control startup
 //!
-//! 1. (once) assign a node id via `Address` (`0x06`) from the broadcast
-//!    id — only needed if the S1 wasn't pre-configured over USB.
-//! 2. `Set_Controller_Mode` (`0x0B`): `VELOCITY_CONTROL` (2) +
+//! The S1's node id is configured over USB beforehand (the firmware never
+//! re-addresses an axis). From there:
+//!
+//! 1. `Set_Controller_Mode` (`0x0B`): `VELOCITY_CONTROL` (2) +
 //!    `PASSTHROUGH` (1).
-//! 3. `Set_Axis_State` (`0x07`): request `CLOSED_LOOP_CONTROL` (8).
-//! 4. stream `Set_Input_Vel` (`0x0D`) with `Input_Vel` in `rev/s`.
+//! 2. `Set_Axis_State` (`0x07`): request `CLOSED_LOOP_CONTROL` (8).
+//! 3. stream `Set_Input_Vel` (`0x0D`) with `Input_Vel` in `rev/s`.
 //!
 //! Feedback arrives cyclically: `Heartbeat` (`0x01`, default 100 ms) and
 //! `Get_Encoder_Estimates` (`0x09`, default 10 ms) — no explicit request
@@ -46,20 +47,16 @@ use crate::can_interface::{CanInterface, ODriveEncoderFeedback, ODriveHeartbeat}
 use crate::config::JointState;
 use anyhow::Result;
 
-/// CANSimple command IDs (bits 6..=10 of the 11-bit arbitration ID).
+/// CANSimple command IDs (bits 0..=4 of the 11-bit arbitration ID).
 pub mod cmd {
     /// Cyclic heartbeat: axis error + state, 100 ms default.
     pub const HEARTBEAT: u8 = 0x01;
-    /// Assign / enumerate a node id (a.k.a. `Set_Axis_Node_ID`).
-    pub const ADDRESS: u8 = 0x06;
     /// Request an axis state (IDLE / CLOSED_LOOP_CONTROL / …).
     pub const SET_AXIS_STATE: u8 = 0x07;
     /// Cyclic encoder position/velocity feedback (turns, turns/s).
     pub const GET_ENCODER_ESTIMATES: u8 = 0x09;
     /// Select control mode (velocity/torque/…) + input mode.
     pub const SET_CONTROLLER_MODE: u8 = 0x0B;
-    /// Position setpoint (+ vel/torque FF).
-    pub const SET_INPUT_POS: u8 = 0x0C;
     /// Velocity setpoint (+ torque FF). The wheel command.
     pub const SET_INPUT_VEL: u8 = 0x0D;
     /// Clear latched axis errors.
@@ -75,10 +72,7 @@ pub mod axis_state {
 
 /// Controller `control_mode` values (from `Set_Controller_Mode`).
 pub mod control {
-    pub const VOLTAGE: u32 = 0;
-    pub const TORQUE: u32 = 1;
     pub const VELOCITY: u32 = 2;
-    pub const POSITION: u32 = 3;
 }
 
 /// Controller `input_mode` values.
@@ -121,9 +115,6 @@ pub mod axis_error {
     pub const CALIBRATION_ERROR: u32 = 1 << 30;
 }
 
-/// Broadcast / unaddressed node id.
-pub const BROADCAST_NODE_ID: u8 = 0x3F;
-
 /// 2π — converts ODrive turns/s (`rev/s`) into radians/s.
 pub const TWO_PI: f32 = 2.0 * std::f32::consts::PI;
 
@@ -162,27 +153,6 @@ impl ODriveWheel {
     /// Send a standard-frame command to this axis.
     fn send_standard(&self, can: &CanInterface, cmd_id: u8, data: &[u8]) -> Result<()> {
         can.send_standard(make_can_id(cmd_id, self.node_id), data)
-    }
-
-    /// Assign `new_node_id` to the axis whose 48-bit `serial_number`
-    /// matches. `serial_number = 0` is a wildcard that always matches, so
-    /// the same helper re-addresses an already-addressed axis (send
-    /// addressed to its current id) or a factory-fresh one (send to
-    /// [`BROADCAST_NODE_ID`]).
-    ///
-    /// Payload: `[0] = node_id`, `[1..=6] = serial_number` (le48),
-    /// `[7] = connection_id` (0).
-    pub fn assign_node(
-        &self,
-        can: &CanInterface,
-        new_node_id: u8,
-        serial_number: u64,
-    ) -> Result<()> {
-        let mut data = [0u8; 8];
-        data[0] = new_node_id;
-        let serial = serial_number & 0x0000_FFFF_FFFF_FFFF; // 48-bit
-        data[1..7].copy_from_slice(&serial.to_le_bytes()[..6]);
-        can.send_standard(make_can_id(cmd::ADDRESS, BROADCAST_NODE_ID), &data)
     }
 
     /// Request an axis state (`IDLE`, `CLOSED_LOOP_CONTROL`, …).
@@ -246,21 +216,20 @@ impl ODriveWheel {
     /// Decode an encoder-estimate frame into `state.position` / `velocity`.
     ///
     /// The parser already converted `rev` / `rev/s` into `rad` / `rad/s`
-    /// (see [`crate::can_interface::parse_odrive_encoder`]), so this just
-    /// stamps the fields and refreshes the feedback clock. Wheel angle is
-    /// therefore cumulative in radians (unbounded — wheels spin freely).
+    /// (see [`crate::can_interface::ReceivedFrame::parse_odrive_encoder`]),
+    /// so this just stamps the fields. Wheel angle is therefore cumulative
+    /// in radians (unbounded — wheels spin freely). The supervisor stamps
+    /// the watchdog clock (`WheelRuntimeState::last_rx`).
     pub fn process_encoder(&mut self, fb: &ODriveEncoderFeedback) {
         if fb.node_id != self.node_id {
             return;
         }
         self.state.position = fb.position;
         self.state.velocity = fb.velocity;
-        self.state.last_update_ms = Self::now_ms();
     }
 
     /// Decode a heartbeat frame into `state.is_enabled` / `has_error` /
-    /// `error_code` / `axis_state`, and refresh the feedback clock
-    /// (heartbeat is part of the watchdog liveness signal too).
+    /// `error_code` / `axis_state`.
     pub fn process_heartbeat(&mut self, hb: &ODriveHeartbeat) {
         if hb.node_id != self.node_id {
             return;
@@ -269,13 +238,6 @@ impl ODriveWheel {
         self.state.is_enabled = hb.axis_state == axis_state::CLOSED_LOOP_CONTROL as u8;
         self.state.has_error = hb.axis_error != 0;
         self.state.error_code = hb.axis_error;
-        self.state.last_update_ms = Self::now_ms();
-    }
-
-    /// Whether feedback (encoder or heartbeat) arrived within `max_age_ms`.
-    pub fn is_alive(&self, max_age_ms: u64) -> bool {
-        let now = Self::now_ms();
-        now.saturating_sub(self.state.last_update_ms) < max_age_ms
     }
 
     /// Human-readable axis-error description. Decodes the ODrive
@@ -348,19 +310,6 @@ impl ODriveWheel {
             Some(format!("{} (0x{e:08X})", names.join(", ")))
         }
     }
-
-    fn now_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    }
-}
-
-impl Default for ODriveWheel {
-    fn default() -> Self {
-        Self::new(0)
-    }
 }
 
 #[cfg(test)]
@@ -373,8 +322,8 @@ mod tests {
         assert_eq!(make_can_id(cmd::HEARTBEAT, 36), 0x481);
         assert_eq!(make_can_id(cmd::GET_ENCODER_ESTIMATES, 36), 0x489);
         assert_eq!(make_can_id(cmd::GET_ENCODER_ESTIMATES, 46), 0x5C9);
-        // Broadcast address (node 0x3F) for ID 0x7E6.
-        assert_eq!(make_can_id(cmd::ADDRESS, BROADCAST_NODE_ID), 0x7E6);
+        // `Address` (0x06) to the broadcast node 0x3F is ID 0x7E6.
+        assert_eq!(make_can_id(0x06, 0x3F), 0x7E6);
         // node_id masked to 6 bits, cmd_id to 5 bits.
         assert_eq!(make_can_id(0x21, 0x40), make_can_id(0x01, 0x00));
     }
@@ -398,7 +347,6 @@ mod tests {
             axis_error: 0,
             axis_state: axis_state::CLOSED_LOOP_CONTROL as u8,
             procedure_result: 0,
-            trajectory_done: false,
         });
         assert!(wheel.state.is_enabled);
         assert!(!wheel.state.has_error);
@@ -408,7 +356,6 @@ mod tests {
             axis_error: axis_error::ESTOP_REQUESTED,
             axis_state: axis_state::IDLE as u8,
             procedure_result: 0,
-            trajectory_done: false,
         });
         assert!(!wheel.state.is_enabled);
         assert!(wheel.state.has_error);
@@ -427,7 +374,6 @@ mod tests {
             axis_error: 0,
             axis_state: axis_state::CLOSED_LOOP_CONTROL as u8,
             procedure_result: 0,
-            trajectory_done: false,
         });
         assert!(!wheel.state.is_enabled);
     }

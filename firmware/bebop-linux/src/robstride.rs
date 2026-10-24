@@ -3,13 +3,17 @@
 //! Implements the Robstride CAN protocol for motor control.
 //! Uses CAN 2.0 Extended Frame (29-bit ID) at 1 Mbps.
 
-use crate::can_interface::{CanInterface, ReceivedFrame, RobstrideFeedback};
+use crate::can_interface::{CanInterface, RobstrideFeedback};
 use crate::config::{JointCommand, JointState, RobstrideModel, RobstrideSpecs};
 use anyhow::Result;
 use tracing::{debug, trace};
 
-/// Robstride communication types (bits 28-24 of extended frame ID)
-mod cmd {
+/// Robstride communication types (bits 28-24 of extended frame ID). The
+/// supervisor's RX dispatcher matches on the feedback / report / fault types.
+// The full table is the arms' protocol reference: GET_ID and the parameter
+// read/write types are not sent yet.
+#[allow(dead_code)]
+pub(crate) mod cmd {
     pub const GET_ID: u8 = 0x00;
     pub const MOTOR_CTRL: u8 = 0x01; // Operation control mode
     pub const FEEDBACK: u8 = 0x02; // Motor feedback response
@@ -22,8 +26,11 @@ mod cmd {
     pub const ACTIVE_REPORT: u8 = 0x18;
 }
 
-/// Robstride parameter indices
-mod param {
+/// Robstride parameter indices (for `PARAM_READ` / `PARAM_WRITE`).
+// Register map kept for the Robstride arms (on-motor torque / speed /
+// current limits, run-mode select); nothing reads or writes it yet.
+#[allow(dead_code)]
+pub(crate) mod param {
     pub const RUN_MODE: u16 = 0x7005;
     pub const IQ_REF: u16 = 0x7006;
     pub const SPD_REF: u16 = 0x700A;
@@ -37,8 +44,11 @@ mod param {
     pub const VBUS: u16 = 0x701C;
 }
 
-/// Run modes
-mod mode {
+/// Run modes (values of the `RUN_MODE` parameter).
+// Kept for the Robstride arms; the driver only uses the MIT-like operation
+// mode and never writes `RUN_MODE`.
+#[allow(dead_code)]
+pub(crate) mod mode {
     pub const OPERATION: u8 = 0x00; // MIT-like control
     pub const POSITION_PP: u8 = 0x01; // Profile Position
     pub const VELOCITY: u8 = 0x02;
@@ -61,10 +71,8 @@ const HOST_ID: u8 = 0xFD;
 #[derive(Debug)]
 pub struct RobstrideMotor {
     pub can_id: u8,
-    pub model: RobstrideModel,
     specs: RobstrideSpecs,
     pub state: JointState,
-    run_mode: u8,
 }
 
 impl RobstrideMotor {
@@ -72,10 +80,8 @@ impl RobstrideMotor {
     pub fn new(can_id: u8, model: RobstrideModel) -> Self {
         Self {
             can_id,
-            model,
             specs: model.specs(),
             state: JointState::default(),
-            run_mode: mode::OPERATION,
         }
     }
 
@@ -94,12 +100,6 @@ impl RobstrideMotor {
         let clamped = value.clamp(min, max);
         let proportion = (clamped - min) / (max - min);
         (proportion * 65535.0) as u16
-    }
-
-    /// Convert uint16 to float with given range
-    fn uint16_to_float(value: u16, min: f32, max: f32) -> f32 {
-        let proportion = value as f32 / 65535.0;
-        min + proportion * (max - min)
     }
 
     /// Enable the motor
@@ -186,18 +186,6 @@ impl RobstrideMotor {
         Ok(())
     }
 
-    /// Send position-only command (uses configured Kp/Kd)
-    pub fn send_position(&self, can: &CanInterface, position: f32, kp: f32, kd: f32) -> Result<()> {
-        let cmd = JointCommand {
-            position,
-            velocity: 0.0,
-            torque: 0.0,
-            kp,
-            kd,
-        };
-        self.send_command(can, &cmd)
-    }
-
     /// Process feedback frame.
     ///
     /// Velocity and torque arrive as raw `u16` (the parser doesn't know
@@ -221,16 +209,6 @@ impl RobstrideMotor {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
-    }
-
-    /// Check if motor is receiving feedback
-    pub fn is_alive(&self, max_age_ms: u64) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
-        (now - self.state.last_update_ms) < max_age_ms
     }
 
     /// Get fault description
@@ -261,61 +239,5 @@ impl RobstrideMotor {
         }
 
         Some(faults.join(", "))
-    }
-}
-
-/// Collection of Robstride motors on a single bus
-pub struct RobstrideMotorBus {
-    pub motors: Vec<RobstrideMotor>,
-}
-
-impl RobstrideMotorBus {
-    pub fn new() -> Self {
-        Self { motors: Vec::new() }
-    }
-
-    pub fn add_motor(&mut self, can_id: u8, model: RobstrideModel) {
-        self.motors.push(RobstrideMotor::new(can_id, model));
-    }
-
-    pub fn get_motor(&self, can_id: u8) -> Option<&RobstrideMotor> {
-        self.motors.iter().find(|m| m.can_id == can_id)
-    }
-
-    pub fn get_motor_mut(&mut self, can_id: u8) -> Option<&mut RobstrideMotor> {
-        self.motors.iter_mut().find(|m| m.can_id == can_id)
-    }
-
-    /// Enable all motors
-    pub fn enable_all(&self, can: &CanInterface) -> Result<()> {
-        for motor in &self.motors {
-            motor.enable(can)?;
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        Ok(())
-    }
-
-    /// Disable all motors
-    pub fn disable_all(&self, can: &CanInterface) -> Result<()> {
-        for motor in &self.motors {
-            motor.disable(can)?;
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        Ok(())
-    }
-
-    /// Process received frame and update motor state
-    pub fn process_frame(&mut self, frame: &ReceivedFrame) {
-        if let Some(feedback) = frame.parse_robstride() {
-            if let Some(motor) = self.get_motor_mut(feedback.motor_id) {
-                motor.process_feedback(&feedback);
-            }
-        }
-    }
-}
-
-impl Default for RobstrideMotorBus {
-    fn default() -> Self {
-        Self::new()
     }
 }

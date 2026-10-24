@@ -5,8 +5,9 @@
 //! - **One OS thread per CAN bus** drains the socket and dispatches feedback
 //!   to per-motor entries. (Blocking SocketCAN reads play poorly with tokio,
 //!   and we don't want a slow socket starving the executor.)
-//! - **One async task** runs the supervisor "tick" at 100 Hz: re-sends
-//!   hold-gain commands to every armed motor, runs the watchdog.
+//! - **The control-loop OS thread** (`main.rs`, `SCHED_FIFO`) runs the
+//!   supervisor "tick" at 100 Hz: watchdog, the drive twist for armed
+//!   wheels, hold-gain commands to every armed joint.
 //! - **Server tasks** (WS handlers) call into the supervisor via the
 //!   methods on this struct. All shared state is protected by per-motor
 //!   `std::sync::Mutex`es to avoid one slow motor blocking the others.
@@ -18,6 +19,7 @@ use crate::drive::{twist_to_wheel_angular, Odometry, Twist};
 use crate::mode::Mode;
 use crate::odrive::{self, ODriveWheel};
 use crate::powerboard;
+use crate::robstride;
 use crate::safety::bus_pool::{read_can_state, BusPool};
 use crate::safety::limits::{
     BreachReason, MotorRuntimeState, MotorSnapshot, WheelRuntimeState, WheelSnapshot,
@@ -38,16 +40,12 @@ const TICK_RATE_HZ: u64 = 100;
 /// this, so a full-reverse command ramps instead of snapping.
 const WHEEL_VEL_SLEW_RAD_S_PER_TICK: f32 = 1.0;
 
-/// Async event broadcast to interested subscribers (server, logger, etc.).
+/// Async event broadcast to the WS connections, which push it to their
+/// clients. Arm state and E-STOP resets reach clients through telemetry.
 #[derive(Debug, Clone)]
 pub enum SupervisorEvent {
     ModeChanged(Mode),
     EStopLatched(String),
-    EStopReset,
-    MotorArmed { joint: String },
-    MotorDisarmed { joint: String },
-    WheelArmed { wheel: String },
-    WheelDisarmed { wheel: String },
 }
 
 /// Per-joint outcome of [`Supervisor::set_mechanical_zero_all`].
@@ -224,16 +222,6 @@ fn resolve_stop(
     }
 }
 
-/// What [`Supervisor::drive_command`] did with an accepted command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DriveOutcome {
-    /// The twist is now the commanded twist.
-    Applied,
-    /// A stop from a client that doesn't hold the seat while another
-    /// does: ignored on purpose (see [`resolve_stop`]).
-    IgnoredNotHolder,
-}
-
 /// Longest display name kept from a `ClientHello` (characters).
 pub const CLIENT_NAME_MAX_CHARS: usize = 32;
 
@@ -274,9 +262,9 @@ pub struct Supervisor {
     by_can_id: HashMap<(String, u8), usize>,
     /// Lookup: joint name -> motors[index]
     by_name: HashMap<String, usize>,
-    /// One `Mutex<WheelRuntimeState>` per ODrive wheel (empty on the
-    /// humanoid). Parallel to `motors`; wheels are velocity-controlled so
-    /// they don't share the joint slew/hold machinery.
+    /// One `Mutex<WheelRuntimeState>` per ODrive wheel (empty without a
+    /// `wheels:` block). Parallel to `motors`; wheels are velocity-controlled
+    /// so they don't share the joint slew/hold machinery.
     wheels: Vec<Arc<Mutex<WheelRuntimeState>>>,
     /// Lookup: `(can_interface, node_id) -> wheels[index]`.
     by_odrive_id: HashMap<(String, u8), usize>,
@@ -472,11 +460,6 @@ impl Supervisor {
         self.drive.is_some()
     }
 
-    /// Copy of the differential-drive geometry, if any.
-    pub fn drive_config(&self) -> Option<DiffDriveConfig> {
-        self.drive.clone()
-    }
-
     /// Set the operator twist command (body frame) consumed by
     /// [`Self::tick_drive`]. Every write refreshes the operator-link
     /// freshness stamp; a non-zero twist that is never refreshed is
@@ -510,8 +493,8 @@ impl Supervisor {
     ///
     /// **Arbitration** (see [`ActiveOperator`]): a zero twist (stop)
     /// is applied from the holder or while no fresh seat exists, and
-    /// ignored ([`DriveOutcome::IgnoredNotHolder`]) from anyone else —
-    /// see [`resolve_stop`]. A non-zero twist requires holding
+    /// silently ignored (still `Ok`) from anyone else — see
+    /// [`resolve_stop`]. A non-zero twist requires holding
     /// the active-operator assignment: the first client to send one
     /// claims it, the holder keeps it (their input refreshes it), and
     /// other clients are rejected until `server.operator_grace_ms`
@@ -521,7 +504,7 @@ impl Supervisor {
     /// included) from a non-autonomous one; a preempting stop claims a
     /// fresh seat for `operator_grace_ms` so the autonomous client can't
     /// take it back (other people wait out that window too).
-    pub fn drive_command(&self, conn_id: u64, twist: Twist) -> Result<DriveOutcome> {
+    pub fn drive_command(&self, conn_id: u64, twist: Twist) -> Result<()> {
         let grace_ms = self.cfg.server.operator_grace_ms;
         let autonomous = self.client_autonomous(conn_id);
         // Decide the seat, update it and write the twist in ONE critical
@@ -544,7 +527,7 @@ impl Supervisor {
                 };
                 let now = Instant::now();
                 let preempted = match resolve_stop(*g, conn_id, autonomous, now, grace_ms) {
-                    StopResolution::Ignore => return Ok(DriveOutcome::IgnoredNotHolder),
+                    StopResolution::Ignore => return Ok(()),
                     StopResolution::Apply => None,
                     StopResolution::Preempt(holder) => {
                         *g = Some(ActiveOperator {
@@ -561,7 +544,7 @@ impl Supervisor {
             if let Some(holder) = preempted {
                 self.log_preemption(holder, conn_id, "stop");
             }
-            return Ok(DriveOutcome::Applied);
+            return Ok(());
         }
         let resolution = {
             let mut g = match self.active_operator.lock() {
@@ -581,17 +564,17 @@ impl Supervisor {
             res
         };
         match resolution {
-            OperatorResolution::Continue => Ok(DriveOutcome::Applied),
+            OperatorResolution::Continue => Ok(()),
             OperatorResolution::Takeover => {
                 info!(
                     conn_id,
                     grace_ms, "operator takeover: drive assignment changed"
                 );
-                Ok(DriveOutcome::Applied)
+                Ok(())
             }
             OperatorResolution::Preempted(holder) => {
                 self.log_preemption(holder, conn_id, "drive");
-                Ok(DriveOutcome::Applied)
+                Ok(())
             }
             OperatorResolution::Rejected(holder) => {
                 let who = match self.client_name(holder) {
@@ -783,9 +766,9 @@ impl Supervisor {
         if self.estop_active() {
             return Err(anyhow!("cannot arm while E-STOP is latched"));
         }
-        if !matches!(self.mode(), Mode::DialIn | Mode::RunPolicy) {
+        if self.mode() != Mode::DialIn {
             return Err(anyhow!(
-                "arming is only allowed in DialIn or RunPolicy mode (currently {:?})",
+                "arming is only allowed in DialIn mode (currently {:?})",
                 self.mode()
             ));
         }
@@ -843,9 +826,6 @@ impl Supervisor {
             g.armed = true;
         }
         info!(wheel, "armed");
-        let _ = self.events.send(SupervisorEvent::WheelArmed {
-            wheel: wheel.to_string(),
-        });
         Ok(())
     }
 
@@ -869,9 +849,6 @@ impl Supervisor {
             g.last_target_vel = 0.0;
         }
         info!(wheel, "disarmed");
-        let _ = self.events.send(SupervisorEvent::WheelDisarmed {
-            wheel: wheel.to_string(),
-        });
         Ok(())
     }
 
@@ -960,20 +937,10 @@ impl Supervisor {
         if prev == requested {
             return Ok(());
         }
-        // Disarm only when leaving the powered-motor regime (DialIn /
-        // RunPolicy) for Idle. Transitioning between DialIn and RunPolicy
-        // *preserves* arm state on purpose: the operator arms once in
-        // DialIn (where slider drive lets them prove the hold loop), then
-        // hands the wheel to the policy without forcing a re-enable
-        // round-trip on the bus. The policy runner doesn't enable motors
-        // itself; if we disarmed here, RunPolicy would silently send PD
-        // commands at disabled motors and look "broken" on the operator's
-        // first try.
-        if matches!(prev, Mode::DialIn | Mode::RunPolicy) && requested == Mode::Idle {
-            self.disarm_all_internal(BreachReason::Operator(format!(
-                "mode change {:?} -> {:?}",
-                prev, requested
-            )));
+        // Leaving the armed mode (DialIn) for Idle disarms everything:
+        // nothing may stay powered in Idle.
+        if prev == Mode::DialIn && requested == Mode::Idle {
+            self.disarm_all_internal();
             // Wheels mirror the joint arm-state transition.
             let _ = self.disarm_all_wheels();
             // Nothing is drivable in Idle; free the operator assignment
@@ -1052,7 +1019,6 @@ impl Supervisor {
             }
         }
         info!("E-STOP latch cleared by operator (ODrive errors cleared)");
-        let _ = self.events.send(SupervisorEvent::EStopReset);
         true
     }
 
@@ -1062,14 +1028,9 @@ impl Supervisor {
         if self.estop_active() {
             return Err(anyhow!("cannot arm while E-STOP is latched"));
         }
-        // Arming is allowed in either powered-motor mode. DialIn is the
-        // canonical bring-up entry point, but the operator also needs to
-        // arm in RunPolicy: the policy runner does not enable motors on
-        // its own, so the "arm-then-let-the-policy-drive" flow has to
-        // work without bouncing through DialIn on every entry.
-        if !matches!(self.mode(), Mode::DialIn | Mode::RunPolicy) {
+        if self.mode() != Mode::DialIn {
             return Err(anyhow!(
-                "arming is only allowed in DialIn or RunPolicy mode (currently {:?})",
+                "arming is only allowed in DialIn mode (currently {:?})",
                 self.mode()
             ));
         }
@@ -1144,9 +1105,6 @@ impl Supervisor {
             g.telemetry_probe_active = false;
         }
         info!(joint, "armed");
-        let _ = self.events.send(SupervisorEvent::MotorArmed {
-            joint: joint.to_string(),
-        });
         Ok(())
     }
 
@@ -1170,9 +1128,6 @@ impl Supervisor {
             g.telemetry_probe_active = false;
         }
         info!(joint, "disarmed");
-        let _ = self.events.send(SupervisorEvent::MotorDisarmed {
-            joint: joint.to_string(),
-        });
         Ok(())
     }
 
@@ -1362,11 +1317,10 @@ impl Supervisor {
     /// reference pose. Either way the operator must see it.
     pub const ZERO_VERIFY_TOLERANCE_RAD: f32 = 0.05;
 
-    /// Batch re-zero of every actuator for the guided zero-calibration
-    /// flow (robot placed in the reference pose — face-flat, legs
-    /// straight — with all joints disarmed). One operator gesture
-    /// re-zeroes everything, so the origins can't end up mixed across
-    /// joints that lost flash at different power cycles.
+    /// Batch re-zero of every actuator for a guided zero-calibration
+    /// flow (every joint placed in its reference pose and disarmed). One
+    /// operator gesture re-zeroes everything, so the origins can't end up
+    /// mixed across joints that lost flash at different power cycles.
     ///
     /// Preconditions are checked for ALL joints *before* any SET_ZERO
     /// is sent (atomic refusal): no E-STOP, every joint disarmed, every
@@ -1456,10 +1410,9 @@ impl Supervisor {
         errors
     }
 
-    /// Internal: disarm all without recording the per-joint events. Used
-    /// during E-STOP and mode transitions where we already have a top-level
-    /// reason.
-    fn disarm_all_internal(&self, _why: BreachReason) {
+    /// Internal: disable and disarm every joint without the per-joint
+    /// logging of [`Self::disarm`]. Used on the DialIn → Idle transition.
+    fn disarm_all_internal(&self) {
         for idx in 0..self.motors.len() {
             let cfg = &self.cfg.joints[idx];
             if let Some(can) = self.bus_pool.get(&cfg.can_bus) {
@@ -1492,29 +1445,6 @@ impl Supervisor {
     }
 
     // ---------------------------------------------------------------- safe TX
-
-    /// Snap every armed motor's slew tracker to its current measured
-    /// position. Use this on transitions where we want the *first*
-    /// outgoing command to be slew-limited relative to where the joint
-    /// actually is, not relative to whatever target the previous mode
-    /// (DialIn hold, hold-current pose, etc.) last latched.
-    ///
-    /// Safety rationale (bipedal robot): without this, a stale
-    /// ``last_target_pos`` left over from DialIn could allow the first
-    /// RunPolicy tick to commit a target one slew step *past* the
-    /// real joint pose. With a 0.05 rad slew at 100 Hz on a 17 kg
-    /// inverted pendulum that's not enough to fault, but it's a free
-    /// jolt the policy didn't ask for and that the trained
-    /// distribution didn't see in sim — so we eliminate it.
-    pub fn resync_slew_tracker(&self) {
-        for entry in &self.motors {
-            let Ok(mut g) = entry.lock() else { continue };
-            if !g.armed {
-                continue;
-            }
-            g.last_target_pos = g.motor.state.position;
-        }
-    }
 
     /// Send a clamp+slew-limited control command to a single motor.
     ///
@@ -1599,7 +1529,8 @@ impl Supervisor {
     }
 
     /// Called by the bus RX thread for each parsed feedback frame
-    /// (`cmd_type == 0x02`) or active-report frame (`cmd_type == 0x18`).
+    /// (`cmd_type == 0x02`, `robstride::cmd::FEEDBACK`) or active-report
+    /// frame (`cmd_type == 0x18`, `robstride::cmd::ACTIVE_REPORT`).
     /// The two share an identical wire format — fault bits + mode status
     /// in the ID, position/velocity/torque/temperature in the 8-byte
     /// payload — so they're routed through the same path.
@@ -1617,10 +1548,10 @@ impl Supervisor {
             g.motor.process_feedback(fb);
             // Convert the motor/encoder frame into the robot (URDF / sim)
             // convention once, here at the RX boundary, so every consumer
-            // above the driver (policy observation, /joint_states, telemetry,
-            // DialIn, limit checks) sees URDF-frame signs. `dir` is +1 for
-            // the common case; only joints whose motor is mounted/zeroed with
-            // reversed polarity carry -1 (see JointConfig::direction).
+            // above the driver (telemetry, DialIn, limit checks) sees
+            // URDF-frame signs. `dir` is +1 for the common case; only joints
+            // whose motor is mounted/zeroed with reversed polarity carry -1
+            // (see JointConfig::direction).
             if dir != 1.0 {
                 g.motor.state.position *= dir;
                 g.motor.state.velocity *= dir;
@@ -1744,10 +1675,10 @@ impl Supervisor {
             };
             g.armed
         };
-        // Passive telemetry for disarmed joints (mirror mode): refresh
-        // cached position/velocity but do not latch E-STOP on limit
-        // excursions — the operator may be moving joints by hand while
-        // the sim mirror is subscribed.
+        // Passive telemetry for disarmed joints (the telemetry probe):
+        // refresh cached position/velocity but do not latch E-STOP on limit
+        // excursions — the operator may be moving joints by hand while a
+        // telemetry client is subscribed.
         if !armed {
             return;
         }
@@ -1857,13 +1788,12 @@ impl Supervisor {
         // operator went silent mid-drive (WS dropped, app crashed,
         // Wi-Fi blip) and their client-side stop gestures never
         // arrived. Zero the twist so the chassis halts. This is a
-        // *controlled stop*: motors stay armed (a balancing chassis
-        // keeps standing) and motion resumes automatically when fresh
-        // commands arrive; E-STOP latching stays reserved for explicit
-        // operator action and motor faults. The drive assignment is
-        // released too — the holder's link is effectively dead, so
-        // another operator should be free to take over immediately
-        // rather than wait out the arbitration grace.
+        // *controlled stop*: motors stay armed and motion resumes
+        // automatically when fresh commands arrive; E-STOP latching stays
+        // reserved for explicit operator action and motor faults. The
+        // drive assignment is released too — the holder's link is
+        // effectively dead, so another operator should be free to take
+        // over immediately rather than wait out the arbitration grace.
         let timeout_ms = self.cfg.server.operator_timeout_ms;
         if timeout_ms > 0 {
             let mut g = match self.cmd_vel.lock() {
@@ -1891,11 +1821,11 @@ impl Supervisor {
 
     /// One 100 Hz drive tick for the wheeled chassis. Applies the operator's
     /// twist command to armed wheels (slew-limited, velocity-clamped) and
-    /// integrates wheel-encoder odometry. No-op on a chassis with no
-    /// `drive:` config (the humanoid).
+    /// integrates wheel-encoder odometry. No-op without a `drive:` config.
     ///
-    /// Called from the main control loop every tick, in all powered modes,
-    /// so the feedback stream stays alive and odometry accumulates.
+    /// Called from the main control loop every tick, whatever the mode (it
+    /// acts only while a wheel is armed, which only DialIn allows), so the
+    /// feedback stream stays alive and odometry accumulates.
     pub fn tick_drive(&self) {
         let Some(drive) = self.drive.clone() else {
             return;
@@ -1925,8 +1855,8 @@ impl Supervisor {
 
         // Command + integrate each wheel. Use the structuring helper on the
         // two known indices so left/right share one code path.
-        self.drive_one_wheel(li, vl_des, dt);
-        self.drive_one_wheel(ri, vr_des, dt);
+        self.drive_one_wheel(li, vl_des);
+        self.drive_one_wheel(ri, vr_des);
 
         // Odometry from *measured* robot-frame wheel velocities.
         let (vl_meas, vr_meas) = (
@@ -1946,7 +1876,7 @@ impl Supervisor {
 
     /// Clamp + slew + TX a single wheel's velocity command (robot frame,
     /// rad/s). Updates `last_target_vel` for the slew limiter.
-    fn drive_one_wheel(&self, idx: usize, vel_des: f32, _dt: f32) {
+    fn drive_one_wheel(&self, idx: usize, vel_des: f32) {
         let (cfg, can) = {
             let c = &self.cfg.wheels[idx];
             let can = match self.bus_pool.get(&c.can_interface) {
@@ -1993,17 +1923,13 @@ impl Supervisor {
     }
 
     /// Send the hold-gains keepalive frame to every currently-armed
-    /// motor, regardless of mode. Used as the per-tick TX for both the
-    /// DialIn hold cycle and the RunPolicy *dry-run* path — dry-run
-    /// inferences are captured + telemetry-published but never reach
-    /// the motors, so we still need *something* on the wire each cycle
-    /// or the Robstride feedback frames stop and the supervisor's
-    /// 100 ms feedback watchdog trips. Each call uses the motor's own
-    /// `last_target_pos` (initialized to the current physical pose at
-    /// arm time and stable across dry-run ticks because `safe_send_ctrl`
-    /// only advances it when called with a different target), so the
-    /// robot holds whatever posture it was in when we entered the
-    /// keepalive state.
+    /// motor, regardless of mode: the per-tick TX of the DialIn hold
+    /// cycle. Something has to go on the wire each cycle or the Robstride
+    /// feedback frames stop and the supervisor's feedback watchdog trips.
+    /// Each call uses the motor's own `last_target_pos` (initialized to
+    /// the current physical pose at arm time, replaced by
+    /// [`Self::set_target_position`]), so a joint holds its posture until
+    /// it is given a new target.
     pub fn tick_hold_armed(&self) {
         if self.estop_active() {
             return;
@@ -2030,21 +1956,22 @@ impl Supervisor {
         }
     }
 
-    /// Keep passive joint feedback alive for mirror / operator UIs while
-    /// WS telemetry is subscribed. Armed motors already receive 100 Hz
-    /// hold-gain TX in DialIn / RunPolicy; this path covers Idle (and any
-    /// disarmed joint) by sending zero-gain hold commands at 100 Hz so
-    /// the motors reply with feedback frames every tick.
+    /// Keep passive joint feedback alive for operator UIs while WS
+    /// telemetry is subscribed. Armed motors already receive 100 Hz
+    /// hold-gain TX in DialIn; this path covers Idle (and any disarmed
+    /// joint) by sending zero-gain hold commands at 100 Hz so the motors
+    /// reply with feedback frames every tick.
     pub fn tick_telemetry_probe(&self) {
         if self.telemetry_subscribers() == 0 || self.estop_active() {
             return;
         }
         let n = self.telemetry_probe_counter.fetch_add(1, Ordering::Relaxed);
         // Re-assert enable + active reporting for ONE motor per tick (round-
-        // robin). The old code hit all 8 disarmed motors in a single tick
+        // robin). The old code hit every disarmed motor in a single tick
         // once per second, which occasionally blocked ~24 ms on the CAN
-        // socket and blew the 10 ms deadline. Spreading the re-assert across
-        // 8 ticks keeps each tick's worst-case at one CAN write.
+        // socket and blew the 10 ms deadline. Spreading the re-asserts
+        // across ticks (one motor each) keeps each tick's worst-case at one
+        // CAN write.
         if n % 100 < self.motors.len() as u32 {
             let idx = (n % 100) as usize;
             self.refresh_one_telemetry_probe(idx);
@@ -2306,13 +2233,13 @@ pub fn spawn_rx_threads(
                             // several frame types on the same 29-bit ID
                             // layout; we dispatch on `cmd_type`:
                             //
-                            //   - 0x02 FEEDBACK and 0x18 ACTIVE_REPORT
+                            //   - FEEDBACK (0x02) and ACTIVE_REPORT (0x18)
                             //     share an identical payload layout —
                             //     both go through `on_feedback` so
                             //     active-report streams (when the motor
                             //     firmware pushes them on its own)
                             //     refresh the watchdog the same way.
-                            //   - 0x15 FAULT_FEEDBACK is an unsolicited
+                            //   - FAULT_FEEDBACK (0x15) is an unsolicited
                             //     fault report. Previously dropped on
                             //     the floor; now latches E-STOP with
                             //     the raw payload + decoded status bits.
@@ -2330,11 +2257,12 @@ pub fn spawn_rx_threads(
                             if let Some(fb) = frame.parse_robstride() {
                                 if sup.motor_index(&iface, fb.motor_id).is_some() {
                                     match fb.cmd_type {
-                                        0x02 | 0x18 => {
+                                        robstride::cmd::FEEDBACK
+                                        | robstride::cmd::ACTIVE_REPORT => {
                                             sup.on_feedback(&iface, &fb);
                                             consumed = true;
                                         }
-                                        0x15 => {
+                                        robstride::cmd::FAULT_FEEDBACK => {
                                             sup.on_fault_report(
                                                 &iface, &fb, frame.id, &frame.data,
                                             );

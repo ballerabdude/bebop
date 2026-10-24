@@ -2,7 +2,8 @@
 //!
 //! The Robstride PowerBoard is the smart power-distribution module that
 //! sits between the battery pack and the motor / 24 V / 12 V / 5 V rails.
-//! On Bebop V2 it lives on its own CAN bus (typically `can4`) and reports:
+//! It lives on its own CAN bus (`can0` on the wheeled robot, see
+//! `bebop_wheeled.yaml`) and reports:
 //!
 //!   - Battery (VBUS) voltage  — the raw pack voltage.  Used as the
 //!     primary "fuel gauge" input together with the configured pack
@@ -54,11 +55,14 @@
 
 use crate::can_interface::{CanInterface, ReceivedFrame};
 use anyhow::Result;
-use tracing::{debug, trace};
+use tracing::trace;
 
 /// CAN communication types (bits 28..24 of the 29-bit ID).
 mod cmd {
     /// Control + query frame: enable/disable rails, restart, clear faults.
+    // Not sent yet: kept, with `ctrl` below, as the hook for a hardware
+    // motor-rail cut (VMBUS feeds the wheel motors, and the arms later).
+    #[allow(dead_code)]
     pub const CONTROL: u8 = 0x01;
     /// Query frame. `data[0]` selects which response we want:
     ///   - `0x00` → board returns a Type-03 status frame
@@ -70,15 +74,11 @@ mod cmd {
     pub const CURRENTS: u8 = 0x04;
     /// Version query / response. `data[0..]` ASCII "PBVx.yz".
     pub const VERSION: u8 = 0x05;
-    /// Auto-report enable/disable: `data[0] = 0x01` on, `0x00` off.
-    pub const AUTO_REPORT: u8 = 0x06;
-    /// Read parameter (data[0..2] = LE index).
-    pub const PARAM_READ: u8 = 0x07;
-    /// Write parameter (data[0..2] = index, data[4..8] = LE value).
-    pub const PARAM_WRITE: u8 = 0x08;
 }
 
 /// Selector byte for `CONTROL` (0x01) frames.
+// See `cmd::CONTROL`: kept for a hardware motor-rail cut, not sent yet.
+#[allow(dead_code)]
 mod ctrl {
     pub const ENABLE: u8 = 0xA1;
     pub const DISABLE: u8 = 0xA0;
@@ -94,7 +94,8 @@ const QUERY_CURRENTS: u8 = 0xCA;
 /// Driver handle for one PowerBoard.
 ///
 /// Stateless apart from `power_id`; all live data lives in
-/// [`PowerBoardSnapshot`] which is owned by the supervisor.
+/// [`crate::safety::power_monitor::PowerBoardSnapshot`], which the
+/// supervisor's power monitor owns.
 #[derive(Debug, Clone, Copy)]
 pub struct PowerBoard {
     pub power_id: u8,
@@ -141,20 +142,6 @@ impl PowerBoard {
         can.send_extended(id, &data)?;
         Ok(())
     }
-
-    /// Enable / disable the board's auto-report Type-03 stream. We
-    /// generally leave this off and poll instead (see module docs).
-    pub fn set_auto_report(&self, can: &CanInterface, enabled: bool) -> Result<()> {
-        let id = self.make_can_id(cmd::AUTO_REPORT, 0);
-        let mut data = [0u8; 8];
-        data[0] = if enabled { 0x01 } else { 0x00 };
-        can.send_extended(id, &data)?;
-        debug!(
-            power_id = self.power_id,
-            enabled, "powerboard auto-report toggled"
-        );
-        Ok(())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +151,6 @@ impl PowerBoard {
 /// Decoded contents of one Type-03 status response.
 #[derive(Debug, Clone)]
 pub struct PowerStatus {
-    pub power_id: u8,
     /// Battery / VBUS voltage in volts. Per manual: raw `u16` big-endian
     /// in payload bytes 0..2, scale = 1/100 V (0 → 0 V, 65535 → 655.35 V).
     pub battery_voltage_v: f32,
@@ -199,14 +185,8 @@ pub struct PowerCurrents {
 #[derive(Debug, Clone)]
 pub enum PowerFrame {
     Status(PowerStatus),
-    Currents {
-        power_id: u8,
-        currents: PowerCurrents,
-    },
-    Version {
-        power_id: u8,
-        version: String,
-    },
+    Currents { currents: PowerCurrents },
+    Version { version: String },
 }
 
 /// Try to interpret `frame` as a PowerBoard response. Returns `None` if
@@ -229,20 +209,18 @@ pub fn parse_frame(frame: &ReceivedFrame, power_id: u8) -> Option<PowerFrame> {
     }
 
     match comm_type {
-        cmd::STATUS => Some(PowerFrame::Status(parse_status(power_id, &frame.data))),
+        cmd::STATUS => Some(PowerFrame::Status(parse_status(&frame.data))),
         cmd::CURRENTS => Some(PowerFrame::Currents {
-            power_id,
             currents: parse_currents(&frame.data),
         }),
         cmd::VERSION => Some(PowerFrame::Version {
-            power_id,
             version: parse_version_payload(&frame.data),
         }),
         _ => None,
     }
 }
 
-fn parse_status(power_id: u8, payload: &[u8]) -> PowerStatus {
+fn parse_status(payload: &[u8]) -> PowerStatus {
     debug_assert!(payload.len() >= 8);
     let battery_raw = u16::from_be_bytes([payload[0], payload[1]]);
     let motor_raw = u16::from_be_bytes([payload[2], payload[3]]);
@@ -263,7 +241,6 @@ fn parse_status(power_id: u8, payload: &[u8]) -> PowerStatus {
     let fault_bits = ((payload[5] as u32) << 16) | ((payload[6] as u32) << 8) | (payload[7] as u32);
 
     PowerStatus {
-        power_id,
         battery_voltage_v: battery_raw as f32 / 100.0,
         motor_voltage_v: motor_raw as f32 / 100.0,
         board_temperature_c: temp_raw as f32,
@@ -388,7 +365,7 @@ mod tests {
                          // low fault byte lives at payload[7].
         payload[7] = 0b0010_0000;
 
-        let s = parse_status(0xAA, &payload);
+        let s = parse_status(&payload);
         assert!((s.battery_voltage_v - 54.60).abs() < 1e-3);
         assert!((s.motor_voltage_v - 54.40).abs() < 1e-3);
         assert!((s.board_temperature_c - 32.0).abs() < 1e-3);
@@ -402,14 +379,14 @@ mod tests {
         // With BE byte order, bit 20 (0x100000) lives in payload[5] bit 4.
         let mut payload = [0u8; 8];
         payload[5] = 0x10;
-        let s = parse_status(0xAA, &payload);
+        let s = parse_status(&payload);
         assert!(s.rail_12v_on);
         assert_eq!(describe_faults(s.fault_bits), "normal");
     }
 
     #[test]
     fn parse_status_matches_live_board_capture() {
-        // Real candump capture from a healthy 13s2p Bebop V2 pack:
+        // Real candump capture from a healthy 13s2p pack:
         //   RX 03AA0000  [8]  12 10 12 0C 23 D0 00 00
         //
         // Expected decode:
@@ -422,7 +399,7 @@ mod tests {
         //               powered-up board, so the FET hands off to the
         //               main rail). No real faults in bits 0..15.
         let payload = [0x12, 0x10, 0x12, 0x0C, 0x23, 0xD0, 0x00, 0x00];
-        let s = parse_status(0xAA, &payload);
+        let s = parse_status(&payload);
         assert!(
             (s.battery_voltage_v - 46.24).abs() < 1e-3,
             "v={}",
@@ -479,7 +456,7 @@ mod tests {
             data: vec![0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00],
         };
         match parse_frame(&frame, 0xAA) {
-            Some(PowerFrame::Currents { currents, .. }) => {
+            Some(PowerFrame::Currents { currents }) => {
                 assert!((currents.al_current_a - 0.02).abs() < 1e-4);
                 assert!((currents.ar_current_a - 0.02).abs() < 1e-4);
                 assert_eq!(currents.ll_current_a, 0.0);

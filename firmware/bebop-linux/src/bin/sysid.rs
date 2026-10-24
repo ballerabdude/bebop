@@ -30,14 +30,16 @@
 //!    sudo systemctl stop bebop-linux
 //!    ```
 //!
-//! 2. Run each maneuver, once per joint. The required `--setup` flag
-//!    declares the physical rig and gates which maneuvers may run.
-//!    Example (left knee, friction, robot hanging on a stand):
+//! 2. Run each maneuver, once per joint. `--config` must name a robot YAML
+//!    whose `joints:` table defines the joint (the shipped
+//!    `bebop_wheeled.yaml` has none). The required `--setup` flag declares
+//!    the physical rig and gates which maneuvers may run. Example
+//!    (friction, robot hanging on a stand):
 //!
 //!    ```text
 //!    cargo run --release --bin sysid -- \
-//!        --config config/bebop_v2.yaml \
-//!        --joint knee_flexion_left_joint \
+//!        --config /etc/bebop/<robot>.yaml \
+//!        --joint <joint_name> \
 //!        --maneuver friction-sweep \
 //!        --setup hanging
 //!    ```
@@ -49,7 +51,7 @@
 //!
 //!    ```text
 //!    cargo run --release --bin sysid -- \
-//!        --joint hip_flexion_left_joint \
+//!        --config /etc/bebop/<robot>.yaml --joint <joint_name> \
 //!        --maneuver noload-speed --setup bench --allow-cap-override
 //!    ```
 //!
@@ -64,11 +66,12 @@
 //! - **`bench`** — single motor on a bench/fixture. All maneuvers,
 //!   including `stall-torque` (block the output) and `noload-speed` (free
 //!   shaft). The only setup permitted for the cap-override T-N maneuvers.
-//! - **`hanging`** — robot suspended with the leg free to swing its full
+//! - **`hanging`** — robot suspended with the limb free to swing its full
 //!   travel: `friction-sweep`, `torque-step`, `torque-chirp`.
 //!   `friction-sweep` is bidirectional so gravity bias cancels out.
-//! - **`stand`** — robot supported / feet on the ground: `friction-sweep`
-//!   and `torque-chirp` only (keep amplitudes low).
+//! - **`stand`** — robot supported with the limb loaded or in contact (e.g.
+//!   feet on the ground): `friction-sweep` and `torque-chirp` only (keep
+//!   amplitudes low).
 //!
 //! # Maneuvers — what movement to expect
 //!
@@ -97,7 +100,7 @@
 //!   `+tau` for `--step-duration` (0.3 s), 0.6 s idle, `-tau` for 0.3 s,
 //!   0.3 s idle. `tau = --tau-frac` x `tau_max` (default 0.3). Total ~1.8 s.
 //! - **Expected motion:** two sharp **kicks** — the joint snaps one way,
-//!   coasts, then snaps back the other way. Brief but abrupt; give the leg
+//!   coasts, then snaps back the other way. Brief but abrupt; give the limb
 //!   room to swing.
 //!
 //! ### `torque-chirp`  (measures rotor inertia / `armature`)
@@ -115,7 +118,7 @@
 //!   amplitude uses the motor's full torque envelope.
 //! - **Expected motion:** a **free shaft spins up to its top (no-load)
 //!   speed** and holds it — fast continuous rotation. Never run this on an
-//!   assembled leg; it would drive the link into its hard stop at speed.
+//!   assembled limb; it would drive the link into its hard stop at speed.
 //!
 //! ### `stall-torque`  (measures `saturation_effort`; **bench only**)
 //! - **Commands:** `kp = kd = 0`, torque ramps 0 -> amp over `--ramp-s`
@@ -158,12 +161,13 @@ use bebop_linux::robstride::RobstrideMotor;
     about = "Robstride actuator system-identification driver (single joint)."
 )]
 struct Args {
-    /// Robot config YAML (joint table, CAN buses, hard limits).
-    #[arg(long, default_value = "config/bebop_v2.yaml")]
+    /// Robot config YAML with a `joints:` table (CAN buses, hard limits).
+    /// Required: no shipped config defines joints yet.
+    #[arg(long)]
     config: String,
 
-    /// Joint to excite, by name (e.g. `knee_flexion_left_joint`). Mutually
-    /// exclusive with `--motor-id` / `--bus`.
+    /// Joint to excite, by its name in the config's `joints:` table.
+    /// Mutually exclusive with `--motor-id` / `--bus`.
     #[arg(long)]
     joint: Option<String>,
 
@@ -183,8 +187,8 @@ struct Args {
 
     /// Physical test setup (REQUIRED) — gates which maneuvers may run:
     ///   `bench`   single motor on a bench/fixture -> all maneuvers
-    ///   `hanging` robot suspended, leg swings free -> friction-sweep, torque-step, torque-chirp
-    ///   `stand`   robot supported / feet down -> friction-sweep, torque-chirp (low amplitude)
+    ///   `hanging` robot suspended, limb swings free -> friction-sweep, torque-step, torque-chirp
+    ///   `stand`   robot supported, limb loaded -> friction-sweep, torque-chirp (low amplitude)
     #[arg(long)]
     setup: String,
 
@@ -327,19 +331,19 @@ impl Maneuver {
 
 /// Physical test setup. Gates which maneuvers are allowed to run so that,
 /// e.g., a free-spinning no-load run can't be commanded on an assembled
-/// leg, and a stall run can't be commanded with nothing to react against.
+/// limb, and a stall run can't be commanded with nothing to react against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Setup {
     /// Single motor on a bench / fixture: full range, including the
     /// cap-override T-N-curve maneuvers.
     Bench,
-    /// Robot suspended with the leg free to swing through its full travel:
-    /// in-envelope maneuvers only (no cap override — a free leg driven to
+    /// Robot suspended with the limb free to swing through its full travel:
+    /// in-envelope maneuvers only (no cap override — a free limb driven to
     /// the true no-load speed would slam its hard stop, and there is
     /// nothing to stall against).
     Hanging,
-    /// Robot supported / feet on the ground: only small, low-amplitude
-    /// in-envelope excitation.
+    /// Robot supported with the limb loaded or in contact (e.g. feet on
+    /// the ground): only small, low-amplitude in-envelope excitation.
     Stand,
 }
 
@@ -720,6 +724,13 @@ fn run(args: Args, stop: Arc<AtomicBool>) -> Result<RunOutcome> {
     // --- resolve joint -----------------------------------------------------
     let cfg = RobotConfig::from_yaml(&args.config)
         .with_context(|| format!("load robot config {:?}", args.config))?;
+    if cfg.joints.is_empty() {
+        bail!(
+            "robot config {:?} has no `joints:` table; sysid drives a single \
+             Robstride joint, so pass a config that defines it",
+            args.config
+        );
+    }
 
     let joint: JointConfig = match (&args.joint, args.motor_id, &args.bus) {
         (Some(name), _, _) => cfg

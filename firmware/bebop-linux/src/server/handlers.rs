@@ -7,7 +7,6 @@ use crate::drive::Twist;
 use crate::imu::ImuShared;
 use crate::mode::Mode;
 use crate::model::ModelShared;
-use crate::policy_io::PolicyIoShared;
 use crate::safety::limits::BreachReason;
 use crate::safety::Supervisor;
 use crate::server::ws::AppState;
@@ -79,7 +78,7 @@ fn handle_twist(
             wz: cmd.angular_z,
         },
     ) {
-        Ok(_) => None,
+        Ok(()) => None,
         Err(e) => Some(error_response(request_id, fmt_err(&e))),
     }
 }
@@ -91,7 +90,6 @@ fn dispatch(
     payload: proto::client_runtime_message::Payload,
 ) -> proto::ServerRuntimeMessage {
     let sup = &state.sup;
-    let policy_control = &state.policy_control;
     let vision = &state.vision;
     let model = &state.model;
     let voice = &state.voice;
@@ -123,7 +121,6 @@ fn dispatch(
             sup,
             &state.imu,
             state.imu_present,
-            &state.policy_io,
             vision,
             model,
             voice,
@@ -249,25 +246,6 @@ fn dispatch(
             }
             Err(e) => error_response(request_id, fmt_err(&e)),
         },
-        P::SetPolicyDryRun(req) => {
-            // Flip the flag here; PolicyRunner reads it on the next tick
-            // (≤10 ms). We deliberately don't try to validate "is the
-            // policy currently running" — toggling in IDLE is fine and
-            // takes effect when the operator next enters RUN_POLICY.
-            match policy_control.lock() {
-                Ok(mut g) => {
-                    g.dry_run = req.enabled;
-                    ack(
-                        request_id,
-                        format!(
-                            "policy dry-run {}",
-                            if req.enabled { "ENABLED" } else { "disabled" }
-                        ),
-                    )
-                }
-                Err(_) => error_response(request_id, "policy_control mutex poisoned".into()),
-            }
-        }
         P::SetVisionEnabled(req) => {
             // Start/stop the Python bebop-vision service via systemd. The
             // request is queued on a background thread (a `systemctl start`
@@ -382,24 +360,6 @@ fn dispatch(
                 Err(e) => error_response(request_id, e),
             }
         }
-        P::SetModelPurpose(req) => {
-            match model.validate_purpose(&req.purpose, &req.model_id) {
-                Ok(()) => {
-                    let purpose = req.purpose.clone();
-                    let model_id = req.model_id.clone();
-                    model.set_purpose(req.purpose, req.model_id);
-                    ack(
-                        request_id,
-                        if model_id.is_empty() {
-                            format!("purpose {purpose} cleared")
-                        } else {
-                            format!("purpose {purpose} -> {model_id}")
-                        },
-                    )
-                }
-                Err(e) => error_response(request_id, e),
-            }
-        }
         // Normally intercepted (reply-less) by `handle_client_message`;
         // kept total so the match needs no panic path.
         P::SetVelocityCommand(cmd) => handle_twist(sup, conn_id, request_id, &cmd)
@@ -487,7 +447,6 @@ pub fn snapshot_response(
     sup: &Arc<Supervisor>,
     imu: &ImuShared,
     imu_present: bool,
-    policy_io: &PolicyIoShared,
     vision: &VisionShared,
     model: &ModelShared,
     voice: &VoiceShared,
@@ -500,7 +459,6 @@ pub fn snapshot_response(
                 sup,
                 imu,
                 imu_present,
-                policy_io,
                 vision,
                 model,
                 voice,

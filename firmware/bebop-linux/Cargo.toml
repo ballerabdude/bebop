@@ -3,7 +3,7 @@ name = "bebop-linux"
 version = "0.1.0"
 edition = "2021"
 authors = ["Bebop Bot Team"]
-description = "Linux runtime for Bebop V2 robot — multi-mode (Idle / DialIn / RunPolicy) server with SocketCAN + ONNX policy."
+description = "Linux runtime for the Bebop robot: a SocketCAN motor/wheel supervisor behind an Idle / DialIn protobuf-over-WebSocket API."
 
 [lib]
 name = "bebop_linux"
@@ -12,17 +12,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "bebop-linux"
 path = "src/main.rs"
-
-# Hardware smoke test for the BNO080/BNO085 over SPI. Independent of the
-# main runtime — pulls in `bno08x-rs` and talks straight to `/dev/spidev0.0`
-# with INT/RST GPIOs provided on the CLI. Use this to verify the wiring
-# and the SPI-mode jumpers when bringing up a new IMU. The production
-# `imu.rs` path uses the same crate / bus / pin assignments. See
-# `src/bin/imu_probe.rs` for CLI usage and `config/bebop_v2.yaml` for
-# the canonical pinout.
-[[bin]]
-name = "imu-probe"
-path = "src/bin/imu_probe.rs"
 
 # Single-joint actuator system-identification driver. Reuses the motor
 # stack (RobotConfig + CanInterface + RobstrideMotor) but bypasses the
@@ -37,45 +26,22 @@ path = "src/bin/sysid.rs"
 [dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full", "rt-multi-thread", "time", "sync", "signal", "net", "macros"] }
-tokio-stream = "0.1"
 futures = "0.3"
 
 # CAN bus
 socketcan = "3.3"
 
 # HTTP + WebSocket
-axum = { version = "0.7", features = ["ws", "macros"] }
+axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
-
-# ONNX Runtime for neural network inference.
-#
-# We use the `load-dynamic` feature so the build does NOT statically link
-# a prebuilt `libonnxruntime.{a,so}`. Two reasons:
-#
-#   1. CI is pinned to ubuntu-22.04-arm (glibc 2.35) for JetPack 6
-#      compatibility, but the default `download-binaries` feature pulls
-#      a prebuilt blob compiled against newer glibc / libstdc++
-#      (uses `__isoc23_strtol*` from glibc 2.38 and `__cxa_call_terminate`
-#      from a newer libstdc++), which fails to link in CI.
-#   2. On the Jetson we want the JetPack-supplied, CUDA-enabled
-#      `libonnxruntime.so` anyway, not pyke's CPU-only prebuilt.
-#
-# At runtime, `ort` reads the dylib path from the `ORT_DYLIB_PATH` env
-# var; if unset it falls back to `libonnxruntime.so` resolved via the
-# normal linker search path (LD_LIBRARY_PATH, /usr/lib/aarch64-linux-gnu,
-# /usr/local/lib, ...). The first ORT call is what triggers the dlopen,
-# so unit tests that don't construct a `Session` still pass without the
-# lib being installed.
-ort = { version = "2.0.0-rc.11", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
-ndarray = "0.16"
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 
-# Math
+# Math (IMU mount rotation)
 nalgebra = "0.32"
 
 # Logging
@@ -84,57 +50,33 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
-
-# Configuration
-toml = "0.8"
 
 # Time handling
 chrono = "0.4"
 
 # Low-level POSIX scheduling + clocks for the real-time control loop
 # (`src/realtime.rs`): SCHED_FIFO and absolute-deadline `clock_nanosleep`
-# on CLOCK_MONOTONIC. Already present transitively (socketcan, mcap, ...);
-# pinned here as a direct dependency since `main.rs` calls it explicitly.
+# on CLOCK_MONOTONIC; also `statvfs` for the disk-free readings
+# (`src/model.rs`, `src/system_capture.rs`). Already present transitively
+# (socketcan, mcap, ...); pinned here as a direct dependency since the
+# firmware calls it explicitly.
 libc = "0.2"
 
-# Wire protocol shared with the Tauri app and the Jetson agent.
+# Wire protocol shared with the operator app and bebop-agent.
 bebop-proto = { path = "../../jetson-agent/bebop-proto" }
 prost = "0.13"
 bytes = "1.7"
 
-# MCAP capture format for the operator-toggled observation/action
-# recordings (see `src/policy_capture.rs`). MCAP gives us:
+# MCAP capture format for the always-on 1 Hz power/host system log
+# (see `src/system_capture.rs`). MCAP gives us:
 #   * a single self-describing binary file (embedded protobuf FDS) that
-#     Foxglove / `mcap-cli` / any robotics tooling reads out of the box;
-#   * built-in chunked LZ4/Zstd compression so the on-disk size of a
-#     100 Hz × ~100-float capture stays manageable across long runs;
-#   * stable per-message timestamps so we can scrub through a session
-#     visually in Foxglove without our own parser.
-# Default features pull in zstd + lz4 chunk compression, which we want.
-mcap = "0.25"
-
-# BNO080/BNO085 over Linux SPI (`spidev` + `gpiod`). Used by both the
-# `imu-probe` diagnostic bin and the production `imu.rs` path.
-#
-# We point at a *vendored* copy of `bno08x-rs` 2.0.1 (rather than the
-# crates.io version) so we can patch:
-#
-#   1. `report_enabled: [bool; 16]` → `[_; 256]`, otherwise enabling
-#      report 0x28 (AR/VR Stabilized Rotation Vector — the EMI-hardened
-#      replacement for 0x05 used by the old Teensy firmware in
-#      `firmware/bebop-locomotion/include/BNO085_IMU.h`) panics the
-#      driver on the first feature-response message.
-#   2. Adds parsing + accessors for SH-2 reports 0x28 and 0x29 (the
-#      AR/VR-Stabilized rotation reports), which the upstream crate
-#      does not handle at all.
-#
-# See `vendor/bno08x-rs/Cargo.toml` for the patch markers and
-# re-vendoring notes.
-bno08x-rs = { path = "vendor/bno08x-rs" }
-
-# GPIO pre-reset pulse in `imu.rs` (same version as `bno08x-rs`).
-gpiod = "0.3.0"
+#     Rerun / Foxglove / `mcap-cli` read out of the box;
+#   * built-in chunked compression, so days of samples stay small;
+#   * stable per-message timestamps, so the system timeline can be scrubbed
+#     next to a drive session without our own parser.
+# The writer only uses Zstd chunks and the firmware never decodes another
+# producer's MCAP, so the default `lz4` feature (a vendored C build) is off.
+mcap = { version = "0.25", default-features = false, features = ["zstd"] }
 
 # USB-serial reader for the Teensy `teensy_bridge` backend (`imu_serial.rs`).
 # `default-features = false` drops the libudev-based port *enumeration*
@@ -142,8 +84,8 @@ gpiod = "0.3.0"
 # cross-compiles for the Jetson (aarch64) without a libudev dependency.
 serialport = { version = "4", default-features = false }
 
-# Argument parsing for the `imu-probe` diagnostic binary. Pulled in via
-# the `derive` feature so the probe can declare its CLI as a struct.
+# Argument parsing for the `sysid` binary. Pulled in via the `derive`
+# feature so it can declare its CLI as a struct.
 clap = { version = "4", features = ["derive"] }
 
 [build-dependencies]

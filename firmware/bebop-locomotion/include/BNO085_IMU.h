@@ -11,8 +11,8 @@
  * We migrate to SPI (dedicated INT line for low-latency reads) and keep
  * the AR/VR-Stabilized Rotation Vector (report 0x28), whose fusion
  * pipeline aggressively filters magnetometer disturbances. This mirrors
- * the Linux runtime (`firmware/bebop-linux/src/imu.rs`, report 0x28 over
- * SPI) and the validated standalone test (`src/main_imu_spi_test.cpp`).
+ * the validated standalone test (`src/main_imu_spi_test.cpp`); the Jetson
+ * consumes the 0x28 quaternion that the Teensy forwards over USB serial.
  *
  * ## Wiring (Adafruit BNO085 breakout -> Teensy 4.1, hardware SPI0)
  *   Board SCL  -> Pin 13  (SCK)   *** also the onboard LED ***

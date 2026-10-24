@@ -1,9 +1,7 @@
 //! Build telemetry / snapshot frames from the supervisor's current state.
 
 use crate::imu::ImuShared;
-use crate::mode::Mode;
 use crate::model::{ModelEntry, ModelShared};
-use crate::policy_io::{self, PolicyIoShared};
 use crate::powerboard::describe_faults;
 use crate::safety::limits::MotorSnapshot;
 use crate::safety::power_monitor::PowerBoardSnapshot;
@@ -214,7 +212,7 @@ fn build_imu_stats(imu: &ImuShared, present: bool) -> proto::ImuStats {
         };
     }
     let now = Instant::now();
-    let (received, stale, last_update_age_ms, quat, heading_acc) = match imu.lock() {
+    let (received, stale, last_update_age_ms, quat) = match imu.lock() {
         Ok(g) => {
             let stale = g.is_stale(now);
             let age = g.age_ms(now);
@@ -223,13 +221,12 @@ fn build_imu_stats(imu: &ImuShared, present: bool) -> proto::ImuStats {
                 stale,
                 age,
                 g.quaternion.unwrap_or([0.0, 0.0, 0.0, 0.0]),
-                g.heading_accuracy_rad,
             )
         }
         // Poisoned mutex is exceptional but not worth crashing the WS
         // pump over — fall back to "no reading, stale" so the UI can
         // still render the rest of the frame.
-        Err(_) => (false, true, 0, [0.0; 4], 0.0),
+        Err(_) => (false, true, 0, [0.0; 4]),
     };
     proto::ImuStats {
         present: true,
@@ -240,39 +237,6 @@ fn build_imu_stats(imu: &ImuShared, present: bool) -> proto::ImuStats {
         quaternion_y: quat[1],
         quaternion_z: quat[2],
         quaternion_w: quat[3],
-        heading_accuracy_rad: heading_acc,
-    }
-}
-
-fn build_policy_io_stats(policy_io: &PolicyIoShared) -> proto::PolicyIoStats {
-    let snapshot = match policy_io.lock() {
-        Ok(g) => g.clone(),
-        Err(_) => return proto::PolicyIoStats::default(),
-    };
-    if !snapshot.present {
-        return proto::PolicyIoStats {
-            present: false,
-            ..Default::default()
-        };
-    }
-    proto::PolicyIoStats {
-        present: true,
-        active: snapshot.active,
-        imu_live: snapshot.imu_live,
-        dry_run: snapshot.dry_run,
-        capture_active: snapshot.capture_active,
-        capture_path: snapshot.capture_path,
-        capture_rows: snapshot.capture_rows,
-        capture_dropped: snapshot.capture_dropped,
-        observation: snapshot.observation,
-        raw_action: snapshot.raw_action,
-        position_targets_rad: snapshot.position_targets_rad.to_vec(),
-        kp: snapshot.kp.to_vec(),
-        kd: snapshot.kd.to_vec(),
-        joint_names: policy_io::joint_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
     }
 }
 
@@ -295,7 +259,6 @@ fn build_vision_stats(vision: &VisionShared) -> proto::VisionState {
         state: snap.state,
         detail,
         service: snap.service,
-        mode: snap.mode,
     }
 }
 
@@ -317,7 +280,6 @@ fn build_voice_stats(voice: &VoiceShared) -> proto::VoiceState {
         state: snap.state,
         detail,
         service: snap.service,
-        model: snap.model,
     }
 }
 
@@ -332,14 +294,6 @@ fn build_model_stats(model: &ModelShared) -> proto::ModelState {
         disk_free_bytes: snap.disk_free_bytes,
         detail: snap.last_error,
         models: snap.models.iter().map(model_entry_to_proto).collect(),
-        selection: snap
-            .selection
-            .iter()
-            .map(|(purpose, model_id)| proto::PurposeSelection {
-                purpose: purpose.clone(),
-                model_id: model_id.clone(),
-            })
-            .collect(),
     }
 }
 
@@ -351,11 +305,8 @@ fn model_entry_to_proto(entry: &ModelEntry) -> proto::ModelCatalogEntry {
         description: spec.description.clone(),
         kind: spec.kind.clone(),
         repo: spec.repo.clone(),
-        files: spec.files.clone(),
-        revision: spec.revision.clone(),
         gated: spec.gated,
         bytes_total: entry.bytes_total,
-        path: spec.path.clone(),
         purpose: spec.purpose.clone(),
         ready: entry.ready,
         state: entry.state.clone(),
@@ -364,12 +315,10 @@ fn model_entry_to_proto(entry: &ModelEntry) -> proto::ModelCatalogEntry {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn build_snapshot(
     sup: &Arc<Supervisor>,
     imu: &ImuShared,
     imu_present: bool,
-    policy_io: &PolicyIoShared,
     vision: &VisionShared,
     model: &ModelShared,
     voice: &VoiceShared,
@@ -389,7 +338,6 @@ pub fn build_snapshot(
         buses: collect_buses(sup),
         power: Some(build_power_stats(sup)),
         imu: Some(build_imu_stats(imu, imu_present)),
-        policy_io: Some(build_policy_io_stats(policy_io)),
         wheels: wheels.iter().map(wheel_state_to_proto).collect(),
         drive: Some(build_drive_state(sup, conn_id)),
         vision: Some(build_vision_stats(vision)),
@@ -398,12 +346,10 @@ pub fn build_snapshot(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn build_telemetry(
     sup: &Arc<Supervisor>,
     imu: &ImuShared,
     imu_present: bool,
-    policy_io: &PolicyIoShared,
     vision: &VisionShared,
     model: &ModelShared,
     voice: &VoiceShared,
@@ -424,7 +370,6 @@ pub fn build_telemetry(
         buses: collect_buses(sup),
         power: Some(build_power_stats(sup)),
         imu: Some(build_imu_stats(imu, imu_present)),
-        policy_io: Some(build_policy_io_stats(policy_io)),
         wheels: wheels.iter().map(wheel_state_to_proto).collect(),
         drive: Some(build_drive_state(sup, conn_id)),
         vision: Some(build_vision_stats(vision)),
@@ -440,6 +385,3 @@ pub fn telemetry_envelope(frame: proto::TelemetryFrame) -> proto::ServerRuntimeM
         payload: Some(proto::server_runtime_message::Payload::Telemetry(frame)),
     }
 }
-
-#[allow(dead_code)]
-pub fn _force_mode_used(_m: Mode) {}

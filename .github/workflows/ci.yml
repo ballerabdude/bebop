@@ -20,8 +20,8 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # bebop-agent (jetson-agent/) — on-device provisioning daemon (Wi-Fi setup
-  # + SoftAP fallback + setup server). Runs the host-side check matrix
+  # bebop-agent (jetson-agent/) — on-device provisioning daemon (Wi-Fi client
+  # / Hosted Network hotspot + setup server). Runs the host-side check matrix
   # (fmt, clippy, test) on x86_64 Linux.
   # ---------------------------------------------------------------------------
   rust:
@@ -57,7 +57,8 @@ jobs:
         run: cargo test --workspace
 
   # Native arm64 release build for the Jetson. Pinned to `ubuntu-22.04-arm`
-  # (glibc 2.35) so the binary is compatible with JetPack 6 (Ubuntu 22.04).
+  # (glibc 2.35): the binary also runs on the robot's newer glibc (JetPack 7,
+  # Ubuntu 24.04).
   jetson:
     name: agent · jetson (arm64) release build
     runs-on: ubuntu-22.04-arm
@@ -91,19 +92,17 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # bebop-linux (firmware/bebop-linux/) — robot firmware: SocketCAN +
-  # ONNX Runtime control loop, and the protobuf-over-WS runtime API the
+  # bebop-linux (firmware/bebop-linux/) — robot firmware: the SocketCAN
+  # motor/wheel supervisor and the protobuf-over-WS runtime API the
   # operator app talks to. Same x86_64 host checks then a native arm64
   # release build for deployment to the Jetson.
   #
   # System deps:
-  #   * protobuf-compiler — bebop-proto (path dep) generates Rust code
-  #     from .proto via prost-build at compile time.
-  #   * pkg-config + cmake — sometimes needed by the `ort` crate's
-  #     build script even when the `download-binaries` feature is
-  #     enabled (and is, by default).
-  # SocketCAN is pure-Rust (talks to the Linux kernel via libc) so no
-  # apt package is needed.
+  #   * protobuf-compiler — bebop-proto (path dep) and the firmware's own
+  #     system-log protos are compiled via prost-build at build time.
+  # SocketCAN is pure-Rust (talks to the Linux kernel via libc) and the
+  # MCAP writer's zstd is vendored C built with the runner's compiler, so
+  # no other apt package is needed.
   # ---------------------------------------------------------------------------
   firmware-rust:
     name: firmware · host checks (fmt, clippy, test)
@@ -114,10 +113,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system deps (protoc, cmake)
+      - name: Install system deps (protoc)
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config protobuf-compiler cmake
+          sudo apt-get install -y protobuf-compiler
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -147,10 +146,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system deps (protoc, cmake)
+      - name: Install system deps (protoc)
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config protobuf-compiler cmake
+          sudo apt-get install -y protobuf-compiler
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -163,10 +162,10 @@ jobs:
       - name: Build bebop-linux (release)
         run: cargo build --release
 
-      # Pack the binary together with the configs, the ONNX policy (graph +
-      # external-data weights), and the systemd unit into a single tarball.
-      # This is what the Jetson installer consumes — one download, one
-      # untar, everything matches the same git SHA.
+      # Pack the binary together with the robot configs and the systemd
+      # unit into a single tarball. This is what the Jetson installer
+      # consumes — one download, one untar, everything matches the same
+      # git SHA.
       - name: Stage firmware bundle
         working-directory: firmware/bebop-linux
         run: |
@@ -174,24 +173,12 @@ jobs:
           rm -rf bundle
           install -d bundle/bin bundle/config bundle/systemd
           install -m 0755 target/release/bebop-linux       bundle/bin/bebop-linux
-          # Ship every robot config variant (bebop_v2.yaml humanoid,
-          # bebop_wheeled.yaml differential-drive chassis, ...). The
-          # Jetson installer picks the one to activate via
-          # `--config-yaml` (default bebop_v2.yaml).
+          # Ship every robot config variant (bebop_wheeled.yaml, the
+          # differential-drive chassis, ...). The Jetson installer picks
+          # the one to activate via `--config-yaml` (default
+          # bebop_wheeled.yaml).
           for f in config/*.yaml; do
             install -m 0644 "${f}" "bundle/config/$(basename "${f}")"
-          done
-          install -m 0644 config/policy.onnx               bundle/config/policy.onnx
-          install -m 0644 config/policy.onnx.data          bundle/config/policy.onnx.data
-          # Optional navigable-path model for the nav runner
-          # (firmware/bebop-linux/src/nav.rs). Staged only when present
-          # in the checkout — the firmware soft-fails without it
-          # (NavState.present = false), so a bundle missing these files
-          # just means no nav telemetry / overlay.
-          for f in navseg.onnx navseg.onnx.data; do
-            if [[ -f "config/${f}" ]]; then
-              install -m 0644 "config/${f}" "bundle/config/${f}"
-            fi
           done
           install -m 0644 deploy/systemd/bebop-linux.service \
                                                            bundle/systemd/bebop-linux.service

@@ -4,11 +4,12 @@
 //! Supports both standard (11-bit) and extended (29-bit) CAN frames.
 
 use crate::config::RobstrideSpecs;
+use crate::odrive;
 use anyhow::{Context, Result};
 use socketcan::{CanFrame, CanSocket, EmbeddedFrame, ExtendedId, Socket, StandardId};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 /// CAN bus interface wrapper
 pub struct CanInterface {
@@ -130,20 +131,6 @@ impl CanInterface {
         }
     }
 
-    /// Receive with timeout
-    pub fn receive_timeout(&self, timeout: Duration) -> Result<Option<ReceivedFrame>> {
-        let start = std::time::Instant::now();
-
-        while start.elapsed() < timeout {
-            if let Some(frame) = self.try_receive()? {
-                return Ok(Some(frame));
-            }
-            std::thread::sleep(Duration::from_micros(100));
-        }
-
-        Ok(None)
-    }
-
     /// Drain all pending frames from receive buffer
     pub fn drain(&self) -> Vec<ReceivedFrame> {
         let mut frames = Vec::new();
@@ -151,11 +138,6 @@ impl CanInterface {
             frames.push(frame);
         }
         frames
-    }
-
-    /// Get interface name
-    pub fn interface_name(&self) -> &str {
-        &self.interface_name
     }
 }
 
@@ -250,7 +232,7 @@ impl ReceivedFrame {
         let cmd_id = (self.id & 0x1F) as u8;
 
         // Only parse encoder estimate frames (cmd_id = 0x09)
-        if cmd_id != 0x09 {
+        if cmd_id != odrive::cmd::GET_ENCODER_ESTIMATES {
             return None;
         }
 
@@ -281,7 +263,7 @@ impl ReceivedFrame {
         let cmd_id = (self.id & 0x1F) as u8;
 
         // Only parse heartbeat frames (cmd_id = 0x01)
-        if cmd_id != 0x01 {
+        if cmd_id != odrive::cmd::HEARTBEAT {
             return None;
         }
 
@@ -289,14 +271,12 @@ impl ReceivedFrame {
             u32::from_le_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]);
         let axis_state = self.data[4];
         let procedure_result = self.data[5];
-        let trajectory_done = (self.data[6] & 0x01) != 0;
 
         Some(ODriveHeartbeat {
             node_id,
             axis_error,
             axis_state,
             procedure_result,
-            trajectory_done,
         })
     }
 }
@@ -364,62 +344,10 @@ pub struct ODriveHeartbeat {
     pub node_id: u8,
     pub axis_error: u32,
     pub axis_state: u8,
+    /// Result code of the last axis procedure (e.g. the
+    /// `FULL_CALIBRATION_SEQUENCE` that `CalibrateWheel` starts). Decoded
+    /// but not surfaced yet.
     pub procedure_result: u8,
-    pub trajectory_done: bool,
-}
-
-/// Multi-bus CAN manager
-pub struct CanBusManager {
-    buses: Vec<CanInterface>,
-}
-
-impl CanBusManager {
-    /// Create a new manager with multiple CAN interfaces
-    pub fn new(interfaces: &[&str]) -> Result<Self> {
-        let mut buses = Vec::new();
-
-        for interface in interfaces {
-            match CanInterface::open(interface) {
-                Ok(bus) => {
-                    buses.push(bus);
-                    debug!("Opened CAN interface: {}", interface);
-                }
-                Err(e) => {
-                    warn!("Failed to open CAN interface {}: {}", interface, e);
-                }
-            }
-        }
-
-        if buses.is_empty() {
-            return Err(anyhow::anyhow!("No CAN interfaces available"));
-        }
-
-        Ok(Self { buses })
-    }
-
-    /// Get bus by index
-    pub fn get_bus(&self, index: usize) -> Option<&CanInterface> {
-        self.buses.get(index)
-    }
-
-    /// Get bus by name
-    pub fn get_bus_by_name(&self, name: &str) -> Option<&CanInterface> {
-        self.buses.iter().find(|b| b.interface_name() == name)
-    }
-
-    /// Number of active buses
-    pub fn bus_count(&self) -> usize {
-        self.buses.len()
-    }
-
-    /// Drain all buses
-    pub fn drain_all(&self) -> Vec<ReceivedFrame> {
-        let mut frames = Vec::new();
-        for bus in &self.buses {
-            frames.extend(bus.drain());
-        }
-        frames
-    }
 }
 
 #[cfg(test)]
@@ -595,8 +523,7 @@ mod tests {
         let mut data = vec![0u8; 8];
         data[0..4].copy_from_slice(&axis_error.to_le_bytes());
         data[4] = 8; // CLOSED_LOOP_CONTROL
-        data[5] = 0; // procedure result
-        data[6] = 1; // trajectory done flag
+        data[5] = 2; // procedure result
 
         let hb = odrive_frame(0x01, 5, data)
             .parse_odrive_heartbeat()
@@ -604,6 +531,6 @@ mod tests {
         assert_eq!(hb.node_id, 5);
         assert_eq!(hb.axis_error, 1 << 31);
         assert_eq!(hb.axis_state, 8);
-        assert!(hb.trajectory_done);
+        assert_eq!(hb.procedure_result, 2);
     }
 }

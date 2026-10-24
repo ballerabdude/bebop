@@ -63,7 +63,6 @@ pub enum BreachReason {
         can_interface: String,
         message: String,
     },
-    ProcessExit,
 }
 
 impl BreachReason {
@@ -113,7 +112,6 @@ impl BreachReason {
                 can_interface,
                 message,
             } => format!("CAN bus {can_interface}: {message}"),
-            BreachReason::ProcessExit => "process exit".to_string(),
         }
     }
 }
@@ -138,7 +136,7 @@ pub struct MotorRuntimeState {
     /// motor. `None` until the first frame arrives.
     pub last_rx: Option<Instant>,
     /// True when this motor was electrically enabled solely for passive
-    /// WS telemetry (mirror mode) while `armed == false`.
+    /// WS telemetry (the telemetry probe) while `armed == false`.
     pub telemetry_probe_active: bool,
 }
 
@@ -273,7 +271,6 @@ impl WheelRuntimeState {
             armed: self.armed,
             feedback_stale: self.feedback_stale(now),
             position_received: self.last_rx.is_some(),
-            has_error: self.wheel.state.has_error,
             error_code: self.wheel.state.error_code,
             position: self.wheel.state.position,
             velocity: self.wheel.state.velocity,
@@ -297,7 +294,6 @@ pub struct WheelSnapshot {
     pub armed: bool,
     pub feedback_stale: bool,
     pub position_received: bool,
-    pub has_error: bool,
     pub error_code: u32,
     pub position: f32,
     pub velocity: f32,

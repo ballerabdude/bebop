@@ -1,8 +1,10 @@
-//! Bebop V2 Linux runtime.
+//! Bebop Linux runtime.
 //!
-//! Multi-mode server: starts in [`mode::Mode::Idle`], accepts mode
-//! transitions / motor commands / telemetry subscriptions over a
-//! protobuf-over-WebSocket API exposed by [`server`].
+//! Starts in [`mode::Mode::Idle`] and accepts mode transitions (Idle /
+//! DialIn), drive twists, motor commands and telemetry subscriptions over
+//! a protobuf-over-WebSocket API exposed by [`server`]. The wheeled robot
+//! drives its ODrive wheels and polls the PowerBoard; the Robstride joint
+//! path is kept for the arms.
 //!
 //! Every motor TX flows through [`safety::Supervisor`], which clamps to
 //! per-joint hard limits, runs a feedback watchdog, and latches an E-STOP
@@ -16,10 +18,6 @@ use bebop_linux::imu;
 use bebop_linux::imu_serial;
 use bebop_linux::mode::Mode;
 use bebop_linux::model;
-use bebop_linux::policy_capture;
-use bebop_linux::policy_control;
-use bebop_linux::policy_io;
-use bebop_linux::policy_runner::PolicyRunner;
 use bebop_linux::realtime;
 use bebop_linux::safety::power_monitor::spawn_power_monitor;
 use bebop_linux::safety::supervisor::spawn_rx_threads;
@@ -30,7 +28,7 @@ use bebop_linux::vision;
 use bebop_linux::voice;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::signal;
 use tracing::{error, info, warn};
@@ -39,17 +37,14 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 #[derive(Debug, Clone)]
 struct Args {
     config: PathBuf,
-    /// Path to the trained policy ONNX. If `None`, defaults to
-    /// `<config_dir>/policy.onnx` (sibling of the joint YAML).
-    policy: Option<PathBuf>,
-    /// Directory to write MCAP captures into: operator-toggled
-    /// observation/action captures (`policy_capture_*.mcap`, see
-    /// `crate::policy_capture`) plus the always-on power/host system log
-    /// (`system_*.mcap`, see `crate::system_capture`). `~/` is expanded;
-    /// defaults to `~/bebop-captures`.
+    /// Directory to write MCAP captures into: the always-on power/host
+    /// system log (`system_*.mcap`, see `crate::system_capture`). The
+    /// bebop-vision recorder's `navd_session_*.mcap` share it, and
+    /// `GET /captures` lists both. `~/` is expanded; defaults to
+    /// `~/bebop-captures`.
     capture_dir: Option<PathBuf>,
     /// Executable that converts an MCAP capture into a Rerun `.rrd`
-    /// (`GET /captures/rerun/<name>`). Set up by `scripts/setup-rerun.sh`.
+    /// (`GET /captures/rrd/<stem>.rrd`). Set up by `scripts/setup-rerun.sh`.
     /// The endpoint returns 503 if the path is missing.
     rerun_converter: PathBuf,
 }
@@ -57,8 +52,7 @@ struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
-            config: PathBuf::from("config/bebop_v2.yaml"),
-            policy: None,
+            config: PathBuf::from("config/bebop_wheeled.yaml"),
             capture_dir: None,
             rerun_converter: PathBuf::from("/usr/local/bin/bebop-mcap-to-rrd"),
         }
@@ -77,12 +71,6 @@ fn parse_args() -> Args {
                     i += 1;
                 }
             }
-            "--policy" | "-p" => {
-                if i + 1 < cli.len() {
-                    args.policy = Some(PathBuf::from(&cli[i + 1]));
-                    i += 1;
-                }
-            }
             "--capture-dir" => {
                 if i + 1 < cli.len() {
                     args.capture_dir = Some(PathBuf::from(&cli[i + 1]));
@@ -97,18 +85,16 @@ fn parse_args() -> Args {
             }
             "--help" | "-h" => {
                 println!(
-                    "bebop-linux v2 runtime\n\
+                    "bebop-linux runtime\n\
                      \n\
                      USAGE:\n    bebop-linux [OPTIONS]\n\
                      \n\
                      OPTIONS:\n  \
-                       -c, --config <PATH>      Joint config YAML \
-                                                 [default: config/bebop_v2.yaml]\n  \
-                        -p, --policy <PATH>      Trained policy ONNX \
-                                                  [default: <config_dir>/policy.onnx]\n  \
-                           --capture-dir <DIR>  Where to write MCAP captures (policy + always-on system log) \
+                       -c, --config <PATH>      Robot config YAML \
+                                                 [default: config/bebop_wheeled.yaml]\n  \
+                           --capture-dir <DIR>  Where to write the always-on system log MCAPs \
                                                  [default: ~/bebop-captures]\n  \
-                           --rerun-converter <PATH>  MCAP -> Rerun .rrd converter for GET /captures/rerun \
+                           --rerun-converter <PATH>  MCAP -> Rerun .rrd converter for GET /captures/rrd \
                                                  [default: /usr/local/bin/bebop-mcap-to-rrd]\n  \
                        -h, --help               Print help\n"
                 );
@@ -124,29 +110,10 @@ fn parse_args() -> Args {
     args
 }
 
-/// Resolve the policy ONNX path. The CLI override wins; otherwise we pick
-/// `<config_dir>/policy.onnx` so the operator can ship the policy as a
-/// drop-in next to `bebop_v2.yaml`.
-fn resolve_policy_path(args: &Args) -> PathBuf {
-    resolve_sibling(args, args.policy.as_ref(), "policy.onnx")
-}
-
-fn resolve_sibling(args: &Args, override_path: Option<&PathBuf>, file: &str) -> PathBuf {
-    if let Some(p) = override_path {
-        return p.clone();
-    }
-    let cfg_dir = args
-        .config
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    cfg_dir.join(file)
-}
-
 /// Resolve the operator capture directory. The CLI override wins (with
 /// `~` expanded); otherwise we default to `~/bebop-captures` so the
 /// files land in the operator's home dir without root permissions.
-/// Falls back to `./bebop-captures` if `$HOME` is unset (CI / containers).
+/// If `$HOME` is unset the `~` is left unexpanded.
 fn resolve_capture_dir(args: &Args) -> PathBuf {
     let raw = args
         .capture_dir
@@ -174,8 +141,8 @@ async fn main() -> Result<()> {
     init_tracing();
 
     info!("╔════════════════════════════════════════╗");
-    info!("║    Bebop V2 Linux Runtime              ║");
-    info!("║    SocketCAN + WS API + ONNX           ║");
+    info!("║    Bebop Linux Runtime                 ║");
+    info!("║    SocketCAN + WebSocket API           ║");
     info!("╚════════════════════════════════════════╝");
 
     let args = parse_args();
@@ -186,13 +153,16 @@ async fn main() -> Result<()> {
     );
     info!(
         joints = cfg.num_joints(),
+        wheels = cfg.num_wheels(),
         buses = cfg.can_interfaces.len(),
         bind = %cfg.server.bind_addr,
         "config loaded"
     );
 
-    // Open every CAN bus. Pre-flight check refuses ERROR-PASSIVE / BUS-OFF.
-    let bus_pool = Arc::new(BusPool::open(&cfg.can_interfaces).context("open CAN buses")?);
+    // Open every CAN bus. A bus that is missing or not ERROR-ACTIVE is
+    // logged, not fatal: the supervisor refuses to arm anything on it, and
+    // `BusPool::refresh_if_due` picks it up once it appears.
+    let bus_pool = Arc::new(BusPool::open(&cfg.can_interfaces));
 
     // Build the supervisor. Stays in scope for the lifetime of `main` so its
     // `Drop` disables every motor before we leave.
@@ -205,8 +175,8 @@ async fn main() -> Result<()> {
     // systemd). The background poller also feeds `VisionState` telemetry.
     let vision_shared = vision::spawn_vision_supervisor(shutdown_flag.clone());
 
-    // Gated model-weight provisioning: store the operator's Hugging Face
-    // token and drive the SAM 3.1 download unit. Feeds `ModelState`.
+    // Model-weight provisioning: store the operator's Hugging Face token and
+    // drive the per-model download units. Feeds `ModelState`.
     let model_shared = model::spawn_model_supervisor(shutdown_flag.clone());
 
     // Operator control of the Python voice (speech-to-speech) service
@@ -214,24 +184,15 @@ async fn main() -> Result<()> {
     // telemetry. Audio itself is served by the unit on :9093, not here.
     let voice_shared = voice::spawn_voice_supervisor(shutdown_flag.clone());
 
-    // Shared latest IMU reading (always present; the I²C reader fills it
+    // Shared latest IMU reading (always present; the IMU reader fills it
     // when an `imu:` block exists in the YAML, otherwise stays at default
     // and the telemetry builder reports `present = false` so the
     // operator UI hides the orientation card).
     let imu_shared = imu::new_shared();
     let imu_present = cfg.imu.is_some();
-    let policy_io_shared = policy_io::new_shared();
-    // Operator-toggled policy control (dry-run + MCAP capture). Owned
-    // once here; cloned into the WS server (writer) and the policy
-    // runner (reader / file-state owner).
-    let policy_control_shared = policy_control::new_shared();
-    // Pick the IMU backend: read the BNO directly over the Jetson's SPI
-    // bus, or consume pre-fused frames from the Teensy `teensy_bridge` over
-    // USB serial. Both fill `imu_shared` with the same body-frame snapshot.
+    // Start the IMU backend: the Teensy `teensy_bridge` streams pre-fused
+    // BNO085 frames over USB serial into `imu_shared` (body frame).
     let imu_handle = cfg.imu.as_ref().and_then(|imu_cfg| match imu_cfg.source {
-        ImuSource::Spi => {
-            imu::spawn_imu_thread(imu_cfg.clone(), shutdown_flag.clone(), imu_shared.clone())
-        }
         ImuSource::Serial => imu_serial::spawn_imu_serial_thread(
             imu_cfg.clone(),
             shutdown_flag.clone(),
@@ -247,38 +208,16 @@ async fn main() -> Result<()> {
         .power_monitor()
         .and_then(|monitor| spawn_power_monitor(monitor, bus_pool.clone(), shutdown_flag.clone()));
 
-    // Try to load the trained policy. Soft-fail: if the file is missing
-    // or doesn't match the expected I/O contract, log a warning and
-    // continue — DialIn / Idle still work without a policy on disk.
-    //
-    // The runner takes a clone of `imu_shared` so it can read the
-    // latest body-frame quaternion + calibrated gyro on every tick.
-    // The IMU thread is the sole writer; the runner and the telemetry
-    // builder both clone independent reader handles.
-    let policy_path = resolve_policy_path(&args);
     let capture_dir = resolve_capture_dir(&args);
     info!(dir = %capture_dir.display(), "capture: output directory resolved");
 
-    // Spawn the off-the-hot-loop MCAP writer thread once at startup.
-    // It lives for the whole process; the runner submits samples via
-    // its `CaptureHandle` clone and the writer publishes capture status
-    // (`capture_active` / `capture_path` / `capture_rows` /
-    // `capture_dropped`) directly back into `policy_io_shared`.
-    //
     // Shared finalize/active-segment state: the HTTP layer uses it to flag
     // the currently-writing segment and to finalize it before a download.
     let capture_control = Arc::new(CaptureControl::new());
 
-    let (capture_handle, capture_join) = policy_capture::spawn_capture_thread(
-        capture_dir.clone(),
-        policy_io_shared.clone(),
-        capture_control.clone(),
-    );
-
-    // Always-on system logger: power-board + host utilization at 1 Hz,
-    // independent of the operator-toggled policy captures above. Runs for
-    // the whole process (idle, thermal soak, spin-up included) and stamps
-    // drive-state transitions on `/session` so a navd session can be
+    // Always-on system logger: power-board + host utilization at 1 Hz.
+    // Runs for the whole process (idle, thermal soak, spin-up included) and
+    // stamps drive-state transitions on `/session` so a navd session can be
     // correlated with the system timeline.
     let system_join = system_capture::spawn_system_capture(
         supervisor.clone(),
@@ -287,40 +226,9 @@ async fn main() -> Result<()> {
         capture_control.clone(),
     );
 
-    let policy_io_for_runner = policy_io_shared.clone();
-    let policy_control_for_runner = policy_control_shared.clone();
-    let policy_runner: Arc<Mutex<Option<PolicyRunner>>> = match PolicyRunner::new(
-        supervisor.clone(),
-        imu_shared.clone(),
-        policy_io_for_runner,
-        policy_control_for_runner,
-        capture_handle.clone(),
-        &policy_path,
-    ) {
-        Ok(pr) => {
-            if let Ok(mut g) = policy_io_shared.lock() {
-                g.set_present(true);
-            }
-            info!(model = %policy_path.display(), "policy loaded; RunPolicy mode is available");
-            Arc::new(Mutex::new(Some(pr)))
-        }
-        Err(e) => {
-            if let Ok(mut g) = policy_io_shared.lock() {
-                g.set_present(false);
-            }
-            warn!(
-                model = %policy_path.display(),
-                error = %e,
-                "policy not loaded; RunPolicy mode will be a no-op"
-            );
-            Arc::new(Mutex::new(None))
-        }
-    };
-
-    // Periodic supervisor tick: hold-cycle TX in DialIn mode, RunPolicy
-    // inference + TX in RunPolicy mode, watchdog every cycle.
+    // Periodic supervisor tick: watchdog every cycle, the drive twist for
+    // armed wheels, and hold-cycle TX for armed joints in DialIn mode.
     let sup_tick = supervisor.clone();
-    let pr_tick = policy_runner.clone();
     let shutdown_tick = shutdown_flag.clone();
 
     /// Control-loop period: 100 Hz. Also the per-cycle work budget — if
@@ -397,25 +305,10 @@ async fn main() -> Result<()> {
                 sup_tick.run_watchdog();
                 sup_tick.tick_telemetry_probe();
                 // Wheeled chassis: apply the operator twist + integrate
-                // odometry every tick (no-op on the legged humanoid, which
-                // has no `drive:` config).
+                // odometry every tick (no-op without a `drive:` config).
                 sup_tick.tick_drive();
                 if sup_tick.mode() == Mode::DialIn {
                     sup_tick.tick_dial_in_hold();
-                }
-                // Always pump the policy runner: it has internal mode +
-                // estop gates, runs inference only in RunPolicy, and on
-                // mode exit it resets the controller + publishes
-                // `active=false` to the shared `PolicyIoSnapshot`. Skipping
-                // the call in non-RunPolicy modes meant the snapshot stayed
-                // at `active=true` with the last observation/action
-                // forever, so the operator app's history sparklines kept
-                // appending duplicate "live" samples and the real history
-                // was overwritten in the ring buffer.
-                if let Ok(mut g) = pr_tick.lock() {
-                    if let Some(pr) = g.as_mut() {
-                        pr.tick();
-                    }
                 }
 
                 let work = wake.elapsed();
@@ -474,8 +367,6 @@ async fn main() -> Result<()> {
     // Run the WS server in its own task so we can also wait for ctrl-c.
     let server_sup = supervisor.clone();
     let server_imu = imu_shared.clone();
-    let server_policy_io = policy_io_shared.clone();
-    let server_policy_control = policy_control_shared.clone();
     let server_capture_dir = capture_dir.clone();
     let server_vision = vision_shared.clone();
     let server_model = model_shared.clone();
@@ -488,8 +379,6 @@ async fn main() -> Result<()> {
             sup: server_sup,
             imu: server_imu,
             imu_present,
-            policy_io: server_policy_io,
-            policy_control: server_policy_control,
             capture_dir: server_capture_dir,
             vision: server_vision,
             model: server_model,
@@ -506,8 +395,8 @@ async fn main() -> Result<()> {
 
     // Wait for a shutdown signal. systemd sends SIGTERM on stop/restart;
     // without a handler the default disposition terminates the process
-    // immediately, so the capture threads never run their shutdown path and
-    // the MCAPs are left without a footer (indexed viewers reject them).
+    // immediately, so the capture thread never runs its shutdown path and
+    // the MCAP is left without a footer (indexed viewers reject it).
     // Catch SIGTERM and take the same graceful path as ctrl-c so `finish()`
     // runs and the files stay readable.
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
@@ -542,15 +431,6 @@ async fn main() -> Result<()> {
     if let Some(h) = imu_handle {
         let _ = h.join();
     }
-
-    // Drain + finalize any open MCAP capture before we drop the
-    // supervisor. Doing this before the supervisor's `Drop` keeps the
-    // capture file from being closed *while* the disable-on-shutdown
-    // command frames are in flight — the last samples in the file are
-    // therefore the last meaningful policy ticks, not a noisy tail of
-    // "motors disabling".
-    capture_handle.shutdown();
-    let _ = capture_join.join();
 
     // Stop the always-on system logger last: it only reads the supervisor
     // and the host, so it can drain up to the shutdown instant.

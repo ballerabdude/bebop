@@ -4,7 +4,7 @@
 //! (battery / motor voltage, branch currents, board temperature, fault
 //! word, SOC) together with host utilization (CPU, GPU, RAM, thermals,
 //! load, capture-disk fill) to a rolling MCAP in the capture dir. It is
-//! independent of any drive/policy session and runs from boot until the
+//! independent of any drive session and runs from boot until the
 //! process exits, so idle periods, thermal soak, and power spin-up are
 //! captured too — the context a drive-session-only log would miss.
 //!
@@ -22,7 +22,7 @@
 //!
 //! All writers live in this thread; there is no high-rate producer, so no
 //! mpsc is needed. Files rotate daily / by size and are pruned
-//! oldest-first under a disk budget, mirroring `policy_capture`.
+//! oldest-first under a disk budget.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -386,10 +386,10 @@ fn sample_power(sup: &Arc<Supervisor>, wall_ns: u64) -> proto::Power {
 // --- Drive-state predicate -------------------------------------------------
 
 /// Whether the chassis is in a drivable, armed, non-estop state. Mirrors
-/// the recorder's gate: DIAL_IN / RUN_POLICY, no E-STOP, every wheel
-/// armed (an empty wheel set counts as armed — legged build).
+/// the recorder's gate: DIAL_IN, no E-STOP, every wheel armed (an empty
+/// wheel set counts as armed — a config without wheels).
 fn is_drive_active(mode: Mode, estop: bool, wheels_armed: &[bool]) -> bool {
-    matches!(mode, Mode::DialIn | Mode::RunPolicy) && !estop && wheels_armed.iter().all(|&a| a)
+    mode == Mode::DialIn && !estop && wheels_armed.iter().all(|&a| a)
 }
 
 fn drive_active(sup: &Arc<Supervisor>) -> bool {
@@ -813,11 +813,10 @@ mod tests {
     #[test]
     fn drive_active_predicate() {
         assert!(is_drive_active(Mode::DialIn, false, &[true, true]));
-        assert!(is_drive_active(Mode::RunPolicy, false, &[true]));
         assert!(!is_drive_active(Mode::DialIn, false, &[true, false]));
         assert!(!is_drive_active(Mode::Idle, false, &[true, true]));
         assert!(!is_drive_active(Mode::DialIn, true, &[true, true]));
-        // empty wheel set counts as armed (legged build), matching the
+        // empty wheel set counts as armed (no `wheels:`), matching the
         // Python recorder's `all({}.values())`.
         assert!(is_drive_active(Mode::DialIn, false, &[]));
     }

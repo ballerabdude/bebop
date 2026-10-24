@@ -1,14 +1,17 @@
-// Bebop runtime API — bidirectional protobuf-over-WebSocket between the
-// Tauri operator app and `bebop-linux` running on the robot.
+// Bebop runtime API — bidirectional protobuf-over-WebSocket between
+// `bebop-linux` on the robot and its clients: the operator app
+// (`bebop-app`) and bebop-vision's recorder and voice agent.
 //
-// This file is intentionally separate from `bebop.proto`: that one is the
-// BLE control surface (one-shot request/response, small messages, used for
-// setup/provisioning), while this one is a streaming bidirectional API
-// for live motor control + telemetry over a TCP/WS link.
+// This file is intentionally separate from `bebop.proto`: that one is
+// `bebop-agent`'s setup surface (one-shot request/response, small
+// messages, used for Wi-Fi provisioning), while this one is a streaming
+// bidirectional API for live motor/wheel control + telemetry.
 //
 // Codegen: `prost-build` picks this up via the glob in `build.rs`; the
-// Tauri app picks it up via `npm run gen-proto` which runs buf over the
-// containing directory.
+// app picks it up via `npm run gen-proto` which runs buf over the
+// containing directory. The checked-in Python bindings
+// (`bebop-vision/bebop_vision/proto/bebop/runtime/v1/`) come from protoc
+// run on a copy staged at `bebop/runtime/v1/` (the package path).
 
 syntax = "proto3";
 
@@ -33,9 +36,9 @@ message ClientRuntimeMessage {
     SetMode             set_mode               = 6;
     EmergencyStop       emergency_stop         = 7;
     ResetEStop          reset_estop            = 8;
-    // Position-limit dial-in: command a hold target for an armed motor in
-    // DIAL_IN mode. Used by the operator app's slider to discover the
-    // mechanical envelope before raising hard_limits in the YAML.
+    // Position-limit dial-in: command a hold target for an armed joint in
+    // DIAL_IN mode, to discover its mechanical envelope before raising
+    // hard_limits in the YAML.
     SetMotorTarget      set_motor_target       = 9;
     // Re-zero a single motor's mechanical origin to its current physical
     // position. Used after reassembly when the joint's reported position
@@ -43,37 +46,17 @@ message ClientRuntimeMessage {
     // ended up outside the safety envelope so the supervisor refuses to
     // arm). Persisted in the motor's flash; effective immediately.
     SetMechanicalZero   set_mechanical_zero    = 10;
-    // Toggle the policy "dry run" flag. When enabled, RUN_POLICY still
-    // builds observations, runs ONNX inference, publishes telemetry, and
-    // captures samples — but instead of applying the policy's PD command
-    // the supervisor sends a hold-gains keepalive each tick (same shape
-    // as DialIn's hold cycle). The robot freezes in its current posture
-    // and the Robstride feedback watchdog stays alive. Used for bench
-    // observation / noise capture without physically driving the
-    // actuators. The flag persists across mode transitions; clear it
-    // explicitly when you want the policy to drive motors again.
-    SetPolicyDryRun     set_policy_dry_run     = 11;
-    // Tag 12 was `SetPolicyCapture`, the operator-toggled MCAP capture
-    // request. Capture is now always-on while the runtime is in
-    // DIAL_IN or RUN_POLICY (the firmware auto-rotates the file on
-    // size and prunes oldest segments under a disk budget — see
-    // `firmware/bebop-linux/src/policy_capture.rs`), so the toggle no
-    // longer exists. Reserved so this tag isn't accidentally re-used
-    // by a different message with the same id.
-    //
-    // Batch variant of SetMechanicalZero for the guided zero-calibration
-    // flow in the operator app: the robot is placed in the reference pose
-    // (face-flat on the floor, both legs straight) with every joint
-    // disarmed, and one request re-zeroes all actuators. The firmware
-    // enforces the per-joint preconditions atomically *before* touching
-    // any motor (no E-STOP, every joint disarmed, every bus healthy), so
-    // a half-armed robot can't end up with a mixed set of origins.
-    // Robstride motors intermittently lose their stored origin across a
-    // power cycle, so this flow is part of normal pre-flight, not just
-    // reassembly.
+    // Batch variant of SetMechanicalZero for a guided zero-calibration
+    // flow: every joint is placed in its reference pose and disarmed, and
+    // one request re-zeroes all actuators. The firmware enforces the
+    // per-joint preconditions atomically *before* touching any motor (no
+    // E-STOP, every joint disarmed, every bus healthy), so a half-armed
+    // robot can't end up with a mixed set of origins. Robstride motors
+    // intermittently lose their stored origin across a power cycle, so
+    // this flow is part of normal pre-flight, not just reassembly.
     SetMechanicalZeroAll set_mechanical_zero_all = 13;
-    // Wheeled differential-drive chassis commands (no-op on the humanoid,
-    // which has no `wheels:`/`drive:` in its YAML).
+    // Wheeled differential-drive chassis commands (they need the
+    // `wheels:`/`drive:` blocks in the robot YAML).
     //
     // Drive a twist (body-frame forward + yaw rate) into the wheel axes;
     // the firmware clamps, slew-limits, and converts to per-wheel velocity.
@@ -115,10 +98,6 @@ message ClientRuntimeMessage {
     // telemetry. Rejected when the id is unknown, the entry isn't
     // downloadable (kind != "hf"), or the download unit isn't installed.
     DownloadModel        download_model        = 26;
-    // Select which catalog model serves a purpose (e.g. "segmentation",
-    // "navigation"). Persisted on the robot so the runtime knows what to
-    // load. An empty `model_id` clears the purpose's selection.
-    SetModelPurpose      set_model_purpose     = 27;
     // Start/stop the on-robot voice (speech-to-speech) service
     // (`bebop-voice.service`) via systemd, mirroring `SetVisionEnabled`.
     // The firmware (root) drives the unit; the running state rides back in
@@ -141,14 +120,22 @@ message ClientRuntimeMessage {
     // 32 characters by the firmware; empty clears it.
     ClientHello          client_hello          = 30;
   }
-  reserved 12;
-  reserved "set_policy_capture";
+  // 11 = `set_policy_dry_run`, 12 = `set_policy_capture`: the legged ONNX
+  // policy's dry-run and MCAP-capture toggles. 12 went when that capture
+  // became always-on; 11 was removed with the policy runner 2026-10-24.
+  // Never reuse.
+  reserved 11, 12;
+  reserved "set_policy_dry_run", "set_policy_capture";
   // 19-22 were the retired OBSBOT gimbal (`set_camera_pose`), the legacy
   // navseg mask push (`subscribe_nav` / `unsubscribe_nav`) and the navd
   // goal slot (`set_navigation_goal`). Removed 2026-10-23; never reuse.
   reserved 19, 20, 21, 22;
   reserved "set_camera_pose", "subscribe_nav", "unsubscribe_nav",
            "set_navigation_goal";
+  // 27 = `set_model_purpose`: a per-purpose model choice the firmware
+  // persisted but no runtime ever read. Removed 2026-10-24; never reuse.
+  reserved 27;
+  reserved "set_model_purpose";
 }
 
 // Connection identity. See `ClientRuntimeMessage.client_hello`.
@@ -175,8 +162,11 @@ message ServerRuntimeMessage {
     TelemetryFrame      telemetry       = 4;  // ~30 Hz when subscribed
     ModeChanged         mode_changed    = 5;
     EStopLatched        estop_latched   = 6;
-    BusStatusUpdate     bus_status      = 7;
   }
+  // 7 = `bus_status`: a bus-health push the firmware never sent (bus health
+  // rides `TelemetryFrame.buses`). Removed 2026-10-24; never reuse.
+  reserved 7;
+  reserved "bus_status";
   // 8 = `nav_mask` (legacy navseg push), 9 = `nav_goal` (navd goal slot):
   // both removed 2026-10-23; never reuse.
   reserved 8, 9;
@@ -189,15 +179,17 @@ message ServerRuntimeMessage {
 
 enum Mode {
   MODE_UNSPECIFIED  = 0;
-  // Motors disabled. Telemetry still streams (so the operator can see
-  // current pose). Mode at boot.
+  // Nothing can be armed. Telemetry still streams (so the operator can see
+  // the robot's state). Mode at boot.
   MODE_IDLE         = 1;
-  // Per-motor enable/disable, hold-gain TX cycle, slew limit + watchdog
-  // enforced. Used during dial-in / bring-up.
+  // The armed mode: wheels and joints may be armed. Armed wheels track the
+  // operator twist, armed joints get the slew-limited hold-gain cycle, and
+  // the watchdog is enforced. Leaving it for IDLE disarms everything.
   MODE_DIAL_IN      = 2;
-  // Existing ONNX policy loop drives commands. Disarms all motors when
-  // leaving this mode.
-  MODE_RUN_POLICY   = 3;
+  // 3 = `MODE_RUN_POLICY`, the legged ONNX policy loop: removed 2026-10-24.
+  // Reserved rather than renumbered: recorded MCAPs plot the raw value.
+  reserved 3;
+  reserved "MODE_RUN_POLICY";
 }
 
 // ---------------------------------------------------------------------------
@@ -224,8 +216,8 @@ message MotorState {
   float  temperature_c     = 13;
 
   // True once at least one feedback frame (0x02 or 0x18) has been parsed
-  // for this joint. Mirror consumers should gate on this the same way they
-  // gate IMU orientation on ``ImuStats.received``.
+  // for this joint. Consumers should gate on this the same way they gate
+  // IMU orientation on ``ImuStats.received``.
   bool   position_received = 15;
 
   // Most recent commanded position target, post-clamp and post-slew. In
@@ -280,8 +272,7 @@ message WheelState {
 }
 
 // Differential-drive summary: the operator twist actually in effect plus the
-// wheel-encoder odometry pose. `present` is false on the humanoid (no
-// `drive:` block).
+// wheel-encoder odometry pose. `present` is false without a `drive:` block.
 message DriveState {
   bool  present = 1;
 
@@ -436,27 +427,26 @@ message TelemetryFrame {
   // decode the frame (default is `present=false`).
   PowerStats power      = 12;
   // Latest IMU rotation-vector reading. `imu.present = false` on robots
-  // built without the optional BNO080/BNO085. Optional so old clients
-  // can still decode the frame.
+  // configured without an `imu:` block. Optional so old clients can still
+  // decode the frame.
   ImuStats imu          = 13;
-  // Latest policy observation/action I/O from the 100 Hz ONNX loop.
-  // `policy_io.present = false` when no policy was loaded at boot.
-  // Optional so old clients can still decode the frame.
-  PolicyIoStats policy_io = 14;
-  // ODrive wheel state (empty on the humanoid).
+  // 14 = `policy_io` (the legged ONNX policy's observation/action I/O):
+  // removed 2026-10-24; never reuse.
+  reserved 14;
+  reserved "policy_io";
+  // ODrive wheel state (empty without a `wheels:` block).
   repeated WheelState wheels = 15;
   // Differential-drive summary; `present=false` without a `drive:` block.
   DriveState drive = 16;
   // 17 = `camera` (OBSBOT gimbal), 18 = `nav` (navseg summary): retired
-  // (plan §9) and removed 2026-10-23; never reuse.
+  // 2026-09-06 and removed 2026-10-23; never reuse.
   reserved 17, 18;
   reserved "camera", "nav";
-  // State of the bebop-vision service (`bebop-vision.service`). Present on
-  // both the humanoid and wheeled builds — it's a process-level service,
-  // not a motor feature.
+  // State of the bebop-vision service (`bebop-vision.service`). Always
+  // sent — it's a process-level service, not a motor feature.
   VisionState vision = 19;
-  // Gated model-weight provisioning state (Hugging Face token + SAM 3.1
-  // download). `model.present = false` when the download unit isn't
+  // Model-weight provisioning state (Hugging Face token + catalog
+  // downloads). `model.present = false` when the download unit isn't
   // installed; the UI hides the provisioning card in that case.
   ModelState model = 20;
   // On-robot voice (speech-to-speech) service state. `voice.present = false`
@@ -474,19 +464,14 @@ message Snapshot {
   repeated BusEntry   buses  = 11;
   PowerStats power      = 12;
   ImuStats imu          = 13;
-  PolicyIoStats policy_io = 14;
   repeated WheelState wheels = 15;
   DriveState drive = 16;
-  // See TelemetryFrame: 17/18 removed.
-  reserved 17, 18;
-  reserved "camera", "nav";
+  // See TelemetryFrame: 14, 17 and 18 removed.
+  reserved 14, 17, 18;
+  reserved "policy_io", "camera", "nav";
   VisionState vision = 19;
   ModelState model = 20;
   VoiceState voice = 21;
-}
-
-message BusStatusUpdate {
-  repeated BusEntry buses = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -597,13 +582,6 @@ message SetMechanicalZero {
 // untrustworthy).
 message SetMechanicalZeroAll {}
 
-// Toggle the policy dry-run flag. See `ClientRuntimeMessage.set_policy_dry_run`
-// for semantics. The firmware acks the request immediately; the new value
-// is honored on the next 100 Hz `PolicyRunner` tick.
-message SetPolicyDryRun {
-  bool enabled = 1;
-}
-
 // Start/stop the bebop-vision service. See
 // `ClientRuntimeMessage.set_vision_enabled` for semantics. The firmware
 // forwards the request to systemd and acks immediately; the resulting
@@ -632,15 +610,6 @@ message DownloadModel {
   string model_id = 1;
 }
 
-// Select the active model for a purpose. The firmware persists the mapping
-// (used by the runtime to decide what to load) and echoes the full
-// selection in `ModelState.selection`. `model_id` must name a catalog entry
-// whose `purpose` matches; empty clears the selection.
-message SetModelPurpose {
-  string purpose  = 1;
-  string model_id = 2;
-}
-
 // ---------------------------------------------------------------------------
 // Server responses / async events
 // ---------------------------------------------------------------------------
@@ -663,21 +632,21 @@ message EStopLatched {
 }
 
 // ---------------------------------------------------------------------------
-// IMU telemetry (BNO080/BNO085 rotation vector)
+// IMU telemetry (BNO085 rotation vector)
 // ---------------------------------------------------------------------------
 
-// Latest fused orientation reading from the optional BNO080/BNO085 IMU.
-// `present = false` when the firmware was built/configured without an
-// `imu:` block in the YAML (the UI should hide the orientation card in
-// that case). `received = false` after first boot until the sensor
-// produces a usable quaternion. Quaternion convention matches
-// `bno080::wrapper::BNO080::rotation_quaternion`: `[qx, qy, qz, qw]`
-// with `qw` last (Hamilton, XYZW order); identity is `(0, 0, 0, 1)`.
+// Latest fused orientation reading from the BNO085 IMU, which the Teensy
+// bridge streams over USB serial. `present = false` when the firmware is
+// configured without an `imu:` block in the YAML (the UI should hide the
+// orientation card in that case). `received = false` after boot until
+// the sensor produces a usable quaternion. Quaternion convention:
+// `[qx, qy, qz, qw]` with `qw` last (Hamilton, XYZW order); identity is
+// `(0, 0, 0, 1)`.
 //
-// Lives at the bottom of the file (rather than next to `PowerStats`)
-// so adding it doesn't shift the descriptor indices of every following
-// message, which would force a churn-y diff in the buf-es generated
-// TypeScript bindings.
+// Declared after the request/response messages (rather than next to
+// `PowerStats`) because new messages are appended: inserting one mid-file
+// shifts the descriptor indices of every following message, which forces
+// a churn-y diff in the buf-es generated TypeScript bindings.
 message ImuStats {
   // True iff `imu:` is configured in the firmware YAML.
   bool   present                = 1;
@@ -693,11 +662,10 @@ message ImuStats {
   // Body-frame orientation as a unit quaternion (Hamilton, XYZW).
   //
   // Frame contract: the firmware applies any `imu.mount:` rotation
-  // declared in the joint YAML *before* publishing, so this is already
-  // in body frame (REP-103 / FLU: +x forward, +y left, +z up). UIs and
-  // the future PolicyRunner IMU feed can render / consume it as a
-  // calibrated body-frame attitude with no further rotation. Matches
-  // `bebop_linux::observation::ImuState::quaternion`.
+  // declared in the robot YAML *before* publishing, so this is already
+  // in body frame (REP-103 / FLU: +x forward, +y left, +z up). UIs can
+  // render / consume it as a calibrated body-frame attitude with no
+  // further rotation.
   //
   // Normalization contract: while `received = true`, the producer
   // guarantees |q| = 1 within float precision. Before the first frame
@@ -708,98 +676,11 @@ message ImuStats {
   float  quaternion_y           = 21;
   float  quaternion_z           = 22;
   float  quaternion_w           = 23;
-  // BNO08x-reported heading-accuracy estimate (radians, 1σ). 0 until
-  // the sensor has converged.
-  float  heading_accuracy_rad   = 24;
-}
-
-// ---------------------------------------------------------------------------
-// Policy I/O telemetry (ONNX observation + action vectors)
-// ---------------------------------------------------------------------------
-
-// Latest observation/action snapshot from [`PolicyRunner`]. Published at
-// the telemetry rate (~30 Hz) but sourced from the 100 Hz inference loop
-// (always the most recent tick). `present = false` when the firmware
-// failed to load `policy.onnx` at boot; `active = false` outside
-// `MODE_RUN_POLICY` or while E-STOP is latched.
-//
-// Vector layouts mirror `bebop_linux::observation::ObservationBuilder` and
-// the rate-limited `policy I/O` log line:
-//
-//   observation[ 0.. 3)  base_ang_vel
-//   observation[ 3.. 6)  projected_gravity
-//   observation[ 6..14)  joint_pos_rel
-//   observation[14..22)  joint_vel
-//   observation[22..46)  last_action (24-dim raw NN output)
-//   observation[46..49)  cmd_vel (vx, vy, wz)
-//
-// (No base_lin_vel channel — the robot cannot observe its base linear
-//  velocity, so it was dropped from the observation and training.)
-//
-//   raw_action[ 0.. 8)  position commands (pre-decode, [-1, 1])
-//   raw_action[ 8..16)  kp commands
-//   raw_action[16..24)  kd commands
-//
-// Joint-ordered slices use the policy slot order documented in
-// `bebop_linux::observation::JOINT_NAMES`.
-message PolicyIoStats {
-  // True iff `policy.onnx` loaded successfully at boot.
-  bool   present                = 1;
-  // True while the 100 Hz loop is actively inferring (RunPolicy + !E-STOP).
-  bool   active                 = 2;
-  // Whether the observation builder is consuming live BNO085 readings
-  // (`true`) or the synthetic upright fallback (`false`). Driven by the
-  // rotation-vector freshness clock; if this is true the gyro / `base_ang_vel`
-  // channel is treated as live too.
-  bool   imu_live               = 3;
-  // Tag 4 was the historical `gyro_live` flag that surfaced a separate
-  // freshness clock for the BNO085 calibrated-gyro (0x02) subscription.
-  // Removed once the SPI / Teensy bridge bring-up was stable enough that
-  // a fresh rotation vector implies a fresh gyro in every observed
-  // failure mode; reserved so we don't accidentally re-use the field.
-  reserved 4;
-  reserved "gyro_live";
-  // True when the operator has enabled policy "dry run" (`SetPolicyDryRun`).
-  // In this state RUN_POLICY still infers, publishes telemetry, and writes
-  // capture rows, but the per-tick `safe_send_ctrl` motor command is
-  // skipped — armed motors receive no PD command from the policy.
-  bool   dry_run                = 5;
-  // True while an MCAP capture file is currently open and being
-  // appended to on the robot. Capture is always-on whenever the
-  // runtime is in DIAL_IN or RUN_POLICY (and not E-STOPped); this
-  // flag will flip to `false` in IDLE / under E-STOP. The writer
-  // auto-rotates the file on size, so this stays `true` across
-  // rotations — only `capture_path` / `capture_rows` change.
-  bool   capture_active         = 6;
-  // Absolute filesystem path of the currently-open capture segment on
-  // the robot, or empty when no capture is open. Changes whenever the
-  // writer rotates to a new segment. Files are available via the
-  // runtime HTTP server at `/captures` (list) and `/captures/dl/<name>`
-  // (download). `.mcap` extension.
-  string capture_path           = 7;
-  // Number of samples appended to the *current* capture segment.
-  // Resets to 0 each time the writer rotates to a new file; the
-  // total across segments is not tracked here.
-  uint64 capture_rows           = 8;
-  // Cumulative samples the tick thread tried to enqueue but the writer
-  // thread's bounded channel was full for. Monotonic across the process
-  // lifetime. `0` means the writer is keeping up; sustained growth means
-  // the disk / compression can't drain at 100 Hz and the capture has
-  // gaps. UIs should flag non-zero values.
-  uint64 capture_dropped        = 9;
-
-  // Full 49-element observation fed to ONNX on the most recent tick.
-  repeated float observation    = 10;
-  // Full 24-element raw NN output from the most recent tick.
-  repeated float raw_action     = 11;
-
-  // Decoded MIT-mode commands (8 joints, policy slot order).
-  repeated float position_targets_rad = 20;
-  repeated float kp             = 21;
-  repeated float kd             = 22;
-
-  // Policy slot joint names (same order as the 8-element slices above).
-  repeated string joint_names   = 30;
+  // 24 = `heading_accuracy_rad`: only the removed SPI driver set it (the
+  // Teensy bridge frame carries no accuracy estimate). Removed 2026-10-24;
+  // never reuse.
+  reserved 24;
+  reserved "heading_accuracy_rad";
 }
 
 // ---------------------------------------------------------------------------
@@ -829,9 +710,10 @@ message VisionState {
   string detail  = 4;
   // Fully-qualified unit name, e.g. "bebop-vision.service".
   string service = 5;
-  // Human-readable run mode baked into the unit ("recorder"), so the UI
-  // can label the start button without hard-coding the command.
-  string mode    = 6;
+  // 6 = `mode`: a constant "recorder" label nothing read. Removed
+  // 2026-10-24; never reuse.
+  reserved 6;
+  reserved "mode";
 }
 
 // ---------------------------------------------------------------------------
@@ -839,10 +721,10 @@ message VisionState {
 // ---------------------------------------------------------------------------
 //
 // The robot does not ship model weights: gated ones (SAM 3.1, DINOv3, ...)
-// require a Hugging Face token, and locally trained ones (navd students,
-// ONNX experiments) are produced on the robot or a workstation. The catalog
-// lives in `bebop-vision/config/models.yaml` and is served to the app here;
-// the operator supplies a token (see `SetHfToken`) and starts a download per
+// require a Hugging Face token, and kind="local" ones are produced on the
+// robot or copied over from a workstation. The catalog lives in
+// `bebop-vision/config/models.yaml` and is served to the app here; the
+// operator supplies a token (see `SetHfToken`) and starts a download per
 // model (see `DownloadModel`). Downloads run as a per-model systemd unit
 // (`bebop-model-download@<id>.service`) because they are long (many GB).
 //
@@ -859,17 +741,10 @@ message ModelState {
   string detail          = 4;
   // The catalog plus each entry's live status.
   repeated ModelCatalogEntry models = 5;
-  // Active model per purpose (see `SetModelPurpose`). A purpose missing from
-  // this list has no selection.
-  repeated PurposeSelection selection = 6;
-}
-
-// The active model chosen for one purpose.
-message PurposeSelection {
-  // Purpose key ("segmentation", "backbone", "navigation", ...).
-  string purpose  = 1;
-  // Catalog id of the selected model; empty means unset.
-  string model_id = 2;
+  // 6 = `selection`: the per-purpose choice set by the removed
+  // `set_model_purpose`. Removed 2026-10-24; never reuse.
+  reserved 6;
+  reserved "selection";
 }
 
 // One catalog model and its current provisioning status.
@@ -881,25 +756,23 @@ message ModelCatalogEntry {
   // One-line description.
   string description = 3;
   // Source kind: "hf" (downloadable from Hugging Face) or "local"
-  // (trained/produced off-robot; presence is reported but there is nothing
-  // to download).
+  // (produced on the robot or copied from a workstation; presence is
+  // reported but there is nothing to download).
   string kind        = 4;
   // Hugging Face repo id (kind="hf"); empty otherwise.
   string repo        = 5;
-  // Repo-relative filenames to fetch (kind="hf").
-  repeated string files = 6;
-  // Pinned revision (kind="hf"), e.g. "main".
-  string revision    = 7;
   // True when the repo is gated and a Hugging Face token is required.
   bool   gated       = 8;
   // Expected total size in bytes across files (0 when unknown).
   uint64 bytes_total = 9;
-  // On-robot weights path. Absolute, or relative to the weights directory.
-  string path        = 10;
-  // What the model is for ("segmentation", "backbone", "navigation",
-  // "trajectory", "vlm", ...). Models sharing a purpose are alternatives;
-  // the operator picks one via `SetModelPurpose`.
+  // What the model is for ("segmentation", "backbone", "voice", "asr",
+  // "tts", "brain", ...).
   string purpose     = 11;
+  // 6 = `files`, 7 = `revision`, 10 = `path`: catalog details no client
+  // read (the downloader takes them from models.yaml). Removed 2026-10-24;
+  // never reuse.
+  reserved 6, 7, 10;
+  reserved "files", "revision", "path";
 
   // ---- live status ----------------------------------------------------
   // True iff every file is present on disk.
@@ -931,8 +804,7 @@ message SetVoiceEnabled {
   bool enabled = 1;
 }
 
-// Snapshot of the `bebop-voice.service` systemd unit. Mirrors `VisionState`;
-// `model` names the catalog voice model being served.
+// Snapshot of the `bebop-voice.service` systemd unit. Mirrors `VisionState`.
 message VoiceState {
   // True iff the systemd unit is installed (`LoadState=loaded`).
   bool   present = 1;
@@ -941,10 +813,12 @@ message VoiceState {
   // Raw systemd ActiveState ("active", "inactive", "activating", "failed").
   string state   = 3;
   // systemd SubState, with `Result` appended when it isn't "success", or the
-  // last systemctl error / service detail (e.g. "building engines").
+  // last systemctl error.
   string detail  = 4;
   // Fully-qualified unit name, e.g. "bebop-voice.service".
   string service = 5;
-  // Catalog id of the voice model the service serves (e.g. "qwen3-omni-30b").
-  string model   = 6;
+  // 6 = `model`: a hard-coded voice model id nothing read (and wrong under
+  // the default cascade). Removed 2026-10-24; never reuse.
+  reserved 6;
+  reserved "model";
 }

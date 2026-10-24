@@ -45,10 +45,6 @@ pub struct PowerBoardSnapshot {
     /// Wall-clock instant when `status` was last updated. `None` means
     /// no Type-03 frame has arrived yet (board offline / wrong bus).
     pub last_status_rx: Option<Instant>,
-    /// Wall-clock instant of the last *outgoing* poll. Useful for the
-    /// "stale" check: if poll_at - last_status_rx > timeout we know
-    /// the board missed a beat, even if we haven't polled again yet.
-    pub last_poll_at: Option<Instant>,
 }
 
 impl PowerBoardSnapshot {
@@ -140,10 +136,10 @@ impl PowerMonitor {
                 g.status = Some(s);
                 g.last_status_rx = Some(now);
             }
-            PowerFrame::Currents { currents, .. } => {
+            PowerFrame::Currents { currents } => {
                 g.currents = Some(currents);
             }
-            PowerFrame::Version { version, .. } => {
+            PowerFrame::Version { version } => {
                 if g.version.as_deref() != Some(version.as_str()) {
                     info!(version = %version, "powerboard firmware version detected");
                 }
@@ -183,7 +179,6 @@ pub fn spawn_power_monitor(
     };
     let interval = Duration::from_millis(monitor.cfg.poll_interval_ms);
     let board = monitor.board;
-    let state = monitor.state.clone();
     let handle = std::thread::Builder::new()
         .name(format!("powerboard-{iface}"))
         .spawn(move || {
@@ -207,9 +202,6 @@ pub fn spawn_power_monitor(
 
             while !shutdown.load(Ordering::SeqCst) {
                 let poll_at = Instant::now();
-                if let Ok(mut g) = state.lock() {
-                    g.last_poll_at = Some(poll_at);
-                }
                 if let Err(e) = board.query_status(&can) {
                     // CAN write failed. Most likely cause: the gs_usb
                     // controller went BUS-OFF because there's no peer

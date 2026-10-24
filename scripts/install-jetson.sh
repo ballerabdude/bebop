@@ -3,12 +3,10 @@
 # Installs (or upgrades) the latest bebop-agent + bebop-linux on the Jetson
 # you're currently shelled into.
 #
-# bebop-linux is shipped as a single tarball (binary + bebop_v2.yaml +
-# policy.onnx + policy.onnx.data + systemd unit)
-# so the runtime, the joint config, and the policy weights all move
-# together. The default source is the latest GitHub Release tagged
-# `firmware/v*`. For pre-release main builds use `--run-id` to pull from
-# a CI workflow run.
+# bebop-linux is shipped as a single tarball (binary + robot configs +
+# systemd unit) so the runtime and its config always move together. The
+# default source is the latest GitHub Release tagged `firmware/v*`. For
+# pre-release main builds use `--run-id` to pull from a CI workflow run.
 #
 # bebop-agent still ships as a bare binary; its config / unit are fetched
 # from `main` via the GitHub contents API as before.
@@ -43,31 +41,30 @@
 #   sudo ./install-jetson.sh --setup-can-only # just configure CAN; don't
 #                                             # download or install binaries
 #   sudo ./install-jetson.sh --build-gs-usb   # build gs_usb out-of-tree if
-#                                             # the running kernel lacks it
-#                                             # (JetPack stock kernel does);
+#                                             # the running kernel lacks it;
 #                                             # implies --setup-can
-#   sudo ./install-jetson.sh --setup-imu      # also configure IMU access:
-#                                             # udev rules giving the `bebop`
-#                                             # group rw on /dev/spidev* and
-#                                             # /dev/gpiochip* (SPI backend) AND
-#                                             # a stable /dev/bebop-imu symlink
-#                                             # for the Teensy `teensy_bridge`
-#                                             # serial backend (so bebop-linux
-#                                             # can open whichever the YAML
-#                                             # selects without root)
-#   sudo ./install-jetson.sh --setup-imu-only # just configure IMU access;
-#                                             # don't download or install
-#                                             # binaries
-#   sudo ./install-jetson.sh --config-yaml bebop_wheeled.yaml
+#   sudo ./install-jetson.sh --setup-imu      # also configure the Teensy
+#                                             # `teensy_bridge` USB serial
+#                                             # ports: a udev rule giving the
+#                                             # `bebop` group rw, plus stable
+#                                             # /dev/bebop-imu (IMU frames),
+#                                             # /dev/bebop-imu-debug (log)
+#                                             # and /dev/bebop-control
+#                                             # (button events for
+#                                             # bebop-agent)
+#   sudo ./install-jetson.sh --setup-imu-only # just the Teensy setup; don't
+#                                             # download or install binaries
+#   sudo ./install-jetson.sh --config-yaml <name>.yaml
 #                                             # activate a different robot
 #                                             # config from the bundle
-#                                             # (default: bebop_v2.yaml).
+#                                             # (default: bebop_wheeled.yaml).
 #                                             # The choice is remembered in
 #                                             # /etc/bebop/config-yaml-name
 #                                             # so plain upgrade runs keep
-#                                             # it; the systemd unit gets a
-#                                             # drop-in pointing ExecStart
-#                                             # at the chosen file.
+#                                             # it; when the shipped unit
+#                                             # runs another file, a systemd
+#                                             # drop-in points ExecStart at
+#                                             # the chosen one.
 #   sudo ./install-jetson.sh --setup-orbbec   # also install Orbbec Gemini
 #                                             # 335Lg depth-camera support:
 #                                             # udev rules so non-root
@@ -109,15 +106,13 @@
 #
 # Idempotency:
 #   * /etc/bebop/agent.toml is preserved if present (one-time bootstrap).
-#   * /etc/bebop/bebop_v2.yaml AND /etc/bebop/policy.onnx{,.data} are
-#     replaced unconditionally on every run — the firmware bundle is the
-#     source of truth and they're versioned together as a unit. The
-#     previous bebop_v2.yaml is saved as bebop_v2.yaml.bak so a bad
-#     config push can be rolled back without re-downloading.
-#   (The legacy navseg.onnx nav-model install — and its onnxruntime
-#   CUDA-EP health check — were removed with the OBSBOT pipeline, plan
-#   §9 Stage 3. The navd student model runs in bebop-vision's venv, not
-#   in the firmware.)
+#   * The active robot config (/etc/bebop/bebop_wheeled.yaml by default)
+#     is replaced unconditionally on every run — the firmware bundle is
+#     the source of truth. The previous copy is saved next to it as
+#     <name>.yaml.bak so a bad config push can be rolled back without
+#     re-downloading.
+#   * Files that older bundles installed (/etc/bebop/bebop_v2.yaml,
+#     /etc/bebop/policy.onnx{,.data}) are left in place; nothing reads them.
 
 # Orbbec note (--setup-orbbec): the Gemini 335Lg (USB 2bc5:080b) must be
 # on a USB 3.0 port — behind USB 2.0 it enumerates at 480 Mbps and
@@ -195,15 +190,16 @@ LOCAL_REPO_ROOT=""
 BUILD=0
 # 1 Mbps is the Robstride bus rate; bebop-linux assumes the same.
 CAN_BITRATE="${CAN_BITRATE:-1000000}"
-# Group that owns /dev/spidev* and /dev/gpiochip* after `--setup-imu`.
+# Group that owns the Teensy's USB serial ports (/dev/bebop-imu,
+# /dev/bebop-imu-debug, /dev/bebop-control) after `--setup-imu`.
 # Defaults to `bebop` (which the JetPack OEM setup creates alongside the
 # `bebop` login user); override if you run the runtime under a
 # different account.
 IMU_GROUP="${IMU_GROUP:-bebop}"
 # Robot config to activate. Resolved in this order:
 #   1. --config-yaml <name>          (explicit, and persisted for next time)
-#   2. /etc/bebop/config-yaml-name   (a previous explicit choice)
-#   3. bebop_v2.yaml                 (bundle default / current behavior)
+#   2. /etc/bebop/config-yaml-name   (what a previous run installed)
+#   3. bebop_wheeled.yaml            (the default; the shipped unit runs it)
 # Must name a *.yaml shipped in the firmware bundle's config/ dir.
 CONFIG_YAML=""
 
@@ -293,7 +289,7 @@ if [[ -z "${CONFIG_YAML}" && -f /etc/bebop/config-yaml-name ]]; then
     CONFIG_YAML="$(cat /etc/bebop/config-yaml-name)"
     echo "==> using remembered config choice: ${CONFIG_YAML}"
 fi
-CONFIG_YAML="${CONFIG_YAML:-bebop_v2.yaml}"
+CONFIG_YAML="${CONFIG_YAML:-bebop_wheeled.yaml}"
 # Refuse obviously-wrong values early (a path traversal or an empty
 # string); existence inside the bundle is checked after extraction.
 if [[ ! "${CONFIG_YAML}" =~ ^[A-Za-z0-9._-]+\.yaml$ ]]; then
@@ -418,41 +414,23 @@ EOF
 # IMU setup helper
 # ---------------------------------------------------------------------------
 #
-# The Bebop V2 IMU is a BNO085. There are two supported wiring
-# topologies, selected by `imu.source` in
-# `firmware/bebop-linux/config/bebop_v2.yaml`:
+# The robot's BNO085 IMU is wired to the Teensy 4.1, which runs the
+# `teensy_bridge` firmware and streams binary frames to the Jetson over USB
+# serial; `bebop-linux` reads them when the robot YAML has an `imu:` block.
+# The Teensy enumerates with USB_TRIPLE_SERIAL as 16c0:048c: interface 0 is
+# the binary frame stream, interface 2 the debug log, and interface 4 the
+# control channel (buttons/events read by `bebop-agent`, exposed as
+# /dev/bebop-control).
 #
-#   * source: spi    — the BNO is wired to the Jetson's SPI bus. At
-#                      runtime `bebop-linux` opens three device nodes:
-#                        - /dev/spidev0.0 (SPI controller via jetson-io `spi1`)
-#                        - /dev/gpiochip0 (line 144 = INT/HINTN, 106 = RST)
-#   * source: serial — the BNO is wired to the Teensy, which runs the
-#                      `teensy_bridge` firmware and streams binary frames to
-#                      the Jetson over USB serial. `bebop-linux` opens a
-#                      tty (e.g. /dev/ttyACM0). The Teensy enumerates with
-#                      USB_TRIPLE_SERIAL as 16c0:048c: interface 0 is the
-#                      binary frame stream, interface 2 the debug log, and
-#                      interface 4 the control channel (buttons/events read
-#                      by `bebop-agent`, exposed as /dev/bebop-control).
-#
-# JetPack ships /dev/spidev* and /dev/gpiochip* as root-only (mode 0600,
-# owner root:root); /dev/ttyACM* are usually group `dialout`. So a
-# non-root runtime fails to open them. This function drops a udev rule
-# that hands all of them to `${IMU_GROUP}` (default `bebop`, matching the
-# OEM login group) so the runtime can come up as a regular service user
-# without sudo. For the serial backend it also creates stable symlinks
-# /dev/bebop-imu (binary stream), /dev/bebop-imu-debug (log) and
-# /dev/bebop-control (control), so config can point at a name that doesn't
-# shift when other USB CDC devices enumerate ahead of the Teensy.
-#
-# Caveat: enabling `spi1` itself is a one-time, *interactive*
-# device-tree change made via `sudo /opt/nvidia/jetson-io/jetson-io.py`
-# and requires a reboot. This function detects the missing
-# `/dev/spidev0.0` and prints clear instructions instead of trying to
-# automate that step (the jetson-io API is brittle enough that we'd
-# rather a human run it once than fail half a setup mid-script).
+# /dev/ttyACM* are usually group `dialout`, so a non-root process fails to
+# open them. This function drops a udev rule that hands the Teensy's three
+# interfaces to `${IMU_GROUP}` (default `bebop`, matching the OEM login
+# group) and creates stable symlinks /dev/bebop-imu (binary stream),
+# /dev/bebop-imu-debug (log) and /dev/bebop-control (control), so config
+# can point at a name that doesn't shift when other USB CDC devices
+# enumerate ahead of the Teensy.
 setup_imu() {
-    echo "==> configuring IMU access (SPI + GPIO udev rule, group=${IMU_GROUP})"
+    echo "==> configuring Teensy serial access (udev rule, group=${IMU_GROUP})"
 
     # 1) Make sure the target group exists. JetPack OEM setup creates a
     #    `bebop` group alongside the `bebop` user; if someone's overriding
@@ -474,27 +452,14 @@ EOF
         exit 1
     fi
 
-    # 2) Drop a udev rule covering every SPI controller and gpiochip
-    #    on the system. We're not specific about which spidev / chip
-    #    because the YAML config picks the active one — and bebop-linux
-    #    refuses to start if it picks the wrong one. The rule is cheap
-    #    (matches happen on device-add, no runtime cost).
+    # 2) Drop a udev rule for the Teensy's three CDC-ACM interfaces. The
+    #    rule is cheap (matches happen on device-add, no runtime cost).
     install -d -m 0755 /etc/udev/rules.d
     cat > /etc/udev/rules.d/99-bebop-imu.rules <<EOF
-# Bebop V2 IMU (BNO085). Covers both wiring topologies; the active one
-# is chosen by 'imu.source' in
-# firmware/bebop-linux/config/bebop_v2.yaml. Remove this file to revert
-# to the default access.
+# Bebop Teensy 4.1 (teensy_bridge firmware): the BNO085 IMU stream, its
+# debug log and the control channel over USB serial. Remove this file to
+# revert to the default access.
 #
-# --- source: spi -----------------------------------------------------
-# Hand /dev/spidev* and /dev/gpiochip* to the ${IMU_GROUP} group so the
-# bebop-linux runtime can open the SPI bus and toggle the INT/RST
-# GPIOs without root. Specific lines are picked up by gpiod inside the
-# binary; see the YAML for the active pinout.
-KERNEL=="spidev*",   GROUP="${IMU_GROUP}", MODE="0660"
-KERNEL=="gpiochip*", GROUP="${IMU_GROUP}", MODE="0660"
-#
-# --- source: serial (Teensy teensy_bridge firmware) -------------------
 # The Teensy enumerates with USB_TRIPLE_SERIAL as 16c0:048c and presents
 # three CDC-ACM interfaces. Interface 0 carries the binary IMU frames;
 # interface 2 is the human-readable debug log; interface 4 is the control
@@ -507,13 +472,9 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="16c0", ATTRS{idProduct}=="048c", ENV{ID_USB_
 EOF
     echo "    wrote /etc/udev/rules.d/99-bebop-imu.rules"
 
-    # 3) Reload + apply to nodes that are already present. The
-    #    SUBSYSTEM matchers cover the in-tree (`spidev`), the legacy
-    #    ("gpio") sysfs path for gpiochip devices, and the Teensy tty.
+    # 3) Reload + apply to the Teensy ttys that are already present.
     udevadm control --reload-rules
-    udevadm trigger --subsystem-match=spidev 2>/dev/null || true
-    udevadm trigger --subsystem-match=gpio   2>/dev/null || true
-    udevadm trigger --subsystem-match=tty    2>/dev/null || true
+    udevadm trigger --subsystem-match=tty 2>/dev/null || true
     # `trigger` only *queues* events; wait for the daemon to process them
     # so the status listing below reflects the symlinks it just created
     # (otherwise /dev/bebop-imu can race and show up as "not present").
@@ -522,34 +483,11 @@ EOF
     # 4) Status: list whatever's there now so the operator can tell at a
     #    glance whether the rule actually took effect.
     echo
-    echo "    Current IMU device nodes:"
-    if compgen -G "/dev/spidev*" >/dev/null; then
-        ls -l /dev/spidev* 2>/dev/null | sed 's/^/      /'
-    else
-        cat <<'EOF'
-      (none — /dev/spidev0.0 is not present)
-      The Jetson's SPI controller isn't enabled at the device-tree level.
-      Run jetson-io to turn on `spi1` (40-pin header pins 19/21/23/24)
-      and then reboot:
-
-          sudo /opt/nvidia/jetson-io/jetson-io.py
-          # → Configure 40-pin expansion header → Configure header pins
-          #   manually → toggle `spi1` → Back → Save → Save and reboot
-          sudo reboot
-
-      After the reboot re-run `--setup-imu` (or the full installer) so
-      this script can verify /dev/spidev0.0 came up.
-EOF
-    fi
-    if compgen -G "/dev/gpiochip*" >/dev/null; then
-        ls -l /dev/gpiochip* 2>/dev/null | sed 's/^/      /'
-    else
-        echo "      (none — no /dev/gpiochip* nodes found; very unusual on Jetson)"
-    fi
-    echo
-    echo "    Teensy teensy_bridge firmware (source: serial):"
+    echo "    Teensy teensy_bridge firmware:"
     if compgen -G "/dev/bebop-imu*" >/dev/null; then
-        ls -l /dev/bebop-imu* /dev/bebop-control 2>/dev/null | sed 's/^/      /'
+        # `|| true`: a missing /dev/bebop-control must reach the warning
+        # below instead of failing the pipeline (set -e / pipefail).
+        ls -l /dev/bebop-imu* /dev/bebop-control 2>/dev/null | sed 's/^/      /' || true
     else
         cat <<'EOF'
       (none — /dev/bebop-imu not present)
@@ -558,8 +496,9 @@ EOF
 
           pio run -e teensy_bridge --target upload   # from firmware/bebop-locomotion
 
-      then re-run `--setup-imu`. Only needed when bebop_v2.yaml sets
-      `imu.source: "serial"`; ignore this for the SPI backend.
+      then re-run `--setup-imu`. bebop-agent's mode button needs
+      /dev/bebop-control; bebop-linux reads /dev/bebop-imu only when the
+      robot YAML has an `imu:` block.
 EOF
     fi
     if [[ -e /dev/bebop-control ]]; then
@@ -1170,16 +1109,14 @@ EOF
 fi
 
 if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
-    # Source layout (binary + bebop_v2.yaml + policy.onnx + policy.onnx.data +
-    # bebop-linux.service + VERSION) matches what the CI bundle ships, so
-    # everything downstream of "extract" is identical between modes.
+    # Source layout (binary + config/*.yaml + bebop-linux.service + VERSION)
+    # matches what the CI bundle ships, so everything downstream of
+    # "extract" is identical between modes.
     mkdir -p "${WORK_DIR}/linux-bundle" "${WORK_DIR}/linux-download"
     if [[ "${LOCAL}" -eq 1 ]]; then
         echo "==> staging bebop-linux bundle from local checkout"
         LX_ROOT="${LOCAL_REPO_ROOT}/firmware/bebop-linux"
         LX_BIN_SRC="${LX_ROOT}/target/release/bebop-linux"
-        LX_ONNX_SRC="${LX_ROOT}/config/policy.onnx"
-        LX_ONNX_DATA_SRC="${LX_ROOT}/config/policy.onnx.data"
         LX_UNIT_SRC="${LX_ROOT}/deploy/systemd/bebop-linux.service"
         if [[ ! -f "${LX_BIN_SRC}" ]]; then
             cat >&2 <<EOF
@@ -1191,12 +1128,10 @@ Build it first (or re-run with --build):
 EOF
             exit 1
         fi
-        for f in "${LX_ONNX_SRC}" "${LX_ONNX_DATA_SRC}" "${LX_UNIT_SRC}"; do
-            if [[ ! -f "${f}" ]]; then
-                echo "missing local firmware asset: ${f}" >&2
-                exit 1
-            fi
-        done
+        if [[ ! -f "${LX_UNIT_SRC}" ]]; then
+            echo "missing local firmware asset: ${LX_UNIT_SRC}" >&2
+            exit 1
+        fi
         install -d "${WORK_DIR}/linux-bundle/bin" \
                     "${WORK_DIR}/linux-bundle/config" \
                     "${WORK_DIR}/linux-bundle/systemd"
@@ -1207,8 +1142,6 @@ EOF
             [[ -e "${f}" ]] || continue
             install -m 0644 "${f}" "${WORK_DIR}/linux-bundle/config/$(basename "${f}")"
         done
-        install -m 0644 "${LX_ONNX_SRC}"       "${WORK_DIR}/linux-bundle/config/policy.onnx"
-        install -m 0644 "${LX_ONNX_DATA_SRC}"  "${WORK_DIR}/linux-bundle/config/policy.onnx.data"
         install -m 0644 "${LX_UNIT_SRC}"       "${WORK_DIR}/linux-bundle/systemd/bebop-linux.service"
         # Synthesize a VERSION file mirroring CI's, so the post-install
         # echo gives operators something useful to grep in journals.
@@ -1268,15 +1201,14 @@ EOF
     # The active robot config, per CONFIG_YAML (flag / remembered /
     # default). The bundle carries every variant; we activate one.
     LINUX_YAML="${WORK_DIR}/linux-bundle/config/${CONFIG_YAML}"
-    LINUX_ONNX="${WORK_DIR}/linux-bundle/config/policy.onnx"
-    LINUX_ONNX_DATA="${WORK_DIR}/linux-bundle/config/policy.onnx.data"
     LINUX_UNIT="${WORK_DIR}/linux-bundle/systemd/bebop-linux.service"
-    for f in "${LINUX_BIN}" "${LINUX_YAML}" "${LINUX_ONNX}" "${LINUX_ONNX_DATA}" "${LINUX_UNIT}"; do
+    for f in "${LINUX_BIN}" "${LINUX_YAML}" "${LINUX_UNIT}"; do
         if [[ ! -f "${f}" ]]; then
             echo "bundle is missing $(basename "${f}") (looked at ${f})" >&2
             if [[ "${f}" == "${LINUX_YAML}" ]]; then
                 echo "the active config is '${CONFIG_YAML}'; available in this bundle:" >&2
                 ls "${WORK_DIR}/linux-bundle/config/"*.yaml 2>/dev/null | xargs -n1 basename | sed 's/^/    /' >&2
+                echo "pick one with --config-yaml <name> (later runs remember it)" >&2
             fi
             exit 1
         fi
@@ -1395,11 +1327,6 @@ else
     echo "==> skipping prereq install"
 fi
 
-# (The firmware's v4l-utils prereq and the navseg/onnxruntime CUDA-EP
-# health check were removed with the OBSBOT camera + legacy nav runner,
-# plan §9 Stage 3 — the firmware no longer touches any /dev/video* and
-# runs no ONNX nav model.)
-
 # ---------------------------------------------------------------------------
 # Lay down files
 # ---------------------------------------------------------------------------
@@ -1422,11 +1349,11 @@ if [[ "${INSTALL_AGENT}" -eq 1 ]]; then
 fi
 
 if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
-    # Capture dir: shared by the firmware (root policy captures) and
-    # bebop-vision (root navd sessions). Pre-create it so it exists before
-    # either process starts; bebop-linux.service's StateDirectory= will
-    # then (re)own it root:root 0750, which is why bebop-vision also runs
-    # as root.
+    # Capture dir: shared by the firmware (root, its always-on system_*.mcap
+    # log) and bebop-vision (root navd sessions). Pre-create it so it exists
+    # before either process starts; bebop-linux.service's StateDirectory=
+    # will then (re)own it root:root 0750, which is why bebop-vision also
+    # runs as root.
     install -d -o "${SUDO_USER:-bebop}" -g "$(id -gn "${SUDO_USER:-bebop}")" \
         /var/lib/bebop-captures
     echo "==> installing bebop-linux → /usr/local/bin/bebop-linux"
@@ -1434,10 +1361,10 @@ if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
 
     # Robot config. Installed under its REAL filename (e.g.
     # /etc/bebop/bebop_wheeled.yaml); the systemd unit's ExecStart is
-    # repointed via a drop-in when it isn't the historical default
-    # (/etc/bebop/bebop_v2.yaml, which the shipped unit references).
-    # Backup logic applies to whichever file is active so a bad rollout
-    # can be reverted without re-downloading.
+    # repointed via a drop-in when the shipped unit runs another file
+    # (it runs the default, /etc/bebop/bebop_wheeled.yaml). Backup logic
+    # applies to whichever file is active so a bad rollout can be
+    # reverted without re-downloading.
     yaml_dst="/etc/bebop/${CONFIG_YAML}"
     if [[ -f "${yaml_dst}" ]] && ! cmp -s "${yaml_dst}" "${LINUX_YAML}"; then
         echo "==> updating ${yaml_dst} (previous saved as .bak)"
@@ -1453,12 +1380,13 @@ if [[ "${INSTALL_LINUX}" -eq 1 ]]; then
     # and makes an explicit later switch observable).
     echo "${CONFIG_YAML}" > /etc/bebop/config-yaml-name
 
-    # Non-default config: drop-in overrides the unit's --config path.
-    # A drop-in (not editing the unit) survives this installer
-    # rewriting the base unit on every upgrade. Switching back to the
-    # default removes the drop-in.
+    # A config the shipped unit doesn't run (a non-default choice, or an
+    # older bundle whose unit names another file): a drop-in overrides
+    # the unit's --config path. A drop-in (not editing the unit) survives
+    # this installer rewriting the base unit on every upgrade. When the
+    # unit already runs the active config, the drop-in is removed.
     unit_dropin_dir=/etc/systemd/system/bebop-linux.service.d
-    if [[ "${CONFIG_YAML}" != "bebop_v2.yaml" ]]; then
+    if ! grep -qE "^[^#]*--config ${yaml_dst//./\\.}" "${LINUX_UNIT}"; then
         install -d -m 0755 "${unit_dropin_dir}"
         cat > "${unit_dropin_dir}/10-config.conf" <<EOF
 # Managed by install-jetson.sh --config-yaml ${CONFIG_YAML}.
@@ -1474,16 +1402,6 @@ EOF
         rm -f "${unit_dropin_dir}/10-config.conf"
     fi
 
-    # Policy weights. `bebop-linux` resolves `--policy` to
-    # `<config_dir>/policy.onnx` by default, so dropping both files
-    # alongside the YAML is all the runtime needs. Both files MUST come
-    # from the same training export — `policy.onnx` references
-    # `policy.onnx.data` by relative path inside the graph.
-    echo "==> installing policy → /etc/bebop/policy.onnx{,.data}"
-    install -m 0644 "${LINUX_ONNX}"      /etc/bebop/policy.onnx
-    install -m 0644 "${LINUX_ONNX_DATA}" /etc/bebop/policy.onnx.data
-
-    # Navigable-path model (optional, same drop-in convention as the
     install -m 0644 "${LINUX_UNIT}" /etc/systemd/system/bebop-linux.service
 
     # bebop-vision unit: installed for the app's start/stop control, but

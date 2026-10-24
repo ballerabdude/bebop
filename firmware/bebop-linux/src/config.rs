@@ -1,4 +1,5 @@
-//! Robot configuration — joint definitions, motor specs, safety limits.
+//! Robot configuration — joints, wheels, drive geometry, power board, IMU
+//! and server settings, plus the motor specs and safety limits they use.
 //!
 //! The configuration is loaded at startup from a YAML file via
 //! [`RobotConfig::from_yaml`]. There is no longer a hardcoded fallback
@@ -9,90 +10,6 @@ use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
-
-// ===========================================================================
-// Control loop / observation / scaling — kept in code (training-coupled).
-// ===========================================================================
-
-/// Control loop timing configuration.
-///
-/// NOTE: the authoritative policy/control-loop rate is `main.rs`'s
-/// `TICK_PERIOD` (10 ms = 100 Hz), which is what actually drives
-/// `PolicyRunner::tick`. It MUST match the sim control rate
-/// (`exp_standing.py`: `sim.dt 0.005 × decimation 2 = 100 Hz`). A stale
-/// `POLICY_RATE_HZ = 50` constant used to live here and was never wired to
-/// the real loop; it was removed so nothing can silently re-introduce a
-/// half-rate control loop (which would desync the slew limit + action delay
-/// the policy was trained against).
-pub mod timing {
-    pub const FEEDBACK_PUBLISH_HZ: u64 = 100;
-    pub const WATCHDOG_TIMEOUT_MS: u64 = 500;
-}
-
-/// Observation and action dimensions (must match training!).
-///
-/// Bebop V2 (humanoid, 8 leg joints, no wheels). Observation layout
-/// matches `sim/bebop_training/envs/bebop_v2_base_cfg.py::PolicyCfg`
-/// declaration order:
-///
-/// ```text
-///   [ 0.. 3)  base_ang_vel       (rad/s, body frame)
-///   [ 3.. 6)  projected_gravity  (unit vector in body frame)
-///   [ 6..14)  joint_pos_rel      (rad, JOINT_NAMES order)
-///   [14..22)  joint_vel_rel      (rad/s, JOINT_NAMES order)
-///   [22..46)  last_action        (raw NN output, 24 dims: pos | kp | kd)
-///   [46..49)  velocity_commands  (vx, vy, wz)
-/// ```
-///
-/// NOTE: there is deliberately **no** `base_lin_vel` channel. Bebop V2 has
-/// no wheel odometry / VIO, so the real robot could only ever feed zeros;
-/// training against the sim's privileged ground-truth velocity was a
-/// sim-to-real gap, so it was removed from the observation entirely.
-///
-/// Action layout: 24 floats. MIT-mode variable impedance, 3 channels
-/// per joint in JOINT_NAMES order:
-///
-/// - `[ 0.. 8)` raw position commands -> `target = default + SCALE_ACTION * clamp(raw, -1, 1)`
-/// - `[ 8..16)` raw kp commands       -> affine [-1, 1] to each joint's `(kp_min, kp_max)`
-/// - `[16..24)` raw kd commands       -> affine [-1, 1] to each joint's `(kd_min, kd_max)`
-///
-/// Per-joint kp/kd clamps are loaded from the YAML
-/// `policy_gain_clamps` block — see [`PolicyGainClamps`]. They MUST
-/// mirror `POLICY_KP_MIN/MAX` and `POLICY_KD_MIN/MAX` in the sim
-/// config.
-pub mod dims {
-    pub const OBS_DIM: usize = 49;
-    pub const ACTION_DIM: usize = 24;
-    pub const HISTORY_STEPS: usize = 1;
-    pub const TOTAL_OBS_DIM: usize = OBS_DIM * HISTORY_STEPS;
-}
-
-/// Scaling factors used by [`crate::observation`] (must match training!).
-pub mod scales {
-    pub const SCALE_LIN_VEL: f32 = 1.0;
-    pub const SCALE_ANG_VEL: f32 = 1.0;
-    pub const SCALE_DOF_POS: f32 = 1.0;
-    pub const SCALE_DOF_VEL: f32 = 1.0;
-    /// Action -> position-target gain. MUST match the ``pos_scale``
-    /// field on the sim's ``VariableImpedanceJointActionCfg`` in
-    /// ``sim/bebop_training/experiments/exp_standing.py``. The policy
-    /// learns the mapping ``target = default + SCALE_ACTION * raw``
-    /// during training; if this constant differs from the sim value
-    /// the deployed commands silently mis-scale (a too-large value
-    /// here pushes the joints past their safe envelope on every
-    /// command; a too-small value makes the policy weak / unable to
-    /// reach its trained pose).
-    ///
-    /// 0.5 means raw=±1.0 maps to ±0.5 rad per joint -- enough range
-    /// for standing and slow walking, well inside every joint's
-    /// hard safety limit. Raise this (and retrain) when transitioning
-    /// to highly dynamic motions that need more per-tick reach.
-    pub const SCALE_ACTION: f32 = 0.5;
-
-    pub const CLIP_LIN_VEL: f32 = 3.0;
-    pub const CLIP_ANG_VEL: f32 = 10.0;
-    pub const CLIP_DOF_VEL: f32 = 15.0;
-}
 
 // ===========================================================================
 // Motor model specs — used for uint16 ↔ float scaling on the wire.
@@ -225,75 +142,17 @@ pub struct Gains {
 #[derive(Debug, Clone, Copy)]
 pub struct SlewParams {
     pub max_pos_step_per_tick: f32,
-    pub arm_ramp_s: f32,
-    pub abort_ramp_s: f32,
 }
 
 impl SlewParams {
     pub const DEFAULT: Self = Self {
         max_pos_step_per_tick: 0.005,
-        arm_ramp_s: 0.5,
-        abort_ramp_s: 0.3,
-    };
-}
-
-/// Global policy action-decode parameters (`defaults.policy` in the YAML).
-/// These MUST mirror the sim action term
-/// (`VariableImpedanceJointActionCfg` in
-/// `sim/bebop_training/envs/bebop_v2_actions.py`) — the trained policy
-/// baked in whatever bandwidth these values allow.
-#[derive(Debug, Clone, Copy)]
-pub struct PolicyConfig {
-    /// First-order low-pass time constant (seconds) applied to the decoded
-    /// kp/kd channels every 100 Hz policy tick:
-    /// `g += alpha * (cmd - g)`, `alpha = 1 - exp(-tick_dt / tau)`.
-    /// Hard anti-snap guarantee on the gain channels (the position
-    /// channel's analog is the slew clamp): tick-rate gain flipping is
-    /// attenuated ~16x at tau = 0.08 while impedance shifts slower than
-    /// ~2 Hz pass through. `0` disables the filter — do NOT deploy
-    /// disabled against an EMA-trained policy. See
-    /// [`crate::observation::GainEma`].
-    pub gain_ema_tau_s: f32,
-}
-
-impl PolicyConfig {
-    pub const DEFAULT: Self = Self {
-        // Mirrors the sim ActionsCfg `gain_ema_tau_s` (round 6, Jul 22
-        // 2026). Explicitly set in bebop_v2.yaml; the fallback only
-        // guards older configs.
-        gain_ema_tau_s: 0.08,
-    };
-}
-
-/// Per-joint bounds on the policy-emitted kp / kd values for the
-/// MIT-mode variable-impedance action. The decode path affine-maps each
-/// raw `[-1, 1]` channel into `(min, max)` for its joint. Values MUST
-/// mirror `POLICY_KP_MIN/MAX` and `POLICY_KD_MIN/MAX` in
-/// `sim/bebop_training/envs/bebop_v2_base_cfg.py`.
-#[derive(Debug, Clone, Copy)]
-pub struct PolicyGainClamps {
-    pub kp_min: f32,
-    pub kp_max: f32,
-    pub kd_min: f32,
-    pub kd_max: f32,
-}
-
-impl PolicyGainClamps {
-    /// Conservative fallback if YAML omits both defaults and per-joint
-    /// overrides. Matches the most-conservative joint in the Bebop V2
-    /// envelope (foot kd_min).
-    pub const FALLBACK: Self = Self {
-        kp_min: 5.0,
-        kp_max: 100.0,
-        kd_min: 0.5,
-        kd_max: 5.0,
     };
 }
 
 #[derive(Debug, Clone)]
 pub struct JointConfig {
     pub name: String,
-    pub index: usize,
     pub can_id: u8,
     pub can_bus: String,
     pub model: RobstrideModel,
@@ -301,11 +160,6 @@ pub struct JointConfig {
     pub hold_gains: Gains,
     pub test_gains: Gains,
     pub slew: SlewParams,
-    pub default_position: f32,
-    /// Per-joint policy gain clamps (kp / kd ranges). The MIT-mode
-    /// policy emits raw kp / kd in [-1, 1]; the decode path maps each
-    /// to this joint's range before TX.
-    pub policy_gain_clamps: PolicyGainClamps,
     /// Sign that converts the motor/encoder rotation direction into the
     /// robot (URDF / sim) joint convention. Either `+1.0` (motor and
     /// URDF agree, the default) or `-1.0` (the motor is mounted / zeroed
@@ -314,25 +168,21 @@ pub struct JointConfig {
     ///
     /// The supervisor applies this at the motor⇄robot boundary: every
     /// incoming feedback `position` / `velocity` / `torque` is multiplied
-    /// by `direction` before it reaches any consumer (policy observation,
-    /// `/joint_states` log, telemetry, DialIn, limit checks), and every
-    /// outgoing position / velocity / torque setpoint is multiplied by it
-    /// again on the way back to the wire. So everything above
-    /// [`crate::robstride`] speaks the URDF convention and the trained
-    /// policy sees the same joint signs it did in sim.
+    /// by `direction` before it reaches any consumer (telemetry, DialIn,
+    /// limit checks), and every outgoing position / velocity / torque
+    /// setpoint is multiplied by it again on the way back to the wire. So
+    /// everything above [`crate::robstride`] speaks the URDF convention.
     ///
     /// NOTE: `hard_limits.pos_min` / `pos_max` are interpreted in the
-    /// robot frame. They're symmetric for the joints we currently flip
-    /// (hip abduction, ±1.0), so the sign is harmless there; if you ever
-    /// flip a joint with an *asymmetric* position envelope, express that
-    /// envelope in robot-frame coordinates.
+    /// robot frame. If you flip a joint with an *asymmetric* position
+    /// envelope, express that envelope in robot-frame coordinates.
     pub direction: f32,
 }
 
 /// Configuration for a single ODrive BotWheel (velocity-controlled,
 /// continuous rotation). Unlike [`JointConfig`] a wheel has no position
 /// envelope, no kp/kd — the ODrive runs its own velocity loop and we
-/// command a `rev/s` setpoint with an optional torque feed-forward.
+/// command a `rev/s` setpoint.
 #[derive(Debug, Clone)]
 pub struct WheelConfig {
     pub name: String,
@@ -343,13 +193,11 @@ pub struct WheelConfig {
     /// [`JointConfig::direction`]. Applied at the wheel⇄robot boundary so
     /// feedback and setpoints speak the URDF/sim forward convention.
     pub direction: f32,
-    /// Wheel angular-velocity hard limit (rad/s). E-STOP breaker.
+    /// Wheel angular-velocity limit (rad/s). Every commanded wheel speed is
+    /// clamped to it; the measured speed is not checked against it.
     pub vel_max: f32,
-    /// Optional torque feed-forward clamp (Nm). Applies to the
-    /// `Input_Torque_FF` field on `Set_Input_Vel`; currently the policy
-    /// path leaves it at 0.
-    pub torque_limit: f32,
-    /// E-STOP if no encoder/heartbeat arrives within this many ms.
+    /// E-STOP if an armed wheel goes this many ms without an encoder /
+    /// heartbeat frame (once it has reported at least once).
     pub feedback_timeout_ms: f32,
 }
 
@@ -412,10 +260,9 @@ impl Default for ServerConfig {
 /// Battery chemistry parameters are independent of the board itself and
 /// are used purely for the operator-facing "fuel gauge" (state-of-charge
 /// linear-interp from voltage). The defaults applied when YAML omits these
-/// fields are 13 cells × 4.20 V / 3.00 V (a generic Li-ion NMC pack);
-/// Bebop V2 and the wheeled chassis both ship with the 13s2p NMC pack,
-/// see `bebop_v2.yaml` / `bebop_wheeled.yaml` for the matching 4.20 V /
-/// 3.00 V endpoints.
+/// fields are 13 cells × 4.20 V / 3.00 V (a generic Li-ion NMC pack); the
+/// wheeled chassis ships with a 13s2p NMC pack, see `bebop_wheeled.yaml`
+/// for the matching 4.20 V / 3.00 V endpoints.
 #[derive(Debug, Clone)]
 pub struct PowerBoardConfig {
     pub can_interface: String,
@@ -456,47 +303,33 @@ impl PowerBoardConfig {
 
 #[derive(Debug, Clone)]
 pub struct RobotConfig {
+    /// Robstride MIT-mode joints (empty without a `joints:` block).
     pub joints: Vec<JointConfig>,
-    /// ODrive wheel actuators (empty on the legged humanoid). Mutually
-    /// exclusive with `joints` in practice — see `drive` below.
+    /// ODrive wheel actuators (empty without a `wheels:` block).
     pub wheels: Vec<WheelConfig>,
-    /// Differential-drive geometry; `Some` on a wheeled chassis, `None`
-    /// on the humanoid. References wheel names in `wheels`.
+    /// Differential-drive geometry; `None` without a `drive:` block.
+    /// References wheel names in `wheels`.
     pub drive: Option<DiffDriveConfig>,
     pub can_interfaces: Vec<String>,
     pub server: ServerConfig,
     pub power: Option<PowerBoardConfig>,
-    /// Global policy action-decode parameters (`defaults.policy`).
-    pub policy: PolicyConfig,
-    /// When set, [`crate::imu`] streams fused orientation into the shared
-    /// state consumed by the WS telemetry pump. Policy observations still
-    /// use synthetic IMU until explicitly wired.
+    /// When set, [`crate::imu_serial`] streams the BNO085's body-frame
+    /// orientation into the shared state the telemetry builders read.
     pub imu: Option<ImuConfig>,
 }
 
-/// Optional BNO080/BNO085 SPI reader (see `imu:` in the robot YAML).
+/// Where the runtime gets its BNO085 data from (`imu.source` in the robot
+/// YAML; `serial` when omitted).
 ///
-/// The BNO talks SHTP over SPI (mode 3, ≤ 3 MHz) with two host-side
-/// GPIOs: an active-low **INT** (`HINTN`) so the host knows when the
-/// chip has a packet ready, and an active-low **RST** the host pulses
-/// at boot to bring the chip into a clean SPI-mode session. See
-/// `config/bebop_v2.yaml`'s `imu:` block for the canonical Bebop V2
-/// pinout and a wiring diagram.
-/// Where the runtime gets its BNO085 data from.
-///
-/// Both backends fill the same [`crate::imu::ImuShared`] snapshot with a
-/// body-frame quaternion + gyro, so they are interchangeable from the
-/// policy runner / telemetry pump's point of view. The chassis `mount:`
-/// rotation is applied identically in both paths.
+/// The backend fills the shared [`crate::imu::ImuShared`] snapshot with a
+/// body-frame quaternion + gyro, after applying the chassis `mount:`
+/// rotation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImuSource {
-    /// Read the BNO085 directly over the Jetson's own SPI bus + GPIOs
-    /// (the historical path; see [`crate::imu::spawn_imu_thread`]).
-    Spi,
     /// Read pre-fused frames streamed by the Teensy over USB serial
     /// (see [`crate::imu_serial::spawn_imu_serial_thread`] and the Teensy
     /// `teensy_bridge` firmware). The BNO is wired to the Teensy, not the
-    /// Jetson, so the SPI/INT/RST fields are unused.
+    /// Jetson.
     Serial,
 }
 
@@ -504,10 +337,9 @@ impl std::str::FromStr for ImuSource {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "spi" => Ok(Self::Spi),
             "serial" | "usb" | "teensy" => Ok(Self::Serial),
             other => Err(anyhow!(
-                "unknown imu.source {other:?} (expected \"spi\" or \"serial\")"
+                "unknown imu.source {other:?} (expected \"serial\")"
             )),
         }
     }
@@ -518,31 +350,12 @@ pub struct ImuConfig {
     /// Which backend feeds the shared IMU snapshot.
     pub source: ImuSource,
     /// Serial device the Teensy `teensy_bridge` enumerates as, e.g.
-    /// `/dev/ttyACM0`. Only meaningful when `source == Serial`.
+    /// `/dev/ttyACM0`.
     pub serial_device: String,
-    /// SPI character device — e.g. `/dev/spidev0.0` for the Jetson
-    /// header pins 19/21/23/24 (`SPI0_*` in the pinout). Only meaningful
-    /// when `source == Spi`.
-    pub spi_device: String,
-    /// GPIO chip (e.g. `gpiochip0`) hosting the BNO `INT`/`HINTN` line.
-    pub int_chip: String,
-    /// Line offset within `int_chip`. Look up with `gpioinfo`; for
-    /// Jetson Orin Nano this is the gpiochip line that backs the
-    /// physical header pin INT is wired to (see the YAML pinout table).
-    pub int_line: u32,
-    /// GPIO chip hosting the BNO `RST`/`RSTN` line.
-    pub rst_chip: String,
-    /// Line offset within `rst_chip` for `RST`.
-    pub rst_line: u32,
-    /// SH-2 sensor-report cadence hint, in milliseconds. Lower = more
-    /// samples/sec; bounded by the chip's gyro rate (1 kHz) and the SPI
-    /// throughput (see `spi_max_speed_hz`). 5 ms = 200 Hz; 50 ms = 20 Hz.
+    /// Expected report period in milliseconds (the Teensy sets the BNO's
+    /// actual cadence). Seeds the staleness budget: the snapshot reads
+    /// stale after 3× this, at least 250 ms. 5 ms = 200 Hz; 50 ms = 20 Hz.
     pub rotation_vector_period_ms: u16,
-    /// SPI bus clock (Hz) for the BNO08x. The chip is rated to 3 MHz;
-    /// 80 kHz (the driver's historical default) cannot carry high report
-    /// rates. Defaults to 1 MHz, which sustains a 200 Hz RV + gyro pair
-    /// with margin. Lower it if long / unshielded jumpers make reads flaky.
-    pub spi_max_speed_hz: u32,
     /// Constant **sensor-to-body** rotation, stored as a unit quaternion
     /// in XYZW order. Every raw BNO reading is post-multiplied by this
     /// before publishing, so downstream consumers always see a body-frame
@@ -565,14 +378,15 @@ impl ImuConfig {
 }
 
 impl RobotConfig {
-    /// Load and validate a v2 humanoid config from a YAML file.
+    /// Load and validate a robot config from a YAML file.
     ///
     /// Validates:
     /// - Each `model` parses as a known [`RobstrideModel`].
-    /// - `motor_id` is in `1..=255`.
+    /// - `motor_id` is in `1..=255`; a wheel's `node_id` in `0..=63`.
     /// - `pos_min < pos_max`, `vel_max > 0`, etc.
-    /// - No two joints share `(can_interface, motor_id)`.
-    /// - Joint names are unique.
+    /// - No two joints share `(can_interface, motor_id)`, no two wheels
+    ///   `(can_interface, node_id)`.
+    /// - Joint and wheel names are unique.
     ///
     /// Joint order in the resulting `Vec<JointConfig>` matches the YAML
     /// insertion order (preserved by `serde_yaml::Mapping`).
@@ -590,7 +404,7 @@ impl RobotConfig {
         let mut interfaces: HashSet<String> = HashSet::new();
 
         // serde_yaml::Mapping preserves YAML insertion order, which is what
-        // we want so that `index` matches the file ordering.
+        // we want so that `joints` keeps the file ordering.
         for (key, value) in raw.joints.iter() {
             let name = key
                 .as_str()
@@ -664,19 +478,11 @@ impl RobotConfig {
             );
             let slew = merge_slew(defaults.slew.as_ref(), raw_joint.slew.as_ref());
 
-            let policy_gain_clamps = merge_policy_gain_clamps(
-                defaults.policy_gain_clamps.as_ref(),
-                raw_joint.policy_gain_clamps.as_ref(),
-            );
-            validate_policy_gain_clamps(&name, &model, &policy_gain_clamps)?;
-
             let direction = raw_joint.direction.or(defaults.direction).unwrap_or(1.0);
             validate_direction(&name, direction)?;
 
-            let index = joints.len();
             joints.push(JointConfig {
                 name,
-                index,
                 can_id: motor_id,
                 can_bus,
                 model,
@@ -684,16 +490,13 @@ impl RobotConfig {
                 hold_gains,
                 test_gains,
                 slew,
-                default_position: 0.0,
-                policy_gain_clamps,
                 direction,
             });
         }
 
         // ----- Wheels (ODrive BotWheel) -----------------------------------
-        // Parse the optional `wheels:` mapping. A wheeled chassis has
-        // wheels (and usually no `joints`); the humanoid has `joints` and
-        // no `wheels`. At least one of the two must be present.
+        // Parse the optional `wheels:` mapping. A config may carry wheels,
+        // joints, or both; at least one of the two must be present.
         let mut wheels = Vec::new();
         let mut seen_wheel_names: HashSet<String> = HashSet::new();
         let mut seen_wheel_pairs: HashSet<(String, u8)> = HashSet::new();
@@ -736,7 +539,6 @@ impl RobotConfig {
             if vel_max <= 0.0 {
                 return Err(anyhow!("wheel {name:?}: vel_max must be > 0"));
             }
-            let torque_limit = raw_wheel.torque_limit.unwrap_or(0.0);
             let feedback_timeout_ms = raw_wheel.feedback_timeout_ms.unwrap_or(100.0);
             if feedback_timeout_ms <= 0.0 {
                 return Err(anyhow!("wheel {name:?}: feedback_timeout_ms must be > 0"));
@@ -750,7 +552,6 @@ impl RobotConfig {
                 node_id: node_id as u8,
                 direction,
                 vel_max,
-                torque_limit,
                 feedback_timeout_ms,
             });
         }
@@ -865,79 +666,19 @@ impl RobotConfig {
         let mut can_interfaces: Vec<String> = interfaces.into_iter().collect();
         can_interfaces.sort();
 
-        let policy = {
-            let tau = defaults
-                .policy
-                .as_ref()
-                .and_then(|p| p.gain_ema_tau_s)
-                .unwrap_or(PolicyConfig::DEFAULT.gain_ema_tau_s);
-            if tau < 0.0 {
-                return Err(anyhow!(
-                    "defaults.policy.gain_ema_tau_s must be >= 0 (0 disables the \
-                     filter); got {tau}"
-                ));
-            }
-            PolicyConfig {
-                gain_ema_tau_s: tau,
-            }
-        };
-
         let imu = raw
             .imu
             .map(|raw_imu| -> Result<ImuConfig> {
-                // The defaults match the validated Bebop V2 pinout (see
-                // `config/bebop_v2.yaml`): SPI device + INT/RST GPIOs
-                // matching Jetson Orin Nano's `gpiochip0:144` (header
-                // pin 7, PAC.06) and `gpiochip0:85` (header pin 15,
-                // PN.01 / GPIO12). Override per-robot when the wiring differs.
                 let source = match raw_imu.source.as_deref() {
                     Some(s) => s.parse::<ImuSource>()?,
-                    None => ImuSource::Spi,
+                    None => ImuSource::Serial,
                 };
-
                 let serial_device = raw_imu
                     .serial_device
                     .unwrap_or_else(|| "/dev/ttyACM0".to_string());
-
-                let spi_device = raw_imu
-                    .spi_device
-                    .unwrap_or_else(|| "/dev/spidev0.0".to_string());
-                let int_chip = raw_imu.int_chip.unwrap_or_else(|| "gpiochip0".to_string());
-                let rst_chip = raw_imu.rst_chip.unwrap_or_else(|| "gpiochip0".to_string());
-                // INT/RST GPIO lines only matter for the SPI backend; the
-                // serial bridge has the BNO wired to the Teensy. Require them
-                // only when `source: spi`, otherwise default to 0 (unused).
-                let (int_line, rst_line) = if source == ImuSource::Spi {
-                    let int_line = raw_imu.int_line.ok_or_else(|| {
-                        anyhow!(
-                            "imu.int_line is required for source: spi \
-                                 (GPIO line offset within `int_chip`)"
-                        )
-                    })?;
-                    let rst_line = raw_imu.rst_line.ok_or_else(|| {
-                        anyhow!(
-                            "imu.rst_line is required for source: spi \
-                                 (GPIO line offset within `rst_chip`)"
-                        )
-                    })?;
-                    (int_line, rst_line)
-                } else {
-                    (raw_imu.int_line.unwrap_or(0), raw_imu.rst_line.unwrap_or(0))
-                };
                 let rotation_vector_period_ms = raw_imu.rotation_vector_period_ms.unwrap_or(50);
                 if rotation_vector_period_ms == 0 {
                     return Err(anyhow!("imu.rotation_vector_period_ms must be >= 1"));
-                }
-                // Default 1 MHz: ~12× the historical 80 kHz, enough to carry
-                // a 200 Hz RV + gyro pair with headroom, while staying well
-                // under the BNO08x's 3 MHz SPI ceiling. Tune down for long /
-                // unshielded jumper wiring if reads get flaky at speed.
-                let spi_max_speed_hz = raw_imu.spi_max_speed_hz.unwrap_or(1_000_000);
-                if spi_max_speed_hz == 0 || spi_max_speed_hz > 3_000_000 {
-                    return Err(anyhow!(
-                        "imu.spi_max_speed_hz must be in 1..=3_000_000 (BNO08x SPI ceiling \
-                         is 3 MHz); got {spi_max_speed_hz}"
-                    ));
                 }
                 let mount_quat_sensor_body = match raw_imu.mount {
                     Some(m) => build_mount_quat_sensor_body(&m)?,
@@ -946,13 +687,7 @@ impl RobotConfig {
                 Ok(ImuConfig {
                     source,
                     serial_device,
-                    spi_device,
-                    int_chip,
-                    int_line,
-                    rst_chip,
-                    rst_line,
                     rotation_vector_period_ms,
-                    spi_max_speed_hz,
                     mount_quat_sensor_body,
                 })
             })
@@ -966,7 +701,6 @@ impl RobotConfig {
             can_interfaces,
             server,
             power,
-            policy,
             imu,
         })
     }
@@ -975,16 +709,8 @@ impl RobotConfig {
         self.joints.iter().find(|j| j.name == name)
     }
 
-    pub fn get_joint_by_index(&self, index: usize) -> Option<&JointConfig> {
-        self.joints.iter().find(|j| j.index == index)
-    }
-
     pub fn num_joints(&self) -> usize {
         self.joints.len()
-    }
-
-    pub fn get_wheel(&self, name: &str) -> Option<&WheelConfig> {
-        self.wheels.iter().find(|w| w.name == name)
     }
 
     pub fn num_wheels(&self) -> usize {
@@ -993,7 +719,7 @@ impl RobotConfig {
 }
 
 // ===========================================================================
-// Joint state / command (used by Robstride driver + observation builder).
+// Joint state / command (used by the Robstride and ODrive drivers).
 // ===========================================================================
 
 #[derive(Debug, Clone, Default)]
@@ -1025,7 +751,7 @@ pub struct JointCommand {
 struct RawConfig {
     defaults: Option<RawDefaults>,
     /// `serde_yaml::Mapping` preserves YAML insertion order, which we rely
-    /// on so that `index` reflects the file ordering.
+    /// on so that `RobotConfig::joints` keeps the file ordering.
     #[serde(default)]
     joints: serde_yaml::Mapping,
     #[serde(default)]
@@ -1038,25 +764,12 @@ struct RawConfig {
 
 #[derive(Debug, Default, Deserialize)]
 struct RawImu {
-    /// `"spi"` (default) or `"serial"`. Selects the IMU backend.
+    /// `"serial"` (the default). Selects the IMU backend.
     source: Option<String>,
     /// Serial device for the Teensy `teensy_bridge`. Defaults to
-    /// `/dev/ttyACM0`. Only used when `source: serial`.
+    /// `/dev/ttyACM0`.
     serial_device: Option<String>,
-    /// SPI character device. Defaults to `/dev/spidev0.0` for the Jetson
-    /// header pins 19/21/23/24 (`SPI0_*` in the pinout).
-    spi_device: Option<String>,
-    /// GPIO chip for `INT` (`HINTN`). Defaults to `gpiochip0`.
-    int_chip: Option<String>,
-    /// Line offset within `int_chip`. **Required.**
-    int_line: Option<u32>,
-    /// GPIO chip for `RST`. Defaults to `gpiochip0`.
-    rst_chip: Option<String>,
-    /// Line offset within `rst_chip`. **Required.**
-    rst_line: Option<u32>,
     rotation_vector_period_ms: Option<u16>,
-    /// SPI clock in Hz. Defaults to 1 MHz. See [`ImuConfig::spi_max_speed_hz`].
-    spi_max_speed_hz: Option<u32>,
     mount: Option<RawMount>,
 }
 
@@ -1079,8 +792,6 @@ struct RawDefaults {
     hold_gains: Option<RawGains>,
     test_gains: Option<RawGains>,
     slew: Option<RawSlew>,
-    policy: Option<RawPolicy>,
-    policy_gain_clamps: Option<RawPolicyGainClamps>,
     direction: Option<f32>,
 }
 
@@ -1093,19 +804,10 @@ struct RawJoint {
     hold_gains: Option<RawGains>,
     test_gains: Option<RawGains>,
     slew: Option<RawSlew>,
-    policy_gain_clamps: Option<RawPolicyGainClamps>,
     /// Motor→robot direction sign (`+1` / `-1`). See
     /// [`JointConfig::direction`]. Omitted ⇒ `+1` (default, motor agrees
     /// with the URDF). Inherits the `defaults.direction` block.
     direction: Option<f32>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RawPolicyGainClamps {
-    kp_min: Option<f32>,
-    kp_max: Option<f32>,
-    kd_min: Option<f32>,
-    kd_max: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1127,13 +829,6 @@ struct RawGains {
 #[derive(Debug, Default, Deserialize)]
 struct RawSlew {
     max_pos_step_per_tick: Option<f32>,
-    arm_ramp_s: Option<f32>,
-    abort_ramp_s: Option<f32>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RawPolicy {
-    gain_ema_tau_s: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1161,7 +856,6 @@ struct RawWheel {
     node_id: Option<u32>,
     direction: Option<f32>,
     vel_max: Option<f32>,
-    torque_limit: Option<f32>,
     feedback_timeout_ms: Option<f32>,
 }
 
@@ -1211,8 +905,8 @@ fn parse_axis_remap(spec: &str, field: &str) -> Result<[f32; 3]> {
 ///    accidental reflections).
 /// 3. Invert and convert to a unit quaternion `q_sensor_body` in XYZW.
 ///
-/// Used by `imu.rs` as a post-multiplier: `q_world_body = q_world_sensor *
-/// q_sensor_body`.
+/// Used by the IMU reader (`imu_serial.rs`) as a post-multiplier:
+/// `q_world_body = q_world_sensor * q_sensor_body`.
 fn build_mount_quat_sensor_body(raw: &RawMount) -> Result<[f32; 4]> {
     use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 
@@ -1255,7 +949,7 @@ fn build_mount_quat_sensor_body(raw: &RawMount) -> Result<[f32; 4]> {
         .inverse()
         .into_inner();
     // nalgebra::Quaternion stores `coords = [i, j, k, w]` (= XYZW), which is
-    // exactly the convention `ImuShared` / `ImuState` expect.
+    // exactly the convention `ImuShared` expects.
     Ok([
         q_sensor_body.coords.x,
         q_sensor_body.coords.y,
@@ -1308,26 +1002,6 @@ fn merge_slew(defaults: Option<&RawSlew>, joint: Option<&RawSlew>) -> SlewParams
             |s| s.max_pos_step_per_tick,
             SlewParams::DEFAULT.max_pos_step_per_tick,
         ),
-        arm_ramp_s: pick(|s| s.arm_ramp_s, SlewParams::DEFAULT.arm_ramp_s),
-        abort_ramp_s: pick(|s| s.abort_ramp_s, SlewParams::DEFAULT.abort_ramp_s),
-    }
-}
-
-fn merge_policy_gain_clamps(
-    defaults: Option<&RawPolicyGainClamps>,
-    joint: Option<&RawPolicyGainClamps>,
-) -> PolicyGainClamps {
-    let pick = |get: fn(&RawPolicyGainClamps) -> Option<f32>, fallback: f32| {
-        joint
-            .and_then(get)
-            .or_else(|| defaults.and_then(get))
-            .unwrap_or(fallback)
-    };
-    PolicyGainClamps {
-        kp_min: pick(|c| c.kp_min, PolicyGainClamps::FALLBACK.kp_min),
-        kp_max: pick(|c| c.kp_max, PolicyGainClamps::FALLBACK.kp_max),
-        kd_min: pick(|c| c.kd_min, PolicyGainClamps::FALLBACK.kd_min),
-        kd_max: pick(|c| c.kd_max, PolicyGainClamps::FALLBACK.kd_max),
     }
 }
 
@@ -1338,70 +1012,6 @@ fn validate_direction(joint_name: &str, direction: f32) -> Result<()> {
     if (direction - 1.0).abs() > 1e-6 && (direction + 1.0).abs() > 1e-6 {
         return Err(anyhow!(
             "actuator {joint_name:?}: direction must be +1 or -1 (got {direction})"
-        ));
-    }
-    Ok(())
-}
-
-/// Reject clamps that don't form a valid range or that exceed the
-/// motor model's electrical envelope. The supervisor uses the wire
-/// scaler's full encoder range when packing the CAN frame, so writing
-/// kp > `RobstrideSpecs::kp_max` would saturate at the encoder peak
-/// silently; we'd rather fail-fast at boot.
-fn validate_policy_gain_clamps(
-    joint_name: &str,
-    model: &RobstrideModel,
-    clamps: &PolicyGainClamps,
-) -> Result<()> {
-    if !(clamps.kp_min.is_finite() && clamps.kp_max.is_finite()) {
-        return Err(anyhow!(
-            "joint {joint_name:?}: policy_gain_clamps kp_min/kp_max must be finite"
-        ));
-    }
-    if !(clamps.kd_min.is_finite() && clamps.kd_max.is_finite()) {
-        return Err(anyhow!(
-            "joint {joint_name:?}: policy_gain_clamps kd_min/kd_max must be finite"
-        ));
-    }
-    if clamps.kp_min < 0.0 || clamps.kd_min < 0.0 {
-        return Err(anyhow!(
-            "joint {joint_name:?}: policy_gain_clamps kp_min/kd_min must be >= 0 \
-             (got kp_min={}, kd_min={})",
-            clamps.kp_min,
-            clamps.kd_min
-        ));
-    }
-    if clamps.kp_min >= clamps.kp_max {
-        return Err(anyhow!(
-            "joint {joint_name:?}: policy_gain_clamps kp_min ({}) must be < kp_max ({})",
-            clamps.kp_min,
-            clamps.kp_max
-        ));
-    }
-    if clamps.kd_min >= clamps.kd_max {
-        return Err(anyhow!(
-            "joint {joint_name:?}: policy_gain_clamps kd_min ({}) must be < kd_max ({})",
-            clamps.kd_min,
-            clamps.kd_max
-        ));
-    }
-    let specs = model.specs();
-    if clamps.kp_max > specs.kp_max {
-        return Err(anyhow!(
-            "joint {joint_name:?}: policy_gain_clamps kp_max ({}) exceeds {} encoder \
-             ceiling ({}). Lower kp_max or move to a higher-spec motor model.",
-            clamps.kp_max,
-            model.as_str(),
-            specs.kp_max
-        ));
-    }
-    if clamps.kd_max > specs.kd_max {
-        return Err(anyhow!(
-            "joint {joint_name:?}: policy_gain_clamps kd_max ({}) exceeds {} encoder \
-             ceiling ({}). Lower kd_max or move to a higher-spec motor model.",
-            clamps.kd_max,
-            model.as_str(),
-            specs.kd_max
         ));
     }
     Ok(())
@@ -1500,34 +1110,104 @@ joints:
         std::fs::remove_file(&path).ok();
     }
 
+    /// The full `joints:` schema the arms will use — a `defaults:` block,
+    /// per-joint overrides, a reversed-polarity joint and two buses —
+    /// next to the wheeled chassis it will share a config with.
+    const ARMS_AND_WHEELS: &str = r#"
+defaults:
+  hard_limits:
+    pos_min: -0.5
+    pos_max: 0.5
+    vel_max: 2.0
+    tau_max: 8.0
+    temp_max: 65.0
+    feedback_timeout_ms: 100
+  hold_gains: { kp: 5.0, kd: 1.0 }
+  test_gains: { kp: 30.0, kd: 2.0 }
+  slew:
+    max_pos_step_per_tick: 0.01
+joints:
+  shoulder_pitch_left_joint:
+    can_interface: can1
+    motor_id: 11
+    model: RS03
+    direction: -1
+    hard_limits: { pos_min: -1.5, pos_max: 1.5, tau_max: 30.0 }
+    hold_gains: { kp: 40.0, kd: 3.0 }
+  elbow_left_joint:
+    can_interface: can1
+    motor_id: 12
+    model: RS02
+  shoulder_pitch_right_joint:
+    can_interface: can2
+    motor_id: 11
+    model: RS03
+    slew: { max_pos_step_per_tick: 0.02 }
+wheels:
+  left:
+    can_interface: can4
+    node_id: 36
+    vel_max: 20.0
+  right:
+    can_interface: can4
+    node_id: 46
+    direction: -1
+    vel_max: 20.0
+drive:
+  left_wheel: left
+  right_wheel: right
+  wheel_radius: 0.0855
+  track_width: 0.402
+"#;
+
     #[test]
-    fn shipped_bebop_v2_yaml_flips_reversed_polarity_joints() {
-        // Guards the actual deployed config: the hip-abduction, hip-flexion,
-        // and knee-flexion motors are mounted/zeroed with reversed encoder
-        // polarity vs the URDF/sim (confirmed by passive back-drive captures),
-        // so they carry direction -1. Only the foot/ankle joints agree with
-        // the URDF (direction +1).
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/bebop_v2.yaml");
-        let cfg = RobotConfig::from_yaml(&path).expect("load shipped bebop_v2.yaml");
-        for joint in &cfg.joints {
-            let reversed = joint.name.starts_with("hip_abduction_")
-                || joint.name.starts_with("hip_flexion_")
-                || joint.name.starts_with("knee_flexion_");
-            let expected = if reversed { -1.0 } else { 1.0 };
-            assert_eq!(
-                joint.direction, expected,
-                "joint {} has unexpected direction {}",
-                joint.name, joint.direction
-            );
-        }
+    fn joint_schema_parses_next_to_wheels_with_reversed_polarity() {
+        let path = write_temp_config(ARMS_AND_WHEELS);
+        let cfg = RobotConfig::from_yaml(&path).expect("load arms + wheels config");
+        std::fs::remove_file(&path).ok();
+
+        // Joints keep the YAML order; a motor_id may repeat on another bus.
+        let names: Vec<&str> = cfg.joints.iter().map(|j| j.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "shoulder_pitch_left_joint",
+                "elbow_left_joint",
+                "shoulder_pitch_right_joint"
+            ]
+        );
+        let shoulder = cfg.get_joint("shoulder_pitch_left_joint").unwrap();
+        assert_eq!(shoulder.direction, -1.0, "reversed polarity must parse");
+        assert_eq!((shoulder.can_bus.as_str(), shoulder.can_id), ("can1", 11));
+        assert_eq!(shoulder.model, RobstrideModel::RS03);
+        // Per-joint overrides win field by field; the rest comes from
+        // `defaults:`.
+        assert_eq!(shoulder.hard_limits.pos_min, -1.5);
+        assert_eq!(shoulder.hard_limits.tau_max, 30.0);
+        assert_eq!(shoulder.hard_limits.vel_max, 2.0);
+        assert_eq!(shoulder.hold_gains.kp, 40.0);
+        assert_eq!(shoulder.test_gains.kd, 2.0);
+
+        let elbow = cfg.get_joint("elbow_left_joint").unwrap();
+        assert_eq!(elbow.direction, 1.0);
+        assert_eq!(elbow.model, RobstrideModel::RS02);
+        assert_eq!(elbow.hard_limits.pos_max, 0.5);
+        assert!((elbow.slew.max_pos_step_per_tick - 0.01).abs() < 1e-6);
+        let right = cfg.get_joint("shoulder_pitch_right_joint").unwrap();
+        assert!((right.slew.max_pos_step_per_tick - 0.02).abs() < 1e-6);
+
+        assert_eq!(cfg.num_wheels(), 2);
+        assert!(cfg.drive.is_some());
+        // Every bus a joint or wheel names is registered, sorted.
+        assert_eq!(cfg.can_interfaces, ["can1", "can2", "can4"]);
     }
 
     #[test]
     fn shipped_bebop_wheeled_yaml_parses_power_block() {
-        // Guards the deployed wheeled config: the chassis reuses the V2
-        // power board (can0, addr 0xAA) and 13s NMC pack, and the parser
-        // must auto-register both `can4` (wheels) and `can0` (power) in
-        // the bus pool — the YAML deliberately carries no explicit
+        // Guards the deployed wheeled config: the chassis has its PowerBoard
+        // on can0 (addr 0xAA) and a 13s NMC pack, and the parser must
+        // auto-register both `can4` (wheels) and `can0` (power) in the bus
+        // pool — the YAML deliberately carries no explicit
         // `can_interfaces:` list. Losing the `power:` block silently
         // hides the operator app's battery card (present=false).
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/bebop_wheeled.yaml");
@@ -1552,7 +1232,7 @@ mod imu_mount_tests {
     use super::*;
 
     /// Apply `q_sensor_body` to a sensor-frame vector and return the body-
-    /// frame components. Mirrors what `imu.rs` does at runtime (via the
+    /// frame components. Mirrors what the IMU reader does at runtime (via the
     /// `q_world_body = q_world_sensor · q_sensor_body` post-multiply) but
     /// exposed here as a plain rotation so the assertions are obvious.
     fn rotate_sensor_to_body(q_sb_xyzw: [f32; 4], v_sensor: [f32; 3]) -> [f32; 3] {
@@ -1710,11 +1390,12 @@ drive:
     fn parses_wheels_without_joints() {
         let path = write_temp_config(DIFF_DRIVE);
         let cfg = RobotConfig::from_yaml(&path).expect("load wheeled config");
+        let wheel = |name: &str| cfg.wheels.iter().find(|w| w.name == name);
         assert_eq!(cfg.num_joints(), 0);
         assert_eq!(cfg.num_wheels(), 2);
-        assert!(cfg.get_wheel("left").is_some());
-        assert_eq!(cfg.get_wheel("right").unwrap().direction, -1.0);
-        assert_eq!(cfg.get_wheel("left").unwrap().direction, 1.0);
+        assert!(wheel("left").is_some());
+        assert_eq!(wheel("right").unwrap().direction, -1.0);
+        assert_eq!(wheel("left").unwrap().direction, 1.0);
         let d = cfg.drive.as_ref().expect("drive parsed");
         assert_eq!(d.left_wheel, "left");
         assert_eq!(d.right_wheel, "right");
@@ -1794,6 +1475,31 @@ drive:
             "unexpected error: {err:#}"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn imu_block_without_source_defaults_to_serial() {
+        let body = format!("{DIFF_DRIVE}imu:\n  serial_device: /dev/bebop-imu\n");
+        let path = write_temp_config(&body);
+        let cfg = RobotConfig::from_yaml(&path).expect("load wheeled config with imu");
+        std::fs::remove_file(&path).ok();
+        let imu = cfg.imu.expect("imu block parsed");
+        assert_eq!(imu.source, ImuSource::Serial);
+        assert_eq!(imu.serial_device, "/dev/bebop-imu");
+        assert_eq!(imu.rotation_vector_period_ms, 50);
+        assert_eq!(imu.mount_quat_sensor_body, ImuConfig::IDENTITY_QUAT);
+    }
+
+    #[test]
+    fn rejects_unknown_imu_source() {
+        let body = format!("{DIFF_DRIVE}imu:\n  source: spi\n");
+        let path = write_temp_config(&body);
+        let err = RobotConfig::from_yaml(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        assert!(
+            format!("{err:#}").contains("unknown imu.source"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

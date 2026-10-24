@@ -1,16 +1,13 @@
 //! BNO085 IMU reader that consumes pre-fused frames streamed by the
-//! Teensy `teensy_bridge` firmware over USB serial, instead of talking to
-//! the chip over the Jetson's own SPI bus.
+//! Teensy `teensy_bridge` firmware over USB serial.
 //!
-//! ## Why a serial backend
+//! ## Why a serial bridge
 //!
-//! The BNO can be wired to the Teensy (which already sits on the robot
-//! for motor control) rather than to the Jetson's SPI header. The Teensy
-//! reads the chip and forwards each fused sample to the Jetson as a
-//! fixed 52-byte binary frame. This module parses that stream and writes
-//! the result into the **same** [`ImuShared`] snapshot the SPI path
-//! ([`crate::imu::spawn_imu_thread`]) fills, so the policy runner and the
-//! telemetry pump don't care which backend is active.
+//! The Jetson has no usable GPIO/SPI header for the BNO, so the chip is
+//! wired to the Teensy instead. The Teensy reads it and forwards each
+//! fused sample to the Jetson as a fixed 52-byte binary frame. This
+//! module parses that stream and writes the result into the shared
+//! [`ImuShared`] snapshot the telemetry builders read.
 //!
 //! ## Frame contract
 //!
@@ -28,9 +25,9 @@
 //! ```
 //!
 //! The Teensy sends the **raw sensor-frame** quaternion / gyro; the
-//! chassis mount rotation (YAML `imu.mount:`) is applied here, exactly
-//! as [`crate::imu`] does for the SPI path, so the published snapshot is
-//! always a body-frame (REP-103 / FLU) attitude + angular velocity.
+//! chassis mount rotation (YAML `imu.mount:`) is applied here with the
+//! [`crate::imu`] quaternion helpers, so the published snapshot is always
+//! a body-frame (REP-103 / FLU) attitude + angular velocity.
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -96,10 +93,10 @@ fn parse_frame(buf: &[u8]) -> Option<ParsedFrame> {
 /// the binary IMU stream, and publishes body-frame attitude + angular
 /// velocity into `shared`.
 ///
-/// Mirrors the lifecycle of [`crate::imu::spawn_imu_thread`]: it retries
-/// opening the port forever (with backoff) so the runtime starts even if
-/// the Teensy is not yet enumerated, and it honors `shutdown` for a clean
-/// exit. Returns `None` only if the OS thread itself fails to spawn.
+/// It retries opening the port forever (with backoff) so the runtime
+/// starts even if the Teensy is not yet enumerated, and it honors
+/// `shutdown` for a clean exit. Returns `None` only if the OS thread
+/// itself fails to spawn.
 pub fn spawn_imu_serial_thread(
     cfg: ImuConfig,
     shutdown: Arc<AtomicBool>,

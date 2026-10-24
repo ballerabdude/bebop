@@ -4,8 +4,8 @@
  *
  * Purpose:
  *   Minimal, self-contained program to verify a BNO085 over SPI before
- *   deploying the SPI path on the Jetson. All output goes to the primary
- *   USB Serial port:
+ *   flashing the `teensy_bridge` env, which uses the same wiring. All
+ *   output goes to the primary USB Serial port:
  *
  *       pio run -e imu_spi_test --target upload
  *       pio device monitor -e imu_spi_test    (or: cat /dev/ttyACM0)

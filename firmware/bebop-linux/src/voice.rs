@@ -3,10 +3,10 @@
 //! The on-robot voice stack runs as its own systemd unit
 //! (`bebop-voice.service`, `bebop-vision/bebop_vision/voice_server.py`) rather
 //! than as a child of this process: the voice service owns a large GPU model
-//! and its own venv, and `bebop-linux` runs sandboxed (`ProtectHome=true`,
-//! `PrivateTmp=true`) so a child could not reach them. A separate unit also
-//! gives it its own restart policy and keeps model load / engine build out of
-//! the safety-critical process.
+//! in the repo checkout, and `bebop-linux` runs sandboxed
+//! (`ProtectHome=read-only`, `PrivateTmp=true`) so a child could not write
+//! under `/home`. A separate unit also gives it its own restart policy and
+//! keeps model load / engine build out of the safety-critical process.
 //!
 //! This module owns the bridge: the WS handler calls
 //! [`VoiceShared::request`] with the operator's intent, a background thread
@@ -29,10 +29,6 @@ use std::time::Duration;
 /// systemd unit that runs the Python voice service.
 pub const VOICE_SERVICE: &str = "bebop-voice.service";
 
-/// Catalog id of the voice model the service serves. Surfaced in telemetry so
-/// the UI can label the control without reading the unit file.
-pub const VOICE_MODEL: &str = "qwen3-omni-30b";
-
 /// How often to re-poll systemd when idle. Keeps telemetry fresh without
 /// hammering PID1 with `systemctl show`.
 const POLL_PERIOD: Duration = Duration::from_millis(1500);
@@ -50,8 +46,6 @@ pub struct VoiceSnapshot {
     pub detail: String,
     /// Unit name (constant, echoed for the UI).
     pub service: String,
-    /// Catalog id of the served model (constant).
-    pub model: String,
     /// Most recent `systemctl` failure, or empty. Cleared once the unit
     /// reports running again.
     pub last_error: String,
@@ -65,7 +59,6 @@ impl Default for VoiceSnapshot {
             state: String::new(),
             detail: String::new(),
             service: VOICE_SERVICE.to_string(),
-            model: VOICE_MODEL.to_string(),
             last_error: String::new(),
         }
     }
@@ -253,7 +246,6 @@ mod tests {
         assert_eq!(snap.state, "active");
         assert_eq!(snap.detail, "running");
         assert_eq!(snap.service, VOICE_SERVICE);
-        assert_eq!(snap.model, VOICE_MODEL);
     }
 
     #[test]

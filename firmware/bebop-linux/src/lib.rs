@@ -1,21 +1,20 @@
-//! Bebop V2 robot runtime — library face.
+//! Bebop robot runtime — library face.
 //!
-//! `bebop-linux` is a single binary that operates the robot in one of three
+//! `bebop-linux` runs the wheeled Bebop (two ODrive S1 BotWheels and a
+//! Robstride PowerBoard over SocketCAN) and keeps the Robstride MIT-mode
+//! joint path for the arms that come next. It operates in one of two
 //! [`mode::Mode`]s:
 //!
-//! - [`mode::Mode::Idle`]      — motors disabled, telemetry streams; WS
-//!   subscribers trigger passive joint feedback on disarmed motors.
-//! - [`mode::Mode::DialIn`]    — per-motor enable/disable, slew-limited
-//!   hold commands, watchdog. Used during bench bring-up.
-//! - [`mode::Mode::RunPolicy`] — ONNX policy drives the joints (legacy
-//!   behavior of this binary).
+//! - [`mode::Mode::Idle`]   — boot mode: nothing can be armed; telemetry
+//!   streams, and WS subscribers trigger passive feedback on disarmed joints.
+//! - [`mode::Mode::DialIn`] — the armed mode: armed wheels track the
+//!   operator twist, armed joints get the slew-limited hold cycle, and the
+//!   feedback watchdog runs.
 //!
-//! The Tauri app drives mode transitions over a protobuf-over-WebSocket
+//! The operator app drives mode transitions over a protobuf-over-WebSocket
 //! API ([`server`]). All motor TX traffic flows through [`safety::Supervisor`],
 //! which clamps to per-joint hard limits, runs a feedback watchdog, and
-//! latches an E-STOP that disables every motor on the bus.
-
-#![allow(dead_code)]
+//! latches an E-STOP that disables every motor on every bus.
 
 pub mod can_interface;
 pub mod capture_control;
@@ -23,16 +22,9 @@ pub mod config;
 pub mod drive;
 pub mod imu;
 pub mod imu_serial;
-pub mod logging;
 pub mod mode;
 pub mod model;
-pub mod observation;
 pub mod odrive;
-pub mod policy;
-pub mod policy_capture;
-pub mod policy_control;
-pub mod policy_io;
-pub mod policy_runner;
 pub mod powerboard;
 pub mod realtime;
 pub mod robstride;

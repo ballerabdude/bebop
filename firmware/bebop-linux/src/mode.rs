@@ -1,30 +1,27 @@
 //! Operating mode state machine.
 //!
 //! ```text
-//! Idle ──set_mode(DialIn)──▶ DialIn ──set_mode(RunPolicy)──▶ RunPolicy
-//!  ▲                          │                              │
-//!  │                          │                              │
-//!  └──────────set_mode(Idle)──┴──────────set_mode(Idle)──────┘
+//! Idle ──set_mode(DialIn)──▶ DialIn
+//!  ▲                          │
+//!  └──────set_mode(Idle)──────┘
 //! ```
 //!
-//! Leaving DialIn or RunPolicy disarms every motor before the transition.
-//! Leaving any mode while E-STOP is latched is forbidden — the operator
-//! must `ResetEStop` first, which drops the mode to `Idle`.
+//! Leaving DialIn for Idle disarms every motor and wheel before the
+//! transition. While E-STOP is latched the only allowed transition is to
+//! Idle; `ResetEStop` clears the latch without changing the mode, and
+//! everything stays disarmed until it is armed again.
 
 use bebop_proto::runtime::v1 as proto;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
-    /// Motors disabled, telemetry streams. Default at boot.
+    /// Nothing can be armed; telemetry streams. Default at boot.
     Idle = 1,
-    /// Per-motor enable/disable, slew-limited hold cycle, watchdog. Used
-    /// for bench bring-up and safety-limit dial-in.
+    /// The armed mode: wheels and joints may be armed. Armed wheels track
+    /// the operator twist, armed joints get the slew-limited hold cycle,
+    /// and the feedback watchdog is enforced. Used for driving and for
+    /// joint bring-up / safety-limit dial-in.
     DialIn = 2,
-    /// ONNX policy drives the joints. The runtime loads `policy.onnx`
-    /// (sibling of the joint YAML by default; override with `--policy`)
-    /// and runs the 52-dim observation -> 24-dim MIT-mode action MLP at 100 Hz via
-    /// [`crate::policy_runner::PolicyRunner`].
-    RunPolicy = 3,
 }
 
 impl Mode {
@@ -32,7 +29,6 @@ impl Mode {
         match v {
             x if x == Mode::Idle as u8 => Some(Mode::Idle),
             x if x == Mode::DialIn as u8 => Some(Mode::DialIn),
-            x if x == Mode::RunPolicy as u8 => Some(Mode::RunPolicy),
             _ => None,
         }
     }
@@ -41,7 +37,6 @@ impl Mode {
         match self {
             Mode::Idle => proto::Mode::Idle,
             Mode::DialIn => proto::Mode::DialIn,
-            Mode::RunPolicy => proto::Mode::RunPolicy,
         }
     }
 
@@ -49,7 +44,6 @@ impl Mode {
         match m {
             proto::Mode::Idle => Some(Mode::Idle),
             proto::Mode::DialIn => Some(Mode::DialIn),
-            proto::Mode::RunPolicy => Some(Mode::RunPolicy),
             proto::Mode::Unspecified => None,
         }
     }

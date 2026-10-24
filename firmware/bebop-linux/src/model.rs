@@ -2,9 +2,8 @@
 //!
 //! The robot does not ship model weights. Gated weights (SAM 3.1, DINOv3,
 //! ...) are downloaded from Hugging Face on demand using an operator-supplied
-//! token; locally trained artifacts (ONNX students, experiments) are produced
-//! on the robot or copied from a workstation. This module owns the bridge,
-//! mirroring [`crate::vision`]:
+//! token; `kind: local` artifacts are produced on the robot or copied from a
+//! workstation. This module owns the bridge, mirroring [`crate::vision`]:
 //!
 //! * the catalog is read from `bebop-vision/config/models.yaml` (the single
 //!   source of truth, shared with the Python downloader);
@@ -21,7 +20,6 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs;
 use std::io::Write;
@@ -55,9 +53,6 @@ pub const MODEL_CATALOG_PATH: &str = "/home/bebop/bebop/bebop-vision/config/mode
 /// Directory the Python downloader writes per-model progress into.
 pub const MODEL_STATUS_DIR: &str = "/run/bebop/models";
 
-/// Persisted purpose -> model-id selection (read by the runtime).
-pub const MODEL_SELECTION_PATH: &str = "/etc/bebop/model_selection.json";
-
 /// How often to re-poll systemd + the status files.
 const POLL_PERIOD: Duration = Duration::from_millis(1500);
 
@@ -73,7 +68,7 @@ pub struct ModelSpec {
     /// "hf" (downloadable) or "local" (produced off-robot).
     #[serde(default = "default_kind")]
     pub kind: String,
-    /// What the model is for (e.g. "segmentation", "navigation").
+    /// What the model is for (e.g. "segmentation", "voice").
     #[serde(default)]
     pub purpose: String,
     /// Hugging Face repo id (kind="hf").
@@ -82,9 +77,6 @@ pub struct ModelSpec {
     /// Repo-relative filenames (kind="hf").
     #[serde(default)]
     pub files: Vec<String>,
-    /// Pinned revision (kind="hf").
-    #[serde(default = "default_revision")]
-    pub revision: String,
     /// Requires a Hugging Face token.
     #[serde(default)]
     pub gated: bool,
@@ -111,10 +103,6 @@ fn default_kind() -> String {
 
 fn default_download() -> String {
     "files".to_string()
-}
-
-fn default_revision() -> String {
-    "main".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,8 +152,6 @@ pub enum ModelRequest {
     ClearToken,
     /// Start the named catalog model's download.
     Download(String),
-    /// Set (or clear, when `model_id` is empty) the active model for a purpose.
-    SetPurpose(String, String),
 }
 
 /// Live status for one catalog entry.
@@ -174,8 +160,6 @@ pub struct ModelEntry {
     pub spec: ModelSpec,
     /// Every file is present on disk.
     pub ready: bool,
-    /// The per-model download unit is `active`.
-    pub running: bool,
     /// Coarse lifecycle (see the `ModelCatalogEntry` proto comment).
     pub state: String,
     /// Human-readable status detail.
@@ -199,8 +183,6 @@ pub struct ModelSnapshot {
     pub last_error: String,
     /// Catalog entries with live status.
     pub models: Vec<ModelEntry>,
-    /// Active model id per purpose (`/etc/bebop/model_selection.json`).
-    pub selection: BTreeMap<String, String>,
 }
 
 /// Shared view of the provisioning state.
@@ -215,11 +197,6 @@ impl ModelShared {
     /// Most recent snapshot. Cheap: a mutex-guarded clone of small strings.
     pub fn snapshot(&self) -> ModelSnapshot {
         self.state.lock().map(|g| g.clone()).unwrap_or_default()
-    }
-
-    /// The catalog as loaded at startup.
-    pub fn catalog(&self) -> &[ModelSpec] {
-        &self.catalog
     }
 
     fn find(&self, model_id: &str) -> Option<ModelSpec> {
@@ -270,32 +247,6 @@ impl ModelShared {
     /// pre-check with [`ModelShared::validate_download`].
     pub fn download(&self, model_id: String) {
         let _ = self.tx.send(ModelRequest::Download(model_id));
-    }
-
-    /// Validate a purpose selection. `model_id` empty clears the purpose.
-    pub fn validate_purpose(&self, purpose: &str, model_id: &str) -> Result<(), String> {
-        if purpose.trim().is_empty() {
-            return Err("purpose is empty".to_string());
-        }
-        if model_id.is_empty() {
-            return Ok(());
-        }
-        let spec = self
-            .find(model_id)
-            .ok_or_else(|| format!("unknown model id {model_id:?}"))?;
-        if spec.purpose != purpose {
-            return Err(format!(
-                "{} serves purpose {:?}, not {:?}",
-                spec.id, spec.purpose, purpose
-            ));
-        }
-        Ok(())
-    }
-
-    /// Queue a purpose selection. Non-blocking; callers should pre-check with
-    /// [`ModelShared::validate_purpose`].
-    pub fn set_purpose(&self, purpose: String, model_id: String) {
-        let _ = self.tx.send(ModelRequest::SetPurpose(purpose, model_id));
     }
 }
 
@@ -394,42 +345,6 @@ fn handle_request(state: &Mutex<ModelSnapshot>, catalog: &[ModelSpec], req: Mode
             clear_status(&spec.id);
             let unit = format!("bebop-model-download@{instance}.service");
             match run_systemctl(&["start", "--no-block", &unit]) {
-                Ok(()) => clear_error(state),
-                Err(e) => store_error(state, format!("{e:#}")),
-            }
-        }
-        ModelRequest::SetPurpose(purpose, model_id) => {
-            let purpose = purpose.trim().to_string();
-            if purpose.is_empty() {
-                store_error(state, "purpose is empty".to_string());
-                return;
-            }
-            if !model_id.is_empty() {
-                match catalog.iter().find(|m| m.id == model_id) {
-                    Some(spec) if spec.purpose == purpose => {}
-                    Some(spec) => {
-                        store_error(
-                            state,
-                            format!(
-                                "{} serves purpose {:?}, not {:?}",
-                                spec.id, spec.purpose, purpose
-                            ),
-                        );
-                        return;
-                    }
-                    None => {
-                        store_error(state, format!("unknown model id {model_id:?}"));
-                        return;
-                    }
-                }
-            }
-            let mut selection = load_selection();
-            if model_id.is_empty() {
-                selection.remove(&purpose);
-            } else {
-                selection.insert(purpose, model_id);
-            }
-            match save_selection(&selection) {
                 Ok(()) => clear_error(state),
                 Err(e) => store_error(state, format!("{e:#}")),
             }
@@ -550,47 +465,6 @@ fn read_status(model_id: &str) -> Option<DownloadStatus> {
 fn clear_status(model_id: &str) {
     let path = Path::new(MODEL_STATUS_DIR).join(format!("{model_id}.json"));
     let _ = fs::remove_file(path);
-}
-
-/// Read the persisted purpose -> model-id selection.
-fn load_selection() -> BTreeMap<String, String> {
-    load_selection_at(Path::new(MODEL_SELECTION_PATH))
-}
-
-fn load_selection_at(path: &Path) -> BTreeMap<String, String> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
-}
-
-/// Persist the purpose -> model-id selection (atomic, world-readable).
-fn save_selection(selection: &BTreeMap<String, String>) -> Result<()> {
-    save_selection_at(Path::new(MODEL_SELECTION_PATH), selection)
-}
-
-fn save_selection_at(path: &Path, selection: &BTreeMap<String, String>) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let text = serde_json::to_string_pretty(selection).context("serialize model selection")?;
-    let tmp = path.with_file_name(format!(
-        "{}.tmp",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("model_selection.json")
-    ));
-    {
-        let mut f = fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-        f.write_all(text.as_bytes())
-            .with_context(|| format!("write {}", tmp.display()))?;
-        f.sync_all()
-            .with_context(|| format!("fsync {}", tmp.display()))?;
-    }
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644))
-        .with_context(|| format!("chmod 0644 {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))?;
-    Ok(())
 }
 
 fn weights_root() -> PathBuf {
@@ -766,7 +640,6 @@ fn build_entry(spec: &ModelSpec) -> ModelEntry {
         return ModelEntry {
             spec: spec.clone(),
             ready,
-            running: false,
             state: if ready { "ready".into() } else { "idle".into() },
             detail: if ready {
                 String::new()
@@ -824,7 +697,6 @@ fn build_entry(spec: &ModelSpec) -> ModelEntry {
     ModelEntry {
         spec: spec.clone(),
         ready,
-        running,
         state: derive_state(ready, running, &active_state, status.as_ref()),
         detail,
         bytes_downloaded,
@@ -844,7 +716,6 @@ fn refresh_into(state: &Mutex<ModelSnapshot>, catalog: &[ModelSpec]) {
         s.present = present;
         s.disk_free_bytes = disk_free;
         s.models = models;
-        s.selection = load_selection();
         // Clear a stale error once the environment is healthy again: the
         // token exists and no entry is in a failure state.
         let any_failed = s
@@ -873,11 +744,11 @@ models:
     revision: main
     gated: true
     bytes: 3502755717
-  - id: navd
-    name: navd student
+  - id: local-net
+    name: Locally trained net
     kind: local
-    purpose: navigation
-    path: navd.onnx
+    purpose: experiment
+    path: local-net.onnx
   - id: qwen3-omni-30b
     name: Qwen3-Omni
     kind: hf
@@ -899,7 +770,7 @@ models:
         assert!(models[0].gated);
         assert_eq!(models[0].files, vec!["sam3.1_multiplex.pt".to_string()]);
         assert_eq!(models[1].kind, "local");
-        assert_eq!(models[1].purpose, "navigation");
+        assert_eq!(models[1].purpose, "experiment");
         assert!(models[1].files.is_empty());
     }
 
@@ -925,23 +796,6 @@ models:
         let models =
             parse_catalog("models:\n  - id: x\n    repo: a/b\n    download: snapshot\n").unwrap();
         assert_eq!(models[0].download, "snapshot");
-    }
-
-    #[test]
-    fn selection_round_trips_at_path() {
-        let dir = std::env::temp_dir().join(format!("bebop_model_sel_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let path = dir.join("model_selection.json");
-        assert!(load_selection_at(&path).is_empty());
-        let mut sel = BTreeMap::new();
-        sel.insert("segmentation".to_string(), "sam3.1".to_string());
-        sel.insert("navigation".to_string(), "navd".to_string());
-        save_selection_at(&path, &sel).unwrap();
-        let loaded = load_selection_at(&path);
-        assert_eq!(loaded, sel);
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o644);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -992,8 +846,8 @@ models:
     fn sanitize_instance_is_conservative() {
         assert_eq!(sanitize_instance("sam3.1").as_deref(), Some("sam3.1"));
         assert_eq!(
-            sanitize_instance("navd_traj-v2").as_deref(),
-            Some("navd_traj-v2")
+            sanitize_instance("local_net-v2").as_deref(),
+            Some("local_net-v2")
         );
         assert!(sanitize_instance("../../etc/passwd").is_none());
         assert!(sanitize_instance("a/b").is_none());

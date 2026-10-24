@@ -42,8 +42,8 @@
  * `jetson-agent/bebop-agent/src/control_serial.rs`.
  *
  * NOTE: the Teensy streams the RAW sensor-frame quaternion / gyro. The
- * chassis mount rotation is applied on the Jetson (mirroring the SPI
- * path in `imu.rs`) so the two IMU sources are interchangeable.
+ * chassis mount rotation is applied on the Jetson, by
+ * `firmware/bebop-linux/src/imu_serial.rs` (YAML `imu.mount:`).
  */
 
 #include <Arduino.h>

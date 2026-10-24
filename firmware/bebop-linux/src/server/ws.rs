@@ -25,8 +25,6 @@
 use crate::capture_control::CaptureControl;
 use crate::imu::ImuShared;
 use crate::model::ModelShared;
-use crate::policy_control::PolicyControlShared;
-use crate::policy_io::PolicyIoShared;
 use crate::safety::{Supervisor, SupervisorEvent};
 use crate::server::handlers::{encode, error_response, handle_client_message};
 use crate::server::telemetry::{build_telemetry, telemetry_envelope};
@@ -67,17 +65,13 @@ const RRD_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 #[derive(Clone)]
 pub struct AppState {
     pub sup: Arc<Supervisor>,
-    /// Latest IMU rotation-vector reading. Populated by [`crate::imu`]
-    /// when the YAML has an `imu:` block; left at default otherwise.
+    /// Latest IMU rotation-vector reading. Populated by
+    /// [`crate::imu_serial`] when the YAML has an `imu:` block; left at
+    /// default otherwise.
     pub imu: ImuShared,
     /// True when the firmware was configured with an `imu:` block (drives
     /// the `ImuStats.present` proto flag).
     pub imu_present: bool,
-    /// Latest policy observation/action snapshot from the inference loop.
-    pub policy_io: PolicyIoShared,
-    /// Operator-toggled dry-run flag. Written here from the WS handler;
-    /// read by [`crate::policy_runner::PolicyRunner`].
-    pub policy_control: PolicyControlShared,
     /// Directory the MCAP writer thread is writing into. Exposed to the
     /// HTTP layer so `GET /captures` can list finished segments and
     /// `GET /captures/dl/<name>` (via `ServeDir`) can stream them out.
@@ -90,12 +84,13 @@ pub struct AppState {
     /// Voice (speech-to-speech) service control + status (see
     /// [`crate::voice`]).
     pub voice: VoiceShared,
-    /// Finalize / active-segment state shared with the MCAP capture writers.
-    /// Used to flag the currently-writing segment in `GET /captures` and to
-    /// roll it over before a download (`POST /captures/finalize`).
+    /// Finalize / active-segment state shared with the system-log MCAP
+    /// writer. Used to flag the currently-writing segment in
+    /// `GET /captures` and to roll it over before a download
+    /// (`POST /captures/finalize`).
     pub captures: Arc<CaptureControl>,
     /// Executable that converts an MCAP into a Rerun `.rrd`
-    /// (`GET /captures/rerun/<name>`); see `scripts/setup-rerun.sh`.
+    /// (`GET /captures/rrd/<stem>.rrd`); see `scripts/setup-rerun.sh`.
     pub rerun_converter: PathBuf,
 }
 
@@ -139,8 +134,8 @@ pub async fn run_server(state: AppState, bind_addr: &str) -> Result<()> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CaptureEntry {
-    /// Filename (e.g. `policy_capture_20260612_021530.mcap`). The
-    /// download URL is `/captures/dl/<name>`.
+    /// Filename (e.g. `system_20261024_101500.mcap`). The download URL
+    /// is `/captures/dl/<name>`.
     name: String,
     /// On-disk size in bytes. Operators use this to spot a stuck /
     /// rotating writer vs a finished segment.
@@ -148,9 +143,10 @@ struct CaptureEntry {
     /// Modification time as Unix milliseconds. 0 if `stat` doesn't
     /// expose it on this filesystem.
     modified_ms: u64,
-    /// True for the segment a firmware writer currently has open (still
-    /// being appended to). The app calls `/captures/finalize` before
-    /// downloading one of these so the served file has a footer.
+    /// True for the segment the system-log writer currently has open
+    /// (still being appended to). The app downloads one of these through
+    /// `GET /captures/finalize-dl/<name>`, which rolls it over first so
+    /// the served file has a footer.
     active: bool,
 }
 
@@ -159,16 +155,14 @@ struct CapturesResponse {
     files: Vec<CaptureEntry>,
 }
 
-/// List every MCAP in the capture dir — `policy_capture_*` (firmware),
-/// `navd_session_*` (bebop-vision) and `system_*` (always-on system log) —
-/// newest first. The currently-open segment (still being appended to by
-/// the writer) is included so the operator can grab a partial recording
-/// if needed — `ServeDir` will stream whatever bytes are on disk at
-/// download time.
+/// List every MCAP in the capture dir — `navd_session_*` (bebop-vision)
+/// and `system_*` (always-on system log) — newest first. The currently-open
+/// segment (still being appended to by the writer) is included so the
+/// operator can grab a partial recording if needed — `ServeDir` will
+/// stream whatever bytes are on disk at download time.
 async fn list_captures(State(state): State<AppState>) -> impl IntoResponse {
     let dir = state.capture_dir.clone();
     let system_active = state.captures.system_path();
-    let policy_active = state.captures.policy_path();
     // Read on a blocking thread so the axum executor isn't blocked on
     // a slow eMMC `readdir` (cheap on the Jetson, but free safety).
     let result = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<CaptureEntry>> {
@@ -183,14 +177,10 @@ async fn list_captures(State(state): State<AppState>) -> impl IntoResponse {
                 Err(_) => continue,
             };
             // navd recorder sessions (bebop-vision) and the always-on
-            // system log (bebop-linux) share this dir and are
-            // listed/downloadable alongside policy captures.
+            // system log (bebop-linux) share this dir and are listed /
+            // downloadable side by side.
             let is_mcap = name.ends_with(".mcap");
-            if !(is_mcap
-                && (name.starts_with("policy_capture_")
-                    || name.starts_with("navd_session_")
-                    || name.starts_with("system_")))
-            {
+            if !(is_mcap && (name.starts_with("navd_session_") || name.starts_with("system_"))) {
                 continue;
             }
             let meta = match entry.metadata() {
@@ -207,8 +197,7 @@ async fn list_captures(State(state): State<AppState>) -> impl IntoResponse {
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
             let path = entry.path();
-            let active = system_active.as_deref() == Some(path.as_path())
-                || policy_active.as_deref() == Some(path.as_path());
+            let active = system_active.as_deref() == Some(path.as_path());
             out.push(CaptureEntry {
                 name,
                 size_bytes: meta.len(),
@@ -240,17 +229,14 @@ async fn list_captures(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-/// Roll the currently-writing segment(s) over so their files have a
-/// footer. Waits (bounded) for the writers to open a fresh segment.
+/// Roll the currently-writing segment over so its file has a footer.
+/// Waits (bounded) for the writer to open a fresh segment.
 async fn finalize_now(control: &CaptureControl) {
-    let before = (control.system_path(), control.policy_path());
+    let before = control.system_path();
     control.request_finalize();
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        let now = (control.system_path(), control.policy_path());
-        let sys_done = before.0.is_none() || now.0 != before.0;
-        let pol_done = before.1.is_none() || now.1 != before.1;
-        if sys_done && pol_done {
+        if before.is_none() || control.system_path() != before {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -275,8 +261,7 @@ async fn finalize_download(
         Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let active = state.captures.system_path().as_deref() == Some(path.as_path())
-        || state.captures.policy_path().as_deref() == Some(path.as_path());
+    let active = state.captures.system_path().as_deref() == Some(path.as_path());
     if active {
         finalize_now(&state.captures).await;
     }
@@ -520,7 +505,6 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 &tele_state.sup,
                 &tele_state.imu,
                 tele_state.imu_present,
-                &tele_state.policy_io,
                 &tele_state.vision,
                 &tele_state.model,
                 &tele_state.voice,
@@ -553,30 +537,23 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
             let payload = match ev {
-                SupervisorEvent::ModeChanged(m) => Some(
+                SupervisorEvent::ModeChanged(m) => {
                     proto::server_runtime_message::Payload::ModeChanged(proto::ModeChanged {
                         mode: m.as_proto() as i32,
-                    }),
-                ),
+                    })
+                }
                 SupervisorEvent::EStopLatched(reason) => {
-                    Some(proto::server_runtime_message::Payload::EstopLatched(
-                        proto::EStopLatched { reason },
-                    ))
+                    proto::server_runtime_message::Payload::EstopLatched(proto::EStopLatched {
+                        reason,
+                    })
                 }
-                SupervisorEvent::EStopReset
-                | SupervisorEvent::MotorArmed { .. }
-                | SupervisorEvent::MotorDisarmed { .. }
-                | SupervisorEvent::WheelArmed { .. }
-                | SupervisorEvent::WheelDisarmed { .. } => None,
             };
-            if let Some(p) = payload {
-                let msg = proto::ServerRuntimeMessage {
-                    request_id: 0,
-                    payload: Some(p),
-                };
-                if tx_events.send(encode(&msg)).await.is_err() {
-                    break;
-                }
+            let msg = proto::ServerRuntimeMessage {
+                request_id: 0,
+                payload: Some(payload),
+            };
+            if tx_events.send(encode(&msg)).await.is_err() {
+                break;
             }
         }
     });
@@ -675,7 +652,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     // assignment, its twist is now orphaned — the stop gesture that
     // would have ended the drive died with the socket. Release the
     // assignment and zero the twist so the chassis halts (motors stay
-    // armed/balancing; recovery is automatic once any client sends
+    // armed; recovery is automatic once any client sends
     // fresh commands). Viewers and rejected would-be drivers touched
     // nothing, so their disconnect is a no-op here (it only forgets the
     // connection's `ClientHello` name).

@@ -1,10 +1,11 @@
 # ============================================================================
-# Bebop differential-drive (wheeled) configuration.
+# Bebop differential-drive (wheeled) configuration — the default for
+# `bebop-linux --config` and for the systemd unit's ExecStart.
 #
-# Initial wheeled chassis: two ODrive BotWheels driven by ODrive S1
-# controllers over CAN, no legged joints. The humanoid `bebop_v2.yaml` has
-# `joints:` for the Robstride MIT-mode actuators; this file replaces them
-# with `wheels:` + `drive:`.
+# Wheeled chassis: two ODrive BotWheels driven by ODrive S1 controllers over
+# CAN (`wheels:` + `drive:`), plus the Robstride PowerBoard (`power:`).
+# Robstride MIT-mode actuators (the arms, later) go in a `joints:` block,
+# which this file doesn't have yet.
 #
 # Velocity control: the firmware commands each wheel's `Set_Input_Vel`
 # (turns/s) after converting the operator twist (vx, wz) through the
@@ -12,9 +13,9 @@
 # ============================================================================
 
 # ODrive BotWheel axes. `node_id` is the ODrive "simple" CAN node id
-# (0..=63) — set the same value over USB with:
+# (0..=63). The firmware never assigns it; set the same value on the S1
+# over USB first:
 #     odrivetool:  odrv0.axis0.config.can.node_id = 1
-# or let the firmware assign it at boot via the Address (0x06) message.
 wheels:
   left:
     can_interface: can4
@@ -24,12 +25,12 @@ wheels:
     # to -1 when a wheel's motor is wired reversed (a passive spin-back
     # check on the bench confirms the sign).
     direction: 1.0
-    # Wheel angular-velocity hard limit (rad/s). 20 rad/s on a 0.0855 m
-    # wheel ≈ 1.7 m/s. E-STOP trips if a commanded speed ever exceeds this.
+    # Wheel angular-velocity limit (rad/s). 20 rad/s on a 0.0855 m wheel
+    # ≈ 1.7 m/s. Every commanded wheel speed is clamped to this; it is a
+    # command clamp, not an E-STOP on the measured speed.
     vel_max: 20.0
-    # Optional torque feed-forward clamp (Nm) — currently unused (0).
-    torque_limit: 0.0
-    # E-STOP if no encoder (10 ms) / heartbeat (100 ms) arrives within this.
+    # E-STOP if an armed wheel goes this long without an encoder (10 ms) /
+    # heartbeat (100 ms) frame, once it has reported at least once.
     feedback_timeout_ms: 250
 
   right:
@@ -37,7 +38,6 @@ wheels:
     node_id: 46
     direction: -1.0
     vel_max: 20.0
-    torque_limit: 0.0
     feedback_timeout_ms: 250
 
 # Differential-drive geometry. `track_width` is the full left-right wheel
@@ -59,21 +59,23 @@ drive:
 # ============================================================================
 # Power board (Robstride PowerBoard) — battery / rail telemetry
 # ----------------------------------------------------------------------------
-# Same board and pack as the humanoid V2 wiring: the PowerBoard lives on
-# its own CAN bus (can0) at address 0xAA, polled at 1 Hz for the Type-03
-# status frame. The parser auto-registers `can0` alongside the wheels'
-# `can4` in the bus pool, so no separate `can_interfaces:` list is needed.
+# The PowerBoard lives on its own CAN bus (can0) at address 0xAA, polled at
+# 1 Hz for the Type-03 status frame. The parser auto-registers `can0`
+# alongside the wheels' `can4` in the bus pool, so no separate
+# `can_interfaces:` list is needed.
 #
 # Wiring confirmed on the Thor wheeled robot (2026-10-03): ODrive wheels on
 # can4 (the busy bus), PowerBoard on can0. Pointing `power:` at can4 reads
 # zero (no board there) and hides the app's battery card.
 #
-# Battery: the 13s2p Li-ion NMC pack (26× Molicel INR21700-P45B) shared
-# with Bebop V2 — 54.6 V full → 39.0 V empty, linear V→SOC interpolation
-# in the operator app. See bebop_v2.yaml's `power:` block for the full
-# chemistry notes; delete this block to run wheel bring-up without a
-# power board attached (the runtime comes up cleanly and the app hides
-# the battery card).
+# Battery: the 13s2p Li-ion NMC pack (26× Molicel INR21700-P45B). Only the
+# 13s series count sets the voltage (2p adds capacity): 13 × 4.20 V = 54.6 V
+# full → 13 × 3.00 V = 39.0 V empty (a conservative anchor; the P45B cutoff
+# is 2.50 V/cell and the pack BMS trips on cell UVP first). The operator
+# app's fuel gauge interpolates linearly between the two, so it reads low
+# under heavy current draw; treat it as a coarse indicator. Delete this
+# block to run wheel bring-up without a power board attached (the runtime
+# comes up cleanly and the app hides the battery card).
 # ============================================================================
 power:
   can_interface: can0

@@ -10,7 +10,6 @@
 //! (see [`BusPool::is_healthy`]).
 
 use crate::can_interface::CanInterface;
-use anyhow::Result;
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
@@ -28,7 +27,10 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Returns one of `"ERROR-ACTIVE"`, `"ERROR-PASSIVE"`, `"BUS-OFF"`, or `None`
 /// if the state line couldn't be located (driver or netdev variant). Doing
 /// this via netlink directly would avoid a fork+exec, but `ip` is universally
-/// available on Jetson L4T images and the call only happens at bring-up.
+/// available on Jetson L4T images. It runs well past bring-up:
+/// [`BusPool::is_healthy`], [`BusPool::refresh_if_due`], TX-error
+/// diagnostics and the telemetry builder (once per bus per frame for every
+/// subscribed client) all call it.
 pub fn read_can_state(interface: &str) -> Option<String> {
     let out = Command::new("ip")
         .args(["-details", "link", "show", interface])
@@ -77,7 +79,7 @@ impl BusPool {
     /// different names — still serves its API and can report what is missing,
     /// instead of crash-looping. The bus stays absent until
     /// [`BusPool::refresh_if_due`] finds it.
-    pub fn open(interfaces: &[String]) -> Result<Self> {
+    pub fn open(interfaces: &[String]) -> Self {
         let mut by_iface = HashMap::new();
         for iface in interfaces {
             match read_can_state(iface).as_deref() {
@@ -137,11 +139,11 @@ impl BusPool {
                 }
             }
         }
-        Ok(Self {
+        Self {
             by_iface: RwLock::new(by_iface),
             configured: interfaces.to_vec(),
             last_refresh: Mutex::new(Instant::now()),
-        })
+        }
     }
 
     pub fn get(&self, iface: &str) -> Option<Arc<CanInterface>> {
