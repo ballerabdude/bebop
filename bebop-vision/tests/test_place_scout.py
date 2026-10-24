@@ -1,7 +1,6 @@
 """Pending-place capture and store lifecycle (no torch, camera, or VLM)."""
 
 import sqlite3
-from pathlib import Path
 
 import cv2
 import numpy as np

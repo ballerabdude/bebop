@@ -1,5 +1,5 @@
 [Unit]
-Description=Bebop vision recorder (Orbbec rig + navd MCAP sessions + MJPEG on :9092)
+Description=Bebop vision recorder (Orbbec rig + navd MCAP sessions + WebRTC/WHEP video on :9092)
 Documentation=https://github.com/ballerabdude/bebop
 # The recorder opens the Orbbec cameras and connects to the bebop-linux
 # runtime WebSocket for drive-state + telemetry. It does not need the
@@ -10,8 +10,7 @@ Wants=network-online.target bebop-linux.service
 
 [Service]
 Type=simple
-# Runs as root, like the documented manual recorder (`sudo .venv/bin/python`
-# in AGENTS.md). The shared capture dir is root-owned (bebop-linux's
+# Runs as root. The shared capture dir is root-owned (bebop-linux's
 # `StateDirectory=bebop-captures` makes systemd chown
 # /var/lib/bebop-captures to root:root 0750) and the Orbbec SDK writes
 # Log/ + the recorder lock in /tmp, all of which a `bebop` user can't
@@ -20,8 +19,9 @@ User=root
 Group=root
 WorkingDirectory=/home/bebop/bebop/bebop-vision
 Environment=PYTHONUNBUFFERED=1
-# Optional features share this recorder's cameras. For the app Map page set
-# BEBOP_VISION_EXTRA_ARGS="--live-slam --live-slam-map" in vision.env.
+# Extra main.py flags (e.g. BEBOP_VISION_EXTRA_ARGS="--disk-budget-gb 80") go
+# in vision.env. main.py rejects unknown flags, so a removed flag left there
+# keeps the unit in a restart loop.
 EnvironmentFile=-/etc/bebop/vision.env
 ExecStart=/home/bebop/bebop/bebop-vision/.venv/bin/python -u main.py \
     --record-navd /var/lib/bebop-captures \

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Protocol, runtime_checkable
 
 import numpy as np
 
@@ -50,17 +49,6 @@ DINOV3_CONFIG = dict(
 
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-
-
-@runtime_checkable
-class PlaceEncoder(Protocol):
-    """Anything that can turn a view into a fixed-length descriptor."""
-
-    dim: int
-
-    def encode_bgr(self, bgr: np.ndarray) -> np.ndarray: ...
-
-    def encode_jpeg(self, jpeg: bytes) -> np.ndarray: ...
 
 
 def find_weights_dir(weights_dir: Path | str | None = None) -> Path:
@@ -104,7 +92,6 @@ class DinoV3Encoder:
         self.image_size = int(image_size)
         self._device = device
         self._model = None
-        self._torch = None
         self._lock = threading.Lock()
         self.dim = int(DINOV3_CONFIG["hidden_size"])
 
@@ -119,7 +106,6 @@ class DinoV3Encoder:
         model = AutoModel.from_pretrained(str(weights), config=cfg)
         device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
         model.eval().to(device)
-        self._torch = torch
         self._model = model
         self._device = device
         return model
@@ -171,45 +157,3 @@ class DinoV3Encoder:
         if bgr is None:
             raise ValueError("could not decode JPEG")
         return self.encode_bgr(bgr)
-
-    # -- patch features (route following) ---------------------------------
-
-    def encode_patches_bgr(self, bgr: np.ndarray, image_size: int | None = None):
-        """(cls[D], patches[gh, gw, D]) for one view, both L2-normalised.
-
-        `image_size` (square, multiple of 16) sets the patch grid:
-        224 -> 14x14, 336 -> 21x21.  The CLS/register tokens are dropped
-        from the patch grid.
-        """
-        import cv2
-        import torch
-
-        size = int(image_size or self.image_size)
-        if size % 16:
-            raise ValueError("image_size must be a multiple of 16")
-        with self._lock:
-            if self._model is None:
-                self._load()
-            x = cv2.resize(bgr, (size, size), interpolation=cv2.INTER_LINEAR)
-            x = x[:, :, ::-1].astype(np.float32) / 255.0
-            x = (x - _MEAN) / _STD
-            px = torch.from_numpy(
-                np.ascontiguousarray(x.transpose(2, 0, 1)[None])).to(self._device)
-            with torch.inference_mode():
-                out = self._model(pixel_values=px)
-            hs = out.last_hidden_state[0].float().cpu().numpy()
-        g = size // 16
-        n_special = hs.shape[0] - g * g
-        cls = hs[0]
-        patches = hs[n_special:].reshape(g, g, -1)
-        cls = cls / (np.linalg.norm(cls) + 1e-12)
-        patches = patches / (np.linalg.norm(patches, axis=2, keepdims=True) + 1e-12)
-        return cls.astype(np.float32), patches.astype(np.float32)
-
-    def encode_patches_jpeg(self, jpeg: bytes, image_size: int | None = None):
-        import cv2
-
-        bgr = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if bgr is None:
-            raise ValueError("could not decode JPEG")
-        return self.encode_patches_bgr(bgr, image_size)

@@ -9,7 +9,6 @@ never anchored to a frozen view.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
 
 
 @dataclass
@@ -17,10 +16,6 @@ class View:
     role: str
     jpeg: bytes
     stamp_us: int
-
-
-class Capture(Protocol):
-    def grab(self) -> list[View]: ...
 
 
 class RigCapture:

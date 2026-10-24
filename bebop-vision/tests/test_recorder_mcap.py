@@ -94,7 +94,7 @@ class FakeRobot:
         self.frames = collections.deque(maxlen=512)
         self.state = SimpleNamespace(cmd=(0.2, -0.1), odom=(0.5, 0.1, 0.02),
                                      connected=True, estop_latched=False,
-                                     mode=pb.MODE_RUN_POLICY,
+                                     mode=pb.MODE_DIAL_IN,
                                      wheel_armed={"left": True, "right": True})
 
 
@@ -348,7 +348,7 @@ def test_drive_active():
     from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as pb
     robot = FakeRobot()
     robot.state.wheel_armed = {"left": True, "right": True}
-    robot.state.mode = pb.MODE_RUN_POLICY
+    robot.state.mode = pb.MODE_DIAL_IN
     assert _drive_active(robot)
     # a single armed wheel is a failed enable, not a drivable state
     robot.state.wheel_armed = {"left": True, "right": False}
@@ -361,7 +361,7 @@ def test_drive_active():
     robot.state.estop_latched = False
     robot.state.mode = pb.MODE_IDLE
     assert not _drive_active(robot)
-    robot.state.mode = pb.MODE_RUN_POLICY
+    robot.state.mode = pb.MODE_DIAL_IN
     robot.state.connected = False
     assert not _drive_active(robot)
 
@@ -430,7 +430,7 @@ def test_runtime_and_notes_channels(tmp_path):
     robot.frames.append((time.monotonic(), time.time_ns(),
                          fresh.SerializeToString()))
     event = pb.ServerRuntimeMessage()
-    event.mode_changed.mode = pb.MODE_RUN_POLICY       # not telemetry
+    event.mode_changed.mode = pb.MODE_DIAL_IN          # not telemetry
     robot.frames.append((time.monotonic(), time.time_ns(),
                          event.SerializeToString()))
     notes.add_event("recovery", "off-lane start")

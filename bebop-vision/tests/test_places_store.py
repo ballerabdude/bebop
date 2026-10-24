@@ -5,7 +5,6 @@ static capture source, so these run anywhere numpy/cv2 do — the real DINOv3
 encoder is covered separately on the robot.
 """
 
-import copy
 import json
 import urllib.error
 import urllib.request
@@ -21,7 +20,6 @@ from bebop_vision.places import (
     StaticCapture,
     View,
 )
-from bebop_vision.places.submap import decode_rle, encode_rle, rle_true_count
 
 
 def _jpeg(value: int) -> bytes:
@@ -59,60 +57,6 @@ def store(tmp_path):
     s = PlaceStore(tmp_path / "places")
     yield s
     s.close()
-
-
-def _snapshot(*, width=4, height=3, occupied=None, free=None,
-              pose=(1.0, 2.0, 15.0), camera_height=1.3,
-              walls=None, origin=(-0.5, -0.4), resolution=0.05):
-    """A minimal but valid :9096 /structure payload (visual map frame)."""
-    occ = (np.zeros((height, width), dtype=bool) if occupied is None
-           else np.asarray(occupied, dtype=bool))
-    fr = (np.zeros((height, width), dtype=bool) if free is None
-          else np.asarray(free, dtype=bool))
-    assert occ.shape == (height, width) and fr.shape == (height, width)
-    return {
-        "frame_id": "map",
-        "pose_frame": "map_from_camera_optical",
-        "gravity_source": "estimated_from_floor",
-        "gravity": {
-            "valid": True,
-            "up": [0.0, -1.0, 0.0],
-            "roll_deg": 0.0,
-            "pitch_deg": 2.5,
-            "inlier_ratio": 0.92,
-        },
-        "floor": {
-            "valid": True,
-            "normal": [0.0, -1.0, 0.0],
-            "offset_m": camera_height,
-            "camera_height_m": camera_height,
-            "inliers": 800,
-            "rmse_m": 0.004,
-        },
-        "grid": {
-            "origin": [float(origin[0]), float(origin[1])],
-            "resolution_m": float(resolution),
-            "width": width,
-            "height": height,
-            "occupied_count": int(occ.sum()),
-            "free_count": int(fr.sum()),
-            "encoding": "rle_base64",
-            "occupied_rle": encode_rle(occ),
-            "free_rle": encode_rle(fr),
-        },
-        "walls": ([[-0.5, 0.0, 0.5, 0.0]] if walls is None else walls),
-        "wall_cells": [],
-        "path": [[0.0, 0.0]],
-        "pose": {
-            "valid": True,
-            "x": pose[0],
-            "y": pose[1],
-            "yaw_deg": pose[2],
-            "t_ns": 123456,
-            "segment": 0,
-        },
-        "revision": 7,
-    }
 
 
 # --- store -----------------------------------------------------------------
@@ -153,16 +97,13 @@ def test_rename_and_delete(store):
     assert store.count() == 1
 
 
-def test_facts_tags_and_odom(store):
-    p = store.create_place("Lab", odom=(1.5, -0.5, 0.2))
+def test_facts(store):
+    p = store.create_place("Lab")
     store.add_fact(p.id, "  there is a red mug  ", source="operator")
     store.add_fact(p.id, "vision saw a desk", source="vision")
-    store.add_tag(p.id, "desk", confidence=0.8, source="vision")
     got = store.get_place(p.id)
-    assert got.odom == (1.5, -0.5, 0.2)
     assert [f.text for f in got.facts] == ["there is a red mug", "vision saw a desk"]
     assert got.facts[0].source == "operator"
-    assert got.tags[0].label == "desk"
 
 
 def test_keyframes_roundtrip(store):
@@ -213,324 +154,6 @@ def test_persists_across_reopen(tmp_path):
     s2.close()
 
 
-# --- per-place local maps --------------------------------------------------
-
-
-def test_place_map_upsert_bumps_revision_and_preserves_created_at(store):
-    p = store.create_place("Lab")
-    snap = _snapshot(pose=(1.0, 2.0, 15.0))
-    first, created = store.upsert_place_map(p.id, snap)
-    assert created is True
-    assert first.revision == 1
-    assert first.anchor_x == pytest.approx(1.0)
-    assert first.anchor_y == pytest.approx(2.0)
-    assert first.anchor_yaw_deg == pytest.approx(15.0)
-    created_at = first.created_at
-
-    refined, created = store.upsert_place_map(
-        "lab", _snapshot(pose=(3.0, 4.0, 30.0)))
-    assert created is False
-    assert refined.revision == 2
-    assert refined.created_at == pytest.approx(created_at)
-    # The anchor is pinned to the first capture, so accumulation stays coherent.
-    assert refined.anchor_x == pytest.approx(1.0)
-    assert refined.anchor_y == pytest.approx(2.0)
-    assert refined.anchor_yaw_deg == pytest.approx(15.0)
-    assert refined.updated_at >= refined.created_at
-    assert store.get_place_map(p.id).revision == 2
-
-
-def test_second_capture_does_not_leak_into_another_place(store):
-    a = store.create_place("Kitchen")
-    b = store.create_place("Lab")
-    occ_a = np.zeros((3, 4), dtype=bool)
-    occ_a[0, 0] = True
-    occ_b = np.zeros((3, 4), dtype=bool)
-    occ_b[2, 3] = True
-    map_a, _ = store.upsert_place_map(
-        a.id, _snapshot(occupied=occ_a, pose=(1.0, 1.0, 0.0)))
-    map_b, _ = store.upsert_place_map(
-        b.id, _snapshot(occupied=occ_b, pose=(9.0, 9.0, 90.0)))
-    assert map_a.occupied_rle != map_b.occupied_rle
-    assert store.get_place_map(a.id).revision == 1
-    assert store.get_place_map(b.id).revision == 1
-
-    # A second capture for B must not touch A's row at all.
-    store.upsert_place_map(
-        b.id, _snapshot(occupied=occ_b, pose=(8.0, 7.0, 45.0)))
-    got_a = store.get_place_map(a.id)
-    got_b = store.get_place_map(b.id)
-    assert got_a.revision == 1
-    assert got_a.anchor_x == pytest.approx(1.0)
-    assert got_a.occupied_rle == map_a.occupied_rle
-    assert got_b.revision == 2
-    assert got_b.anchor_x == pytest.approx(9.0)
-
-
-def test_place_map_rle_round_trip(store):
-    p = store.create_place("Lab")
-    occ = np.zeros((3, 4), dtype=bool)
-    occ[0, 0] = True
-    occ[1, 2] = True
-    occ[2, 3] = True
-    free = ~occ
-    place_map, _ = store.upsert_place_map(
-        p.id, _snapshot(occupied=occ, free=free))
-    assert np.array_equal(decode_rle(place_map.occupied_rle, 4, 3), occ)
-    assert np.array_equal(decode_rle(place_map.free_rle, 4, 3), free)
-    payload = place_map.to_dict()
-    assert payload["grid"]["occupied_count"] == 3
-    assert payload["grid"]["free_count"] == 9
-    assert payload["grid"]["encoding"] == "rle_base64"
-    assert payload["frame"] == "capture_session_map"
-    assert payload["anchor"] == {"x": 1.0, "y": 2.0, "yaw_deg": 15.0}
-
-
-def test_anchor_is_pinned_to_the_first_capture_across_recaptures(store):
-    p = store.create_place("Lab")
-    poses = [(1.0, 2.0, 15.0), (2.5, -0.5, -40.0), (0.0, 0.0, 180.0)]
-    for i, pose in enumerate(poses):
-        place_map, created = store.upsert_place_map(
-            p.id, _snapshot(pose=pose))
-        assert created is (i == 0)
-        assert place_map.revision == i + 1
-        # The first capture owns the anchor; later poses only add evidence.
-        assert (place_map.anchor_x, place_map.anchor_y,
-                place_map.anchor_yaw_deg) == pytest.approx(poses[0])
-
-
-def test_recapture_accumulates_and_never_shrinks(store):
-    """Counts never shrink under merge.
-
-    The precise invariant is known cells (occupied ∪ free); free alone may
-    fall when an observed obstruction reclassifies it (see
-    `test_merge_reclassifies_free_as_occupied_without_losing_known_cells`).
-    """
-    p = store.create_place("Lab")
-    first_occ = np.zeros((3, 4), dtype=bool)
-    first_occ[1, 1] = True
-    first_free = np.zeros((3, 4), dtype=bool)
-    first_free[0, 0] = True
-    first_free[2, 3] = True
-    walls = [[-0.5, 0.0, 0.5, 0.0], [0.5, -0.4, 0.5, 0.1]]
-    first, _ = store.upsert_place_map(
-        p.id, _snapshot(occupied=first_occ, free=first_free, walls=walls))
-    assert rle_true_count(first.occupied_rle) == 1
-    assert rle_true_count(first.free_rle) == 2
-    assert first.walls == walls
-
-    # A new occupied cell accumulates; the capture has zero walls, which must
-    # not erase the walls already known.
-    second_occ = np.zeros((3, 4), dtype=bool)
-    second_occ[0, 3] = True
-    second, _ = store.upsert_place_map(
-        p.id, _snapshot(occupied=second_occ, walls=[]))
-    assert rle_true_count(second.occupied_rle) == 2
-    assert rle_true_count(second.free_rle) == 2
-    assert second.walls == walls
-    occ = decode_rle(second.occupied_rle, second.width, second.height)
-    assert occ.sum() == 2
-
-    # A completely empty snapshot (no cells, no walls) changes nothing.
-    empty = np.zeros((3, 4), dtype=bool)
-    third, _ = store.upsert_place_map(
-        p.id, _snapshot(occupied=empty, free=empty, walls=[]))
-    assert rle_true_count(third.occupied_rle) == 2
-    assert rle_true_count(third.free_rle) == 2
-    assert third.walls == walls
-
-
-def test_merge_reclassifies_free_as_occupied_without_losing_known_cells(store):
-    """The merge invariant is known cells, not raw free_count.
-
-    A live obstruction observed in a later capture legitimately reclassifies
-    previously free space as occupied (measured: known |3312| -> |3312|,
-    lost=0, occupied +6, free -6).  So free_count may fall; no cell that was
-    known (occupied ∪ free) may become unknown.
-    """
-    p = store.create_place("Lab")
-    free_a = np.zeros((3, 4), dtype=bool)
-    free_a[0, :] = True
-    free_a[1, :] = True
-    first, _ = store.upsert_place_map(
-        p.id, _snapshot(occupied=np.zeros((3, 4), bool), free=free_a))
-    known_before = (rle_true_count(first.occupied_rle)
-                    + rle_true_count(first.free_rle))
-    assert known_before == 8
-    assert rle_true_count(first.occupied_rle) == 0
-
-    # The incoming capture sees obstructions in cells that were free before.
-    occ_b = np.zeros((3, 4), dtype=bool)
-    occ_b[0, 1] = True
-    occ_b[1, 2] = True
-    merged, _ = store.upsert_place_map(
-        p.id, _snapshot(occupied=occ_b))
-    occupied = rle_true_count(merged.occupied_rle)
-    free = rle_true_count(merged.free_rle)
-    assert occupied == 2
-    assert free == known_before - 2   # free shrank, and that is legitimate
-    assert occupied + free == known_before  # nothing known was lost
-
-
-def test_merge_rebins_grids_with_different_origins_and_sizes(store):
-    p = store.create_place("Lab")
-    # Stored: 3x3 at (0, 0), 0.1 m cells; occupied at its near corner.
-    occ_a = np.zeros((3, 3), dtype=bool)
-    occ_a[0, 0] = True
-    free_a = ~occ_a
-    first, _ = store.upsert_place_map(
-        p.id, _snapshot(width=3, height=3, occupied=occ_a, free=free_a,
-                        origin=(0.0, 0.0), resolution=0.1, walls=[]))
-    assert (first.width, first.height) == (3, 3)
-    assert first.origin_x == pytest.approx(0.0)
-
-    # Incoming: 2x2 at (-0.2, -0.2); occupied at (row 1, col 1), so its
-    # centre is (-0.05, -0.05) -> lattice cell -1 relative to the stored grid.
-    occ_b = np.zeros((2, 2), dtype=bool)
-    occ_b[1, 1] = True
-    merged, _ = store.upsert_place_map(
-        p.id, _snapshot(width=2, height=2, occupied=occ_b,
-                        origin=(-0.2, -0.2), resolution=0.1, walls=[]))
-
-    # Union bbox spans lattice -1..2 -> 4x4 anchored at (-0.1, -0.1).
-    assert (merged.width, merged.height) == (4, 4)
-    assert merged.origin_x == pytest.approx(-0.1)
-    assert merged.origin_y == pytest.approx(-0.1)
-    occ = decode_rle(merged.occupied_rle, merged.width, merged.height)
-    # Stored cell (0, 0) shifts by one; incoming cell (-1, -1) lands at (0, 0).
-    assert bool(occ[1, 1]) is True
-    assert bool(occ[0, 0]) is True
-    assert int(occ.sum()) == 2
-    # The cells sit at their true capture-frame centres (anchor-relative):
-    # stored (0.05, 0.05) and incoming (-0.05, -0.05).
-    ys, xs = np.nonzero(occ)
-    centres = {(round(merged.origin_x + (x + 0.5) * 0.1, 6),
-                round(merged.origin_y + (y + 0.5) * 0.1, 6))
-               for y, x in zip(ys, xs)}
-    assert centres == {(0.05, 0.05), (-0.05, -0.05)}
-    # The pinned anchor is untouched by the rebase.
-    assert (merged.anchor_x, merged.anchor_y,
-            merged.anchor_yaw_deg) == pytest.approx((1.0, 2.0, 15.0))
-
-
-def test_replace_true_resets_to_exactly_the_new_patch(store):
-    p = store.create_place("Lab")
-    occ_a = np.zeros((3, 4), dtype=bool)
-    occ_a[0, 0] = True
-    first, _ = store.upsert_place_map(
-        p.id, _snapshot(occupied=occ_a, pose=(1.0, 2.0, 15.0)))
-    assert rle_true_count(first.occupied_rle) == 1
-
-    occ_b = np.zeros((2, 2), dtype=bool)
-    occ_b[0, 1] = True
-    free_b = ~occ_b
-    walls_b = [[1.0, 1.0, 1.2, 1.0]]
-    replaced, created = store.upsert_place_map(
-        p.id,
-        _snapshot(width=2, height=2, occupied=occ_b, free=free_b,
-                  pose=(3.0, 4.0, 30.0), walls=walls_b,
-                  origin=(1.0, 1.0), resolution=0.05),
-        replace=True,
-    )
-    assert created is False
-    assert replaced.revision == 2
-    # Exactly the new patch: anchor, geometry and walls all come from it.
-    assert (replaced.anchor_x, replaced.anchor_y,
-            replaced.anchor_yaw_deg) == pytest.approx((3.0, 4.0, 30.0))
-    assert (replaced.origin_x, replaced.origin_y) == pytest.approx((1.0, 1.0))
-    assert (replaced.width, replaced.height) == (2, 2)
-    assert np.array_equal(
-        decode_rle(replaced.occupied_rle, 2, 2), occ_b)
-    assert np.array_equal(decode_rle(replaced.free_rle, 2, 2), free_b)
-    assert replaced.walls == walls_b
-    assert rle_true_count(replaced.occupied_rle) == 1
-    assert rle_true_count(replaced.free_rle) == 3
-
-    with pytest.raises(ValueError):
-        store.upsert_place_map(p.id, _snapshot(), replace="yes")
-
-
-def test_map_uses_visual_pose_never_wheel_odometry(store):
-    # The legacy capture odom is deliberately nonsense; a submap anchor must
-    # come from the structure payload's gravity-aligned visual pose.
-    p = store.create_place("Lab", odom=(50.0, -60.0, 1.23))
-    # An explicit pose (e.g. from the live service) overrides the snapshot's
-    # on the first capture, which is where the anchor is pinned.
-    place_map, _ = store.upsert_place_map(
-        p.id, _snapshot(pose=(0.0, 0.0, 0.0)),
-        pose={"valid": True, "x": 3.0, "y": 4.0, "yaw_deg": 90.0})
-    assert (place_map.anchor_x, place_map.anchor_y,
-            place_map.anchor_yaw_deg) == pytest.approx((3.0, 4.0, 90.0))
-    assert 50.0 not in (
-        place_map.anchor_x, place_map.anchor_y, place_map.anchor_yaw_deg)
-
-    # A re-capture never moves the pinned anchor, even with a fresh pose.
-    refined, _ = store.upsert_place_map(
-        p.id, _snapshot(pose=(1.5, 2.5, 30.0)),
-        pose={"valid": True, "x": 1.5, "y": 2.5, "yaw_deg": 30.0})
-    assert (refined.anchor_x, refined.anchor_y,
-            refined.anchor_yaw_deg) == pytest.approx((3.0, 4.0, 90.0))
-    # get_place still exposes legacy odom for compatibility, but it played no
-    # part in the map coordinate system.
-    assert store.get_place(p.id).odom == (50.0, -60.0, 1.23)
-
-
-def test_malformed_map_payloads_are_rejected_not_stored(store):
-    p = store.create_place("Lab")
-    occ = np.zeros((3, 4), dtype=bool)
-    occ[1, 1] = True
-    valid = _snapshot(occupied=occ)
-    cases = []
-
-    cases.append({})  # no grid at all
-    bad = copy.deepcopy(valid)
-    bad["grid"]["encoding"] = "png"
-    cases.append(bad)
-    bad = copy.deepcopy(valid)
-    bad["grid"]["width"] = 5  # RLE covers 12 cells, expected 15
-    cases.append(bad)
-    bad = copy.deepcopy(valid)
-    bad["grid"]["occupied_rle"] = "not-base64!!"
-    cases.append(bad)
-    bad = copy.deepcopy(valid)
-    bad["gravity"]["valid"] = False
-    cases.append(bad)
-    bad = copy.deepcopy(valid)
-    bad["floor"]["valid"] = False
-    cases.append(bad)
-    bad = copy.deepcopy(valid)
-    bad["pose"]["valid"] = False
-    cases.append(bad)
-    bad = copy.deepcopy(valid)
-    bad["pose"]["x"] = "left"
-    cases.append(bad)
-    bad = copy.deepcopy(valid)
-    bad["grid"]["resolution_m"] = 0
-    cases.append(bad)
-    bad = copy.deepcopy(valid)
-    bad["walls"] = [[0.0, 0.0, 1.0]]  # not [x0,y0,x1,y1]
-    cases.append(bad)
-
-    for payload in cases:
-        with pytest.raises(ValueError):
-            store.upsert_place_map(p.id, payload)
-        assert store.get_place_map(p.id) is None
-    with pytest.raises(KeyError):
-        store.upsert_place_map("no-such-place", valid)
-
-
-def test_deleting_place_cascades_its_map_and_edges(store):
-    a = store.create_place("Kitchen")
-    b = store.create_place("Lab")
-    store.upsert_place_map(a.id, _snapshot())
-    store.record_traversal(a.id, b.id, success=True)
-    assert store.get_place_map(a.id) is not None
-    assert len(store.list_edges()) == 1
-    store.delete_place(a.id)
-    assert store.get_place_map(a.id) is None
-    assert store.list_edges() == []
-
-
 # --- place graph (route knowledge) ----------------------------------------
 
 
@@ -545,10 +168,8 @@ def test_graph_serializes_zero_one_and_many_edges(store):
     one = store.graph()
     assert one["node_count"] == 3
     assert [n["name"] for n in one["nodes"]] == ["A", "B", "C"]
-    assert all(n["has_map"] is False for n in one["nodes"])
     assert one["edges"] == [] and one["edge_count"] == 0
 
-    store.upsert_place_map(a.id, _snapshot())
     edge, created = store.record_traversal(a.id, b.id, success=True)
     assert created is True
     graph = store.graph()
@@ -557,7 +178,6 @@ def test_graph_serializes_zero_one_and_many_edges(store):
     assert graph["edges"][0]["to_name"] == "B"
     assert graph["edges"][0]["traversals"] == 1
     assert graph["edges"][0]["successes"] == 1
-    assert [n for n in graph["nodes"] if n["name"] == "A"][0]["has_map"]
 
     store.record_traversal(a.id, c.id, success=False)
     store.record_traversal(b.id, a.id, success=True)
@@ -612,6 +232,15 @@ def test_edge_counters_success_semantics_and_median(store):
             a.id, b.id, success=True, guide_path=[[0.0]])
     with pytest.raises(KeyError):
         store.record_traversal(a.id, "no-such-place", success=True)
+
+
+def test_deleting_place_cascades_its_edges(store):
+    a = store.create_place("Kitchen")
+    b = store.create_place("Lab")
+    store.record_traversal(a.id, b.id, success=True)
+    assert len(store.list_edges()) == 1
+    store.delete_place(a.id)
+    assert store.list_edges() == []
 
 
 # --- service + whereami ----------------------------------------------------
@@ -731,35 +360,15 @@ def _post(port, path, body):
         return r.status, json.loads(r.read())
 
 
-def test_http_place_map_and_graph(tmp_path):
+def test_http_place_graph_and_edges(tmp_path):
     store, svc = _service(tmp_path, [], FakeEncoder())
     svc.start()
     try:
         port = svc.bound_port
         pid = store.create_place("Kitchen").id
-        snap = _snapshot(pose=(2.0, 3.0, 12.0))
-
-        status, res = _post(port, f"/places/{pid}/map", snap)
-        assert status == 201
-        assert res["created"] is True
-        assert res["map"]["revision"] == 1
-        assert res["map"]["anchor"] == {"x": 2.0, "y": 3.0,
-                                        "yaw_deg": 12.0}
-
-        status, res = _post(port, f"/places/{pid}/map", snap)
-        assert status == 200
-        assert res["created"] is False
-        assert res["map"]["revision"] == 2
-
-        status, got = _get(port, f"/places/{pid}/map")
-        assert status == 200
-        assert got["map"]["grid"]["width"] == 4
-        assert got["map"]["grid"]["occupied_count"] == 0
 
         status, graph = _get(port, "/places/graph")
         assert graph["node_count"] == 1
-        assert graph["nodes"][0]["has_map"] is True
-        assert graph["nodes"][0]["map_revision"] == 2
         assert graph["edges"] == []
 
         lab = store.create_place("Lab")
@@ -784,59 +393,10 @@ def test_http_place_map_and_graph(tmp_path):
         assert graph["edges"][0]["to_name"] == "Lab"
 
         with pytest.raises(urllib.error.HTTPError) as exc:
-            _post(port, "/places/nope/map", snap)
-        assert exc.value.code == 404
-        with pytest.raises(urllib.error.HTTPError) as exc:
-            _post(port, f"/places/{pid}/map", {})
-        assert exc.value.code == 400
-        with pytest.raises(urllib.error.HTTPError) as exc:
-            _get(port, f"/places/{lab.id}/map")
+            _post(port, f"/places/nope/edges/{lab.id}", {"success": True})
         assert exc.value.code == 404
         with pytest.raises(urllib.error.HTTPError) as exc:
             _post(port, f"/places/{pid}/edges/{lab.id}", {})
-        assert exc.value.code == 400
-    finally:
-        svc.stop()
-        store.close()
-
-
-def test_http_map_merge_is_default_and_replace_is_explicit(tmp_path):
-    store, svc = _service(tmp_path, [], FakeEncoder())
-    svc.start()
-    try:
-        port = svc.bound_port
-        pid = store.create_place("Kitchen").id
-        occ_a = np.zeros((3, 4), dtype=bool)
-        occ_a[1, 1] = True
-        first = _snapshot(occupied=occ_a, pose=(2.0, 3.0, 12.0))
-        status, res = _post(port, f"/places/{pid}/map", first)
-        assert status == 201 and res["replaced"] is False
-        assert res["map"]["grid"]["occupied_count"] == 1
-
-        # Default re-capture merges: a zero-cell snapshot cannot erase it.
-        status, res = _post(port, f"/places/{pid}/map", _snapshot())
-        assert status == 200
-        assert res["map"]["revision"] == 2
-        assert res["map"]["grid"]["occupied_count"] == 1
-        assert res["map"]["anchor"] == {"x": 2.0, "y": 3.0, "yaw_deg": 12.0}
-
-        # Explicit replace resets the patch, anchor included.
-        occ_b = np.zeros((2, 2), dtype=bool)
-        occ_b[0, 0] = True
-        replacement = _snapshot(width=2, height=2, occupied=occ_b,
-                                pose=(5.0, 6.0, 45.0), walls=[])
-        replacement["replace"] = True
-        status, res = _post(port, f"/places/{pid}/map", replacement)
-        assert status == 200 and res["replaced"] is True
-        assert res["map"]["revision"] == 3
-        assert res["map"]["grid"]["occupied_count"] == 1
-        assert res["map"]["grid"]["width"] == 2
-        assert res["map"]["anchor"] == {"x": 5.0, "y": 6.0, "yaw_deg": 45.0}
-        assert res["map"]["walls"] == []
-
-        replacement["replace"] = "yes"
-        with pytest.raises(urllib.error.HTTPError) as exc:
-            _post(port, f"/places/{pid}/map", replacement)
         assert exc.value.code == 400
     finally:
         svc.stop()

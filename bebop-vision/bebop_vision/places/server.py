@@ -7,24 +7,20 @@ memory over a small JSON API:
     GET    /healthz                      service + encoder status
     GET    /places                       list taught places
     POST   /places        {name, ...}    teach the current view as a place
-    GET    /places/{id}                  one place (facts, tags, keyframes)
+    GET    /places/{id}                  one place (facts, keyframes)
     DELETE /places/{id}                  forget a place
     POST   /places/{id}/facts {text}     operator-stated fact
     POST   /places/{id}/rename {name}    rename
+    POST   /places/{id}/views {seconds}  add the current view(s) (a burst)
     GET    /places/{id}/keyframes/{file} the keyframe JPEG
     GET    /whereami                     recognise the current room
 
-    POST   /places/{id}/map              accumulate a :9096 /structure snapshot
-                                         ({"replace": true} starts over)
-    GET    /places/{id}/map              the place's local submap
+    GET    /places/pending               scout candidates awaiting review
+    POST   /places/pending/{id}/suggest  ask the VLM for a name + facts
+    POST   /places/pending/import        promote / merge reviewed candidates
+
     GET    /places/graph                 nodes (places) + traversal edges
     POST   /places/{from}/edges/{to}     record one A->B traversal
-
-When a System 1 router is attached (`router=`), it also proxies that:
-
-    GET    /router/status                router state + rolling event list
-    GET    /router/decisions?limit=N     recent routing decisions
-    POST   /router/assess {instruction, skill}  one assessment now (blocking)
 
 The same operations are public methods, so the LLM tool layer can call them
 directly without a second HTTP hop.
@@ -41,7 +37,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .store import Place, PlaceStore
 
 DEFAULT_PORT = 9095
-DEFAULT_ROOT = Path("/var/lib/bebop-places")
+# Cap on keyframes one `capture_views` burst adds.
+MAX_BURST_VIEWS = 24
 
 
 def _log(msg: str) -> None:
@@ -61,25 +58,20 @@ class PlacesService:
         port: int = DEFAULT_PORT,
         min_score: float = 0.5,
         min_margin: float = 0.05,
-        capture_roles=("near", "far"),
-        router=None,
         scout=None,
         importer=None,
     ):
         self.store = store
         self.capture = capture
         self.encoder = encoder
-        self.router = router
         self.scout = scout
         self.importer = importer
         self.host = host
         self.port = int(port)
         self.min_score = float(min_score)
         self.min_margin = float(min_margin)
-        self.capture_roles = tuple(capture_roles)
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
         self.bound_port: int | None = None
 
     # -- lifecycle --------------------------------------------------------
@@ -151,22 +143,15 @@ class PlacesService:
     def get_place(self, id_or_name: str) -> Place | None:
         return self.store.get_place(id_or_name)
 
-    def teach(
-        self,
-        name: str,
-        *,
-        facts: list[str] | None = None,
-        odom: tuple[float, float, float] | None = None,
-        roles=None,
-    ) -> dict:
+    def teach(self, name: str, *, facts: list[str] | None = None) -> dict:
         """Create a place from the current camera view(s).
 
         Every fresh view contributes a keyframe and (when an encoder is
         configured) a DINOv3 descriptor. A place with no descriptor can be
         listed and described but not recognised.
         """
-        place = self.store.create_place(name, odom=odom)
-        views = self._grab(roles)
+        place = self.store.create_place(name)
+        views = self._grab()
         encoded = 0
         for v in views:
             self.store.add_keyframe(place.id, v.jpeg, role=v.role, stamp_us=v.stamp_us)
@@ -195,8 +180,6 @@ class PlacesService:
         *,
         seconds: float = 0.0,
         interval_s: float = 1.5,
-        roles=None,
-        max_views: int = 24,
     ) -> dict:
         """Append the current view(s) to an existing place.
 
@@ -204,7 +187,8 @@ class PlacesService:
         `interval_s` until the window elapses, so the operator can pan or
         rotate the robot to cover the room from several angles. Frames whose
         camera stamp is unchanged since the last capture are skipped, so
-        standing still does not pile up duplicate descriptors.
+        standing still does not pile up duplicate descriptors. A burst adds
+        at most `MAX_BURST_VIEWS` keyframes.
         """
         place = self.store.get_place(id_or_name)
         if place is None:
@@ -214,7 +198,7 @@ class PlacesService:
         added_kf = added_desc = ticks = 0
         last_stamp: dict[str, int] = {}
         while True:
-            fresh = [v for v in self._grab(roles)
+            fresh = [v for v in self._grab()
                      if last_stamp.get(v.role) != v.stamp_us]
             for v in fresh:
                 last_stamp[v.role] = v.stamp_us
@@ -231,7 +215,7 @@ class PlacesService:
                     except Exception as exc:  # noqa: BLE001 - keep capturing
                         _log(f"encode failed for {v.role}: {exc}")
             ticks += 1
-            if time.monotonic() >= deadline or added_kf >= max_views:
+            if time.monotonic() >= deadline or added_kf >= MAX_BURST_VIEWS:
                 break
             time.sleep(interval)
         if added_kf:
@@ -247,34 +231,7 @@ class PlacesService:
             "views_total": len(result.keyframes),
         }
 
-    # -- local maps + place graph ----------------------------------------
-
-    def ingest_map(
-        self, id_or_name: str, payload: dict, *, pose=None,
-        replace: bool = False,
-    ) -> dict:
-        """Accumulate one place's submap from a structure snapshot.
-
-        By default the capture is merged into the stored evidence (anchor
-        pinned at the first capture, counts never shrink).  ``replace=True``
-        deliberately resets the place to exactly this patch.
-        """
-        place_map, created = self.store.upsert_place_map(
-            id_or_name, payload, pose=pose, replace=replace)
-        action = "replaced" if replace else ("stored" if created else "merged")
-        _log(f"{action} submap for {id_or_name!r} "
-             f"(revision {place_map.revision}, "
-             f"{place_map.width}x{place_map.height} cells, "
-             f"{len(place_map.walls)} walls)")
-        return {"map": place_map.to_dict(), "created": created,
-                "replaced": bool(replace)}
-
-    def get_map(self, id_or_name: str):
-        """The stored submap, or None when the place has never been mapped."""
-        place = self.store.get_place(id_or_name)
-        if place is None:
-            raise KeyError(id_or_name)
-        return self.store.get_place_map(place.id)
+    # -- place graph ------------------------------------------------------
 
     def graph(self) -> dict:
         return self.store.graph()
@@ -296,7 +253,7 @@ class PlacesService:
              f"({edge.successes}/{edge.traversals})")
         return {"edge": edge.to_dict(), "created": created}
 
-    def whereami(self, *, k: int = 3, roles=None) -> dict:
+    def whereami(self, *, k: int = 3) -> dict:
         """Recognise the current room by appearance.
 
         Returns the best place only when it clears both an absolute score
@@ -306,7 +263,7 @@ class PlacesService:
         """
         if self.encoder is None:
             return {"matched": False, "reason": "encoder not configured"}
-        views = self._grab(roles)
+        views = self._grab()
         if not views:
             return {"matched": False, "reason": "no fresh camera frames"}
         # The far (forward-looking) camera sees the room; the near camera is
@@ -339,19 +296,9 @@ class PlacesService:
             ],
         }
 
-    def _grab(self, roles=None):
+    def _grab(self):
         if self.capture is None:
             return []
-        if roles is None:
-            return self.capture.grab()
-        # RigCapture honours an explicit role subset via a temporary wrapper.
-        try:
-            from .capture import RigCapture
-            if isinstance(self.capture, RigCapture):
-                return RigCapture(self.capture.rig, roles=roles,
-                                  max_age_s=self.capture.max_age_s).grab()
-        except Exception:  # noqa: BLE001
-            pass
         return self.capture.grab()
 
     def status(self) -> dict:
@@ -377,8 +324,6 @@ class PlacesService:
                 "vlm": (self.importer.describe
                         if self.importer is not None else None),
             },
-            "router": self.router.status() if self.router is not None
-            else {"enabled": False},
         }
 
 
@@ -421,14 +366,6 @@ class _PlacesHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         return parts, query
 
-    def _router(self):
-        """The attached System 1 router, or None after sending a 503."""
-        router = self.svc.router
-        if router is None:
-            self._err(503, "router not configured")
-            return None
-        return router
-
     # -- HTTP -------------------------------------------------------------
 
     def do_GET(self):
@@ -454,31 +391,11 @@ class _PlacesHandler(BaseHTTPRequestHandler):
             if parts == ["whereami"]:
                 k = int((query.get("k") or ["3"])[0])
                 return self._json(svc.whereami(k=k))
-            if parts == ["router", "status"]:
-                router = self._router()
-                if router is None:
-                    return
-                return self._json(router.status())
-            if parts == ["router", "decisions"]:
-                router = self._router()
-                if router is None:
-                    return
-                limit = int((query.get("limit") or ["20"])[0])
-                return self._json({
-                    "decisions": router.decisions(limit=limit),
-                    "events": router.events(),
-                })
             if len(parts) == 2 and parts[0] == "places":
                 place = svc.get_place(parts[1])
                 if place is None:
                     return self._err(404, "no such place")
                 return self._json({"place": place.to_dict(root=svc.store.root)})
-            if (len(parts) == 3 and parts[0] == "places"
-                    and parts[2] == "map"):
-                place_map = svc.get_map(parts[1])
-                if place_map is None:
-                    return self._err(404, "no map captured for place")
-                return self._json({"map": place_map.to_dict()})
             if (len(parts) == 4 and parts[0] == "places"
                     and parts[2] == "keyframes"):
                 return self._serve_keyframe(parts[1], parts[3])
@@ -490,28 +407,10 @@ class _PlacesHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.close_connection = True
-        parts, query = self._path()
+        parts, _ = self._path()
         svc = self.svc
         try:
             body = self._body()
-            if parts == ["router", "assess"]:
-                router = self._router()
-                if router is None:
-                    return
-                skill = body.get("skill")
-                if skill is None:
-                    skill = (query.get("skill") or [None])[0]
-                if skill is not None:
-                    skill = str(skill).strip()
-                    names = router.skill_names()
-                    if skill not in names:
-                        return self._err(
-                            400,
-                            f"unknown skill {skill!r}; available: "
-                            f"{', '.join(names)}")
-                instruction = body.get("instruction") or None
-                return self._json(router.assess_once(
-                    instruction=instruction, source="http", skill=skill))
             if parts == ["places", "pending", "import"]:
                 ids = body.get("ids")
                 if not isinstance(ids, list) or not ids:
@@ -570,14 +469,6 @@ class _PlacesHandler(BaseHTTPRequestHandler):
                     return self._err(400, "name is required")
                 place = svc.store.rename_place(parts[1], str(name))
                 return self._json({"place": place.to_dict(root=svc.store.root)})
-            if (len(parts) == 3 and parts[0] == "places"
-                    and parts[2] == "map"):
-                replace = body.get("replace", False)
-                if not isinstance(replace, bool):
-                    raise ValueError("replace must be a boolean")
-                result = svc.ingest_map(parts[1], body, replace=replace)
-                return self._json(result,
-                                  status=201 if result["created"] else 200)
             if (len(parts) == 4 and parts[0] == "places"
                     and parts[2] == "edges"):
                 if "success" not in body:
