@@ -1,7 +1,7 @@
 // Diagnostics › Motors: firmware mode, wheel arming and calibration, the
-// bench joystick, odometry, and CAN bus health. Wheeled chassis only; the
-// legged bench (joint dial-in, policy runner, zero calibration) was retired
-// from the app. The firmware keeps legged support.
+// bench joystick, odometry, and CAN bus health. Wheeled chassis only: the
+// app has no joint bench (dial-in, zero calibration); the firmware keeps the
+// joint commands for the planned arms.
 
 import { useCallback } from "react";
 
@@ -41,7 +41,7 @@ export function MotorsTab() {
   const mode = snapshot?.mode ?? "UNSPECIFIED";
   const estopLatched = estop.latched;
   const wheeled = !!drive?.present && motors.length === 0;
-  const driveMode = mode === "DIAL_IN" || mode === "RUN_POLICY";
+  const driveMode = mode === "DIAL_IN";
   const armed = wheels.filter((w) => w.armed).length;
   const otherDriving = !!drive?.hasActiveOperator && !drive?.youAreActiveOperator;
   const canDrive = wheeled && !estopLatched && driveMode && armed > 0 && !otherDriving;
@@ -72,7 +72,6 @@ export function MotorsTab() {
             disabled={!!busy || estopLatched}
             onChange={(m) => void run(`mode:${m}`, (t) => t.setMode(m as RuntimeMode))}
           />
-          {mode === "RUN_POLICY" ? <StatusPill tone="info">policy</StatusPill> : null}
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 lg:ml-auto">
           {buses.map((b) => (
@@ -137,10 +136,10 @@ export function MotorsTab() {
         <Card>
           <CardHeader
             eyebrow="Motors"
-            title={motors.length > 0 ? `${motors.length} legged joints` : "No wheels reported"}
+            title={motors.length > 0 ? `${motors.length} joints` : "No wheels reported"}
             description={
               motors.length > 0
-                ? "This robot runs the legged configuration. The legged bench (joint dial-in, policy, zero calibration) is no longer in the app; use the firmware tools."
+                ? "This robot reports joints. The app has no joint bench (dial-in, zero calibration); use the firmware tools."
                 : "The firmware reports no wheeled drive."
             }
           />
@@ -161,7 +160,7 @@ export function MotorsTab() {
 
 /// Differential-drive hub: arm controls, live wheel telemetry, odometry,
 /// and the drive joystick. Shown only when the firmware reports a `drive:`
-/// config (a wheeled chassis with no legged joints).
+/// config (a wheeled chassis that reports no joints).
 function DriveCard({
   drive,
   wheels,
@@ -213,7 +212,7 @@ function DriveCard({
             disabled={
               !!busy ||
               allArmed ||
-              (mode !== "DIAL_IN" && mode !== "RUN_POLICY") ||
+              mode !== "DIAL_IN" ||
               estopLatched ||
               wheels.length === 0
             }
@@ -236,7 +235,7 @@ function DriveCard({
         <div className="rounded-card border border-accent/30 bg-accent/5 px-3 py-2 text-label text-text-dim leading-relaxed">
           {estopLatched
             ? "E-STOP is latched — reset it before driving."
-            : mode !== "DIAL_IN" && mode !== "RUN_POLICY"
+            : mode !== "DIAL_IN"
               ? "Switch the mode to Drive, then enable the wheels."
               : armedWheelCount === 0
                 ? "Enable the wheels to drive."
@@ -261,7 +260,7 @@ function DriveCard({
                   busy={busy === `wheel:${w.name}`}
                   calibrating={busy === `calib:${w.name}`}
                   estopLatched={estopLatched}
-                  canArm={mode === "DIAL_IN" || mode === "RUN_POLICY"}
+                  canArm={mode === "DIAL_IN"}
                   onToggle={(enabled) => onToggleWheel(w.name, enabled)}
                   onCalibrate={() => onCalibrateWheel(w.name)}
                 />

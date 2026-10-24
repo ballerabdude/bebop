@@ -11,7 +11,6 @@
 //   9093 voice    bebop-voice: WS /voice, HTTP /healthz, /config
 //   9094 models   bebop-models supervisor: HTTP /models, /healthz
 //   9095 places   place memory (inside bebop-vision): HTTP /places, /whereami
-//   9096 slam     live SLAM structure (only with --live-slam): HTTP /structure
 
 import { httpUrl, wsUrl } from "../runtime/urls.ts";
 
@@ -22,7 +21,6 @@ export const PORTS = {
   voice: 9093,
   models: 9094,
   places: 9095,
-  slam: 9096,
 } as const;
 
 export type ServiceName = keyof typeof PORTS;
@@ -54,7 +52,6 @@ export interface RobotEndpoints {
   voiceHttp: (path: string) => string;
   models: (path?: string) => string;
   places: (path?: string) => string;
-  slam: (path?: string) => string;
   /// Firmware capture listing and downloads (`/captures`, `/captures/dl/..`).
   captures: (path?: string) => string;
   /// `/healthz` of one service.
@@ -95,7 +92,6 @@ export function endpoints(host: string): RobotEndpoints {
     voiceHttp: (path) => httpUrl(host, PORTS.voice, path),
     models: (path = "") => join(httpUrl(host, PORTS.models), path),
     places: (path = "") => join(httpUrl(host, PORTS.places), path),
-    slam: (path = "") => join(httpUrl(host, PORTS.slam), path),
     captures: (path = "") =>
       join(httpUrl(host, PORTS.runtime, "/captures"), path),
     healthz: (service) => httpUrl(host, PORTS[service], "/healthz"),

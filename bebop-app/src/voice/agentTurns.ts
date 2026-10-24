@@ -82,7 +82,7 @@ export interface AgentState {
    * them back into the fresh transcript.
    */
   dropped: string[];
-  /** A `reset` is on its way: ignore bare legacy `error`/`done` until its echo. */
+  /** A `reset` is on its way: ignore bare `error`/`done` until its echo. */
   resetting: boolean;
 }
 
@@ -364,8 +364,9 @@ function reduceEvent(state: AgentState, ev: AgentEvent, at: number): AgentState 
       }));
     }
     case "done": {
-      // Legacy. Precedes every turn_end; on its own (nothing running) it
-      // answers an empty voice utterance, which never becomes a turn.
+      // A bare `done` answers an empty voice utterance, which never becomes
+      // a turn. Older services also sent one right before every turn_end;
+      // that copy is ignored while a turn runs.
       if (runningTurn(state)) return state;
       const empty = state.turns.find(
         (t) => t.status === "pending" && t.source === "voice" && !t.userText,
@@ -374,8 +375,9 @@ function reduceEvent(state: AgentState, ev: AgentEvent, at: number): AgentState 
       return { ...state, turns: state.turns.filter((t) => t !== empty) };
     }
     case "error": {
-      // Typed turns end with turn_end{error}; a bare legacy `error` either
-      // precedes that (ignore) or answers a frame that never became a turn.
+      // Typed turns end with turn_end{error}; a bare `error` answers a frame
+      // that never became a turn. Older services also sent one right before
+      // turn_end{error}; that copy is ignored while a turn runs.
       if (runningTurn(state)) return state;
       const message = str(ev.message) || "agent error";
       const victim = oldestUnstarted(state);

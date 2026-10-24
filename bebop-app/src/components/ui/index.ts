@@ -4,7 +4,6 @@ export type { ButtonProps, ButtonSize, ButtonVariant } from "./Button";
 export { Card, CardHeader } from "./Card";
 export { StatusPill, StatusDot, TONE_DOT, TONE_PILL } from "./StatusPill";
 export type { Tone } from "./StatusPill";
-export { Stat } from "./Stat";
 export { Banner } from "./Banner";
 export type { BannerTone } from "./Banner";
 export { SegmentedControl } from "./SegmentedControl";

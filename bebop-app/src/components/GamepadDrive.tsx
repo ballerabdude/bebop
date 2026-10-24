@@ -118,7 +118,7 @@ export function GamepadDrive({
       lg.armToggleEdge &&
       wheels.length > 0 &&
       !estopRef.current &&
-      (modeRef.current === "DIAL_IN" || modeRef.current === "RUN_POLICY")
+      modeRef.current === "DIAL_IN"
     ) {
       onSetAllWheelsRef.current(armedCount !== wheels.length);
     }
@@ -154,8 +154,8 @@ export function GamepadDrive({
   const armedWheelCount = wheels.filter((w) => w.armed).length;
   const driveBlockReason = estopLatched
     ? "E-STOP latched"
-    : mode !== "DIAL_IN" && mode !== "RUN_POLICY"
-      ? "switch to Dial-in (or Policy) mode"
+    : mode !== "DIAL_IN"
+      ? "switch to Drive mode"
       : armedWheelCount === 0
         ? "enable the wheels"
         : null;

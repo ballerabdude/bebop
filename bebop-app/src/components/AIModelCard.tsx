@@ -10,7 +10,6 @@ const EMPTY_MODEL: ModelView = {
   diskFreeBytes: 0,
   detail: "",
   models: [],
-  selection: [],
 };
 
 /// Human-readable byte size (e.g. "3.3 GB").
@@ -31,10 +30,9 @@ function titleCase(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-/// Model provisioning + per-purpose selection. Shows the robot's catalog
-/// grouped by purpose, lets the operator store a Hugging Face token, start
-/// downloads, and choose which model serves each purpose. Downloads run on
-/// the robot (firmware → systemd) and report progress over telemetry.
+/// Model provisioning. Shows the robot's catalog grouped by purpose and lets
+/// the operator store a Hugging Face token and start downloads. Downloads run
+/// on the robot (firmware → systemd) and report progress over telemetry.
 ///
 /// Renders nothing when `model.present === false` unless `showWhenUnavailable`
 /// is set (the dedicated Models screen uses that to explain the gap).
@@ -80,8 +78,6 @@ export function AIModelCard({
   }
 
   const downloading = model.models.some((m) => m.state === "downloading");
-  const selectionFor = (purpose: string) =>
-    model.selection.find((s) => s.purpose === purpose)?.modelId ?? "";
 
   async function run(key: string, fn: () => Promise<void>) {
     setError(null);
@@ -165,55 +161,31 @@ export function AIModelCard({
           </p>
         </Card>
       ) : (
-        groups.map(([purpose, entries]) => {
-          const selected = selectionFor(purpose);
-          return (
-            <Card key={purpose}>
-              <div className="py-2 flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs text-text-dim uppercase tracking-wider">
-                    {titleCase(purpose)}
-                  </div>
-                  {selected ? (
-                    <button
-                      type="button"
-                      className="inline-flex h-control-sm items-center rounded-input px-2 text-label text-text-dim hover:text-text pointer-coarse:h-touch"
-                      onClick={() =>
-                        run(`purpose:${purpose}`, () =>
-                          transport.setModelPurpose(purpose, ""),
-                        )
-                      }
-                    >
-                      Clear
-                    </button>
-                  ) : null}
-                </div>
-                <div className="flex flex-col divide-y divide-border">
-                  {entries.map((entry) => (
-                    <ModelRow
-                      key={entry.id}
-                      entry={entry}
-                      selected={selected === entry.id}
-                      tokenSet={model.tokenSet}
-                      busy={busy === `download:${entry.id}`}
-                      anyDownloading={downloading}
-                      onSelect={() =>
-                        run(`purpose:${purpose}`, () =>
-                          transport.setModelPurpose(purpose, entry.id),
-                        )
-                      }
-                      onDownload={() =>
-                        run(`download:${entry.id}`, () =>
-                          transport.downloadModel(entry.id),
-                        )
-                      }
-                    />
-                  ))}
-                </div>
+        groups.map(([purpose, entries]) => (
+          <Card key={purpose}>
+            <div className="py-2 flex flex-col gap-2">
+              <div className="text-xs text-text-dim uppercase tracking-wider">
+                {titleCase(purpose)}
               </div>
-            </Card>
-          );
-        })
+              <div className="flex flex-col divide-y divide-border">
+                {entries.map((entry) => (
+                  <ModelRow
+                    key={entry.id}
+                    entry={entry}
+                    tokenSet={model.tokenSet}
+                    busy={busy === `download:${entry.id}`}
+                    anyDownloading={downloading}
+                    onDownload={() =>
+                      run(`download:${entry.id}`, () =>
+                        transport.downloadModel(entry.id),
+                      )
+                    }
+                  />
+                ))}
+              </div>
+            </div>
+          </Card>
+        ))
       )}
     </div>
   );
@@ -240,19 +212,15 @@ function StatusPill({ entry }: { entry: ModelEntryView }) {
 
 function ModelRow({
   entry,
-  selected,
   tokenSet,
   busy,
   anyDownloading,
-  onSelect,
   onDownload,
 }: {
   entry: ModelEntryView;
-  selected: boolean;
   tokenSet: boolean;
   busy: boolean;
   anyDownloading: boolean;
-  onSelect: () => void;
   onDownload: () => void;
 }) {
   const pct =
@@ -265,21 +233,6 @@ function ModelRow({
 
   return (
     <div className="py-3 flex gap-3">
-      <button
-        type="button"
-        role="radio"
-        aria-checked={selected}
-        aria-label={`Use ${entry.name || entry.id}`}
-        onClick={onSelect}
-        className="group -m-2 flex h-control-sm w-10 shrink-0 items-start justify-center pt-3 pointer-coarse:h-touch"
-      >
-        <span
-          aria-hidden
-          className={`h-4 w-4 rounded-full border-2 transition-colors ${
-            selected ? "border-accent bg-accent" : "border-border group-hover:border-accent"
-          }`}
-        />
-      </button>
       <div className="min-w-0 flex-1 flex flex-col gap-1.5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">

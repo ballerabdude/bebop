@@ -2,7 +2,7 @@
 // `src/proto/bebop_runtime_pb.ts` but use string mode names and friendlier
 // field names so React components don't have to import the proto module.
 
-export type RuntimeMode = "UNSPECIFIED" | "IDLE" | "DIAL_IN" | "RUN_POLICY";
+export type RuntimeMode = "UNSPECIFIED" | "IDLE" | "DIAL_IN";
 
 export interface MotorView {
   jointName: string;
@@ -18,7 +18,7 @@ export interface MotorView {
   temperature: number;
   /// Most recent commanded position target (post-clamp / post-slew).
   /// Only meaningful while `armed`; reset to the live position on each
-  /// new arm. Drives the dial-in slider's "what we asked for" marker.
+  /// new arm.
   target: number;
   posMin: number;
   posMax: number;
@@ -56,7 +56,7 @@ export interface WheelView {
 }
 
 /// Differential-drive summary: the operator twist in effect plus the
-/// wheel-encoder odometry pose. `present` is false on the humanoid.
+/// wheel-encoder odometry pose. `present` is false without a `drive:` block.
 export interface DriveView {
   present: boolean;
   cmdLinearX: number; // m/s
@@ -137,33 +137,30 @@ export interface PowerView {
 /// Always present in the view layer; `present === false` when the
 /// firmware has no `imu:` block configured — the UI should hide the
 /// orientation card in that case. `received === false` until the
-/// BNO08x produces its first usable quaternion.
+/// BNO085 produces its first usable quaternion.
 ///
-/// `quaternion` is `[qx, qy, qz, qw]` in Hamilton (XYZW) order to match
-/// the policy-side convention. Identity orientation is `(0, 0, 0, 1)`.
+/// `quaternion` is `[qx, qy, qz, qw]` in Hamilton (XYZW) order, body
+/// frame. Identity orientation is `(0, 0, 0, 1)`.
 export interface ImuView {
   present: boolean;
   received: boolean;
   stale: boolean;
   lastUpdateAgeMs: number;
   quaternion: [number, number, number, number];
-  headingAccuracyRad: number;
 }
 
 /// State of the on-robot voice (speech-to-speech) service
 /// (`bebop-voice.service`). `present === false` means the unit isn't
 /// installed on this robot; the UI should hide the voice card. `running` is
 /// true while the unit is systemd-`active` (the Python service is up).
-/// `model` names the catalog voice model being served (e.g.
-/// "qwen3-omni-30b"). Audio does not travel over the runtime WS — the voice
-/// page talks to the service's own WebSocket on :9093 (see docs/voice.md).
+/// Audio does not travel over the runtime WS — the voice page talks to the
+/// service's own WebSocket on :9093 (see docs/voice.md).
 export interface VoiceView {
   present: boolean;
   running: boolean;
   state: string;
   detail: string;
   service: string;
-  model: string;
 }
 
 export interface RuntimeSnapshot {
@@ -173,9 +170,10 @@ export interface RuntimeSnapshot {
   estopReason: string;
   motors: MotorView[];
   buses: BusView[];
-  /// ODrive wheels (empty on the legged humanoid).
+  /// ODrive wheels (empty without a `wheels:` block).
   wheels: WheelView[];
-  /// Differential-drive summary; `drive.present === false` on the humanoid.
+  /// Differential-drive summary; `drive.present === false` without a
+  /// `drive:` block.
   drive: DriveView;
   /// Always present in the view layer; `power.present === false` when
   /// the firmware has no `power:` block configured.
@@ -183,9 +181,6 @@ export interface RuntimeSnapshot {
   /// Always present in the view layer; `imu.present === false` when
   /// the firmware has no `imu:` block configured.
   imu: ImuView;
-  /// Policy observation/action I/O. `policyIo.present === false` when
-  /// `policy.onnx` failed to load at boot.
-  policyIo: PolicyIoView;
   /// bebop-vision service state. `vision.present === false` when the
   /// `bebop-vision.service` unit isn't installed — the UI hides the
   /// vision control card in that case.
@@ -196,32 +191,6 @@ export interface RuntimeSnapshot {
   /// Voice (speech-to-speech) service state. `voice.present === false` when
   /// `bebop-voice.service` isn't installed — the UI hides the voice card.
   voice: VoiceView;
-}
-
-/// Policy I/O view. Mirrors the scalar capture/lifecycle fields of the
-/// firmware's `PolicyIoStats` proto. The live observation/action/kp/kd
-/// vectors are intentionally NOT surfaced here anymore — operators
-/// inspect those post-hoc in Foxglove via the downloaded MCAP, so
-/// carrying them per-frame through the view layer was pure overhead.
-export interface PolicyIoView {
-  present: boolean;
-  /** Operator has enabled dry-run: RUN_POLICY still infers + publishes +
-   *  captures, but no PD commands reach the motors. */
-  dryRun: boolean;
-  /** Robot is currently writing MCAP capture samples. Distinct from
-   *  "operator requested capture" — only `true` once the writer thread
-   *  has actually opened the file on disk. */
-  captureActive: boolean;
-  /** Absolute path of the active capture file on the robot, or "" when
-   *  no capture is open. `.mcap` extension. */
-  capturePath: string;
-  /** Sample count appended to the active capture file (0 when none). */
-  captureRows: number;
-  /** Cumulative samples the tick thread tried to enqueue but the writer
-   *  thread's bounded channel was full for. Monotonic across the process
-   *  lifetime; 0 means the writer is keeping up. UIs should flag a
-   *  non-zero value as data loss. */
-  captureDropped: number;
 }
 
 /// State of the Python bebop-vision service (`bebop-vision.service`).
@@ -236,7 +205,6 @@ export interface VisionView {
   state: string;
   detail: string;
   service: string;
-  mode: string;
 }
 
 /// One catalog model and its live provisioning status. `kind === "hf"`
@@ -248,25 +216,16 @@ export interface ModelEntryView {
   name: string;
   description: string;
   kind: string;
-  /// What the model is for (e.g. "segmentation", "navigation").
+  /// What the model is for (e.g. "segmentation", "voice").
   purpose: string;
   repo: string;
-  files: string[];
-  revision: string;
   gated: boolean;
   bytesTotal: number;
-  path: string;
   ready: boolean;
   /// "idle" | "downloading" | "ready" | "failed" | "unauthorized"
   state: string;
   detail: string;
   bytesDownloaded: number;
-}
-
-/// The active model chosen for one purpose.
-export interface PurposeSelectionView {
-  purpose: string;
-  modelId: string;
 }
 
 /// Model-weight provisioning state (Hugging Face token + per-model status).
@@ -278,6 +237,4 @@ export interface ModelView {
   diskFreeBytes: number;
   detail: string;
   models: ModelEntryView[];
-  /// Active model per purpose (unset purposes are absent).
-  selection: PurposeSelectionView[];
 }

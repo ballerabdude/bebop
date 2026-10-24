@@ -14,12 +14,6 @@ export interface Keyframe {
   stamp_us: number;
 }
 
-export interface Tag {
-  label: string;
-  confidence: number;
-  source: string;
-}
-
 export interface BestMatch {
   id: string;
   name: string;
@@ -40,7 +34,6 @@ export interface Place {
   updated_at: number;
   last_seen_at: number | null;
   facts: Fact[];
-  tags: Tag[];
   keyframes: Keyframe[];
 }
 
@@ -90,7 +83,7 @@ export function shortTime(epochS: number | null | undefined): string {
   });
 }
 
-export async function readError(res: Response): Promise<string> {
+async function readError(res: Response): Promise<string> {
   try {
     const body = await res.json();
     if (body && typeof body.error === "string") return body.error;

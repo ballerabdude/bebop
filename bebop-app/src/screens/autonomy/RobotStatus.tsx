@@ -48,7 +48,6 @@ const MODE_LABEL: Record<string, string> = {
   UNSPECIFIED: "Unknown",
   IDLE: "Idle",
   DIAL_IN: "Armed",
-  RUN_POLICY: "Policy",
 };
 
 export function placeLabel(where: ReturnType<typeof usePlaces>["whereami"], reachable: boolean | null): {
@@ -64,9 +63,7 @@ export function placeLabel(where: ReturnType<typeof usePlaces>["whereami"], reac
     const score = typeof where.score === "number" ? ` · score ${formatMatchScore(where.score)}` : "";
     return { text: name, tone: "ok", hint: `Recognised place${score}` };
   }
-  // `top` entries are `{id, name, score}` (older services nested a `place`).
-  const top = (where.top?.[0] ?? null) as { name?: string; place?: { name?: string } } | null;
-  const best = top?.name || top?.place?.name || "";
+  const best = where.top?.[0]?.name || "";
   return {
     text: "Unknown place",
     tone: "dim",

@@ -122,7 +122,6 @@ const MODE_LABEL: Record<string, string> = {
   UNSPECIFIED: "Unknown",
   IDLE: "Idle",
   DIAL_IN: "Armed mode",
-  RUN_POLICY: "Policy",
 };
 
 function StatusBar({ headerRef }: { headerRef: Ref<HTMLElement> }) {

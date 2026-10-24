@@ -6,8 +6,8 @@ import { MapView } from "../../screens/memory/MapView";
 import { PlacesView } from "../../screens/memory/PlacesView";
 
 /// `#/r/:host/autonomy/memory[?view=map]`: place memory (review, teach,
-/// known places) and the per-place map + place graph. Both views read the
-/// session's shared places poller.
+/// known places) and the place graph. Both views read the session's shared
+/// places poller.
 export default function MemoryRoute() {
   const [params, setParams] = useSearchParams();
   const view = params.get("view") === "map" ? "map" : "places";
@@ -35,7 +35,7 @@ export default function MemoryRoute() {
                 </span>
               ),
             },
-            { id: "map", label: "Map & graph" },
+            { id: "map", label: "Place graph" },
           ]}
           className="mx-0 px-0"
         />

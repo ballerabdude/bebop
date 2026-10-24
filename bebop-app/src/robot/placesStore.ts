@@ -32,8 +32,6 @@ export interface PlacesState {
   places: PlaceSummary[];
   /// Pending places waiting for review/import (`GET /places/pending`).
   pending: PlaceSummary[];
-  /// False when the service predates the pending queue (404).
-  pendingSupported: boolean;
   whereami: WhereAmI | null;
   /// Places service reachable on the last /places request (null = unknown).
   reachable: boolean | null;
@@ -45,7 +43,6 @@ export interface PlacesState {
 const INITIAL: PlacesState = {
   places: [],
   pending: [],
-  pendingSupported: true,
   whereami: null,
   reachable: null,
   error: null,
@@ -183,28 +180,20 @@ export class PlacesStore {
       ]);
       if (!res.ok) throw new Error(await readError(res));
       const body = (await res.json()) as { places?: PlaceSummary[] };
-      // Older services have no pending queue (404); keep the confirmed list
-      // usable rather than failing the whole poll.
       // A failed/garbled pending fetch keeps the last queue: /places itself
       // answered, so the service is reachable.
       let pending: PlaceSummary[] = this.state.pending;
-      let pendingSupported = this.state.pendingSupported;
       if (pendingRes?.ok) {
         try {
           const pb = (await pendingRes.json()) as { places?: PlaceSummary[] };
           pending = Array.isArray(pb?.places) ? pb.places : [];
-          pendingSupported = true;
         } catch {
           /* non-JSON 200: keep the previous queue */
         }
-      } else if (pendingRes?.status === 404) {
-        pending = [];
-        pendingSupported = false;
       }
       this.set({
         places: Array.isArray(body.places) ? body.places : [],
         pending,
-        pendingSupported,
         reachable: true,
         error: null,
         loading: false,

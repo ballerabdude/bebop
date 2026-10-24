@@ -41,8 +41,6 @@ import {
   SetMotorEnabledSchema,
   SetMotorTargetSchema,
   SetHfTokenSchema,
-  SetModelPurposeSchema,
-  SetPolicyDryRunSchema,
   SetVelocityCommandSchema,
   SetVisionEnabledSchema,
   SetVoiceEnabledSchema,
@@ -61,14 +59,12 @@ import {
   type BusEntry as ProtoBusEntry,
   type PowerStats as ProtoPowerStats,
   type ImuStats as ProtoImuStats,
-  type PolicyIoStats as ProtoPolicyIoStats,
   type WheelState as ProtoWheelState,
   type DriveState as ProtoDriveState,
   type VisionState as ProtoVisionState,
   type VoiceState as ProtoVoiceState,
   type ModelState as ProtoModelState,
   type ModelCatalogEntry as ProtoModelCatalogEntry,
-  type PurposeSelection as ProtoPurposeSelection,
 } from "../proto/bebop_runtime_pb";
 import { createReplyRegistry, TWIST_REPLY_CAPACITY } from "./twistStream";
 import type {
@@ -78,7 +74,6 @@ import type {
   ModelEntryView,
   ModelView,
   MotorView,
-  PolicyIoView,
   PowerView,
   RuntimeMode,
   RuntimeSnapshot,
@@ -513,13 +508,12 @@ export class RuntimeTransport {
     });
   }
 
-  /// Batch re-zero of every actuator for the guided zero-calibration
-  /// flow (robot in the reference pose — face-flat, legs straight — with
-  /// every joint disarmed). The firmware checks preconditions for ALL
-  /// joints before touching any motor, then reports a per-joint summary
-  /// including post-zero verification failures (a motor that ignored
-  /// SET_ZERO, or a joint not at the reference pose). Returns the
-  /// firmware's summary message so the UI can show it verbatim.
+  /// Batch re-zero of every actuator for a guided zero-calibration flow
+  /// (every joint in its reference pose and disarmed). The firmware checks
+  /// preconditions for ALL joints before touching any motor, then reports
+  /// a per-joint summary including post-zero verification failures (a
+  /// motor that ignored SET_ZERO, or a joint not at the reference pose).
+  /// Returns the firmware's summary message so the UI can show it verbatim.
   async setMechanicalZeroAll(): Promise<string> {
     const reply = await this.request({
       case: "setMechanicalZeroAll",
@@ -570,23 +564,12 @@ export class RuntimeTransport {
     });
   }
 
-  /// Toggle the policy dry-run flag. While enabled, RUN_POLICY still
-  /// infers, publishes telemetry, and writes MCAP captures, but no PD
-  /// commands reach the motors. Persists across mode transitions; the
-  /// UI is responsible for showing the operator that it's on.
-  async setPolicyDryRun(enabled: boolean): Promise<void> {
-    await this.requestAck({
-      case: "setPolicyDryRun",
-      value: create(SetPolicyDryRunSchema, { enabled }),
-    });
-  }
-
   // -------------------------------------------------------------- drive
 
   /// Drive a twist (body frame) into the differential-drive chassis.
   /// `linearX` (m/s forward) and `angularZ` (rad/s yaw, + left). The
   /// firmware clamps + slew-limits and converts to per-wheel velocity;
-  /// send (0, 0) to stop. No-op on the humanoid (no `drive:` block).
+  /// send (0, 0) to stop. No-op without a `drive:` block.
   ///
   /// Fire-and-forget, for the drive stream (`twistStream.ts`). It never
   /// waits for the Ack: it returns true once the frame is handed to the
@@ -722,14 +705,6 @@ export class RuntimeTransport {
     });
   }
 
-  /// Select the active model for a purpose. `modelId === ""` clears it.
-  async setModelPurpose(purpose: string, modelId: string): Promise<void> {
-    await this.requestAck({
-      case: "setModelPurpose",
-      value: create(SetModelPurposeSchema, { purpose, modelId }),
-    });
-  }
-
   // -------------------------------------------------------------- internals
   private async requestAck(payload: ClientPayload): Promise<void> {
     const reply = await this.request(payload);
@@ -825,10 +800,9 @@ export class RuntimeTransport {
       case "snapshot":
       case "ack":
       case "error":
-      case "busStatus":
       case undefined:
-        // Either an unsolicited push variant we don't subscribe to yet,
-        // or a stray response without a pending entry. Drop quietly.
+        // Either a push variant this build doesn't know (`undefined`), or
+        // a stray response without a pending entry. Drop quietly.
         break;
     }
   }
@@ -847,7 +821,6 @@ function snapshotFromProto(s: Snapshot | TelemetryFrame): RuntimeSnapshot {
     drive: driveFromProto(s.drive),
     power: powerFromProto(s.power),
     imu: imuFromProto(s.imu),
-    policyIo: policyIoFromProto(s.policyIo),
     vision: visionFromProto(s.vision),
     model: modelFromProto(s.model),
     voice: voiceFromProto(s.voice),
@@ -917,7 +890,6 @@ function imuFromProto(p: ProtoImuStats | undefined): ImuView {
     stale: p.stale,
     lastUpdateAgeMs: p.lastUpdateAgeMs,
     quaternion: [p.quaternionX, p.quaternionY, p.quaternionZ, p.quaternionW],
-    headingAccuracyRad: p.headingAccuracyRad,
   };
 }
 
@@ -927,34 +899,6 @@ const EMPTY_IMU_VIEW: ImuView = {
   stale: true,
   lastUpdateAgeMs: 0,
   quaternion: [0, 0, 0, 1],
-  headingAccuracyRad: 0,
-};
-
-function policyIoFromProto(p: ProtoPolicyIoStats | undefined): PolicyIoView {
-  if (!p) {
-    return EMPTY_POLICY_IO_VIEW;
-  }
-  // Only the scalar capture/lifecycle fields are surfaced to the view
-  // layer — the observation/action/kp/kd vectors are inspected post-hoc
-  // in Foxglove via the downloaded MCAP, so we intentionally don't copy
-  // them per-frame here.
-  return {
-    present: p.present,
-    dryRun: p.dryRun,
-    captureActive: p.captureActive,
-    capturePath: p.capturePath,
-    captureRows: Number(p.captureRows),
-    captureDropped: Number(p.captureDropped),
-  };
-}
-
-const EMPTY_POLICY_IO_VIEW: PolicyIoView = {
-  present: false,
-  dryRun: false,
-  captureActive: false,
-  capturePath: "",
-  captureRows: 0,
-  captureDropped: 0,
 };
 
 function visionFromProto(p: ProtoVisionState | undefined): VisionView {
@@ -969,7 +913,6 @@ function visionFromProto(p: ProtoVisionState | undefined): VisionView {
     state: p.state,
     detail: p.detail,
     service: p.service,
-    mode: p.mode,
   };
 }
 
@@ -979,7 +922,6 @@ const EMPTY_VISION_VIEW: VisionView = {
   state: "",
   detail: "",
   service: "",
-  mode: "",
 };
 
 function voiceFromProto(p: ProtoVoiceState | undefined): VoiceView {
@@ -994,7 +936,6 @@ function voiceFromProto(p: ProtoVoiceState | undefined): VoiceView {
     state: p.state,
     detail: p.detail,
     service: p.service,
-    model: p.model,
   };
 }
 
@@ -1004,7 +945,6 @@ const EMPTY_VOICE_VIEW: VoiceView = {
   state: "",
   detail: "",
   service: "",
-  model: "",
 };
 
 function modelEntryFromProto(e: ProtoModelCatalogEntry): ModelEntryView {
@@ -1015,11 +955,8 @@ function modelEntryFromProto(e: ProtoModelCatalogEntry): ModelEntryView {
     kind: e.kind,
     purpose: e.purpose,
     repo: e.repo,
-    files: e.files,
-    revision: e.revision,
     gated: e.gated,
     bytesTotal: Number(e.bytesTotal),
-    path: e.path,
     ready: e.ready,
     state: e.state,
     detail: e.detail,
@@ -1039,10 +976,6 @@ function modelFromProto(p: ProtoModelState | undefined): ModelView {
     diskFreeBytes: Number(p.diskFreeBytes),
     detail: p.detail,
     models: p.models.map(modelEntryFromProto),
-    selection: p.selection.map((s: ProtoPurposeSelection) => ({
-      purpose: s.purpose,
-      modelId: s.modelId,
-    })),
   };
 }
 
@@ -1052,7 +985,6 @@ const EMPTY_MODEL_VIEW: ModelView = {
   diskFreeBytes: 0,
   detail: "",
   models: [],
-  selection: [],
 };
 
 function powerFromProto(p: ProtoPowerStats | undefined): PowerView {
@@ -1155,8 +1087,6 @@ function modeFromProto(m: Mode): RuntimeMode {
       return "IDLE";
     case Mode.DIAL_IN:
       return "DIAL_IN";
-    case Mode.RUN_POLICY:
-      return "RUN_POLICY";
     case Mode.UNSPECIFIED:
     default:
       return "UNSPECIFIED";
@@ -1169,8 +1099,6 @@ function modeToProto(m: RuntimeMode): Mode {
       return Mode.IDLE;
     case "DIAL_IN":
       return Mode.DIAL_IN;
-    case "RUN_POLICY":
-      return Mode.RUN_POLICY;
     case "UNSPECIFIED":
     default:
       return Mode.UNSPECIFIED;

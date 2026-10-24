@@ -26,11 +26,7 @@
     --color-warning: #f5b544;
     --color-warning-fg: #ffe1a6;
 
-    /* Canvas palette (the Memory map canvas reads these through getComputedStyle) */
-    --color-canvas-free: rgba(53, 194, 143, 0.16);
-    --color-canvas-obstacle: rgba(216, 222, 233, 0.3);
-    --color-canvas-wall: #d8dee9;
-    --color-canvas-anchor: #ffd166;
+    /* Canvas palette (the Memory place-graph canvas reads these through getComputedStyle) */
     --color-canvas-edge: rgba(79, 140, 255, 0.72);
     --color-canvas-node: #4f8cff;
 

@@ -24,8 +24,8 @@ interface CaptureFile {
   sizeBytes: number;
   modifiedMs: number;
   /// True for the segment a firmware writer currently has open. The app
-  /// finalizes it (`POST /captures/finalize`) before downloading so the
-  /// saved file has an MCAP footer.
+  /// downloads it through `/captures/finalize-dl/<name>`, which rolls it
+  /// over first so the saved file has an MCAP footer.
   active?: boolean;
 }
 
@@ -46,14 +46,13 @@ function formatModified(ms: number): string {
   return d.toLocaleString();
 }
 
-/// Lists every `.mcap` capture on the robot (drive sessions, policy
-/// captures and the always-on `system_*` health log) and lets the
-/// operator download any of them. The health log rolls daily and is
-/// hidden by default so the drive sessions stay findable. Polls the JSON endpoint on
-/// mount + on a manual refresh; downloads stream via the same HTTP
-/// server (`/captures/dl/<name>`) and are saved through a temporary
-/// blob-URL anchor so they work inside the Tauri webview the same way
-/// they would in a regular browser.
+/// Lists every `.mcap` capture on the robot (drive sessions and the
+/// always-on `system_*` health log) and lets the operator download any
+/// of them. The health log rolls daily and is hidden by default so the
+/// drive sessions stay findable. Polls the JSON endpoint on mount + on a
+/// manual refresh; downloads are plain links to the same HTTP server
+/// (`/captures/dl/<name>`; the live segment goes through `finalize-dl`),
+/// so the browser streams them straight to disk (see `downloadUrl`).
 function CaptureDownloads() {
   const { endpoints } = useRobot();
   const [files, setFiles] = useState<CaptureFile[] | null>(null);
@@ -67,8 +66,7 @@ function CaptureDownloads() {
   const PAGE_SIZE = 8;
   const [page, setPage] = useState(0);
   /// The firmware's always-on health log (`system_*`, one file per day)
-  /// and the legged `policy_capture_*` segments are not drive data; hide
-  /// them unless asked so the list is the drives.
+  /// is not drive data; hide it unless asked so the list is the drives.
   const [showSystem, setShowSystem] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -97,8 +95,7 @@ function CaptureDownloads() {
   /// (e.g. after a refresh that returns fewer segments, or after the
   /// operator deleted captures out of band). Without this the user
   /// could be stranded on a page that has no rows.
-  const isSystemLog = (name: string) =>
-    name.startsWith("system_") || name.startsWith("policy_capture_");
+  const isSystemLog = (name: string) => name.startsWith("system_");
   const visibleFiles = files
     ? showSystem
       ? files
@@ -205,8 +202,8 @@ function CaptureDownloads() {
         <div className="text-label text-text-dim italic">Loading…</div>
       ) : files.length === 0 ? (
         <div className="text-label text-text-dim italic">
-          No captures on robot yet. They appear as soon as the runtime
-          enters DIAL_IN or RUN_POLICY.
+          No captures on robot yet. They appear as soon as the wheels are
+          armed in drive mode.
         </div>
       ) : visibleFiles.length === 0 ? (
         <div className="text-label text-text-dim italic">

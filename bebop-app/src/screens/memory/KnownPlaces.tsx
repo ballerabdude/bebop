@@ -139,9 +139,7 @@ export function PlaceDetail({
       <CardHeader
         eyebrow="Place"
         title={<span className="text-base">{placeTitle(place)}</span>}
-        description={`${plural(place.keyframes.length, "view")} · last seen ${shortTime(place.last_seen_at)}${
-          place.tags.length ? ` · ${place.tags.map((t) => t.label).join(", ")}` : ""
-        }`}
+        description={`${plural(place.keyframes.length, "view")} · last seen ${shortTime(place.last_seen_at)}`}
         actions={
           <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close place details">
             Close

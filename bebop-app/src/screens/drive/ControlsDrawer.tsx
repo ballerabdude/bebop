@@ -89,7 +89,7 @@ export function ControlsDrawer({
   const vision = snapshot?.vision;
   const armed = wheels.filter((w) => w.armed).length;
   const wheeled = !!drive?.present && (snapshot?.motors.length ?? 0) === 0;
-  const driveMode = mode === "DIAL_IN" || mode === "RUN_POLICY";
+  const driveMode = mode === "DIAL_IN";
 
   // Esc closes the overlay drawer.
   useEffect(() => {
@@ -204,7 +204,7 @@ export function ControlsDrawer({
           <SegmentedControl<RuntimeMode>
             label="Firmware mode"
             className="w-full"
-            value={mode === "RUN_POLICY" ? "RUN_POLICY" : mode === "DIAL_IN" ? "DIAL_IN" : "IDLE"}
+            value={mode === "DIAL_IN" ? "DIAL_IN" : "IDLE"}
             disabled={!!busy || !snapshot}
             onChange={(m) => void run(`mode:${m}`, (t) => t.setMode(m))}
             options={[

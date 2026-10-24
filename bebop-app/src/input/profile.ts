@@ -41,9 +41,9 @@ export interface ControlProfile {
   /// Soft limit at full deflection for body twists: turn rate in
   /// rad/s (+wz = left turn).
   maxAngular: number;
-  /// Per-joint dial-in rate (rad/s) at full stick + full trigger on
-  /// the legged robot. Coupled with the firmware's
-  /// `slew.max_pos_step_per_tick` ceiling.
+  /// Per-joint dial-in rate (rad/s) at full stick + full trigger, for a
+  /// gamepad joint dial-in; unused while the app has none. Coupled with
+  /// the firmware's `slew.max_pos_step_per_tick` ceiling.
   dialInRate: number;
 }
 

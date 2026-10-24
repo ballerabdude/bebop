@@ -14,9 +14,6 @@ export interface VoiceHealth {
   detail: string;
   /// Model id the service reports (for the cascade just "cascade").
   model: string;
-  /// "nvfp4" | "fp16" | "mixed"
-  precision: string;
-  modelDownloaded: boolean;
   /// Seconds since the model server was started (anchors the build timer).
   elapsedS: number;
   /// Age of the last supervisor heartbeat (server-side). A value that keeps
@@ -34,8 +31,6 @@ export interface VoiceHealth {
   toolsEnabled: boolean;
   /// `move_relative` switched on.
   motionEnabled: boolean;
-  /// A turn is running for some session on the server.
-  turnActive: boolean;
 }
 
 function healthFromJson(j: Record<string, unknown>): VoiceHealth {
@@ -44,8 +39,6 @@ function healthFromJson(j: Record<string, unknown>): VoiceHealth {
     phase: String(j.phase ?? ""),
     detail: String(j.detail ?? ""),
     model: String(j.model ?? ""),
-    precision: String(j.precision ?? ""),
-    modelDownloaded: Boolean(j.model_downloaded),
     elapsedS: Number(j.elapsed_s ?? 0),
     heartbeatAgeS:
       j.heartbeat_age_s === null || j.heartbeat_age_s === undefined
@@ -57,13 +50,10 @@ function healthFromJson(j: Record<string, unknown>): VoiceHealth {
     toolsSupported: Boolean(j.tools_supported),
     toolsEnabled: Boolean(j.tools_enabled),
     motionEnabled: Boolean(j.motion_enabled),
-    turnActive: Boolean(j.turn_active),
   };
 }
 
-/// Human name of the engine. The firmware's `VoiceState.model` is the
-/// catalog id it was installed with (e.g. "qwen3-omni-30b") and goes stale
-/// once the service runs the cascade, so this reads `/healthz` instead.
+/// Human name of the engine `/healthz` reports as running.
 export function engineLabel(backend: string): string {
   if (backend === "cascade") return "Cascade";
   if (backend === "omni") return "Omni";
@@ -135,14 +125,12 @@ export interface VoiceConfigView {
   voices: string[];
   /** When set, the bebop-models supervisor owns the omni backend. */
   omni_supervisor_url: string;
-  omni_backend_id: string;
 }
 
 export interface VoiceConfigState {
   config: VoiceConfigView | null;
   error: string | null;
   save: (partial: Partial<VoiceConfigView>) => Promise<void>;
-  reload: () => void;
 }
 
 function configFromJson(j: Record<string, unknown>): VoiceConfigView {
@@ -158,14 +146,12 @@ function configFromJson(j: Record<string, unknown>): VoiceConfigView {
     backends: Array.isArray(j.backends) ? (j.backends as string[]) : ["cascade", "omni"],
     voices: Array.isArray(j.voices) ? (j.voices as string[]) : [],
     omni_supervisor_url: String(j.omni_supervisor_url ?? ""),
-    omni_backend_id: String(j.omni_backend_id ?? "omni-edgellm"),
   };
 }
 
 export function useVoiceConfig(host: string, enabled = true): VoiceConfigState {
   const [config, setConfig] = useState<VoiceConfigView | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
     if (!enabled || !host) {
@@ -191,7 +177,7 @@ export function useVoiceConfig(host: string, enabled = true): VoiceConfigState {
     return () => {
       cancelled = true;
     };
-  }, [host, enabled, nonce]);
+  }, [host, enabled]);
 
   const save = useCallback(
     async (partial: Partial<VoiceConfigView>) => {
@@ -210,6 +196,5 @@ export function useVoiceConfig(host: string, enabled = true): VoiceConfigState {
     [host],
   );
 
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
-  return { config, error, save, reload };
+  return { config, error, save };
 }

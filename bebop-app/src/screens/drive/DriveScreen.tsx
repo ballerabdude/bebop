@@ -63,7 +63,6 @@ const MODE_LABEL: Record<string, string> = {
   UNSPECIFIED: "Unknown",
   IDLE: "Idle",
   DIAL_IN: "Drive mode",
-  RUN_POLICY: "Policy",
 };
 
 const SOURCE_LABEL: Record<DriveSource, string> = {
@@ -202,7 +201,7 @@ export function DriveScreen() {
   const estopLatched = estop.latched;
   const armed = wheels.filter((w) => w.armed).length;
   const wheeled = !!drive?.present && (snapshot?.motors.length ?? 0) === 0;
-  const driveMode = mode === "DIAL_IN" || mode === "RUN_POLICY";
+  const driveMode = mode === "DIAL_IN";
   const driver: DriverStatus = driverStatus(seatOf(drive));
   // A human holding the seat makes this client a spectator; the robot's
   // own agent can be overridden by moving the joystick.

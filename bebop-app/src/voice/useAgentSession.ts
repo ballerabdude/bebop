@@ -14,7 +14,6 @@ import {
   activeTurn,
   agentReducer,
   INITIAL_AGENT_STATE,
-  runningTurn,
 } from "./agentTurns";
 import type { AgentEvent, AgentState, ToolItem, Turn } from "./agentTurns";
 
@@ -23,8 +22,6 @@ export type AgentLink = "off" | "connecting" | "open" | "reconnecting";
 export interface AgentSessionOptions {
   /// Connect only while true (e.g. the service reports ready).
   enabled: boolean;
-  /// TTS speaker override; empty uses the service's configured voice.
-  voice?: string;
   /// Binary PCM16 frames (24 kHz mono) of the reply speech.
   onAudio?: (bytes: ArrayBuffer) => void;
   /// Called when a turn is cancelled locally (stop queued speech).
@@ -36,8 +33,6 @@ export interface AgentSession {
   link: AgentLink;
   /// The turn that is recording, waiting or running, if any.
   active: Turn | null;
-  /// The turn the server is running.
-  running: Turn | null;
   /// A `move_relative` in progress.
   motion: ToolItem | null;
   sendText: (text: string, opts: { speak: boolean }) => boolean;
@@ -95,7 +90,7 @@ function loadTurns(host: string, sessionId: string): Turn[] {
 }
 
 export function useAgentSession(host: string, opts: AgentSessionOptions): AgentSession {
-  const { enabled, voice } = opts;
+  const { enabled } = opts;
   const [sessionId, setSessionId] = useState(
     () => readStorage(SESSION_PREFIX + host) || makeId("s-"),
   );
@@ -142,7 +137,6 @@ export function useAgentSession(host: string, opts: AgentSessionOptions): AgentS
       if (disposed) return;
       setLink(attempt === 0 ? "connecting" : "reconnecting");
       const qs = new URLSearchParams({ session: sessionId });
-      if (voice) qs.set("voice", voice);
       const sock = new WebSocket(endpoints(host).voiceWs(qs.toString()));
       sock.binaryType = "arraybuffer";
       ws = sock;
@@ -193,7 +187,7 @@ export function useAgentSession(host: string, opts: AgentSessionOptions): AgentS
       wsRef.current = null;
       dispatch({ type: "disconnected", at: Date.now() });
     };
-  }, [host, live, sessionId, voice]);
+  }, [host, live, sessionId]);
 
   const send = useCallback((msg: unknown): boolean => {
     const ws = wsRef.current;
@@ -280,7 +274,6 @@ export function useAgentSession(host: string, opts: AgentSessionOptions): AgentS
     state,
     link,
     active: activeTurn(state),
-    running: runningTurn(state),
     motion: activeMotion(state),
     sendText,
     beginUtterance,

@@ -247,23 +247,22 @@ function RailPill({
 // Orientation card (IMU rotation-vector visualization)
 // ---------------------------------------------------------------------------
 
-/// Live orientation indicator driven by the BNO080/BNO085 rotation
-/// vector. Renders a labelled box rotating in 3D so the operator can
-/// quickly tell whether the robot is upright, leaning, or has flipped,
-/// plus numeric roll/pitch/yaw readouts.
+/// Live orientation indicator driven by the BNO085 rotation vector that
+/// the Teensy bridge streams. Renders a labelled box rotating in 3D so the
+/// operator can quickly tell whether the robot is upright, leaning, or has
+/// flipped, plus numeric roll/pitch/yaw readouts.
 ///
 /// # Frame contract with the firmware
 ///
 /// `imu.quaternion` arrives as **body-frame XYZW (Hamilton)**: the
-/// firmware (`bebop-linux/src/imu.rs`) has already composed the
-/// `imu.mount:` rotation from `bebop_v2.yaml` and renormalized to unit
+/// firmware (`bebop-linux/src/imu_serial.rs`) has already composed the
+/// `imu.mount:` rotation from the robot YAML and renormalized to unit
 /// length before publishing. So we treat the four floats as a unit
 /// body-frame attitude and feed them to both the CSS-matrix render and
 /// the Euler decomposition without any further rotation.
 ///
-/// The bno080 crate seeds its cached quaternion at all-zeros before
-/// the first SHTP report, and that pre-init state still propagates as
-/// `received = false`. We gate the whole card on `received && !stale`
+/// Before the first frame the firmware reports an all-zero quaternion
+/// with `received = false`. We gate the whole card on `received && !stale`
 /// to avoid rendering an "identity" cube while no real data is flowing
 /// — and as a belt-and-braces measure we also fall back to identity
 /// if a non-finite or near-zero quaternion ever slips through.
@@ -295,7 +294,6 @@ function OrientationCard({ imu }: { imu: ImuView }) {
   );
 
   const usable = haveQuat && !imu.stale;
-  const headingDeg = (imu.headingAccuracyRad * 180) / Math.PI;
 
   return (
     <div className="rounded-card border border-border bg-bg-elev px-3.5 py-3 flex flex-col gap-2.5">
@@ -401,11 +399,6 @@ function OrientationCard({ imu }: { imu: ImuView }) {
               qw <span className="text-text">{qw.toFixed(2)}</span>
             </span>
           </div>
-          {imu.headingAccuracyRad > 0 ? (
-            <div className="col-span-3 text-caption text-text-dim">
-              Heading accuracy ±{headingDeg.toFixed(1)}° (1σ)
-            </div>
-          ) : null}
         </div>
       </div>
 

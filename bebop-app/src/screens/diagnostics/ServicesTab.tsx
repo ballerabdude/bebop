@@ -24,7 +24,6 @@ const SERVICES: { id: ServiceName; label: string; what: string }[] = [
   { id: "voice", label: "Voice", what: "bebop-voice: agent + speech" },
   { id: "models", label: "Models", what: "bebop-models GPU supervisor" },
   { id: "places", label: "Places", what: "place memory (in bebop-vision)" },
-  { id: "slam", label: "Live SLAM", what: "only with --live-slam" },
 ];
 
 type Probe = "up" | "down" | "checking";

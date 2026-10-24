@@ -20,7 +20,6 @@ test("endpoint registry builds every service URL from one host", () => {
   assert.equal(ep.voiceHttp("/config"), "http://10.0.0.5:9093/config");
   assert.equal(ep.models("/models"), "http://10.0.0.5:9094/models");
   assert.equal(ep.places("/whereami"), "http://10.0.0.5:9095/whereami");
-  assert.equal(ep.slam("/structure"), "http://10.0.0.5:9096/structure");
   assert.equal(ep.captures(), "http://10.0.0.5:9090/captures");
   assert.equal(ep.captures("/dl/a.mcap"), "http://10.0.0.5:9090/captures/dl/a.mcap");
   assert.equal(ep.healthz("setup"), "http://10.0.0.5:9091/healthz");
@@ -31,7 +30,6 @@ test("endpoint registry builds every service URL from one host", () => {
     voice: 9093,
     models: 9094,
     places: 9095,
-    slam: 9096,
   });
 });
 
