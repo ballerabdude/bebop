@@ -16,7 +16,6 @@ use bebop_linux::imu;
 use bebop_linux::imu_serial;
 use bebop_linux::mode::Mode;
 use bebop_linux::model;
-use bebop_linux::nav_goal::NavGoalShared;
 use bebop_linux::policy_capture;
 use bebop_linux::policy_control;
 use bebop_linux::policy_io;
@@ -478,7 +477,6 @@ async fn main() -> Result<()> {
     let server_policy_io = policy_io_shared.clone();
     let server_policy_control = policy_control_shared.clone();
     let server_capture_dir = capture_dir.clone();
-    let server_nav_goal = std::sync::Arc::new(NavGoalShared::new());
     let server_vision = vision_shared.clone();
     let server_model = model_shared.clone();
     let server_voice = voice_shared.clone();
@@ -493,7 +491,6 @@ async fn main() -> Result<()> {
             policy_io: server_policy_io,
             policy_control: server_policy_control,
             capture_dir: server_capture_dir,
-            nav_goal: server_nav_goal,
             vision: server_vision,
             model: server_model,
             voice: server_voice,

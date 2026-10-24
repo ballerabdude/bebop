@@ -103,8 +103,9 @@ fn twist_is_stale(twist: Twist, age_ms: u64, timeout_ms: u64) -> bool {
 /// arriving (the operator app re-sends at ~10 Hz while driving), and
 /// loses it on disconnect, operator staleness, E-STOP, or once
 /// `server.operator_grace_ms` passes without input (then anyone's
-/// next drive command takes over). Zero-twist stops bypass
-/// arbitration entirely — stopping is always allowed from any client.
+/// next drive command takes over). Zero-twist stops follow
+/// [`stop_applies`]: honoured from the holder or while the seat is free,
+/// ignored from anyone else (E-STOP is the any-client halt).
 #[derive(Debug, Clone, Copy)]
 struct ActiveOperator {
     conn_id: u64,
@@ -158,6 +159,65 @@ fn resolve_operator(
     }
 }
 
+/// Pure decision for a zero-twist stop from `conn_id`: does it touch the
+/// commanded twist?
+///
+/// A stop is applied when `conn_id` holds the seat, or when no *fresh*
+/// seat exists (nobody driving, the holder idle past `grace_ms`, or
+/// arbitration disabled with `grace_ms == 0`). A stop from any other
+/// client while someone holds a fresh seat is a no-op: a second device
+/// watching the stream whose joystick/keyboard releases (or whose
+/// keepalive stop fires) must not halt the operator who is driving.
+/// Anyone can still halt the robot with `EmergencyStop`, which is never
+/// arbitrated.
+fn stop_applies(active: Option<ActiveOperator>, conn_id: u64, now: Instant, grace_ms: u64) -> bool {
+    match active {
+        None => true,
+        Some(op) if op.conn_id == conn_id => true,
+        Some(op) => {
+            let age_ms = now.duration_since(op.last_input).as_millis() as u64;
+            !(grace_ms > 0 && age_ms <= grace_ms)
+        }
+    }
+}
+
+/// What [`Supervisor::drive_command`] did with an accepted command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriveOutcome {
+    /// The twist is now the commanded twist.
+    Applied,
+    /// A stop from a client that doesn't hold the seat while another
+    /// does: ignored on purpose (see [`stop_applies`]).
+    IgnoredNotHolder,
+}
+
+/// Longest display name kept from a `ClientHello` (characters).
+pub const CLIENT_NAME_MAX_CHARS: usize = 32;
+
+/// Normalize a `ClientHello` name: trimmed, control characters dropped,
+/// capped at [`CLIENT_NAME_MAX_CHARS`]. Empty means "no name".
+pub fn sanitize_client_name(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(CLIENT_NAME_MAX_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Per-connection arbitration view for telemetry (see
+/// [`Supervisor::operator_state`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperatorView {
+    /// A fresh seat assignment exists.
+    pub has_active_operator: bool,
+    /// The asking connection holds it.
+    pub you_are_active_operator: bool,
+    /// The holder's `ClientHello` name ("" if none or no fresh seat).
+    pub active_operator_name: String,
+}
+
 pub struct Supervisor {
     cfg: Arc<RobotConfig>,
     bus_pool: Arc<BusPool>,
@@ -192,6 +252,9 @@ pub struct Supervisor {
     /// (input-following arbitration — see [`ActiveOperator`]). `None`
     /// when nobody is driving.
     active_operator: Arc<Mutex<Option<ActiveOperator>>>,
+    /// Display names announced by WS connections (`ClientHello`), keyed
+    /// by connection id; removed on disconnect.
+    client_names: Arc<Mutex<HashMap<u64, String>>>,
     /// Dead-reckoning pose integrator (wheel-encoder-only odometry).
     odometry: Arc<Mutex<Odometry>>,
     /// Power-board monitor: `Some` iff `cfg.power` is set. Owns the
@@ -245,6 +308,7 @@ impl Supervisor {
             cmd_vel: Arc::new(Mutex::new(CmdVelState::default())),
             operator_stale: Arc::new(AtomicBool::new(false)),
             active_operator: Arc::new(Mutex::new(None)),
+            client_names: Arc::new(Mutex::new(HashMap::new())),
             odometry: Arc::new(Mutex::new(Odometry::default())),
             power,
             mode: Arc::new(AtomicU8::new(Mode::Idle as u8)),
@@ -394,23 +458,33 @@ impl Supervisor {
 
     /// A drive command from WS connection `conn_id`.
     ///
-    /// **Arbitration** (see [`ActiveOperator`]): a zero twist (stop) is
-    /// always accepted from any client and never touches the assignment
-    /// — stopping is always allowed. A non-zero twist requires holding
+    /// **Arbitration** (see [`ActiveOperator`]): a zero twist (stop)
+    /// never touches the assignment; it is applied from the holder or
+    /// while no fresh seat exists, and ignored
+    /// ([`DriveOutcome::IgnoredNotHolder`]) from anyone else — see
+    /// [`stop_applies`]. A non-zero twist requires holding
     /// the active-operator assignment: the first client to send one
     /// claims it, the holder keeps it (their input refreshes it), and
     /// other clients are rejected until `server.operator_grace_ms`
     /// passes without input from the holder — at which point the new
     /// client takes over.
-    pub fn drive_command(&self, conn_id: u64, twist: Twist) -> Result<()> {
-        if twist == Twist::default() {
-            // Stops bypass arbitration: any client may halt the robot,
-            // and a stop neither acquires nor refreshes a claim.
-            self.set_cmd_vel(twist);
-            return Ok(());
-        }
+    pub fn drive_command(&self, conn_id: u64, twist: Twist) -> Result<DriveOutcome> {
         let now = Instant::now();
         let grace_ms = self.cfg.server.operator_grace_ms;
+        if twist == Twist::default() {
+            // A stop neither acquires nor refreshes a claim. Decide and
+            // apply under the seat lock so a concurrent takeover can't
+            // slip between the check and the write.
+            let g = match self.active_operator.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if !stop_applies(*g, conn_id, now, grace_ms) {
+                return Ok(DriveOutcome::IgnoredNotHolder);
+            }
+            self.set_cmd_vel(twist);
+            return Ok(DriveOutcome::Applied);
+        }
         let resolution = {
             let mut g = match self.active_operator.lock() {
                 Ok(g) => g,
@@ -437,35 +511,74 @@ impl Supervisor {
                     );
                 }
                 self.set_cmd_vel(twist);
-                Ok(())
+                Ok(DriveOutcome::Applied)
             }
-            OperatorResolution::Rejected(holder) => Err(anyhow!(
-                "another operator (connection {holder}) is driving; drive commands \
-                 from this device are ignored until theirs stop for {grace_ms} ms"
-            )),
+            OperatorResolution::Rejected(holder) => {
+                let who = match self.client_name(holder) {
+                    Some(name) => format!("{name:?} (connection {holder})"),
+                    None => format!("connection {holder}"),
+                };
+                Err(anyhow!(
+                    "another operator, {who}, is driving; drive commands \
+                     from this device are ignored until theirs stop for {grace_ms} ms"
+                ))
+            }
         }
     }
 
-    /// Per-connection arbitration state for telemetry:
-    /// `(has_active_operator, you_are_active_operator)`. An assignment
+    /// Record (or clear, with an empty name) connection `conn_id`'s
+    /// display name. Returns the stored, sanitized name.
+    pub fn set_client_name(&self, conn_id: u64, raw: &str) -> String {
+        let name = sanitize_client_name(raw);
+        let mut g = match self.client_names.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if name.is_empty() {
+            g.remove(&conn_id);
+        } else {
+            g.insert(conn_id, name.clone());
+        }
+        name
+    }
+
+    /// Connection `conn_id`'s display name, if it announced one.
+    pub fn client_name(&self, conn_id: u64) -> Option<String> {
+        let g = match self.client_names.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        g.get(&conn_id).cloned()
+    }
+
+    /// Per-connection arbitration state for telemetry. An assignment
     /// whose last input is older than the grace window reads as "no
     /// active operator" — the holder can still resume seamlessly
     /// (same-connection continues skip the grace check), but every
     /// other client sees a free seat.
-    pub fn operator_state(&self, conn_id: u64) -> (bool, bool) {
+    pub fn operator_state(&self, conn_id: u64) -> OperatorView {
         let now = Instant::now();
         let grace_ms = self.cfg.server.operator_grace_ms;
-        let g = match self.active_operator.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        match *g {
-            Some(op) => {
-                let age_ms = now.duration_since(op.last_input).as_millis() as u64;
-                let fresh = grace_ms > 0 && age_ms <= grace_ms;
-                (fresh, fresh && op.conn_id == conn_id)
+        let holder = {
+            let g = match self.active_operator.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            match *g {
+                Some(op) => {
+                    let age_ms = now.duration_since(op.last_input).as_millis() as u64;
+                    (grace_ms > 0 && age_ms <= grace_ms).then_some(op.conn_id)
+                }
+                None => None,
             }
-            None => (false, false),
+        };
+        match holder {
+            Some(holder) => OperatorView {
+                has_active_operator: true,
+                you_are_active_operator: holder == conn_id,
+                active_operator_name: self.client_name(holder).unwrap_or_default(),
+            },
+            None => OperatorView::default(),
         }
     }
 
@@ -475,6 +588,9 @@ impl Supervisor {
     /// died with the connection. No-op for viewers and rejected
     /// would-be drivers: their disconnect never touched the motors.
     pub fn operator_disconnected(&self, conn_id: u64) {
+        if let Ok(mut names) = self.client_names.lock() {
+            names.remove(&conn_id);
+        }
         let was_holder = {
             let mut g = match self.active_operator.lock() {
                 Ok(g) => g,
@@ -2265,6 +2381,67 @@ mod tests {
         assert_eq!(
             resolve_operator(Some(holder(7, Duration::from_millis(2500))), 9, now, 2000),
             OperatorResolution::Takeover
+        );
+    }
+
+    #[test]
+    fn stop_from_holder_or_free_seat_applies() {
+        let now = Instant::now();
+        assert!(stop_applies(None, 9, now, 2000));
+        assert!(stop_applies(
+            Some(holder(7, Duration::from_millis(100))),
+            7,
+            now,
+            2000
+        ));
+    }
+
+    #[test]
+    fn stop_from_non_holder_is_ignored_while_seat_is_fresh() {
+        let now = Instant::now();
+        // A viewer's joystick release must not halt the driver.
+        assert!(!stop_applies(
+            Some(holder(7, Duration::from_millis(100))),
+            9,
+            now,
+            2000
+        ));
+        // Inclusive window, like the takeover rule.
+        assert!(!stop_applies(
+            Some(holder(7, Duration::from_millis(2000))),
+            9,
+            now,
+            2000
+        ));
+    }
+
+    #[test]
+    fn stop_from_non_holder_applies_once_the_seat_lapses() {
+        let now = Instant::now();
+        assert!(stop_applies(
+            Some(holder(7, Duration::from_millis(2500))),
+            9,
+            now,
+            2000
+        ));
+        // Arbitration disabled: everyone's stop counts.
+        assert!(stop_applies(
+            Some(holder(7, Duration::from_millis(0))),
+            9,
+            now,
+            0
+        ));
+    }
+
+    #[test]
+    fn client_names_are_trimmed_capped_and_cleaned() {
+        assert_eq!(sanitize_client_name("  Pixel 8  "), "Pixel 8");
+        assert_eq!(sanitize_client_name("a\u{0}b\nc"), "abc");
+        assert_eq!(sanitize_client_name("   "), "");
+        let long = "x".repeat(100);
+        assert_eq!(
+            sanitize_client_name(&long).chars().count(),
+            CLIENT_NAME_MAX_CHARS
         );
     }
 

@@ -22,7 +22,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file bebop_runtime.proto.
  */
 export const file_bebop_runtime: GenFile = /*@__PURE__*/
-  fileDesc("ChNiZWJvcF9ydW50aW1lLnByb3RvEhBiZWJvcC5ydW50aW1lLnYxIr0OChRDbGllbnRSdW50aW1lTWVzc2FnZRISCgpyZXF1ZXN0X2lkGGQgASgNEkMKE3N1YnNjcmliZV90ZWxlbWV0cnkYASABKAsyJC5iZWJvcC5ydW50aW1lLnYxLlN1YnNjcmliZVRlbGVtZXRyeUgAEkcKFXVuc3Vic2NyaWJlX3RlbGVtZXRyeRgCIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVUZWxlbWV0cnlIABI1CgxnZXRfc25hcHNob3QYAyABKAsyHS5iZWJvcC5ydW50aW1lLnYxLkdldFNuYXBzaG90SAASPgoRc2V0X21vdG9yX2VuYWJsZWQYBCABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldE1vdG9yRW5hYmxlZEgAEkcKFnNldF9hbGxfbW90b3JzX2VuYWJsZWQYBSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbE1vdG9yc0VuYWJsZWRIABItCghzZXRfbW9kZRgGIAEoCzIZLmJlYm9wLnJ1bnRpbWUudjEuU2V0TW9kZUgAEjkKDmVtZXJnZW5jeV9zdG9wGAcgASgLMh8uYmVib3AucnVudGltZS52MS5FbWVyZ2VuY3lTdG9wSAASMwoLcmVzZXRfZXN0b3AYCCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlJlc2V0RVN0b3BIABI8ChBzZXRfbW90b3JfdGFyZ2V0GAkgASgLMiAuYmVib3AucnVudGltZS52MS5TZXRNb3RvclRhcmdldEgAEkIKE3NldF9tZWNoYW5pY2FsX3plcm8YCiABKAsyIy5iZWJvcC5ydW50aW1lLnYxLlNldE1lY2hhbmljYWxaZXJvSAASPwoSc2V0X3BvbGljeV9kcnlfcnVuGAsgASgLMiEuYmVib3AucnVudGltZS52MS5TZXRQb2xpY3lEcnlSdW5IABJJChdzZXRfbWVjaGFuaWNhbF96ZXJvX2FsbBgNIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuU2V0TWVjaGFuaWNhbFplcm9BbGxIABJEChRzZXRfdmVsb2NpdHlfY29tbWFuZBgOIAEoCzIkLmJlYm9wLnJ1bnRpbWUudjEuU2V0VmVsb2NpdHlDb21tYW5kSAASPgoRc2V0X3doZWVsX2VuYWJsZWQYDyABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldFdoZWVsRW5hYmxlZEgAEkcKFnNldF9hbGxfd2hlZWxzX2VuYWJsZWQYECABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbFdoZWVsc0VuYWJsZWRIABI5Cg5yZXNldF9vZG9tZXRyeRgRIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUmVzZXRPZG9tZXRyeUgAEjsKD2NhbGlicmF0ZV93aGVlbBgSIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuQ2FsaWJyYXRlV2hlZWxIABI+Cg9zZXRfY2FtZXJhX3Bvc2UYEyABKAsyHy5iZWJvcC5ydW50aW1lLnYxLlNldENhbWVyYVBvc2VCAhgBSAASOwoNc3Vic2NyaWJlX25hdhgUIAEoCzIeLmJlYm9wLnJ1bnRpbWUudjEuU3Vic2NyaWJlTmF2QgIYAUgAEj8KD3Vuc3Vic2NyaWJlX25hdhgVIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVOYXZCAhgBSAASQgoTc2V0X25hdmlnYXRpb25fZ29hbBgWIAEoCzIjLmJlYm9wLnJ1bnRpbWUudjEuU2V0TmF2aWdhdGlvbkdvYWxIABJAChJzZXRfdmlzaW9uX2VuYWJsZWQYFyABKAsyIi5iZWJvcC5ydW50aW1lLnYxLlNldFZpc2lvbkVuYWJsZWRIABI0CgxzZXRfaGZfdG9rZW4YGCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlNldEhmVG9rZW5IABI4Cg5jbGVhcl9oZl90b2tlbhgZIAEoCzIeLmJlYm9wLnJ1bnRpbWUudjEuQ2xlYXJIZlRva2VuSAASOQoOZG93bmxvYWRfbW9kZWwYGiABKAsyHy5iZWJvcC5ydW50aW1lLnYxLkRvd25sb2FkTW9kZWxIABI+ChFzZXRfbW9kZWxfcHVycG9zZRgbIAEoCzIhLmJlYm9wLnJ1bnRpbWUudjEuU2V0TW9kZWxQdXJwb3NlSAASPgoRc2V0X3ZvaWNlX2VuYWJsZWQYHCABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldFZvaWNlRW5hYmxlZEgAEjsKD3Jlc3RhcnRfcnVudGltZRgdIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuUmVzdGFydFJ1bnRpbWVIAEIJCgdwYXlsb2FkSgQIDBANUhJzZXRfcG9saWN5X2NhcHR1cmUiiAQKFFNlcnZlclJ1bnRpbWVNZXNzYWdlEhIKCnJlcXVlc3RfaWQYZCABKA0SJAoDYWNrGAEgASgLMhUuYmVib3AucnVudGltZS52MS5BY2tIABIoCgVlcnJvchgCIAEoCzIXLmJlYm9wLnJ1bnRpbWUudjEuRXJyb3JIABIuCghzbmFwc2hvdBgDIAEoCzIaLmJlYm9wLnJ1bnRpbWUudjEuU25hcHNob3RIABI1Cgl0ZWxlbWV0cnkYBCABKAsyIC5iZWJvcC5ydW50aW1lLnYxLlRlbGVtZXRyeUZyYW1lSAASNQoMbW9kZV9jaGFuZ2VkGAUgASgLMh0uYmVib3AucnVudGltZS52MS5Nb2RlQ2hhbmdlZEgAEjcKDWVzdG9wX2xhdGNoZWQYBiABKAsyHi5iZWJvcC5ydW50aW1lLnYxLkVTdG9wTGF0Y2hlZEgAEjcKCmJ1c19zdGF0dXMYByABKAsyIS5iZWJvcC5ydW50aW1lLnYxLkJ1c1N0YXR1c1VwZGF0ZUgAEjYKCG5hdl9tYXNrGAggASgLMh4uYmVib3AucnVudGltZS52MS5OYXZNYXNrRnJhbWVCAhgBSAASOQoIbmF2X2dvYWwYCSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLk5hdmlnYXRpb25Hb2FsU3RhdGVIAEIJCgdwYXlsb2FkIoEDCgpNb3RvclN0YXRlEhIKCmpvaW50X25hbWUYASABKAkSFQoNY2FuX2ludGVyZmFjZRgCIAEoCRIQCghtb3Rvcl9pZBgDIAEoDRINCgVtb2RlbBgEIAEoCRINCgVhcm1lZBgFIAEoCBIWCg5mZWVkYmFja19zdGFsZRgGIAEoCBISCgpmYXVsdF9iaXRzGAcgASgNEhQKDHBvc2l0aW9uX3JhZBgKIAEoAhIWCg52ZWxvY2l0eV9yYWRfcxgLIAEoAhIRCgl0b3JxdWVfbm0YDCABKAISFQoNdGVtcGVyYXR1cmVfYxgNIAEoAhIZChFwb3NpdGlvbl9yZWNlaXZlZBgPIAEoCBIbChN0YXJnZXRfcG9zaXRpb25fcmFkGA4gASgCEhMKC3Bvc19taW5fcmFkGBQgASgCEhMKC3Bvc19tYXhfcmFkGBUgASgCEg8KB3ZlbF9tYXgYFiABKAISDwoHdGF1X21heBgXIAEoAhIQCgh0ZW1wX21heBgYIAEoAiKKAgoKV2hlZWxTdGF0ZRIMCgRuYW1lGAEgASgJEhUKDWNhbl9pbnRlcmZhY2UYAiABKAkSDwoHbm9kZV9pZBgDIAEoDRINCgVhcm1lZBgFIAEoCBIWCg5mZWVkYmFja19zdGFsZRgGIAEoCBIZChFwb3NpdGlvbl9yZWNlaXZlZBgPIAEoCBISCgplcnJvcl9jb2RlGAcgASgNEhQKDHBvc2l0aW9uX3JhZBgKIAEoAhIWCg52ZWxvY2l0eV9yYWRfcxgLIAEoAhIdChV0YXJnZXRfdmVsb2NpdHlfcmFkX3MYDiABKAISDwoHdmVsX21heBgWIAEoAhISCgpheGlzX3N0YXRlGBcgASgNItQBCgpEcml2ZVN0YXRlEg8KB3ByZXNlbnQYASABKAgSFAoMY21kX2xpbmVhcl94GAIgASgCEhUKDWNtZF9hbmd1bGFyX3oYAyABKAISFgoOb3BlcmF0b3Jfc3RhbGUYBCABKAgSGwoTaGFzX2FjdGl2ZV9vcGVyYXRvchgFIAEoCBIfChd5b3VfYXJlX2FjdGl2ZV9vcGVyYXRvchgGIAEoCBIOCgZvZG9tX3gYCiABKAISDgoGb2RvbV95GAsgASgCEhIKCm9kb21fdGhldGEYDCABKAIiUQoLQ2FtZXJhU3RhdGUSDwoHcHJlc2VudBgBIAEoCBIPCgdwYW5fZGVnGAIgASgCEhAKCHRpbHRfZGVnGAMgASgCEg4KBm1vdmluZxgEIAEoCCJBCghCdXNFbnRyeRIVCg1jYW5faW50ZXJmYWNlGAEgASgJEg0KBXN0YXRlGAIgASgJEg8KB2hlYWx0aHkYAyABKAgi6QQKClBvd2VyU3RhdHMSDwoHcHJlc2VudBgBIAEoCBIVCg1jYW5faW50ZXJmYWNlGAIgASgJEhAKCHBvd2VyX2lkGAMgASgNEhgKEGZpcm13YXJlX3ZlcnNpb24YBCABKAkSFwoPc3RhdHVzX3JlY2VpdmVkGAogASgIEhQKDHN0YXR1c19zdGFsZRgLIAEoCBIaChJsYXN0X3N0YXR1c19hZ2VfbXMYDCABKA0SGQoRYmF0dGVyeV92b2x0YWdlX3YYFCABKAISFwoPbW90b3Jfdm9sdGFnZV92GBUgASgCEhsKE2JvYXJkX3RlbXBlcmF0dXJlX2MYFiABKAISEgoKZmF1bHRfYml0cxgeIAEoDRIZChFmYXVsdF9kZXNjcmlwdGlvbhgfIAEoCRITCgtyYWlsXzEydl9vbhggIAEoCBIVCg1zb2Z0X3N0YXJ0X29uGCEgASgIEhUKDW1vdG9yX3JhaWxfb24YIiABKAgSEwoLcmFpbF8yNHZfb24YIyABKAgSFAoMY3VycmVudF9hbF9hGCggASgCEhQKDGN1cnJlbnRfYXJfYRgpIAEoAhIUCgxjdXJyZW50X2xsX2EYKiABKAISFAoMY3VycmVudF9scl9hGCsgASgCEh0KFXRvdGFsX21vdG9yX2N1cnJlbnRfYRgsIAEoAhIVCg1iYXR0ZXJ5X2NlbGxzGDIgASgNEhsKE3BhY2tfZnVsbF92b2x0YWdlX3YYMyABKAISHAoUcGFja19lbXB0eV92b2x0YWdlX3YYNCABKAISGwoTc3RhdGVfb2ZfY2hhcmdlX3BjdBg1IAEoAiKgBQoOVGVsZW1ldHJ5RnJhbWUSFAoMaG9zdF91bml4X21zGAEgASgEEiQKBG1vZGUYAiABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUSFQoNZXN0b3BfbGF0Y2hlZBgDIAEoCBIUCgxlc3RvcF9yZWFzb24YBCABKAkSLAoGbW90b3JzGAogAygLMhwuYmVib3AucnVudGltZS52MS5Nb3RvclN0YXRlEikKBWJ1c2VzGAsgAygLMhouYmVib3AucnVudGltZS52MS5CdXNFbnRyeRIrCgVwb3dlchgMIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuUG93ZXJTdGF0cxInCgNpbXUYDSABKAsyGi5iZWJvcC5ydW50aW1lLnYxLkltdVN0YXRzEjIKCXBvbGljeV9pbxgOIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUG9saWN5SW9TdGF0cxIsCgZ3aGVlbHMYDyADKAsyHC5iZWJvcC5ydW50aW1lLnYxLldoZWVsU3RhdGUSKwoFZHJpdmUYECABKAsyHC5iZWJvcC5ydW50aW1lLnYxLkRyaXZlU3RhdGUSMQoGY2FtZXJhGBEgASgLMh0uYmVib3AucnVudGltZS52MS5DYW1lcmFTdGF0ZUICGAESKwoDbmF2GBIgASgLMhouYmVib3AucnVudGltZS52MS5OYXZTdGF0ZUICGAESLQoGdmlzaW9uGBMgASgLMh0uYmVib3AucnVudGltZS52MS5WaXNpb25TdGF0ZRIrCgVtb2RlbBgUIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuTW9kZWxTdGF0ZRIrCgV2b2ljZRgVIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuVm9pY2VTdGF0ZSKaBQoIU25hcHNob3QSFAoMaG9zdF91bml4X21zGAEgASgEEiQKBG1vZGUYAiABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUSFQoNZXN0b3BfbGF0Y2hlZBgDIAEoCBIUCgxlc3RvcF9yZWFzb24YBCABKAkSLAoGbW90b3JzGAogAygLMhwuYmVib3AucnVudGltZS52MS5Nb3RvclN0YXRlEikKBWJ1c2VzGAsgAygLMhouYmVib3AucnVudGltZS52MS5CdXNFbnRyeRIrCgVwb3dlchgMIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuUG93ZXJTdGF0cxInCgNpbXUYDSABKAsyGi5iZWJvcC5ydW50aW1lLnYxLkltdVN0YXRzEjIKCXBvbGljeV9pbxgOIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUG9saWN5SW9TdGF0cxIsCgZ3aGVlbHMYDyADKAsyHC5iZWJvcC5ydW50aW1lLnYxLldoZWVsU3RhdGUSKwoFZHJpdmUYECABKAsyHC5iZWJvcC5ydW50aW1lLnYxLkRyaXZlU3RhdGUSMQoGY2FtZXJhGBEgASgLMh0uYmVib3AucnVudGltZS52MS5DYW1lcmFTdGF0ZUICGAESKwoDbmF2GBIgASgLMhouYmVib3AucnVudGltZS52MS5OYXZTdGF0ZUICGAESLQoGdmlzaW9uGBMgASgLMh0uYmVib3AucnVudGltZS52MS5WaXNpb25TdGF0ZRIrCgVtb2RlbBgUIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuTW9kZWxTdGF0ZRIrCgV2b2ljZRgVIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuVm9pY2VTdGF0ZSI8Cg9CdXNTdGF0dXNVcGRhdGUSKQoFYnVzZXMYASADKAsyGi5iZWJvcC5ydW50aW1lLnYxLkJ1c0VudHJ5IiUKElN1YnNjcmliZVRlbGVtZXRyeRIPCgdyYXRlX2h6GAEgASgNIhYKFFVuc3Vic2NyaWJlVGVsZW1ldHJ5Ig0KC0dldFNuYXBzaG90IjYKD1NldE1vdG9yRW5hYmxlZBISCgpqb2ludF9uYW1lGAEgASgJEg8KB2VuYWJsZWQYAiABKAgiJgoTU2V0QWxsTW90b3JzRW5hYmxlZBIPCgdlbmFibGVkGAEgASgIIjkKElNldFZlbG9jaXR5Q29tbWFuZBIQCghsaW5lYXJfeBgBIAEoAhIRCglhbmd1bGFyX3oYAiABKAIiNgoPU2V0V2hlZWxFbmFibGVkEhIKCndoZWVsX25hbWUYASABKAkSDwoHZW5hYmxlZBgCIAEoCCImChNTZXRBbGxXaGVlbHNFbmFibGVkEg8KB2VuYWJsZWQYASABKAgiJAoOQ2FsaWJyYXRlV2hlZWwSEgoKd2hlZWxfbmFtZRgBIAEoCSIyCg1TZXRDYW1lcmFQb3NlEg8KB3Bhbl9kZWcYASABKAISEAoIdGlsdF9kZWcYAiABKAIiDwoNUmVzZXRPZG9tZXRyeSIvCgdTZXRNb2RlEiQKBG1vZGUYASABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUiHwoNRW1lcmdlbmN5U3RvcBIOCgZyZWFzb24YASABKAkiDAoKUmVzZXRFU3RvcCIQCg5SZXN0YXJ0UnVudGltZSI6Cg5TZXRNb3RvclRhcmdldBISCgpqb2ludF9uYW1lGAEgASgJEhQKDHBvc2l0aW9uX3JhZBgCIAEoAiInChFTZXRNZWNoYW5pY2FsWmVybxISCgpqb2ludF9uYW1lGAEgASgJIhYKFFNldE1lY2hhbmljYWxaZXJvQWxsIiIKD1NldFBvbGljeURyeVJ1bhIPCgdlbmFibGVkGAEgASgIIiMKEFNldFZpc2lvbkVuYWJsZWQSDwoHZW5hYmxlZBgBIAEoCCIbCgpTZXRIZlRva2VuEg0KBXRva2VuGAEgASgJIg4KDENsZWFySGZUb2tlbiIhCg1Eb3dubG9hZE1vZGVsEhAKCG1vZGVsX2lkGAEgASgJIjQKD1NldE1vZGVsUHVycG9zZRIPCgdwdXJwb3NlGAEgASgJEhAKCG1vZGVsX2lkGAIgASgJIiIKA0FjaxIKCgJvaxgBIAEoCBIPCgdtZXNzYWdlGAIgASgJIhgKBUVycm9yEg8KB21lc3NhZ2UYASABKAkiMwoLTW9kZUNoYW5nZWQSJAoEbW9kZRgBIAEoDjIWLmJlYm9wLnJ1bnRpbWUudjEuTW9kZSIeCgxFU3RvcExhdGNoZWQSDgoGcmVhc29uGAEgASgJIs4BCghJbXVTdGF0cxIPCgdwcmVzZW50GAEgASgIEhAKCHJlY2VpdmVkGAogASgIEg0KBXN0YWxlGAsgASgIEhoKEmxhc3RfdXBkYXRlX2FnZV9tcxgMIAEoDRIUCgxxdWF0ZXJuaW9uX3gYFCABKAISFAoMcXVhdGVybmlvbl95GBUgASgCEhQKDHF1YXRlcm5pb25fehgWIAEoAhIUCgxxdWF0ZXJuaW9uX3cYFyABKAISHAoUaGVhZGluZ19hY2N1cmFjeV9yYWQYGCABKAIitQIKDVBvbGljeUlvU3RhdHMSDwoHcHJlc2VudBgBIAEoCBIOCgZhY3RpdmUYAiABKAgSEAoIaW11X2xpdmUYAyABKAgSDwoHZHJ5X3J1bhgFIAEoCBIWCg5jYXB0dXJlX2FjdGl2ZRgGIAEoCBIUCgxjYXB0dXJlX3BhdGgYByABKAkSFAoMY2FwdHVyZV9yb3dzGAggASgEEhcKD2NhcHR1cmVfZHJvcHBlZBgJIAEoBBITCgtvYnNlcnZhdGlvbhgKIAMoAhISCgpyYXdfYWN0aW9uGAsgAygCEhwKFHBvc2l0aW9uX3RhcmdldHNfcmFkGBQgAygCEgoKAmtwGBUgAygCEgoKAmtkGBYgAygCEhMKC2pvaW50X25hbWVzGB4gAygJSgQIBBAFUglneXJvX2xpdmUiHwoMU3Vic2NyaWJlTmF2Eg8KB3JhdGVfaHoYASABKA0iEAoOVW5zdWJzY3JpYmVOYXYisAEKCE5hdlN0YXRlEg8KB3ByZXNlbnQYASABKAgSEAoIcmVjZWl2ZWQYAiABKAgSDwoHbWFza19oehgDIAEoAhIQCghwcm92aWRlchgEIAEoCRILCgNzZXEYCiABKAQSDQoFdHNfdXMYCyABKAQSFAoMZnJhY19ibG9ja2VkGBQgASgCEhYKDmZyYWNfbmF2aWdhYmxlGBUgASgCEhQKDGZyYWNfY2F1dGlvbhgWIAEoAiK+AQoMTmF2TWFza0ZyYW1lEgsKA3NlcRgBIAEoBBINCgV0c191cxgCIAEoBBINCgV3aWR0aBgDIAEoDRIOCgZoZWlnaHQYBCABKA0SDAoEZ3JpZBgFIAEoDBIUCgxmcmFjX2Jsb2NrZWQYCiABKAISFgoOZnJhY19uYXZpZ2FibGUYCyABKAISFAoMZnJhY19jYXV0aW9uGAwgASgCEg8KB21hc2tfaHoYDSABKAISEAoIcHJvdmlkZXIYDiABKAkiHAoEVmVjMhIJCgF4GAEgASgCEgkKAXkYAiABKAIibwoRU2V0TmF2aWdhdGlvbkdvYWwSFQoLaGVhZGluZ19yYWQYASABKAJIABIsCgpwb2ludF9vZG9tGAIgASgLMhYuYmVib3AucnVudGltZS52MS5WZWMySAASDQoFY2xlYXIYAyABKAhCBgoEZ29hbCJyChNOYXZpZ2F0aW9uR29hbFN0YXRlEg4KBmFjdGl2ZRgBIAEoCBIVCgtoZWFkaW5nX3JhZBgCIAEoAkgAEiwKCnBvaW50X29kb20YAyABKAsyFi5iZWJvcC5ydW50aW1lLnYxLlZlYzJIAEIGCgRnb2FsIm0KC1Zpc2lvblN0YXRlEg8KB3ByZXNlbnQYASABKAgSDwoHcnVubmluZxgCIAEoCBINCgVzdGF0ZRgDIAEoCRIOCgZkZXRhaWwYBCABKAkSDwoHc2VydmljZRgFIAEoCRIMCgRtb2RlGAYgASgJIsUBCgpNb2RlbFN0YXRlEhEKCXRva2VuX3NldBgBIAEoCBIPCgdwcmVzZW50GAIgASgIEhcKD2Rpc2tfZnJlZV9ieXRlcxgDIAEoBBIOCgZkZXRhaWwYBCABKAkSMwoGbW9kZWxzGAUgAygLMiMuYmVib3AucnVudGltZS52MS5Nb2RlbENhdGFsb2dFbnRyeRI1CglzZWxlY3Rpb24YBiADKAsyIi5iZWJvcC5ydW50aW1lLnYxLlB1cnBvc2VTZWxlY3Rpb24iNQoQUHVycG9zZVNlbGVjdGlvbhIPCgdwdXJwb3NlGAEgASgJEhAKCG1vZGVsX2lkGAIgASgJIooCChFNb2RlbENhdGFsb2dFbnRyeRIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJEhMKC2Rlc2NyaXB0aW9uGAMgASgJEgwKBGtpbmQYBCABKAkSDAoEcmVwbxgFIAEoCRINCgVmaWxlcxgGIAMoCRIQCghyZXZpc2lvbhgHIAEoCRINCgVnYXRlZBgIIAEoCBITCgtieXRlc190b3RhbBgJIAEoBBIMCgRwYXRoGAogASgJEg8KB3B1cnBvc2UYCyABKAkSDQoFcmVhZHkYFCABKAgSDQoFc3RhdGUYFSABKAkSDgoGZGV0YWlsGBYgASgJEhgKEGJ5dGVzX2Rvd25sb2FkZWQYFyABKAQiIgoPU2V0Vm9pY2VFbmFibGVkEg8KB2VuYWJsZWQYASABKAgibQoKVm9pY2VTdGF0ZRIPCgdwcmVzZW50GAEgASgIEg8KB3J1bm5pbmcYAiABKAgSDQoFc3RhdGUYAyABKAkSDgoGZGV0YWlsGAQgASgJEg8KB3NlcnZpY2UYBSABKAkSDQoFbW9kZWwYBiABKAkqUgoETW9kZRIUChBNT0RFX1VOU1BFQ0lGSUVEEAASDQoJTU9ERV9JRExFEAESEAoMTU9ERV9ESUFMX0lOEAISEwoPTU9ERV9SVU5fUE9MSUNZEANiBnByb3RvMw");
+  fileDesc("ChNiZWJvcF9ydW50aW1lLnByb3RvEhBiZWJvcC5ydW50aW1lLnYxItANChRDbGllbnRSdW50aW1lTWVzc2FnZRISCgpyZXF1ZXN0X2lkGGQgASgNEkMKE3N1YnNjcmliZV90ZWxlbWV0cnkYASABKAsyJC5iZWJvcC5ydW50aW1lLnYxLlN1YnNjcmliZVRlbGVtZXRyeUgAEkcKFXVuc3Vic2NyaWJlX3RlbGVtZXRyeRgCIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuVW5zdWJzY3JpYmVUZWxlbWV0cnlIABI1CgxnZXRfc25hcHNob3QYAyABKAsyHS5iZWJvcC5ydW50aW1lLnYxLkdldFNuYXBzaG90SAASPgoRc2V0X21vdG9yX2VuYWJsZWQYBCABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldE1vdG9yRW5hYmxlZEgAEkcKFnNldF9hbGxfbW90b3JzX2VuYWJsZWQYBSABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbE1vdG9yc0VuYWJsZWRIABItCghzZXRfbW9kZRgGIAEoCzIZLmJlYm9wLnJ1bnRpbWUudjEuU2V0TW9kZUgAEjkKDmVtZXJnZW5jeV9zdG9wGAcgASgLMh8uYmVib3AucnVudGltZS52MS5FbWVyZ2VuY3lTdG9wSAASMwoLcmVzZXRfZXN0b3AYCCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlJlc2V0RVN0b3BIABI8ChBzZXRfbW90b3JfdGFyZ2V0GAkgASgLMiAuYmVib3AucnVudGltZS52MS5TZXRNb3RvclRhcmdldEgAEkIKE3NldF9tZWNoYW5pY2FsX3plcm8YCiABKAsyIy5iZWJvcC5ydW50aW1lLnYxLlNldE1lY2hhbmljYWxaZXJvSAASPwoSc2V0X3BvbGljeV9kcnlfcnVuGAsgASgLMiEuYmVib3AucnVudGltZS52MS5TZXRQb2xpY3lEcnlSdW5IABJJChdzZXRfbWVjaGFuaWNhbF96ZXJvX2FsbBgNIAEoCzImLmJlYm9wLnJ1bnRpbWUudjEuU2V0TWVjaGFuaWNhbFplcm9BbGxIABJEChRzZXRfdmVsb2NpdHlfY29tbWFuZBgOIAEoCzIkLmJlYm9wLnJ1bnRpbWUudjEuU2V0VmVsb2NpdHlDb21tYW5kSAASPgoRc2V0X3doZWVsX2VuYWJsZWQYDyABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldFdoZWVsRW5hYmxlZEgAEkcKFnNldF9hbGxfd2hlZWxzX2VuYWJsZWQYECABKAsyJS5iZWJvcC5ydW50aW1lLnYxLlNldEFsbFdoZWVsc0VuYWJsZWRIABI5Cg5yZXNldF9vZG9tZXRyeRgRIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUmVzZXRPZG9tZXRyeUgAEjsKD2NhbGlicmF0ZV93aGVlbBgSIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuQ2FsaWJyYXRlV2hlZWxIABJAChJzZXRfdmlzaW9uX2VuYWJsZWQYFyABKAsyIi5iZWJvcC5ydW50aW1lLnYxLlNldFZpc2lvbkVuYWJsZWRIABI0CgxzZXRfaGZfdG9rZW4YGCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlNldEhmVG9rZW5IABI4Cg5jbGVhcl9oZl90b2tlbhgZIAEoCzIeLmJlYm9wLnJ1bnRpbWUudjEuQ2xlYXJIZlRva2VuSAASOQoOZG93bmxvYWRfbW9kZWwYGiABKAsyHy5iZWJvcC5ydW50aW1lLnYxLkRvd25sb2FkTW9kZWxIABI+ChFzZXRfbW9kZWxfcHVycG9zZRgbIAEoCzIhLmJlYm9wLnJ1bnRpbWUudjEuU2V0TW9kZWxQdXJwb3NlSAASPgoRc2V0X3ZvaWNlX2VuYWJsZWQYHCABKAsyIS5iZWJvcC5ydW50aW1lLnYxLlNldFZvaWNlRW5hYmxlZEgAEjsKD3Jlc3RhcnRfcnVudGltZRgdIAEoCzIgLmJlYm9wLnJ1bnRpbWUudjEuUmVzdGFydFJ1bnRpbWVIABI1CgxjbGllbnRfaGVsbG8YHiABKAsyHS5iZWJvcC5ydW50aW1lLnYxLkNsaWVudEhlbGxvSABCCQoHcGF5bG9hZEoECAwQDUoECBMQFEoECBQQFUoECBUQFkoECBYQF1ISc2V0X3BvbGljeV9jYXB0dXJlUg9zZXRfY2FtZXJhX3Bvc2VSDXN1YnNjcmliZV9uYXZSD3Vuc3Vic2NyaWJlX25hdlITc2V0X25hdmlnYXRpb25fZ29hbCIbCgtDbGllbnRIZWxsbxIMCgRuYW1lGAEgASgJIrUDChRTZXJ2ZXJSdW50aW1lTWVzc2FnZRISCgpyZXF1ZXN0X2lkGGQgASgNEiQKA2FjaxgBIAEoCzIVLmJlYm9wLnJ1bnRpbWUudjEuQWNrSAASKAoFZXJyb3IYAiABKAsyFy5iZWJvcC5ydW50aW1lLnYxLkVycm9ySAASLgoIc25hcHNob3QYAyABKAsyGi5iZWJvcC5ydW50aW1lLnYxLlNuYXBzaG90SAASNQoJdGVsZW1ldHJ5GAQgASgLMiAuYmVib3AucnVudGltZS52MS5UZWxlbWV0cnlGcmFtZUgAEjUKDG1vZGVfY2hhbmdlZBgFIAEoCzIdLmJlYm9wLnJ1bnRpbWUudjEuTW9kZUNoYW5nZWRIABI3Cg1lc3RvcF9sYXRjaGVkGAYgASgLMh4uYmVib3AucnVudGltZS52MS5FU3RvcExhdGNoZWRIABI3CgpidXNfc3RhdHVzGAcgASgLMiEuYmVib3AucnVudGltZS52MS5CdXNTdGF0dXNVcGRhdGVIAEIJCgdwYXlsb2FkSgQICBAJSgQICRAKUghuYXZfbWFza1IIbmF2X2dvYWwigQMKCk1vdG9yU3RhdGUSEgoKam9pbnRfbmFtZRgBIAEoCRIVCg1jYW5faW50ZXJmYWNlGAIgASgJEhAKCG1vdG9yX2lkGAMgASgNEg0KBW1vZGVsGAQgASgJEg0KBWFybWVkGAUgASgIEhYKDmZlZWRiYWNrX3N0YWxlGAYgASgIEhIKCmZhdWx0X2JpdHMYByABKA0SFAoMcG9zaXRpb25fcmFkGAogASgCEhYKDnZlbG9jaXR5X3JhZF9zGAsgASgCEhEKCXRvcnF1ZV9ubRgMIAEoAhIVCg10ZW1wZXJhdHVyZV9jGA0gASgCEhkKEXBvc2l0aW9uX3JlY2VpdmVkGA8gASgIEhsKE3RhcmdldF9wb3NpdGlvbl9yYWQYDiABKAISEwoLcG9zX21pbl9yYWQYFCABKAISEwoLcG9zX21heF9yYWQYFSABKAISDwoHdmVsX21heBgWIAEoAhIPCgd0YXVfbWF4GBcgASgCEhAKCHRlbXBfbWF4GBggASgCIooCCgpXaGVlbFN0YXRlEgwKBG5hbWUYASABKAkSFQoNY2FuX2ludGVyZmFjZRgCIAEoCRIPCgdub2RlX2lkGAMgASgNEg0KBWFybWVkGAUgASgIEhYKDmZlZWRiYWNrX3N0YWxlGAYgASgIEhkKEXBvc2l0aW9uX3JlY2VpdmVkGA8gASgIEhIKCmVycm9yX2NvZGUYByABKA0SFAoMcG9zaXRpb25fcmFkGAogASgCEhYKDnZlbG9jaXR5X3JhZF9zGAsgASgCEh0KFXRhcmdldF92ZWxvY2l0eV9yYWRfcxgOIAEoAhIPCgd2ZWxfbWF4GBYgASgCEhIKCmF4aXNfc3RhdGUYFyABKA0i8gEKCkRyaXZlU3RhdGUSDwoHcHJlc2VudBgBIAEoCBIUCgxjbWRfbGluZWFyX3gYAiABKAISFQoNY21kX2FuZ3VsYXJfehgDIAEoAhIWCg5vcGVyYXRvcl9zdGFsZRgEIAEoCBIbChNoYXNfYWN0aXZlX29wZXJhdG9yGAUgASgIEh8KF3lvdV9hcmVfYWN0aXZlX29wZXJhdG9yGAYgASgIEhwKFGFjdGl2ZV9vcGVyYXRvcl9uYW1lGAcgASgJEg4KBm9kb21feBgKIAEoAhIOCgZvZG9tX3kYCyABKAISEgoKb2RvbV90aGV0YRgMIAEoAiJBCghCdXNFbnRyeRIVCg1jYW5faW50ZXJmYWNlGAEgASgJEg0KBXN0YXRlGAIgASgJEg8KB2hlYWx0aHkYAyABKAgi6QQKClBvd2VyU3RhdHMSDwoHcHJlc2VudBgBIAEoCBIVCg1jYW5faW50ZXJmYWNlGAIgASgJEhAKCHBvd2VyX2lkGAMgASgNEhgKEGZpcm13YXJlX3ZlcnNpb24YBCABKAkSFwoPc3RhdHVzX3JlY2VpdmVkGAogASgIEhQKDHN0YXR1c19zdGFsZRgLIAEoCBIaChJsYXN0X3N0YXR1c19hZ2VfbXMYDCABKA0SGQoRYmF0dGVyeV92b2x0YWdlX3YYFCABKAISFwoPbW90b3Jfdm9sdGFnZV92GBUgASgCEhsKE2JvYXJkX3RlbXBlcmF0dXJlX2MYFiABKAISEgoKZmF1bHRfYml0cxgeIAEoDRIZChFmYXVsdF9kZXNjcmlwdGlvbhgfIAEoCRITCgtyYWlsXzEydl9vbhggIAEoCBIVCg1zb2Z0X3N0YXJ0X29uGCEgASgIEhUKDW1vdG9yX3JhaWxfb24YIiABKAgSEwoLcmFpbF8yNHZfb24YIyABKAgSFAoMY3VycmVudF9hbF9hGCggASgCEhQKDGN1cnJlbnRfYXJfYRgpIAEoAhIUCgxjdXJyZW50X2xsX2EYKiABKAISFAoMY3VycmVudF9scl9hGCsgASgCEh0KFXRvdGFsX21vdG9yX2N1cnJlbnRfYRgsIAEoAhIVCg1iYXR0ZXJ5X2NlbGxzGDIgASgNEhsKE3BhY2tfZnVsbF92b2x0YWdlX3YYMyABKAISHAoUcGFja19lbXB0eV92b2x0YWdlX3YYNCABKAISGwoTc3RhdGVfb2ZfY2hhcmdlX3BjdBg1IAEoAiLZBAoOVGVsZW1ldHJ5RnJhbWUSFAoMaG9zdF91bml4X21zGAEgASgEEiQKBG1vZGUYAiABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUSFQoNZXN0b3BfbGF0Y2hlZBgDIAEoCBIUCgxlc3RvcF9yZWFzb24YBCABKAkSLAoGbW90b3JzGAogAygLMhwuYmVib3AucnVudGltZS52MS5Nb3RvclN0YXRlEikKBWJ1c2VzGAsgAygLMhouYmVib3AucnVudGltZS52MS5CdXNFbnRyeRIrCgVwb3dlchgMIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuUG93ZXJTdGF0cxInCgNpbXUYDSABKAsyGi5iZWJvcC5ydW50aW1lLnYxLkltdVN0YXRzEjIKCXBvbGljeV9pbxgOIAEoCzIfLmJlYm9wLnJ1bnRpbWUudjEuUG9saWN5SW9TdGF0cxIsCgZ3aGVlbHMYDyADKAsyHC5iZWJvcC5ydW50aW1lLnYxLldoZWVsU3RhdGUSKwoFZHJpdmUYECABKAsyHC5iZWJvcC5ydW50aW1lLnYxLkRyaXZlU3RhdGUSLQoGdmlzaW9uGBMgASgLMh0uYmVib3AucnVudGltZS52MS5WaXNpb25TdGF0ZRIrCgVtb2RlbBgUIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuTW9kZWxTdGF0ZRIrCgV2b2ljZRgVIAEoCzIcLmJlYm9wLnJ1bnRpbWUudjEuVm9pY2VTdGF0ZUoECBEQEkoECBIQE1IGY2FtZXJhUgNuYXYi0wQKCFNuYXBzaG90EhQKDGhvc3RfdW5peF9tcxgBIAEoBBIkCgRtb2RlGAIgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlEhUKDWVzdG9wX2xhdGNoZWQYAyABKAgSFAoMZXN0b3BfcmVhc29uGAQgASgJEiwKBm1vdG9ycxgKIAMoCzIcLmJlYm9wLnJ1bnRpbWUudjEuTW90b3JTdGF0ZRIpCgVidXNlcxgLIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkSKwoFcG93ZXIYDCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlBvd2VyU3RhdHMSJwoDaW11GA0gASgLMhouYmVib3AucnVudGltZS52MS5JbXVTdGF0cxIyCglwb2xpY3lfaW8YDiABKAsyHy5iZWJvcC5ydW50aW1lLnYxLlBvbGljeUlvU3RhdHMSLAoGd2hlZWxzGA8gAygLMhwuYmVib3AucnVudGltZS52MS5XaGVlbFN0YXRlEisKBWRyaXZlGBAgASgLMhwuYmVib3AucnVudGltZS52MS5Ecml2ZVN0YXRlEi0KBnZpc2lvbhgTIAEoCzIdLmJlYm9wLnJ1bnRpbWUudjEuVmlzaW9uU3RhdGUSKwoFbW9kZWwYFCABKAsyHC5iZWJvcC5ydW50aW1lLnYxLk1vZGVsU3RhdGUSKwoFdm9pY2UYFSABKAsyHC5iZWJvcC5ydW50aW1lLnYxLlZvaWNlU3RhdGVKBAgREBJKBAgSEBNSBmNhbWVyYVIDbmF2IjwKD0J1c1N0YXR1c1VwZGF0ZRIpCgVidXNlcxgBIAMoCzIaLmJlYm9wLnJ1bnRpbWUudjEuQnVzRW50cnkiJQoSU3Vic2NyaWJlVGVsZW1ldHJ5Eg8KB3JhdGVfaHoYASABKA0iFgoUVW5zdWJzY3JpYmVUZWxlbWV0cnkiDQoLR2V0U25hcHNob3QiNgoPU2V0TW90b3JFbmFibGVkEhIKCmpvaW50X25hbWUYASABKAkSDwoHZW5hYmxlZBgCIAEoCCImChNTZXRBbGxNb3RvcnNFbmFibGVkEg8KB2VuYWJsZWQYASABKAgiOQoSU2V0VmVsb2NpdHlDb21tYW5kEhAKCGxpbmVhcl94GAEgASgCEhEKCWFuZ3VsYXJfehgCIAEoAiI2Cg9TZXRXaGVlbEVuYWJsZWQSEgoKd2hlZWxfbmFtZRgBIAEoCRIPCgdlbmFibGVkGAIgASgIIiYKE1NldEFsbFdoZWVsc0VuYWJsZWQSDwoHZW5hYmxlZBgBIAEoCCIkCg5DYWxpYnJhdGVXaGVlbBISCgp3aGVlbF9uYW1lGAEgASgJIg8KDVJlc2V0T2RvbWV0cnkiLwoHU2V0TW9kZRIkCgRtb2RlGAEgASgOMhYuYmVib3AucnVudGltZS52MS5Nb2RlIh8KDUVtZXJnZW5jeVN0b3ASDgoGcmVhc29uGAEgASgJIgwKClJlc2V0RVN0b3AiEAoOUmVzdGFydFJ1bnRpbWUiOgoOU2V0TW90b3JUYXJnZXQSEgoKam9pbnRfbmFtZRgBIAEoCRIUCgxwb3NpdGlvbl9yYWQYAiABKAIiJwoRU2V0TWVjaGFuaWNhbFplcm8SEgoKam9pbnRfbmFtZRgBIAEoCSIWChRTZXRNZWNoYW5pY2FsWmVyb0FsbCIiCg9TZXRQb2xpY3lEcnlSdW4SDwoHZW5hYmxlZBgBIAEoCCIjChBTZXRWaXNpb25FbmFibGVkEg8KB2VuYWJsZWQYASABKAgiGwoKU2V0SGZUb2tlbhINCgV0b2tlbhgBIAEoCSIOCgxDbGVhckhmVG9rZW4iIQoNRG93bmxvYWRNb2RlbBIQCghtb2RlbF9pZBgBIAEoCSI0Cg9TZXRNb2RlbFB1cnBvc2USDwoHcHVycG9zZRgBIAEoCRIQCghtb2RlbF9pZBgCIAEoCSIiCgNBY2sSCgoCb2sYASABKAgSDwoHbWVzc2FnZRgCIAEoCSIYCgVFcnJvchIPCgdtZXNzYWdlGAEgASgJIjMKC01vZGVDaGFuZ2VkEiQKBG1vZGUYASABKA4yFi5iZWJvcC5ydW50aW1lLnYxLk1vZGUiHgoMRVN0b3BMYXRjaGVkEg4KBnJlYXNvbhgBIAEoCSLOAQoISW11U3RhdHMSDwoHcHJlc2VudBgBIAEoCBIQCghyZWNlaXZlZBgKIAEoCBINCgVzdGFsZRgLIAEoCBIaChJsYXN0X3VwZGF0ZV9hZ2VfbXMYDCABKA0SFAoMcXVhdGVybmlvbl94GBQgASgCEhQKDHF1YXRlcm5pb25feRgVIAEoAhIUCgxxdWF0ZXJuaW9uX3oYFiABKAISFAoMcXVhdGVybmlvbl93GBcgASgCEhwKFGhlYWRpbmdfYWNjdXJhY3lfcmFkGBggASgCIrUCCg1Qb2xpY3lJb1N0YXRzEg8KB3ByZXNlbnQYASABKAgSDgoGYWN0aXZlGAIgASgIEhAKCGltdV9saXZlGAMgASgIEg8KB2RyeV9ydW4YBSABKAgSFgoOY2FwdHVyZV9hY3RpdmUYBiABKAgSFAoMY2FwdHVyZV9wYXRoGAcgASgJEhQKDGNhcHR1cmVfcm93cxgIIAEoBBIXCg9jYXB0dXJlX2Ryb3BwZWQYCSABKAQSEwoLb2JzZXJ2YXRpb24YCiADKAISEgoKcmF3X2FjdGlvbhgLIAMoAhIcChRwb3NpdGlvbl90YXJnZXRzX3JhZBgUIAMoAhIKCgJrcBgVIAMoAhIKCgJrZBgWIAMoAhITCgtqb2ludF9uYW1lcxgeIAMoCUoECAQQBVIJZ3lyb19saXZlIm0KC1Zpc2lvblN0YXRlEg8KB3ByZXNlbnQYASABKAgSDwoHcnVubmluZxgCIAEoCBINCgVzdGF0ZRgDIAEoCRIOCgZkZXRhaWwYBCABKAkSDwoHc2VydmljZRgFIAEoCRIMCgRtb2RlGAYgASgJIsUBCgpNb2RlbFN0YXRlEhEKCXRva2VuX3NldBgBIAEoCBIPCgdwcmVzZW50GAIgASgIEhcKD2Rpc2tfZnJlZV9ieXRlcxgDIAEoBBIOCgZkZXRhaWwYBCABKAkSMwoGbW9kZWxzGAUgAygLMiMuYmVib3AucnVudGltZS52MS5Nb2RlbENhdGFsb2dFbnRyeRI1CglzZWxlY3Rpb24YBiADKAsyIi5iZWJvcC5ydW50aW1lLnYxLlB1cnBvc2VTZWxlY3Rpb24iNQoQUHVycG9zZVNlbGVjdGlvbhIPCgdwdXJwb3NlGAEgASgJEhAKCG1vZGVsX2lkGAIgASgJIooCChFNb2RlbENhdGFsb2dFbnRyeRIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJEhMKC2Rlc2NyaXB0aW9uGAMgASgJEgwKBGtpbmQYBCABKAkSDAoEcmVwbxgFIAEoCRINCgVmaWxlcxgGIAMoCRIQCghyZXZpc2lvbhgHIAEoCRINCgVnYXRlZBgIIAEoCBITCgtieXRlc190b3RhbBgJIAEoBBIMCgRwYXRoGAogASgJEg8KB3B1cnBvc2UYCyABKAkSDQoFcmVhZHkYFCABKAgSDQoFc3RhdGUYFSABKAkSDgoGZGV0YWlsGBYgASgJEhgKEGJ5dGVzX2Rvd25sb2FkZWQYFyABKAQiIgoPU2V0Vm9pY2VFbmFibGVkEg8KB2VuYWJsZWQYASABKAgibQoKVm9pY2VTdGF0ZRIPCgdwcmVzZW50GAEgASgIEg8KB3J1bm5pbmcYAiABKAgSDQoFc3RhdGUYAyABKAkSDgoGZGV0YWlsGAQgASgJEg8KB3NlcnZpY2UYBSABKAkSDQoFbW9kZWwYBiABKAkqUgoETW9kZRIUChBNT0RFX1VOU1BFQ0lGSUVEEAASDQoJTU9ERV9JRExFEAESEAoMTU9ERV9ESUFMX0lOEAISEwoPTU9ERV9SVU5fUE9MSUNZEANiBnByb3RvMw");
 
 /**
  * Client (operator app) -> server (bebop-linux) on the robot.
@@ -161,6 +161,10 @@ export type ClientRuntimeMessage = Message<"bebop.runtime.v1.ClientRuntimeMessag
      *
      * Drive a twist (body-frame forward + yaw rate) into the wheel axes;
      * the firmware clamps, slew-limits, and converts to per-wheel velocity.
+     * Fire-and-forget: an accepted twist gets NO reply (it would only
+     * compete with telemetry for the downlink); a rejected one (seat held
+     * by another client, no drive configured, ...) gets an `Error` with
+     * the request id.
      *
      * @generated from field: bebop.runtime.v1.SetVelocityCommand set_velocity_command = 14;
      */
@@ -202,45 +206,6 @@ export type ClientRuntimeMessage = Message<"bebop.runtime.v1.ClientRuntimeMessag
      */
     value: CalibrateWheel;
     case: "calibrateWheel";
-  } | {
-    /**
-     * Deprecated (plan §9): the OBSBOT camera gimbal is removed. The
-     * firmware acks this as a no-op; the field is kept for wire
-     * compatibility and reserved against reuse in a future revision.
-     *
-     * @generated from field: bebop.runtime.v1.SetCameraPose set_camera_pose = 19 [deprecated = true];
-     * @deprecated
-     */
-    value: SetCameraPose;
-    case: "setCameraPose";
-  } | {
-    /**
-     * Deprecated (plan §9): the legacy navseg mask push is removed —
-     * no firmware handler, nothing is ever pushed. Kept for wire
-     * compatibility.
-     *
-     * @generated from field: bebop.runtime.v1.SubscribeNav subscribe_nav = 20 [deprecated = true];
-     * @deprecated
-     */
-    value: SubscribeNav;
-    case: "subscribeNav";
-  } | {
-    /**
-     * @generated from field: bebop.runtime.v1.UnsubscribeNav unsubscribe_nav = 21 [deprecated = true];
-     * @deprecated
-     */
-    value: UnsubscribeNav;
-    case: "unsubscribeNav";
-  } | {
-    /**
-     * Operator navigation goal for the navd goal-drive pipeline (plan §8).
-     * Handled by storing + broadcasting; the navd process consumes it
-     * from the broadcast via its own WS client.
-     *
-     * @generated from field: bebop.runtime.v1.SetNavigationGoal set_navigation_goal = 22;
-     */
-    value: SetNavigationGoal;
-    case: "setNavigationGoal";
   } | {
     /**
      * Start/stop the bebop-vision Python service (`bebop-vision.service`)
@@ -323,6 +288,18 @@ export type ClientRuntimeMessage = Message<"bebop.runtime.v1.ClientRuntimeMessag
      */
     value: RestartRuntime;
     case: "restartRuntime";
+  } | {
+    /**
+     * Announce this connection's display name ("Pixel 8", "voice", ...).
+     * Optional: send once after connecting (again to rename). The name is
+     * what other clients see as `DriveState.active_operator_name` while
+     * this connection holds the drive seat. Acked; trimmed and capped at
+     * 32 characters by the firmware; empty clears it.
+     *
+     * @generated from field: bebop.runtime.v1.ClientHello client_hello = 30;
+     */
+    value: ClientHello;
+    case: "clientHello";
   } | { case: undefined; value?: undefined };
 };
 
@@ -332,6 +309,25 @@ export type ClientRuntimeMessage = Message<"bebop.runtime.v1.ClientRuntimeMessag
  */
 export const ClientRuntimeMessageSchema: GenMessage<ClientRuntimeMessage> = /*@__PURE__*/
   messageDesc(file_bebop_runtime, 0);
+
+/**
+ * Connection identity. See `ClientRuntimeMessage.client_hello`.
+ *
+ * @generated from message bebop.runtime.v1.ClientHello
+ */
+export type ClientHello = Message<"bebop.runtime.v1.ClientHello"> & {
+  /**
+   * @generated from field: string name = 1;
+   */
+  name: string;
+};
+
+/**
+ * Describes the message bebop.runtime.v1.ClientHello.
+ * Use `create(ClientHelloSchema)` to create a new message.
+ */
+export const ClientHelloSchema: GenMessage<ClientHello> = /*@__PURE__*/
+  messageDesc(file_bebop_runtime, 1);
 
 /**
  * Server -> client. Streamed; not all messages are responses to a request.
@@ -394,26 +390,6 @@ export type ServerRuntimeMessage = Message<"bebop.runtime.v1.ServerRuntimeMessag
      */
     value: BusStatusUpdate;
     case: "busStatus";
-  } | {
-    /**
-     * Deprecated (plan §9): the legacy navseg runner that produced these
-     * masks is removed — the firmware never pushes this. Kept for wire
-     * compatibility.
-     *
-     * @generated from field: bebop.runtime.v1.NavMaskFrame nav_mask = 8 [deprecated = true];
-     * @deprecated
-     */
-    value: NavMaskFrame;
-    case: "navMask";
-  } | {
-    /**
-     * Active navigation goal (navd). Pushed on change to every client
-     * and once to each client right after connect.
-     *
-     * @generated from field: bebop.runtime.v1.NavigationGoalState nav_goal = 9;
-     */
-    value: NavigationGoalState;
-    case: "navGoal";
   } | { case: undefined; value?: undefined };
 };
 
@@ -422,7 +398,7 @@ export type ServerRuntimeMessage = Message<"bebop.runtime.v1.ServerRuntimeMessag
  * Use `create(ServerRuntimeMessageSchema)` to create a new message.
  */
 export const ServerRuntimeMessageSchema: GenMessage<ServerRuntimeMessage> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 1);
+  messageDesc(file_bebop_runtime, 2);
 
 /**
  * @generated from message bebop.runtime.v1.MotorState
@@ -551,7 +527,7 @@ export type MotorState = Message<"bebop.runtime.v1.MotorState"> & {
  * Use `create(MotorStateSchema)` to create a new message.
  */
 export const MotorStateSchema: GenMessage<MotorState> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 2);
+  messageDesc(file_bebop_runtime, 3);
 
 /**
  * One entry per configured wheel. Positions/velocities are already in robot
@@ -648,7 +624,7 @@ export type WheelState = Message<"bebop.runtime.v1.WheelState"> & {
  * Use `create(WheelStateSchema)` to create a new message.
  */
 export const WheelStateSchema: GenMessage<WheelState> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 3);
+  messageDesc(file_bebop_runtime, 4);
 
 /**
  * Differential-drive summary: the operator twist actually in effect plus the
@@ -692,8 +668,11 @@ export type DriveState = Message<"bebop.runtime.v1.DriveState"> & {
    * its commands keep arriving, and loses it on disconnect, operator
    * staleness, E-STOP, or after the server's `operator_grace_ms`
    * passes without input from that client (then anyone's next drive
-   * command takes over). Zero-twist stops are always accepted from any
-   * client regardless of the assignment.
+   * command takes over). A zero-twist stop from the seat holder, or from
+   * anyone while no fresh seat exists, is applied; a stop from any other
+   * client while someone holds the seat is ignored (a viewer releasing
+   * its joystick must not halt the driver). `EmergencyStop` is never
+   * arbitrated: anyone can latch it.
    *
    * `has_active_operator` reports that a *fresh* assignment exists;
    * `you_are_active_operator` is computed per connection so each client
@@ -708,6 +687,15 @@ export type DriveState = Message<"bebop.runtime.v1.DriveState"> & {
    * @generated from field: bool you_are_active_operator = 6;
    */
   youAreActiveOperator: boolean;
+
+  /**
+   * Display name the seat holder announced via `ClientHello` (empty when
+   * nobody holds a fresh seat, or the holder never named itself — show
+   * "another operator" then). Lets viewers see who is driving.
+   *
+   * @generated from field: string active_operator_name = 7;
+   */
+  activeOperatorName: string;
 
   /**
    * Wheel-encoder odometry pose (m, m, rad). Reset via ResetOdometry.
@@ -732,50 +720,6 @@ export type DriveState = Message<"bebop.runtime.v1.DriveState"> & {
  * Use `create(DriveStateSchema)` to create a new message.
  */
 export const DriveStateSchema: GenMessage<DriveState> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 4);
-
-/**
- * Camera gimbal state (OBSBOT Tiny 2, standard UVC pan/tilt controls).
- * `present = false` when the runtime has no `video:` config, or when the
- * camera hasn't been heard from since boot. Pose is the *actual* pose
- * read back from the camera (never the assumed target — the gimbal
- * occasionally applies its own horizon compensation).
- *
- * @generated from message bebop.runtime.v1.CameraState
- */
-export type CameraState = Message<"bebop.runtime.v1.CameraState"> & {
-  /**
-   * @generated from field: bool present = 1;
-   */
-  present: boolean;
-
-  /**
-   * Actual gimbal pose in degrees (pan + = right, tilt + = up,
-   * 0/0 = power-on center). OBSBOT Tiny 2 range: pan ±130°, tilt ±90°.
-   *
-   * @generated from field: float pan_deg = 2;
-   */
-  panDeg: number;
-
-  /**
-   * @generated from field: float tilt_deg = 3;
-   */
-  tiltDeg: number;
-
-  /**
-   * True while the actual pose differs from the last commanded target
-   * by more than ~1 degree on either axis (gimbal still slewing).
-   *
-   * @generated from field: bool moving = 4;
-   */
-  moving: boolean;
-};
-
-/**
- * Describes the message bebop.runtime.v1.CameraState.
- * Use `create(CameraStateSchema)` to create a new message.
- */
-export const CameraStateSchema: GenMessage<CameraState> = /*@__PURE__*/
   messageDesc(file_bebop_runtime, 5);
 
 /**
@@ -1077,25 +1021,6 @@ export type TelemetryFrame = Message<"bebop.runtime.v1.TelemetryFrame"> & {
   drive?: DriveState | undefined;
 
   /**
-   * Deprecated (plan §9): the OBSBOT camera is removed — the firmware
-   * no longer populates this. Kept for wire compatibility with older
-   * clients (they render `present=false`).
-   *
-   * @generated from field: bebop.runtime.v1.CameraState camera = 17 [deprecated = true];
-   * @deprecated
-   */
-  camera?: CameraState | undefined;
-
-  /**
-   * Deprecated (plan §9): the legacy navseg runner is removed — the
-   * firmware no longer populates this. Kept for wire compatibility.
-   *
-   * @generated from field: bebop.runtime.v1.NavState nav = 18 [deprecated = true];
-   * @deprecated
-   */
-  nav?: NavState | undefined;
-
-  /**
    * State of the bebop-vision service (`bebop-vision.service`). Present on
    * both the humanoid and wheeled builds — it's a process-level service,
    * not a motor feature.
@@ -1189,22 +1114,6 @@ export type Snapshot = Message<"bebop.runtime.v1.Snapshot"> & {
    * @generated from field: bebop.runtime.v1.DriveState drive = 16;
    */
   drive?: DriveState | undefined;
-
-  /**
-   * Deprecated (plan §9): see TelemetryFrame.camera.
-   *
-   * @generated from field: bebop.runtime.v1.CameraState camera = 17 [deprecated = true];
-   * @deprecated
-   */
-  camera?: CameraState | undefined;
-
-  /**
-   * Deprecated (plan §9): see TelemetryFrame.nav.
-   *
-   * @generated from field: bebop.runtime.v1.NavState nav = 18 [deprecated = true];
-   * @deprecated
-   */
-  nav?: NavState | undefined;
 
   /**
    * @generated from field: bebop.runtime.v1.VisionState vision = 19;
@@ -1421,35 +1330,6 @@ export const CalibrateWheelSchema: GenMessage<CalibrateWheel> = /*@__PURE__*/
   messageDesc(file_bebop_runtime, 19);
 
 /**
- * Command the camera gimbal to an absolute pan/tilt pose in degrees
- * (pan + = right, tilt + = up; 0/0 = power-on center). The firmware
- * clamps to the camera's UVC-reported limits (OBSBOT Tiny 2: pan ±130°,
- * tilt ±90°, 1° step — see the recon notes in `video.rs`) and reads
- * back the settled pose in telemetry / snapshot. Motion takes ~0.5-0.7 s
- * for a 30° move at default gimbal speed.
- *
- * @generated from message bebop.runtime.v1.SetCameraPose
- */
-export type SetCameraPose = Message<"bebop.runtime.v1.SetCameraPose"> & {
-  /**
-   * @generated from field: float pan_deg = 1;
-   */
-  panDeg: number;
-
-  /**
-   * @generated from field: float tilt_deg = 2;
-   */
-  tiltDeg: number;
-};
-
-/**
- * Describes the message bebop.runtime.v1.SetCameraPose.
- * Use `create(SetCameraPoseSchema)` to create a new message.
- */
-export const SetCameraPoseSchema: GenMessage<SetCameraPose> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 20);
-
-/**
  * @generated from message bebop.runtime.v1.ResetOdometry
  */
 export type ResetOdometry = Message<"bebop.runtime.v1.ResetOdometry"> & {
@@ -1460,7 +1340,7 @@ export type ResetOdometry = Message<"bebop.runtime.v1.ResetOdometry"> & {
  * Use `create(ResetOdometrySchema)` to create a new message.
  */
 export const ResetOdometrySchema: GenMessage<ResetOdometry> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 21);
+  messageDesc(file_bebop_runtime, 20);
 
 /**
  * @generated from message bebop.runtime.v1.SetMode
@@ -1477,7 +1357,7 @@ export type SetMode = Message<"bebop.runtime.v1.SetMode"> & {
  * Use `create(SetModeSchema)` to create a new message.
  */
 export const SetModeSchema: GenMessage<SetMode> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 22);
+  messageDesc(file_bebop_runtime, 21);
 
 /**
  * Latches the supervisor into E-STOP and disables every motor. Persists
@@ -1497,7 +1377,7 @@ export type EmergencyStop = Message<"bebop.runtime.v1.EmergencyStop"> & {
  * Use `create(EmergencyStopSchema)` to create a new message.
  */
 export const EmergencyStopSchema: GenMessage<EmergencyStop> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 23);
+  messageDesc(file_bebop_runtime, 22);
 
 /**
  * @generated from message bebop.runtime.v1.ResetEStop
@@ -1510,7 +1390,7 @@ export type ResetEStop = Message<"bebop.runtime.v1.ResetEStop"> & {
  * Use `create(ResetEStopSchema)` to create a new message.
  */
 export const ResetEStopSchema: GenMessage<ResetEStop> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 24);
+  messageDesc(file_bebop_runtime, 23);
 
 /**
  * Restart `bebop-linux.service` (see the ClientRuntimeMessage field of the
@@ -1526,7 +1406,7 @@ export type RestartRuntime = Message<"bebop.runtime.v1.RestartRuntime"> & {
  * Use `create(RestartRuntimeSchema)` to create a new message.
  */
 export const RestartRuntimeSchema: GenMessage<RestartRuntime> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 25);
+  messageDesc(file_bebop_runtime, 24);
 
 /**
  * Set the hold-target for a single armed motor (DialIn mode only). The
@@ -1556,7 +1436,7 @@ export type SetMotorTarget = Message<"bebop.runtime.v1.SetMotorTarget"> & {
  * Use `create(SetMotorTargetSchema)` to create a new message.
  */
 export const SetMotorTargetSchema: GenMessage<SetMotorTarget> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 26);
+  messageDesc(file_bebop_runtime, 25);
 
 /**
  * Re-zero a single motor's mechanical origin. The supervisor sends the
@@ -1590,7 +1470,7 @@ export type SetMechanicalZero = Message<"bebop.runtime.v1.SetMechanicalZero"> & 
  * Use `create(SetMechanicalZeroSchema)` to create a new message.
  */
 export const SetMechanicalZeroSchema: GenMessage<SetMechanicalZero> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 27);
+  messageDesc(file_bebop_runtime, 26);
 
 /**
  * Re-zero every actuator at once. See `ClientRuntimeMessage.set_mechanical_zero_all`
@@ -1611,7 +1491,7 @@ export type SetMechanicalZeroAll = Message<"bebop.runtime.v1.SetMechanicalZeroAl
  * Use `create(SetMechanicalZeroAllSchema)` to create a new message.
  */
 export const SetMechanicalZeroAllSchema: GenMessage<SetMechanicalZeroAll> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 28);
+  messageDesc(file_bebop_runtime, 27);
 
 /**
  * Toggle the policy dry-run flag. See `ClientRuntimeMessage.set_policy_dry_run`
@@ -1632,7 +1512,7 @@ export type SetPolicyDryRun = Message<"bebop.runtime.v1.SetPolicyDryRun"> & {
  * Use `create(SetPolicyDryRunSchema)` to create a new message.
  */
 export const SetPolicyDryRunSchema: GenMessage<SetPolicyDryRun> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 29);
+  messageDesc(file_bebop_runtime, 28);
 
 /**
  * Start/stop the bebop-vision service. See
@@ -1654,7 +1534,7 @@ export type SetVisionEnabled = Message<"bebop.runtime.v1.SetVisionEnabled"> & {
  * Use `create(SetVisionEnabledSchema)` to create a new message.
  */
 export const SetVisionEnabledSchema: GenMessage<SetVisionEnabled> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 30);
+  messageDesc(file_bebop_runtime, 29);
 
 /**
  * Store the Hugging Face access token used for gated model weights
@@ -1675,7 +1555,7 @@ export type SetHfToken = Message<"bebop.runtime.v1.SetHfToken"> & {
  * Use `create(SetHfTokenSchema)` to create a new message.
  */
 export const SetHfTokenSchema: GenMessage<SetHfToken> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 31);
+  messageDesc(file_bebop_runtime, 30);
 
 /**
  * Delete the stored Hugging Face token. The weights already on disk are
@@ -1691,7 +1571,7 @@ export type ClearHfToken = Message<"bebop.runtime.v1.ClearHfToken"> & {
  * Use `create(ClearHfTokenSchema)` to create a new message.
  */
 export const ClearHfTokenSchema: GenMessage<ClearHfToken> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 32);
+  messageDesc(file_bebop_runtime, 31);
 
 /**
  * Start the asynchronous weight download for a catalog model. `model_id`
@@ -1714,7 +1594,7 @@ export type DownloadModel = Message<"bebop.runtime.v1.DownloadModel"> & {
  * Use `create(DownloadModelSchema)` to create a new message.
  */
 export const DownloadModelSchema: GenMessage<DownloadModel> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 33);
+  messageDesc(file_bebop_runtime, 32);
 
 /**
  * Select the active model for a purpose. The firmware persists the mapping
@@ -1741,7 +1621,7 @@ export type SetModelPurpose = Message<"bebop.runtime.v1.SetModelPurpose"> & {
  * Use `create(SetModelPurposeSchema)` to create a new message.
  */
 export const SetModelPurposeSchema: GenMessage<SetModelPurpose> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 34);
+  messageDesc(file_bebop_runtime, 33);
 
 /**
  * @generated from message bebop.runtime.v1.Ack
@@ -1763,7 +1643,7 @@ export type Ack = Message<"bebop.runtime.v1.Ack"> & {
  * Use `create(AckSchema)` to create a new message.
  */
 export const AckSchema: GenMessage<Ack> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 35);
+  messageDesc(file_bebop_runtime, 34);
 
 /**
  * @generated from message bebop.runtime.v1.Error
@@ -1780,7 +1660,7 @@ export type Error = Message<"bebop.runtime.v1.Error"> & {
  * Use `create(ErrorSchema)` to create a new message.
  */
 export const ErrorSchema: GenMessage<Error> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 36);
+  messageDesc(file_bebop_runtime, 35);
 
 /**
  * @generated from message bebop.runtime.v1.ModeChanged
@@ -1797,7 +1677,7 @@ export type ModeChanged = Message<"bebop.runtime.v1.ModeChanged"> & {
  * Use `create(ModeChangedSchema)` to create a new message.
  */
 export const ModeChangedSchema: GenMessage<ModeChanged> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 37);
+  messageDesc(file_bebop_runtime, 36);
 
 /**
  * @generated from message bebop.runtime.v1.EStopLatched
@@ -1814,7 +1694,7 @@ export type EStopLatched = Message<"bebop.runtime.v1.EStopLatched"> & {
  * Use `create(EStopLatchedSchema)` to create a new message.
  */
 export const EStopLatchedSchema: GenMessage<EStopLatched> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 38);
+  messageDesc(file_bebop_runtime, 37);
 
 /**
  * Latest fused orientation reading from the optional BNO080/BNO085 IMU.
@@ -1912,7 +1792,7 @@ export type ImuStats = Message<"bebop.runtime.v1.ImuStats"> & {
  * Use `create(ImuStatsSchema)` to create a new message.
  */
 export const ImuStatsSchema: GenMessage<ImuStats> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 39);
+  messageDesc(file_bebop_runtime, 38);
 
 /**
  * Latest observation/action snapshot from [`PolicyRunner`]. Published at
@@ -2065,315 +1945,7 @@ export type PolicyIoStats = Message<"bebop.runtime.v1.PolicyIoStats"> & {
  * Use `create(PolicyIoStatsSchema)` to create a new message.
  */
 export const PolicyIoStatsSchema: GenMessage<PolicyIoStats> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 40);
-
-/**
- * Subscribe to pushed `NavMaskFrame`s. Nothing is pushed until this is
- * sent; `UnsubscribeNav` stops the stream. Mirrors the telemetry
- * subscription pattern.
- *
- * @generated from message bebop.runtime.v1.SubscribeNav
- */
-export type SubscribeNav = Message<"bebop.runtime.v1.SubscribeNav"> & {
-  /**
-   * Rate hint in Hz. The server clamps to the nav runner's own rate —
-   * asking for more than the model produces just re-sends the newest
-   * grid, so this is an upper bound on overlay update frequency.
-   *
-   * @generated from field: uint32 rate_hz = 1;
-   */
-  rateHz: number;
-};
-
-/**
- * Describes the message bebop.runtime.v1.SubscribeNav.
- * Use `create(SubscribeNavSchema)` to create a new message.
- */
-export const SubscribeNavSchema: GenMessage<SubscribeNav> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 41);
-
-/**
- * @generated from message bebop.runtime.v1.UnsubscribeNav
- */
-export type UnsubscribeNav = Message<"bebop.runtime.v1.UnsubscribeNav"> & {
-};
-
-/**
- * Describes the message bebop.runtime.v1.UnsubscribeNav.
- * Use `create(UnsubscribeNavSchema)` to create a new message.
- */
-export const UnsubscribeNavSchema: GenMessage<UnsubscribeNav> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 42);
-
-/**
- * Navigable-path inference summary, embedded in telemetry + snapshots.
- *
- * @generated from message bebop.runtime.v1.NavState
- */
-export type NavState = Message<"bebop.runtime.v1.NavState"> & {
-  /**
-   * True iff `navseg.onnx` loaded and the runner thread is up.
-   *
-   * @generated from field: bool present = 1;
-   */
-  present: boolean;
-
-  /**
-   * True once the first mask has been produced.
-   *
-   * @generated from field: bool received = 2;
-   */
-  received: boolean;
-
-  /**
-   * Measured inference rate (EMA over the runner loop), Hz.
-   *
-   * @generated from field: float mask_hz = 3;
-   */
-  maskHz: number;
-
-  /**
-   * Which execution provider is serving the model ("cuda" / "cpu").
-   *
-   * @generated from field: string provider = 4;
-   */
-  provider: string;
-
-  /**
-   * Camera frame sequence number the latest mask was computed from.
-   *
-   * @generated from field: uint64 seq = 10;
-   */
-  seq: bigint;
-
-  /**
-   * Camera capture timestamp of that frame (µs since epoch — matches the
-   * `X-Timestamp-Us` part header on `GET /video`, so consumers can align
-   * masks with frames).
-   *
-   * @generated from field: uint64 ts_us = 11;
-   */
-  tsUs: bigint;
-
-  /**
-   * Fractions of the (128×128 argmax) label map per class, 0..1.
-   *
-   * @generated from field: float frac_blocked = 20;
-   */
-  fracBlocked: number;
-
-  /**
-   * @generated from field: float frac_navigable = 21;
-   */
-  fracNavigable: number;
-
-  /**
-   * @generated from field: float frac_caution = 22;
-   */
-  fracCaution: number;
-};
-
-/**
- * Describes the message bebop.runtime.v1.NavState.
- * Use `create(NavStateSchema)` to create a new message.
- */
-export const NavStateSchema: GenMessage<NavState> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 43);
-
-/**
- * One pushed navigable-path label grid, for the live video overlay.
- * The grid covers the whole camera frame (the model is fed a square
- * 512×512 resize of the full frame, so the grid maps 1:1 onto the
- * frame's aspect regardless of its resolution).
- *
- * @generated from message bebop.runtime.v1.NavMaskFrame
- */
-export type NavMaskFrame = Message<"bebop.runtime.v1.NavMaskFrame"> & {
-  /**
-   * Camera frame sequence number this mask was computed from.
-   *
-   * @generated from field: uint64 seq = 1;
-   */
-  seq: bigint;
-
-  /**
-   * Camera capture timestamp (µs since epoch; matches `NavState.ts_us`).
-   *
-   * @generated from field: uint64 ts_us = 2;
-   */
-  tsUs: bigint;
-
-  /**
-   * Grid dimensions: `grid.len() == width * height`. 160×90 (16:9).
-   *
-   * @generated from field: uint32 width = 3;
-   */
-  width: number;
-
-  /**
-   * @generated from field: uint32 height = 4;
-   */
-  height: number;
-
-  /**
-   * Row-major label map, one byte per cell: 0 = blocked, 1 = navigable,
-   * 2 = caution. Cell (x, y) covers the frame rectangle
-   * [x/width, (x+1)/width) × [y/height, (y+1)/height) of the frame.
-   *
-   * @generated from field: bytes grid = 5;
-   */
-  grid: Uint8Array;
-
-  /**
-   * Summary stats (same values as `NavState`) so overlay consumers get
-   * everything in one message without a separate telemetry join.
-   *
-   * @generated from field: float frac_blocked = 10;
-   */
-  fracBlocked: number;
-
-  /**
-   * @generated from field: float frac_navigable = 11;
-   */
-  fracNavigable: number;
-
-  /**
-   * @generated from field: float frac_caution = 12;
-   */
-  fracCaution: number;
-
-  /**
-   * @generated from field: float mask_hz = 13;
-   */
-  maskHz: number;
-
-  /**
-   * @generated from field: string provider = 14;
-   */
-  provider: string;
-};
-
-/**
- * Describes the message bebop.runtime.v1.NavMaskFrame.
- * Use `create(NavMaskFrameSchema)` to create a new message.
- */
-export const NavMaskFrameSchema: GenMessage<NavMaskFrame> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 44);
-
-/**
- * 2D point in the odometry frame (metres). Odom origin is the pose at
- * the last ResetOdometry; x forward, y left.
- *
- * @generated from message bebop.runtime.v1.Vec2
- */
-export type Vec2 = Message<"bebop.runtime.v1.Vec2"> & {
-  /**
-   * @generated from field: float x = 1;
-   */
-  x: number;
-
-  /**
-   * @generated from field: float y = 2;
-   */
-  y: number;
-};
-
-/**
- * Describes the message bebop.runtime.v1.Vec2.
- * Use `create(Vec2Schema)` to create a new message.
- */
-export const Vec2Schema: GenMessage<Vec2> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 45);
-
-/**
- * Operator-commanded navigation goal for the navd goal-drive pipeline.
- * Oneof picks the goal kind; `clear` supersedes both and empties the
- * goal slot (the robot stops navigating and holds).
- *
- * @generated from message bebop.runtime.v1.SetNavigationGoal
- */
-export type SetNavigationGoal = Message<"bebop.runtime.v1.SetNavigationGoal"> & {
-  /**
-   * @generated from oneof bebop.runtime.v1.SetNavigationGoal.goal
-   */
-  goal: {
-    /**
-     * Body-frame heading offset from current pose, radians, + left.
-     * Held until re-issued or cleared (heading hold).
-     *
-     * @generated from field: float heading_rad = 1;
-     */
-    value: number;
-    case: "headingRad";
-  } | {
-    /**
-     * Destination point in the odometry frame. The robot stops when it
-     * comes within ~0.3 m.
-     *
-     * @generated from field: bebop.runtime.v1.Vec2 point_odom = 2;
-     */
-    value: Vec2;
-    case: "pointOdom";
-  } | { case: undefined; value?: undefined };
-
-  /**
-   * True when neither goal variant is set: clear the active goal.
-   *
-   * @generated from field: bool clear = 3;
-   */
-  clear: boolean;
-};
-
-/**
- * Describes the message bebop.runtime.v1.SetNavigationGoal.
- * Use `create(SetNavigationGoalSchema)` to create a new message.
- */
-export const SetNavigationGoalSchema: GenMessage<SetNavigationGoal> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 46);
-
-/**
- * Server -> client push: the currently active navigation goal. Sent on
- * change to every connected client, and once to each client right after
- * the WS connection opens (so late joiners see the current state).
- *
- * @generated from message bebop.runtime.v1.NavigationGoalState
- */
-export type NavigationGoalState = Message<"bebop.runtime.v1.NavigationGoalState"> & {
-  /**
-   * False when the goal slot is empty.
-   *
-   * @generated from field: bool active = 1;
-   */
-  active: boolean;
-
-  /**
-   * @generated from oneof bebop.runtime.v1.NavigationGoalState.goal
-   */
-  goal: {
-    /**
-     * body-frame offset, rad, + left
-     *
-     * @generated from field: float heading_rad = 2;
-     */
-    value: number;
-    case: "headingRad";
-  } | {
-    /**
-     * odom-frame destination, metres
-     *
-     * @generated from field: bebop.runtime.v1.Vec2 point_odom = 3;
-     */
-    value: Vec2;
-    case: "pointOdom";
-  } | { case: undefined; value?: undefined };
-};
-
-/**
- * Describes the message bebop.runtime.v1.NavigationGoalState.
- * Use `create(NavigationGoalStateSchema)` to create a new message.
- */
-export const NavigationGoalStateSchema: GenMessage<NavigationGoalState> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 47);
+  messageDesc(file_bebop_runtime, 39);
 
 /**
  * Snapshot of the `bebop-vision.service` systemd unit, embedded in
@@ -2441,7 +2013,7 @@ export type VisionState = Message<"bebop.runtime.v1.VisionState"> & {
  * Use `create(VisionStateSchema)` to create a new message.
  */
 export const VisionStateSchema: GenMessage<VisionState> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 48);
+  messageDesc(file_bebop_runtime, 40);
 
 /**
  * ---------------------------------------------------------------------------
@@ -2511,7 +2083,7 @@ export type ModelState = Message<"bebop.runtime.v1.ModelState"> & {
  * Use `create(ModelStateSchema)` to create a new message.
  */
 export const ModelStateSchema: GenMessage<ModelState> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 49);
+  messageDesc(file_bebop_runtime, 41);
 
 /**
  * The active model chosen for one purpose.
@@ -2539,7 +2111,7 @@ export type PurposeSelection = Message<"bebop.runtime.v1.PurposeSelection"> & {
  * Use `create(PurposeSelectionSchema)` to create a new message.
  */
 export const PurposeSelectionSchema: GenMessage<PurposeSelection> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 50);
+  messageDesc(file_bebop_runtime, 42);
 
 /**
  * One catalog model and its current provisioning status.
@@ -2665,7 +2237,7 @@ export type ModelCatalogEntry = Message<"bebop.runtime.v1.ModelCatalogEntry"> & 
  * Use `create(ModelCatalogEntrySchema)` to create a new message.
  */
 export const ModelCatalogEntrySchema: GenMessage<ModelCatalogEntry> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 51);
+  messageDesc(file_bebop_runtime, 43);
 
 /**
  * Start/stop the on-robot voice service (`bebop-voice.service`). The firmware
@@ -2686,7 +2258,7 @@ export type SetVoiceEnabled = Message<"bebop.runtime.v1.SetVoiceEnabled"> & {
  * Use `create(SetVoiceEnabledSchema)` to create a new message.
  */
 export const SetVoiceEnabledSchema: GenMessage<SetVoiceEnabled> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 52);
+  messageDesc(file_bebop_runtime, 44);
 
 /**
  * Snapshot of the `bebop-voice.service` systemd unit. Mirrors `VisionState`;
@@ -2744,7 +2316,7 @@ export type VoiceState = Message<"bebop.runtime.v1.VoiceState"> & {
  * Use `create(VoiceStateSchema)` to create a new message.
  */
 export const VoiceStateSchema: GenMessage<VoiceState> = /*@__PURE__*/
-  messageDesc(file_bebop_runtime, 53);
+  messageDesc(file_bebop_runtime, 45);
 
 /**
  * @generated from enum bebop.runtime.v1.Mode

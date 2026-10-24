@@ -66,14 +66,15 @@ fn build_drive_state(sup: &Arc<Supervisor>, conn_id: u64) -> proto::DriveState {
     // Arbitration flags are per-connection: telemetry frames are built
     // once per subscribed client, so "you" here means the client this
     // frame is being sent to.
-    let (has_active_operator, you_are_active_operator) = sup.operator_state(conn_id);
+    let op = sup.operator_state(conn_id);
     proto::DriveState {
         present: true,
         cmd_linear_x: twist.vx,
         cmd_angular_z: twist.wz,
         operator_stale: sup.operator_stale(),
-        has_active_operator,
-        you_are_active_operator,
+        has_active_operator: op.has_active_operator,
+        you_are_active_operator: op.you_are_active_operator,
+        active_operator_name: op.active_operator_name,
         odom_x: x,
         odom_y: y,
         odom_theta: theta,
@@ -379,8 +380,6 @@ pub fn build_snapshot(
     let estop_latched = sup.estop_active();
     let estop_reason = sup.estop_reason_human().unwrap_or_default();
     proto::Snapshot {
-        // `camera`/`nav` retired with the OBSBOT removal (plan §9): the
-        // deprecated proto fields stay but carry no data.
         host_unix_ms: now_unix_ms(),
         mode: mode_proto,
         estop_latched,
@@ -395,7 +394,6 @@ pub fn build_snapshot(
         vision: Some(build_vision_stats(vision)),
         model: Some(build_model_stats(model)),
         voice: Some(build_voice_stats(voice)),
-        ..Default::default()
     }
 }
 
@@ -431,7 +429,6 @@ pub fn build_telemetry(
         vision: Some(build_vision_stats(vision)),
         model: Some(build_model_stats(model)),
         voice: Some(build_voice_stats(voice)),
-        ..Default::default()
     }
 }
 

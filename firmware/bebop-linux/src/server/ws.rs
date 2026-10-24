@@ -4,26 +4,31 @@
 //! - `GET /ws` — upgrades to a binary WebSocket; framing carries one
 //!   `ClientRuntimeMessage` / `ServerRuntimeMessage` per WS message.
 //!
-//! Each WS connection runs three concurrent tasks:
+//! Each WS connection runs these concurrent tasks:
 //!
-//! 1. **Inbound**: read frames from the socket, dispatch to
-//!    [`super::handlers::handle_client_message`], queue the reply.
+//! 1. **Inbound** (the connection's own task): decode each frame once,
+//!    dispatch to [`super::handlers::handle_client_message`], queue the
+//!    reply (if any) on the reply queue.
 //! 2. **Telemetry**: every `1/rate_hz` seconds, build a `TelemetryFrame`
-//!    and queue it. Default 30 Hz; clamped to `cfg.server.telemetry_max_hz`.
-//!    Sending is gated by whether the client has subscribed.
+//!    and *replace* the connection's latest-telemetry slot
+//!    (`tokio::sync::watch`). Default 30 Hz; clamped to
+//!    `cfg.server.telemetry_max_hz`. Gated by whether the client has
+//!    subscribed.
 //! 3. **Events**: forward supervisor events (mode change, E-STOP latched)
-//!    as unsolicited frames.
-//!
-//! All three feed a shared mpsc to the WS sink writer.
+//!    onto the reply queue.
+//! 4. **Writer**: drains the reply queue first (biased), then sends the
+//!    newest telemetry frame. On a slow downlink stale telemetry frames
+//!    are overwritten instead of queueing, so replies and events never
+//!    wait behind a backlog of telemetry, and the inbound task is never
+//!    parked by telemetry (accepted twists have no reply at all).
 
 use crate::capture_control::CaptureControl;
 use crate::imu::ImuShared;
 use crate::model::ModelShared;
-use crate::nav_goal::NavGoalShared;
 use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
 use crate::safety::{Supervisor, SupervisorEvent};
-use crate::server::handlers::{encode, handle_client_message};
+use crate::server::handlers::{encode, error_response, handle_client_message};
 use crate::server::telemetry::{build_telemetry, telemetry_envelope};
 use crate::vision::VisionShared;
 use crate::voice::VoiceShared;
@@ -36,14 +41,14 @@ use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use bebop_proto::runtime::v1 as proto;
+use bytes::Bytes;
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
-use tokio::sync::broadcast;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing::{debug, info, warn};
@@ -77,9 +82,6 @@ pub struct AppState {
     /// HTTP layer so `GET /captures` can list finished segments and
     /// `GET /captures/dl/<name>` (via `ServeDir`) can stream them out.
     pub capture_dir: PathBuf,
-    /// Operator navigation goal (navd, plan §8). Written by the
-    /// SetNavigationGoal handler; changes broadcast to all clients.
-    pub nav_goal: Arc<NavGoalShared>,
     /// bebop-vision service control + status (see [`crate::vision`]).
     pub vision: VisionShared,
     /// Gated model-weight provisioning control + status (see
@@ -462,120 +464,94 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
     ws.on_upgrade(move |socket| handle_ws(socket, state))
 }
 
+/// Per-connection reply/event queue depth. Telemetry does not ride this
+/// queue (it has its own latest-value slot), so it only fills when a
+/// client fires many requests while its downlink is stalled.
+const REPLY_QUEUE_DEPTH: usize = 32;
+
+/// Telemetry subscription state for one connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TelemetryState {
+    subscribed: bool,
+    rate_hz: u32,
+}
+
 async fn handle_ws(socket: WebSocket, state: AppState) {
-    let AppState {
-        sup,
-        imu,
-        imu_present,
-        policy_io,
-        policy_control,
-        nav_goal,
-        vision,
-        model,
-        voice,
-        capture_dir: _,
-        captures: _,
-        rerun_converter: _,
-    } = state;
     // Per-connection identity for operator arbitration. Monotonic so a
     // reconnecting client never inherits a stale assignment; never 0
     // (0 reads as "no connection" in the per-connection telemetry
     // flags).
     let conn_id = WS_CONN_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
     info!(conn_id, "ws client connected");
+    let sup = state.sup.clone();
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<proto::ServerRuntimeMessage>(256);
+    let (reply_tx, mut reply_rx) = mpsc::channel::<Bytes>(REPLY_QUEUE_DEPTH);
+    let (tele_tx, mut tele_rx) = watch::channel::<Option<Bytes>>(None);
 
-    // Post-connect flush: the current navigation goal, so late joiners
-    // (e.g. a restarting navd process) see the active goal without a
-    // snapshot round-trip.
-    let _ = tx
-        .send(proto::ServerRuntimeMessage {
-            request_id: 0,
-            payload: Some(proto::server_runtime_message::Payload::NavGoal(
-                nav_goal.get().to_proto(),
-            )),
-        })
-        .await;
-
-    // Telemetry control: shared subscribed flag + clamped rate.
-    let telemetry_state = Arc::new(tokio::sync::RwLock::new(TelemetryState {
+    // Telemetry control: subscribed flag + clamped rate, as a watch so the
+    // pump sleeps until a subscription instead of polling.
+    let (tele_cfg_tx, mut tele_cfg_rx) = watch::channel(TelemetryState {
         subscribed: false,
         rate_hz: 30,
-    }));
+    });
     let max_rate_hz = sup.cfg().server.telemetry_max_hz.max(1);
     let default_rate_hz = sup.cfg().server.telemetry_default_hz.max(1);
-    // Task: telemetry pump.
-    let tx_tele = tx.clone();
-    let sup_tele = sup.clone();
-    let imu_tele = imu.clone();
-    let policy_io_tele = policy_io.clone();
-    let vision_tele = vision.clone();
-    let model_tele = model.clone();
-    let voice_tele = voice.clone();
-    let tele_state_tele = telemetry_state.clone();
     let mut client_telemetry_subscribed = false;
+
+    // Task: telemetry pump -> latest-value slot.
+    let tele_state = state.clone();
     let telemetry_task = tokio::spawn(async move {
         loop {
-            let (subscribed, rate_hz) = {
-                let g = tele_state_tele.read().await;
-                (g.subscribed, g.rate_hz)
-            };
-            let period = Duration::from_secs_f32(1.0 / rate_hz.max(1) as f32);
+            let cfg = *tele_cfg_rx.borrow_and_update();
+            if !cfg.subscribed {
+                if tele_cfg_rx.changed().await.is_err() {
+                    break;
+                }
+                continue;
+            }
+            let period = Duration::from_secs_f32(1.0 / cfg.rate_hz.max(1) as f32);
             tokio::time::sleep(period).await;
-            if !subscribed {
+            if !tele_cfg_rx.borrow().subscribed {
                 continue;
             }
             // conn_id rides along so the arbitration flags inside the
             // drive state are computed for *this* client ("you").
             let frame = build_telemetry(
-                &sup_tele,
-                &imu_tele,
-                imu_present,
-                &policy_io_tele,
-                &vision_tele,
-                &model_tele,
-                &voice_tele,
+                &tele_state.sup,
+                &tele_state.imu,
+                tele_state.imu_present,
+                &tele_state.policy_io,
+                &tele_state.vision,
+                &tele_state.model,
+                &tele_state.voice,
                 conn_id,
             );
-            let env = telemetry_envelope(frame);
-            if tx_tele.send(env).await.is_err() {
+            if tele_tx.is_closed() {
                 break;
             }
-        }
-    });
-
-    // Task: nav-goal change pump. Every client sees goal changes (the
-    // navd goal-drive process consumes them; the app mirrors state).
-    let tx_goal = tx.clone();
-    let mut goal_rx = nav_goal.subscribe();
-    let goal_task = tokio::spawn(async move {
-        loop {
-            match goal_rx.recv().await {
-                Ok(goal) => {
-                    let msg = proto::ServerRuntimeMessage {
-                        request_id: 0,
-                        payload: Some(proto::server_runtime_message::Payload::NavGoal(
-                            goal.to_proto(),
-                        )),
-                    };
-                    if tx_goal.send(msg).await.is_err() {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    debug!(skipped = n, "nav-goal broadcast lagged");
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
+            // Overwrites a frame the writer hasn't sent yet: on a slow
+            // link the client gets the newest state, not a backlog.
+            tele_tx.send_replace(Some(encode(&telemetry_envelope(frame))));
         }
     });
 
     // Task: forward supervisor events (mode change, e-stop latched).
-    let tx_events = tx.clone();
+    let tx_events = reply_tx.clone();
     let mut event_rx = sup.subscribe();
     let event_task = tokio::spawn(async move {
-        while let Ok(ev) = event_rx.recv().await {
+        loop {
+            // A lagged receiver (writer stalled long enough to overrun the
+            // broadcast) skips the lost events and keeps forwarding; only a
+            // closed supervisor ends the task. Telemetry carries the current
+            // mode and E-STOP state, so a skipped push is recovered there.
+            let ev = match event_rx.recv().await {
+                Ok(ev) => ev,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    debug!(conn_id, skipped = n, "supervisor event stream lagged");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             let payload = match ev {
                 SupervisorEvent::ModeChanged(m) => Some(
                     proto::server_runtime_message::Payload::ModeChanged(proto::ModeChanged {
@@ -598,18 +574,17 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     request_id: 0,
                     payload: Some(p),
                 };
-                if tx_events.send(msg).await.is_err() {
+                if tx_events.send(encode(&msg)).await.is_err() {
                     break;
                 }
             }
         }
     });
 
-    // Task: WS writer pulls from the channel and serializes.
+    // Task: WS writer. Replies/events first, then the newest telemetry.
     let writer_task = tokio::spawn(async move {
         use futures::SinkExt;
-        while let Some(msg) = rx.recv().await {
-            let bytes = encode(&msg);
+        while let Some(bytes) = next_outbound(&mut reply_rx, &mut tele_rx).await {
             if let Err(e) = sink.send(Message::Binary(bytes.to_vec())).await {
                 debug!(error = %e, "ws send error; closing");
                 break;
@@ -617,64 +592,59 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         }
     });
 
-    // Reader loop: handle incoming frames.
+    // Reader loop: decode each frame once, then dispatch.
     use futures::StreamExt;
     while let Some(frame) = stream.next().await {
         match frame {
             Ok(Message::Binary(bytes)) => {
-                let response = handle_client_message(
-                    &sup,
-                    &imu,
-                    imu_present,
-                    &policy_io,
-                    &policy_control,
-                    &nav_goal,
-                    &vision,
-                    &model,
-                    &voice,
-                    conn_id,
-                    &bytes,
-                );
-
-                // Side effects for messages that affect telemetry state: do this
-                // after dispatch so the response is consistent with the new state.
-                let mut is_twist = false;
-                if let Ok(req) =
-                    <proto::ClientRuntimeMessage as bebop_proto::Message>::decode(bytes.as_ref())
-                {
-                    if let Some(payload) = req.payload {
-                        match payload {
-                            proto::client_runtime_message::Payload::SubscribeTelemetry(s) => {
-                                let mut g = telemetry_state.write().await;
-                                g.subscribed = true;
-                                g.rate_hz = if s.rate_hz == 0 {
-                                    default_rate_hz
-                                } else {
-                                    s.rate_hz.min(max_rate_hz)
-                                };
-                                if !client_telemetry_subscribed {
-                                    sup.inc_telemetry_subscribers();
-                                    client_telemetry_subscribed = true;
-                                }
-                            }
-                            proto::client_runtime_message::Payload::UnsubscribeTelemetry(_) => {
-                                let mut g = telemetry_state.write().await;
-                                g.subscribed = false;
-                                if client_telemetry_subscribed {
-                                    sup.dec_telemetry_subscribers();
-                                    client_telemetry_subscribed = false;
-                                }
-                            }
-                            proto::client_runtime_message::Payload::SetVelocityCommand(_) => {
-                                is_twist = true;
-                            }
-                            _ => {}
+                let req = match <proto::ClientRuntimeMessage as bebop_proto::Message>::decode(
+                    bytes.as_ref(),
+                ) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        let reply = error_response(0, format!("decode error: {e}"));
+                        if !queue_reply(&reply_tx, encode(&reply), false).await {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                // Connection-local side effects (telemetry subscription).
+                match &req.payload {
+                    Some(proto::client_runtime_message::Payload::SubscribeTelemetry(s)) => {
+                        let rate_hz = if s.rate_hz == 0 {
+                            default_rate_hz
+                        } else {
+                            s.rate_hz.min(max_rate_hz)
+                        };
+                        tele_cfg_tx.send_replace(TelemetryState {
+                            subscribed: true,
+                            rate_hz,
+                        });
+                        if !client_telemetry_subscribed {
+                            sup.inc_telemetry_subscribers();
+                            client_telemetry_subscribed = true;
                         }
                     }
+                    Some(proto::client_runtime_message::Payload::UnsubscribeTelemetry(_)) => {
+                        tele_cfg_tx.send_modify(|t| t.subscribed = false);
+                        if client_telemetry_subscribed {
+                            sup.dec_telemetry_subscribers();
+                            client_telemetry_subscribed = false;
+                        }
+                    }
+                    _ => {}
                 }
-
-                if !queue_reply(&tx, response, is_twist).await {
-                    break;
+                let is_twist = matches!(
+                    req.payload,
+                    Some(proto::client_runtime_message::Payload::SetVelocityCommand(
+                        _
+                    ))
+                );
+                if let Some(reply) = handle_client_message(&state, conn_id, req) {
+                    if !queue_reply(&reply_tx, encode(&reply), is_twist).await {
+                        break;
+                    }
                 }
             }
             Ok(Message::Text(t)) => {
@@ -695,11 +665,9 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         }
     }
 
-    drop(tx);
-    let _ = writer_task.await;
-    telemetry_task.abort();
-    goal_task.abort();
-    event_task.abort();
+    // Release the seat and the telemetry-subscriber count first: nothing
+    // in the flush below depends on them, and a stalled writer must not
+    // delay the link-loss stop or keep other operators out of the seat.
     if client_telemetry_subscribed {
         sup.dec_telemetry_subscribers();
     }
@@ -709,39 +677,63 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     // assignment and zero the twist so the chassis halts (motors stay
     // armed/balancing; recovery is automatic once any client sends
     // fresh commands). Viewers and rejected would-be drivers touched
-    // nothing, so their disconnect is a no-op here.
+    // nothing, so their disconnect is a no-op here (it only forgets the
+    // connection's `ClientHello` name).
     sup.operator_disconnected(conn_id);
+
+    // Stop the producers so the writer sees both channels close, then let
+    // it flush what is already queued (bounded: a dead peer can't hold
+    // this connection's cleanup hostage).
+    telemetry_task.abort();
+    event_task.abort();
+    drop(reply_tx);
+    let _ = telemetry_task.await;
+    let _ = event_task.await;
+    let mut writer_task = writer_task;
+    if tokio::time::timeout(Duration::from_secs(2), &mut writer_task)
+        .await
+        .is_err()
+    {
+        writer_task.abort();
+    }
     info!(conn_id, "ws client disconnected");
 }
 
-struct TelemetryState {
-    subscribed: bool,
-    rate_hz: u32,
-}
-
-/// Nav-mask push subscription state (see `SubscribeNav`).
-struct NavPushState {
-    subscribed: bool,
-    rate_hz: u32,
+/// The writer's next outbound frame: a queued reply/event if there is
+/// one (biased), else the newest telemetry frame once it changes. `None`
+/// once the reply queue is closed (the connection is over); a closed
+/// telemetry slot just leaves replies.
+async fn next_outbound(
+    replies: &mut mpsc::Receiver<Bytes>,
+    telemetry: &mut watch::Receiver<Option<Bytes>>,
+) -> Option<Bytes> {
+    loop {
+        tokio::select! {
+            biased;
+            reply = replies.recv() => return reply,
+            changed = telemetry.changed() => {
+                if changed.is_err() {
+                    return replies.recv().await;
+                }
+                if let Some(frame) = telemetry.borrow_and_update().clone() {
+                    return Some(frame);
+                }
+            }
+        }
+    }
 }
 
 /// Queue a reply for this connection's writer task; false once the
 /// connection is gone.
 ///
-/// The outbound queue (256 slots) is shared with 30 Hz telemetry, so on a
-/// slow downlink it fills. Waiting for a slot parks this reader, and the
-/// app streams twists without waiting for their Acks (bebop-app
-/// `twistStream.ts`), so the twists would pile up unread in the socket:
-/// each applied late, each re-arming the operator watchdog, with stops and
-/// E-STOP stuck behind them. A twist's reply (Ack, or the rare seat
-/// rejection, which the next twist repeats) is therefore dropped when the
-/// queue is full; the twist itself was already applied. Other replies keep
-/// waiting: their callers await them, and they are rare.
-async fn queue_reply(
-    tx: &mpsc::Sender<proto::ServerRuntimeMessage>,
-    reply: proto::ServerRuntimeMessage,
-    droppable: bool,
-) -> bool {
+/// The reply queue no longer carries telemetry, so it is normally empty.
+/// A twist's reply (only ever a rejection, which the next twist repeats)
+/// is still dropped when the queue is full: waiting would park this
+/// reader, and the app streams twists without waiting for replies
+/// (bebop-app `twistStream.ts`), so stops and E-STOP would pile up unread
+/// behind it. Other replies wait: their callers await them, and they are
+/// rare.
+async fn queue_reply(tx: &mpsc::Sender<Bytes>, reply: Bytes, droppable: bool) -> bool {
     if droppable {
         !matches!(
             tx.try_send(reply),
@@ -756,26 +748,23 @@ async fn queue_reply(
 mod reply_queue_tests {
     use super::*;
 
-    fn ack(id: u32) -> proto::ServerRuntimeMessage {
-        proto::ServerRuntimeMessage {
-            request_id: id,
-            payload: None,
-        }
+    fn frame(id: u8) -> Bytes {
+        Bytes::from(vec![id])
     }
 
     #[tokio::test]
     async fn a_twist_reply_never_waits_for_a_full_queue() {
-        let (tx, mut rx) = mpsc::channel::<proto::ServerRuntimeMessage>(1);
-        assert!(queue_reply(&tx, ack(1), true).await);
+        let (tx, mut rx) = mpsc::channel::<Bytes>(1);
+        assert!(queue_reply(&tx, frame(1), true).await);
         // Queue full: a twist reply is dropped at once instead of parking
         // the reader (this would hang if it awaited a slot).
         let res = tokio::time::timeout(
             std::time::Duration::from_millis(200),
-            queue_reply(&tx, ack(2), true),
+            queue_reply(&tx, frame(2), true),
         )
         .await;
         assert_eq!(res.ok(), Some(true));
-        assert_eq!(rx.recv().await.map(|m| m.request_id), Some(1));
+        assert_eq!(rx.recv().await, Some(frame(1)));
         assert!(
             rx.try_recv().is_err(),
             "the dropped reply must not be queued"
@@ -784,9 +773,9 @@ mod reply_queue_tests {
 
     #[tokio::test]
     async fn other_replies_wait_and_a_closed_queue_stops_the_reader() {
-        let (tx, mut rx) = mpsc::channel::<proto::ServerRuntimeMessage>(1);
-        assert!(queue_reply(&tx, ack(1), false).await);
-        let pending = queue_reply(&tx, ack(2), false);
+        let (tx, mut rx) = mpsc::channel::<Bytes>(1);
+        assert!(queue_reply(&tx, frame(1), false).await);
+        let pending = queue_reply(&tx, frame(2), false);
         tokio::pin!(pending);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), &mut pending)
@@ -794,11 +783,72 @@ mod reply_queue_tests {
                 .is_err(),
             "a non-twist reply waits for a slot"
         );
-        assert_eq!(rx.recv().await.map(|m| m.request_id), Some(1));
+        assert_eq!(rx.recv().await, Some(frame(1)));
         assert!(pending.await);
         drop(rx);
-        assert!(!queue_reply(&tx, ack(3), true).await);
-        assert!(!queue_reply(&tx, ack(4), false).await);
+        assert!(!queue_reply(&tx, frame(3), true).await);
+        assert!(!queue_reply(&tx, frame(4), false).await);
+    }
+
+    #[tokio::test]
+    async fn telemetry_keeps_only_the_newest_frame() {
+        let (_reply_tx, mut reply_rx) = mpsc::channel::<Bytes>(4);
+        let (tele_tx, mut tele_rx) = watch::channel::<Option<Bytes>>(None);
+        // Writer stalled while three frames were produced: only the last
+        // one is ever sent, then nothing until the next frame.
+        for id in 1..=3 {
+            tele_tx.send_replace(Some(frame(id)));
+        }
+        assert_eq!(
+            next_outbound(&mut reply_rx, &mut tele_rx).await,
+            Some(frame(3))
+        );
+        let idle = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            next_outbound(&mut reply_rx, &mut tele_rx),
+        )
+        .await;
+        assert!(idle.is_err(), "a sent telemetry frame is not resent");
+        tele_tx.send_replace(Some(frame(4)));
+        assert_eq!(
+            next_outbound(&mut reply_rx, &mut tele_rx).await,
+            Some(frame(4))
+        );
+    }
+
+    #[tokio::test]
+    async fn replies_go_out_before_pending_telemetry() {
+        let (reply_tx, mut reply_rx) = mpsc::channel::<Bytes>(4);
+        let (tele_tx, mut tele_rx) = watch::channel::<Option<Bytes>>(None);
+        tele_tx.send_replace(Some(frame(100)));
+        reply_tx.send(frame(1)).await.unwrap();
+        reply_tx.send(frame(2)).await.unwrap();
+        assert_eq!(
+            next_outbound(&mut reply_rx, &mut tele_rx).await,
+            Some(frame(1))
+        );
+        assert_eq!(
+            next_outbound(&mut reply_rx, &mut tele_rx).await,
+            Some(frame(2))
+        );
+        assert_eq!(
+            next_outbound(&mut reply_rx, &mut tele_rx).await,
+            Some(frame(100))
+        );
+    }
+
+    #[tokio::test]
+    async fn writer_ends_when_replies_close_even_without_telemetry_pump() {
+        let (reply_tx, mut reply_rx) = mpsc::channel::<Bytes>(4);
+        let (tele_tx, mut tele_rx) = watch::channel::<Option<Bytes>>(None);
+        drop(tele_tx);
+        reply_tx.send(frame(7)).await.unwrap();
+        drop(reply_tx);
+        assert_eq!(
+            next_outbound(&mut reply_rx, &mut tele_rx).await,
+            Some(frame(7))
+        );
+        assert_eq!(next_outbound(&mut reply_rx, &mut tele_rx).await, None);
     }
 }
 

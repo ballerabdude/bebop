@@ -9,7 +9,7 @@ Linux-based firmware for the Bebop robot using SocketCAN and ONNX Runtime for ne
 - **ONNX Runtime** for neural network policy inference
 - **Robstride motor support** (RS01-RS04) with MIT-style impedance control
 - **ODrive motor support** (S1) with velocity control
-- **UDP command interface** for teleoperation
+- **Protobuf-over-WebSocket runtime API** (`ws://<robot>:9090/ws`) for teleoperation
 - **Safety checks** with IMU-based fall detection
 
 ## Architecture
@@ -23,8 +23,8 @@ Linux-based firmware for the Bebop robot using SocketCAN and ONNX Runtime for ne
 │        ↑                          ↑              │          │
 │        │                          │              ↓          │
 │  ┌──────────┐              ┌──────────┐   ┌──────────┐    │
-│  │   UDP    │              │   ONNX   │   │ SocketCAN│    │
-│  │ Commands │              │  Model   │   │   Bus    │    │
+│  │    WS    │              │   ONNX   │   │ SocketCAN│    │
+│  │ /ws 9090 │              │  Model   │   │   Bus    │    │
 │  └──────────┘              └──────────┘   └──────────┘    │
 └─────────────────────────────────────────────────────────────┘
                                                   │
@@ -190,7 +190,6 @@ sudo systemctl restart bebop-linux
 |--------|-------|---------|-------------|
 | `--model` | `-m` | `model.onnx` | Path to ONNX policy file |
 | `--can` | `-c` | `can0` | CAN interface name |
-| `--port` | `-p` | `10000` | UDP command port |
 | `--rate` | `-r` | `50` | Control loop rate (Hz) |
 | `--no-policy` | | | Disable policy, passthrough mode |
 | `--sim` | | | Simulation mode (no hardware) |
@@ -206,30 +205,23 @@ export RUST_LOG=debug  # or info, warn, error
 export CAN_INTERFACES=can0,can1,can2,can3
 ```
 
-## UDP Command Protocol
+## Runtime API
 
-Send JSON commands to UDP port 10000:
+The operator app (and `bebop-vision`'s `RobotClient`) talk to the runtime
+over a binary protobuf WebSocket on `:9090/ws`, one
+`ClientRuntimeMessage` / `ServerRuntimeMessage` per frame (schema:
+`jetson-agent/bebop-proto/proto/bebop_runtime.proto`). The old UDP JSON
+command port (10000) is gone.
 
-```json
-// Velocity command
-{"xvel": 0.5, "yvel": 0.0, "angvel": 0.1}
-
-// Reset command
-{"type": "reset"}
-```
-
-### Python Example
-
-```python
-import socket
-import json
-
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-# Send velocity command
-cmd = {"xvel": 0.5, "yvel": 0.0, "angvel": 0.0}
-sock.sendto(json.dumps(cmd).encode(), ("localhost", 10000))
-```
+- Drive with `SetVelocityCommand` (fire-and-forget: an accepted twist gets
+  no reply, a rejected one gets an `Error`). One connection holds the
+  drive seat at a time; any number may watch. A stop from a client that
+  doesn't hold the seat is ignored while someone else is driving;
+  `EmergencyStop` from anyone always latches.
+- Name a connection with `ClientHello { name }`; the seat holder's name
+  rides `DriveState.active_operator_name` in telemetry.
+- Telemetry (`SubscribeTelemetry`) is latest-value per connection: on a
+  slow link stale frames are dropped, never queued ahead of replies.
 
 ## Converting Your Model to ONNX
 

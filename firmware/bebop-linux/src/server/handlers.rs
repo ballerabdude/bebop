@@ -1,18 +1,16 @@
 //! Per-message dispatch for the runtime WebSocket protocol.
 //!
-//! Each `ClientRuntimeMessage` is decoded and routed to the supervisor.
-//! The corresponding `ServerRuntimeMessage` is returned for the caller to
-//! write back to the WS sink.
+//! Each decoded `ClientRuntimeMessage` is routed to the supervisor. The
+//! reply (if any) is returned for the caller to queue on the WS downlink.
 
 use crate::drive::Twist;
 use crate::imu::ImuShared;
 use crate::mode::Mode;
 use crate::model::ModelShared;
-use crate::nav_goal::{NavGoal, NavGoalShared};
-use crate::policy_control::PolicyControlShared;
 use crate::policy_io::PolicyIoShared;
 use crate::safety::limits::BreachReason;
 use crate::safety::Supervisor;
+use crate::server::ws::AppState;
 use crate::vision::{VisionShared, VISION_SERVICE};
 use crate::voice::{VoiceShared, VOICE_SERVICE};
 use bebop_proto::runtime::v1 as proto;
@@ -34,82 +32,82 @@ fn fmt_err(e: &anyhow::Error) -> String {
     format!("{e:#}")
 }
 
-/// Decode and dispatch one client message. Returns the immediate reply
-/// (Ack / Error / Snapshot / etc.) — or `None` for messages that don't
-/// produce a response (e.g. SubscribeTelemetry, where the response is the
-/// telemetry stream itself).
+/// Dispatch one decoded client message. Returns the reply to send back
+/// (Ack / Error / Snapshot), or `None` when there is none: an accepted
+/// `SetVelocityCommand` is fire-and-forget (its Ack would only compete
+/// with telemetry for the downlink), so only its rejection replies.
 ///
 /// `conn_id` identifies the sending WS connection; it drives operator
-/// arbitration for drive commands and the per-connection
-/// `you_are_active_operator` snapshot flag.
-#[allow(clippy::too_many_arguments)]
+/// arbitration for drive commands, the per-connection
+/// `you_are_active_operator` snapshot flag and `ClientHello` names.
 pub fn handle_client_message(
-    sup: &Arc<Supervisor>,
-    imu: &ImuShared,
-    imu_present: bool,
-    policy_io: &PolicyIoShared,
-    policy_control: &PolicyControlShared,
-    nav_goal: &NavGoalShared,
-    vision: &VisionShared,
-    model: &ModelShared,
-    voice: &VoiceShared,
+    state: &AppState,
     conn_id: u64,
-    bytes: &[u8],
-) -> proto::ServerRuntimeMessage {
-    let req = match proto::ClientRuntimeMessage::decode(bytes) {
-        Ok(m) => m,
-        Err(e) => {
-            return error_response(0, format!("decode error: {e}"));
-        }
-    };
+    req: proto::ClientRuntimeMessage,
+) -> Option<proto::ServerRuntimeMessage> {
     let request_id = req.request_id;
-    let payload = match req.payload {
-        Some(p) => p,
-        None => {
-            return error_response(request_id, "empty client message".into());
-        }
+    let Some(payload) = req.payload else {
+        // Also what a field this firmware doesn't know (or a reserved,
+        // removed one) decodes to.
+        return Some(error_response(
+            request_id,
+            "empty or unsupported client message".into(),
+        ));
     };
+    if let proto::client_runtime_message::Payload::SetVelocityCommand(cmd) = &payload {
+        return handle_twist(&state.sup, conn_id, request_id, cmd);
+    }
+    Some(dispatch(state, conn_id, request_id, payload))
+}
 
+/// `SetVelocityCommand`: no reply when accepted (or deliberately ignored
+/// as a non-holder's stop), an `Error` when rejected.
+fn handle_twist(
+    sup: &Supervisor,
+    conn_id: u64,
+    request_id: u32,
+    cmd: &proto::SetVelocityCommand,
+) -> Option<proto::ServerRuntimeMessage> {
+    // Arbitrated drive command: the first client to send a non-zero
+    // twist claims the "active operator" seat and other clients are
+    // rejected while it is fresh; a stop from a non-holder is ignored
+    // (see `Supervisor::drive_command`). E-STOP is never arbitrated.
+    match sup.drive_command(
+        conn_id,
+        Twist {
+            vx: cmd.linear_x,
+            wz: cmd.angular_z,
+        },
+    ) {
+        Ok(_) => None,
+        Err(e) => Some(error_response(request_id, fmt_err(&e))),
+    }
+}
+
+fn dispatch(
+    state: &AppState,
+    conn_id: u64,
+    request_id: u32,
+    payload: proto::client_runtime_message::Payload,
+) -> proto::ServerRuntimeMessage {
+    let sup = &state.sup;
+    let policy_control = &state.policy_control;
+    let vision = &state.vision;
+    let model = &state.model;
+    let voice = &state.voice;
     use proto::client_runtime_message::Payload as P;
     match payload {
-        // Deprecated OBSBOT-era messages (plan §9): accepted for wire
-        // compatibility, ignored. Proto fields get `reserved` in Stage 4.
-        P::SetCameraPose(_) | P::SubscribeNav(_) | P::UnsubscribeNav(_) => {
+        P::ClientHello(h) => {
+            let name = sup.set_client_name(conn_id, &h.name);
             ack(
                 request_id,
-                "deprecated: the camera/legacy nav pipeline was removed".into(),
-            )
-        }
-
-        P::SetNavigationGoal(g) => {
-            let goal = if g.clear {
-                NavGoal::None
-            } else {
-                match &g.goal {
-                    Some(proto::set_navigation_goal::Goal::HeadingRad(rad)) => {
-                        NavGoal::Heading(*rad)
-                    }
-                    Some(proto::set_navigation_goal::Goal::PointOdom(p)) => {
-                        NavGoal::PointOdom(p.x, p.y)
-                    }
-                    None => NavGoal::None, // empty oneof + clear=false = clear
-                }
-            };
-            nav_goal.set(goal);
-            ack(
-                request_id,
-                match goal {
-                    NavGoal::None => "navigation goal cleared".into(),
-                    NavGoal::Heading(rad) => {
-                        format!("navigation goal: heading {rad:.2} rad")
-                    }
-                    NavGoal::PointOdom(x, y) => {
-                        format!("navigation goal: point ({x:.2}, {y:.2}) m")
-                    }
+                if name.is_empty() {
+                    format!("connection {conn_id}: name cleared")
+                } else {
+                    format!("connection {conn_id}: hello, {name}")
                 },
             )
         }
-
         P::SubscribeTelemetry(s) => {
             let rate = s.rate_hz;
             ack(
@@ -121,9 +119,9 @@ pub fn handle_client_message(
         P::GetSnapshot(_) => snapshot_response(
             request_id,
             sup,
-            imu,
-            imu_present,
-            policy_io,
+            &state.imu,
+            state.imu_present,
+            &state.policy_io,
             vision,
             model,
             voice,
@@ -400,29 +398,10 @@ pub fn handle_client_message(
                 Err(e) => error_response(request_id, e),
             }
         }
-        P::SetVelocityCommand(req) => {
-            // Arbitrated drive command: the first client to send a
-            // non-zero twist claims the "active operator" assignment and
-            // other clients are rejected while that assignment is fresh
-            // (see `Supervisor::drive_command`). Zero-twist stops are
-            // always accepted from any client.
-            match sup.drive_command(
-                conn_id,
-                Twist {
-                    vx: req.linear_x,
-                    wz: req.angular_z,
-                },
-            ) {
-                Ok(()) => ack(
-                    request_id,
-                    format!(
-                        "drive twist -> vx {:.3} m/s, wz {:.3} rad/s",
-                        req.linear_x, req.angular_z
-                    ),
-                ),
-                Err(e) => error_response(request_id, fmt_err(&e)),
-            }
-        }
+        // Normally intercepted (reply-less) by `handle_client_message`;
+        // kept total so the match needs no panic path.
+        P::SetVelocityCommand(cmd) => handle_twist(sup, conn_id, request_id, &cmd)
+            .unwrap_or_else(|| ack(request_id, "drive twist accepted".into())),
         P::SetWheelEnabled(req) => {
             let result = if req.enabled {
                 sup.arm_wheel(&req.wheel_name)

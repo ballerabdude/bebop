@@ -77,6 +77,10 @@ message ClientRuntimeMessage {
     //
     // Drive a twist (body-frame forward + yaw rate) into the wheel axes;
     // the firmware clamps, slew-limits, and converts to per-wheel velocity.
+    // Fire-and-forget: an accepted twist gets NO reply (it would only
+    // compete with telemetry for the downlink); a rejected one (seat held
+    // by another client, no drive configured, ...) gets an `Error` with
+    // the request id.
     SetVelocityCommand   set_velocity_command   = 14;
     // Arm/disarm a single ODrive wheel (name matches the `wheels:` YAML).
     SetWheelEnabled      set_wheel_enabled      = 15;
@@ -90,19 +94,6 @@ message ClientRuntimeMessage {
     // the S1's NVM — it must be re-run after a power cycle, or persisted
     // once via `odrivetool` → `save_configuration()` over USB.
     CalibrateWheel       calibrate_wheel       = 18;
-    // Deprecated (plan §9): the OBSBOT camera gimbal is removed. The
-    // firmware acks this as a no-op; the field is kept for wire
-    // compatibility and reserved against reuse in a future revision.
-    SetCameraPose        set_camera_pose       = 19 [deprecated = true];
-    // Deprecated (plan §9): the legacy navseg mask push is removed —
-    // no firmware handler, nothing is ever pushed. Kept for wire
-    // compatibility.
-    SubscribeNav         subscribe_nav         = 20 [deprecated = true];
-    UnsubscribeNav       unsubscribe_nav       = 21 [deprecated = true];
-    // Operator navigation goal for the navd goal-drive pipeline (plan §8).
-    // Handled by storing + broadcasting; the navd process consumes it
-    // from the broadcast via its own WS client.
-    SetNavigationGoal    set_navigation_goal   = 22;
     // Start/stop the bebop-vision Python service (`bebop-vision.service`)
     // on the robot. The firmware (root) drives systemd; the running state
     // rides back in telemetry/snapshot as `VisionState`. `enabled = true`
@@ -143,9 +134,26 @@ message ClientRuntimeMessage {
     // must reconnect. Refused while anything is armed, so it can never be
     // a way to bypass the disarm/E-STOP rules.
     RestartRuntime       restart_runtime       = 29;
+    // Announce this connection's display name ("Pixel 8", "voice", ...).
+    // Optional: send once after connecting (again to rename). The name is
+    // what other clients see as `DriveState.active_operator_name` while
+    // this connection holds the drive seat. Acked; trimmed and capped at
+    // 32 characters by the firmware; empty clears it.
+    ClientHello          client_hello          = 30;
   }
   reserved 12;
   reserved "set_policy_capture";
+  // 19-22 were the retired OBSBOT gimbal (`set_camera_pose`), the legacy
+  // navseg mask push (`subscribe_nav` / `unsubscribe_nav`) and the navd
+  // goal slot (`set_navigation_goal`). Removed 2026-10-23; never reuse.
+  reserved 19, 20, 21, 22;
+  reserved "set_camera_pose", "subscribe_nav", "unsubscribe_nav",
+           "set_navigation_goal";
+}
+
+// Connection identity. See `ClientRuntimeMessage.client_hello`.
+message ClientHello {
+  string name = 1;
 }
 
 // Server -> client. Streamed; not all messages are responses to a request.
@@ -162,14 +170,11 @@ message ServerRuntimeMessage {
     ModeChanged         mode_changed    = 5;
     EStopLatched        estop_latched   = 6;
     BusStatusUpdate     bus_status      = 7;
-    // Deprecated (plan §9): the legacy navseg runner that produced these
-    // masks is removed — the firmware never pushes this. Kept for wire
-    // compatibility.
-    NavMaskFrame        nav_mask        = 8 [deprecated = true];
-    // Active navigation goal (navd). Pushed on change to every client
-    // and once to each client right after connect.
-    NavigationGoalState nav_goal        = 9;
   }
+  // 8 = `nav_mask` (legacy navseg push), 9 = `nav_goal` (navd goal slot):
+  // both removed 2026-10-23; never reuse.
+  reserved 8, 9;
+  reserved "nav_mask", "nav_goal";
 }
 
 // ---------------------------------------------------------------------------
@@ -290,8 +295,11 @@ message DriveState {
   // its commands keep arriving, and loses it on disconnect, operator
   // staleness, E-STOP, or after the server's `operator_grace_ms`
   // passes without input from that client (then anyone's next drive
-  // command takes over). Zero-twist stops are always accepted from any
-  // client regardless of the assignment.
+  // command takes over). A zero-twist stop from the seat holder, or from
+  // anyone while no fresh seat exists, is applied; a stop from any other
+  // client while someone holds the seat is ignored (a viewer releasing
+  // its joystick must not halt the driver). `EmergencyStop` is never
+  // arbitrated: anyone can latch it.
   //
   // `has_active_operator` reports that a *fresh* assignment exists;
   // `you_are_active_operator` is computed per connection so each client
@@ -299,27 +307,15 @@ message DriveState {
   // are built per connection by the server).
   bool  has_active_operator      = 5;
   bool  you_are_active_operator  = 6;
+  // Display name the seat holder announced via `ClientHello` (empty when
+  // nobody holds a fresh seat, or the holder never named itself — show
+  // "another operator" then). Lets viewers see who is driving.
+  string active_operator_name    = 7;
 
   // Wheel-encoder odometry pose (m, m, rad). Reset via ResetOdometry.
   float odom_x     = 10;
   float odom_y     = 11;
   float odom_theta = 12;
-}
-
-// Camera gimbal state (OBSBOT Tiny 2, standard UVC pan/tilt controls).
-// `present = false` when the runtime has no `video:` config, or when the
-// camera hasn't been heard from since boot. Pose is the *actual* pose
-// read back from the camera (never the assumed target — the gimbal
-// occasionally applies its own horizon compensation).
-message CameraState {
-  bool  present  = 1;
-  // Actual gimbal pose in degrees (pan + = right, tilt + = up,
-  // 0/0 = power-on center). OBSBOT Tiny 2 range: pan ±130°, tilt ±90°.
-  float pan_deg  = 2;
-  float tilt_deg = 3;
-  // True while the actual pose differs from the last commanded target
-  // by more than ~1 degree on either axis (gimbal still slewing).
-  bool  moving   = 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -432,13 +428,10 @@ message TelemetryFrame {
   repeated WheelState wheels = 15;
   // Differential-drive summary; `present=false` without a `drive:` block.
   DriveState drive = 16;
-  // Deprecated (plan §9): the OBSBOT camera is removed — the firmware
-  // no longer populates this. Kept for wire compatibility with older
-  // clients (they render `present=false`).
-  CameraState camera = 17 [deprecated = true];
-  // Deprecated (plan §9): the legacy navseg runner is removed — the
-  // firmware no longer populates this. Kept for wire compatibility.
-  NavState nav = 18 [deprecated = true];
+  // 17 = `camera` (OBSBOT gimbal), 18 = `nav` (navseg summary): retired
+  // (plan §9) and removed 2026-10-23; never reuse.
+  reserved 17, 18;
+  reserved "camera", "nav";
   // State of the bebop-vision service (`bebop-vision.service`). Present on
   // both the humanoid and wheeled builds — it's a process-level service,
   // not a motor feature.
@@ -465,10 +458,9 @@ message Snapshot {
   PolicyIoStats policy_io = 14;
   repeated WheelState wheels = 15;
   DriveState drive = 16;
-  // Deprecated (plan §9): see TelemetryFrame.camera.
-  CameraState camera = 17 [deprecated = true];
-  // Deprecated (plan §9): see TelemetryFrame.nav.
-  NavState nav = 18 [deprecated = true];
+  // See TelemetryFrame: 17/18 removed.
+  reserved 17, 18;
+  reserved "camera", "nav";
   VisionState vision = 19;
   ModelState model = 20;
   VoiceState voice = 21;
@@ -525,17 +517,6 @@ message SetAllWheelsEnabled {
 // `calibrate_wheel` for the persistence caveat.
 message CalibrateWheel {
   string wheel_name = 1;
-}
-
-// Command the camera gimbal to an absolute pan/tilt pose in degrees
-// (pan + = right, tilt + = up; 0/0 = power-on center). The firmware
-// clamps to the camera's UVC-reported limits (OBSBOT Tiny 2: pan ±130°,
-// tilt ±90°, 1° step — see the recon notes in `video.rs`) and reads
-// back the settled pose in telemetry / snapshot. Motion takes ~0.5-0.7 s
-// for a 30° move at default gimbal speed.
-message SetCameraPose {
-  float pan_deg  = 1;
-  float tilt_deg = 2;
 }
 
 message ResetOdometry {}
@@ -800,124 +781,6 @@ message PolicyIoStats {
 
   // Policy slot joint names (same order as the 8-element slices above).
   repeated string joint_names   = 30;
-}
-
-// ---------------------------------------------------------------------------
-// Navigable-path inference (nav runner)
-// ---------------------------------------------------------------------------
-//
-// The nav runner is the firmware-side consumer of the SegFormer
-// navigable-path student model (`navseg.onnx`, exported from
-// `bebop-vision`). It subscribes to the camera hub's MJPEG broadcast,
-// decodes + preprocesses each frame, runs ONNX inference (CUDA EP when
-// the loaded libonnxruntime supports it, CPU otherwise), and publishes:
-//
-//   - `NavState` — a summary embedded in every telemetry/snapshot frame
-//     (mask rate, class fractions) so dashboards can show "nav: 12 Hz,
-//     51% navigable" without subscribing to the grid.
-//   - `NavMaskFrame` — the low-res label grid itself, pushed at the
-//     subscribed rate so the operator app can overlay navigable /
-//     caution regions on the live video playback. Subscribe-gated.
-//
-// Label semantics (matching `bebop_vision.labelnav` / the training data):
-//   0 = blocked, 1 = navigable, 2 = caution.
-
-// Subscribe to pushed `NavMaskFrame`s. Nothing is pushed until this is
-// sent; `UnsubscribeNav` stops the stream. Mirrors the telemetry
-// subscription pattern.
-message SubscribeNav {
-  // Rate hint in Hz. The server clamps to the nav runner's own rate —
-  // asking for more than the model produces just re-sends the newest
-  // grid, so this is an upper bound on overlay update frequency.
-  uint32 rate_hz = 1;
-}
-
-message UnsubscribeNav {}
-
-// Navigable-path inference summary, embedded in telemetry + snapshots.
-message NavState {
-  // True iff `navseg.onnx` loaded and the runner thread is up.
-  bool  present        = 1;
-  // True once the first mask has been produced.
-  bool  received       = 2;
-  // Measured inference rate (EMA over the runner loop), Hz.
-  float mask_hz        = 3;
-  // Which execution provider is serving the model ("cuda" / "cpu").
-  string provider      = 4;
-  // Camera frame sequence number the latest mask was computed from.
-  uint64 seq           = 10;
-  // Camera capture timestamp of that frame (µs since epoch — matches the
-  // `X-Timestamp-Us` part header on `GET /video`, so consumers can align
-  // masks with frames).
-  uint64 ts_us         = 11;
-  // Fractions of the (128×128 argmax) label map per class, 0..1.
-  float frac_blocked   = 20;
-  float frac_navigable = 21;
-  float frac_caution   = 22;
-}
-
-// One pushed navigable-path label grid, for the live video overlay.
-// The grid covers the whole camera frame (the model is fed a square
-// 512×512 resize of the full frame, so the grid maps 1:1 onto the
-// frame's aspect regardless of its resolution).
-message NavMaskFrame {
-  // Camera frame sequence number this mask was computed from.
-  uint64 seq = 1;
-  // Camera capture timestamp (µs since epoch; matches `NavState.ts_us`).
-  uint64 ts_us = 2;
-  // Grid dimensions: `grid.len() == width * height`. 160×90 (16:9).
-  uint32 width  = 3;
-  uint32 height = 4;
-  // Row-major label map, one byte per cell: 0 = blocked, 1 = navigable,
-  // 2 = caution. Cell (x, y) covers the frame rectangle
-  // [x/width, (x+1)/width) × [y/height, (y+1)/height) of the frame.
-  bytes  grid = 5;
-  // Summary stats (same values as `NavState`) so overlay consumers get
-  // everything in one message without a separate telemetry join.
-  float frac_blocked   = 10;
-  float frac_navigable = 11;
-  float frac_caution   = 12;
-  float mask_hz        = 13;
-  string provider      = 14;
-}
-
-// ---------------------------------------------------------------------------
-// Navigation goal (navd)
-// ---------------------------------------------------------------------------
-
-// 2D point in the odometry frame (metres). Odom origin is the pose at
-// the last ResetOdometry; x forward, y left.
-message Vec2 {
-  float x = 1;
-  float y = 2;
-}
-
-// Operator-commanded navigation goal for the navd goal-drive pipeline.
-// Oneof picks the goal kind; `clear` supersedes both and empties the
-// goal slot (the robot stops navigating and holds).
-message SetNavigationGoal {
-  oneof goal {
-    // Body-frame heading offset from current pose, radians, + left.
-    // Held until re-issued or cleared (heading hold).
-    float heading_rad = 1;
-    // Destination point in the odometry frame. The robot stops when it
-    // comes within ~0.3 m.
-    Vec2  point_odom  = 2;
-  }
-  // True when neither goal variant is set: clear the active goal.
-  bool clear = 3;
-}
-
-// Server -> client push: the currently active navigation goal. Sent on
-// change to every connected client, and once to each client right after
-// the WS connection opens (so late joiners see the current state).
-message NavigationGoalState {
-  // False when the goal slot is empty.
-  bool  active = 1;
-  oneof goal {
-    float heading_rad = 2;  // body-frame offset, rad, + left
-    Vec2  point_odom  = 3;  // odom-frame destination, metres
-  }
 }
 
 // ---------------------------------------------------------------------------

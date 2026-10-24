@@ -27,7 +27,6 @@ use std::path::Path;
 pub mod timing {
     pub const FEEDBACK_PUBLISH_HZ: u64 = 100;
     pub const WATCHDOG_TIMEOUT_MS: u64 = 500;
-    pub const UDP_PORT: u16 = 10000;
 }
 
 /// Observation and action dimensions (must match training!).

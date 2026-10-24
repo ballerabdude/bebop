@@ -25,4 +25,4 @@ pub mod supervisor;
 pub use bus_pool::{read_can_state, BusPool};
 pub use limits::{BreachReason, MotorRuntimeState, MotorSnapshot};
 pub use power_monitor::{spawn_power_monitor, PowerBoardSnapshot, PowerMonitor};
-pub use supervisor::{Supervisor, SupervisorEvent};
+pub use supervisor::{DriveOutcome, OperatorView, Supervisor, SupervisorEvent};
