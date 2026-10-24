@@ -1,8 +1,27 @@
 # Bebop Locomotion Firmware
 
-Teensy 4.1 locomotion controller for the Bebop robot. Runs neural network policy inference on-board, interfaces with CAN motor controllers (ODrive, Robstride), and communicates with ROS2 via micro-ROS.
+Teensy 4.1 firmware for the Bebop robot (PlatformIO).
 
-## Architecture
+The robot runs the **`teensy_bridge`** env. It reads the BNO085 over SPI and
+streams IMU frames to the Jetson over USB serial (`/dev/bebop-imu`, read by
+`firmware/bebop-linux/src/imu_serial.rs` when the robot YAML has an `imu:`
+block), and forwards the network-mode button on a control channel
+(`/dev/bebop-control`, read by `bebop-agent`). The Jetson does not talk to the
+BNO085 itself.
+
+```
+BNO085 ──SPI0──▶ Teensy 4.1 (teensy_bridge) ══ USB_TRIPLE_SERIAL, 16c0:048c ══▶ Jetson
+mode button ───▶   pin 2      if00 /dev/bebop-imu        52-byte IMU frames, 200 Hz → bebop-linux
+                              if02 /dev/bebop-imu-debug  diagnostics
+                              if04 /dev/bebop-control    button events → bebop-agent
+```
+
+The `sim` and `ros` envs are legacy: the micro-ROS controller of the earlier
+wheel-legged robot (hip / knee Robstrides plus ODrive wheels) with policy
+inference on the Teensy. Everything below about motor control, ROS 2 topics and
+the policy applies to them only.
+
+## Architecture (legacy `sim` / `ros`)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -25,30 +44,42 @@ Teensy 4.1 locomotion controller for the Bebop robot. Runs neural network policy
 
 ## Build Modes
 
-| Mode | Description | Entry Point |
-|------|-------------|-------------|
-| `sim` | **Isaac Sim HIL** - Policy on Teensy, sensor data from simulation via micro-ROS | `main_sim.cpp` |
-| `ros` | **Hardware Mode** - Policy on Teensy, sensor data from real IMU/motors via CAN | `main.cpp` |
+| Env | Description | Entry Point | USB |
+|-----|-------------|-------------|-----|
+| `teensy_bridge` | **Production.** BNO085 over SPI → 52-byte IMU frames at 200 Hz, plus mode-button control frames | `main_teensy_bridge.cpp` | `USB_TRIPLE_SERIAL` |
+| `imu_spi_test` | Standalone BNO085 check over SPI (the `teensy_bridge` wiring) | `main_imu_spi_test.cpp` | serial |
+| `imu_test` | Standalone BNO085 check over I2C | `main_imu_test.cpp` | serial |
+| `sim` | Legacy **Isaac Sim HIL** - Policy on Teensy, sensor data from simulation via micro-ROS | `main_sim.cpp` | `USB_DUAL_SERIAL` |
+| `ros` | Legacy **Hardware Mode** - Policy on Teensy, sensor data from real IMU/motors via CAN | `main.cpp` | `USB_DUAL_SERIAL` |
 
 ## Quick Start
 
 ```bash
 cd firmware/bebop-locomotion
 
-# Build (default: sim mode)
-pio run
+# Production firmware (what the robot runs)
+pio run -e teensy_bridge --target upload
+cat /dev/bebop-imu-debug          # its diagnostics (after install-jetson.sh --setup-imu)
 
-# Build for hardware
+# Standalone IMU check
+pio run -e imu_spi_test --target upload
+
+# Legacy envs
+pio run -e sim
 pio run -e ros
-
-# Upload to Teensy
-pio run --target upload
-
-# Monitor debug output (SerialUSB1)
-pio device monitor
 ```
 
+`platformio.ini` still sets `default_envs = sim`, so a bare `pio run` or
+`pio run --target upload`, and `just fw-build` / `just fw-flash`, which run
+exactly that, build and flash the legacy `sim` env. Flashing it replaces the
+`USB_TRIPLE_SERIAL` firmware: the `/dev/bebop-*` devices disappear and
+`bebop-agent`'s mode button goes dead. Always pass `-e teensy_bridge`.
+`sudo ./scripts/install-jetson.sh --setup-imu` (once, on the robot, from the
+repo root) installs the udev rule behind the `/dev/bebop-*` symlinks.
+
 ## Motor Control
+
+Legacy `sim` / `ros` envs only.
 
 ### Joint Mapping
 
@@ -139,6 +170,8 @@ publisher.publish(cmd)
 
 ## ROS2 Topics
 
+Legacy `sim` / `ros` envs only.
+
 ### Published Topics
 
 | Topic | Type | Rate | Description |
@@ -173,71 +206,86 @@ publisher.publish(cmd)
 ```
 bebop-locomotion/
 ├── include/
-│   ├── BebopPolicy.h      # Auto-generated neural network weights
-│   ├── BNO085_IMU.h       # IMU driver
-│   ├── GenericMotor.h     # Motor interface abstraction
-│   ├── MicroROS.h         # micro-ROS communication (sim mode)
-│   ├── ODriveMotor.h      # ODrive CAN protocol
-│   ├── RobotConfig.h      # Joint/motor configuration
-│   ├── RobstrideMotor.h   # Robstride CAN protocol
-│   ├── RosPublishers.h    # ROS topic publishers (ros mode)
-│   └── SerialCommands.h   # Debug serial interface
+│   ├── BebopPolicy.h          # Auto-generated neural network weights (legacy)
+│   ├── BNO085_IMU.h           # BNO085 driver (SPI)
+│   ├── ControlProtocol.h      # teensy_bridge control frames (14 bytes)
+│   ├── GenericMotor.h         # Motor interface abstraction
+│   ├── ImuSerialProtocol.h    # teensy_bridge IMU frames (52 bytes)
+│   ├── MicroROS.h             # micro-ROS communication (sim mode)
+│   ├── ODriveMotor.h          # ODrive CAN protocol
+│   ├── RobotConfig.h          # Joint/motor configuration (legacy)
+│   ├── RobstrideMotor.h       # Robstride CAN protocol
+│   ├── RosPublishers.h        # ROS topic publishers (ros mode)
+│   └── SerialCommands.h       # Debug serial interface
 ├── src/
-│   ├── main.cpp           # Hardware mode entry point
-│   ├── main_sim.cpp       # Simulation mode entry point
-│   ├── MicroROS.cpp       # micro-ROS implementation
-│   ├── RosPublishers.cpp  # ROS publisher implementation
-│   └── SerialCommands.cpp # Serial command parser
-└── platformio.ini         # Build configuration
+│   ├── main_teensy_bridge.cpp # teensy_bridge entry point (production)
+│   ├── main_imu_spi_test.cpp  # imu_spi_test entry point
+│   ├── main_imu_test.cpp      # imu_test entry point (I2C)
+│   ├── main.cpp               # ros entry point (legacy)
+│   ├── main_sim.cpp           # sim entry point (legacy)
+│   ├── MicroROS.cpp           # micro-ROS implementation
+│   ├── RosPublishers.cpp      # ROS publisher implementation
+│   └── SerialCommands.cpp     # Serial command parser
+└── platformio.ini             # Build configuration
 ```
 
 ## Hardware Connections
 
 ### Teensy 4.1 Pinout
 
+BNO085 (Adafruit breakout) on hardware SPI0: the wiring of
+`include/BNO085_IMU.h` (used by `teensy_bridge` and the legacy `ros` env) and of
+`imu_spi_test`:
+
+| BNO085 | Teensy pin |
+|--------|------------|
+| SCL (SCK) | 13 (also the onboard LED) |
+| DI (MOSI) | 11 |
+| SDA (MISO) | 12 |
+| CS | 10 |
+| INT | 37 (required for SPI) |
+| RST | 36 |
+| P0, P1 | 3V3 (SPI mode) |
+
+`imu_test` uses I2C instead: SCL 19, SDA 18 (INT 37, RST 36 optional).
+
 | Function | Pin |
 |----------|-----|
-| CAN1 TX | 22 |
-| CAN1 RX | 23 |
-| IMU SCL | 19 |
-| IMU SDA | 18 |
-| IMU INT | 36 |
-| IMU RST | 35 |
-| Status LED | 13 |
+| Network-mode button (`teensy_bridge`) | 2, switch to GND (internal pull-up) |
+| CAN1 TX / RX (legacy `ros`) | 22 / 23 |
+| Status LED (legacy `sim` / `ros`) | 13, shared with SPI SCK |
 
 ### USB Ports
 
-With `USB_DUAL_SERIAL` enabled:
+`teensy_bridge` (`USB_TRIPLE_SERIAL`, enumerates as `16c0:048c`):
+- **if00** (`Serial`) → `/dev/bebop-imu` - binary IMU frames
+- **if02** (`SerialUSB1`) → `/dev/bebop-imu-debug` - diagnostics
+- **if04** (`SerialUSB2`) → `/dev/bebop-control` - control frames (button events)
+
+The `/dev/bebop-*` names are udev symlinks from
+`sudo ./scripts/install-jetson.sh --setup-imu`.
+
+Legacy `sim` / `ros` (`USB_DUAL_SERIAL`):
 - **USB0** (`Serial`) - micro-ROS agent communication
 - **USB1** (`SerialUSB1`) - Debug output and serial commands
 
 ## Updating the Policy
 
-Neural network weights are stored in `include/BebopPolicy.h`. To update:
-
-```bash
-# 1. Export from Isaac Lab
-./isaaclab.sh -p bebop_training/export_bebop_model.py \
-    --checkpoint training_logs/.../model_XXXX.pt \
-    --headless
-
-# 2. Copy to firmware
-cp training_logs/.../BebopPolicy.h firmware/bebop-locomotion/include/
-
-# 3. Rebuild and upload
-cd firmware/bebop-locomotion
-pio run --target upload
-```
+Legacy `sim` / `ros` envs only. The weights are compiled in from
+`include/BebopPolicy.h` (its header: generated 2026-01-29, 30 inputs -> 6
+outputs). Nothing in the tree regenerates it:
+`sim/bebop_training/export_bebop_model.py` stopped writing the header on
+2026-05-10 (`090be8b`) and exports the v2 humanoid's policy to ONNX instead.
 
 ## IDE Setup (VSCode + clangd)
 
 ```bash
-# Generate compilation database
+# Generate compilation database (follows default_envs = sim unless -e is given)
 cd firmware/bebop-locomotion
-pio run -t compiledb
+pio run -e teensy_bridge -t compiledb
 ```
 
-The repo includes `.clangd` at the root pointing to the firmware's `compile_commands.json`.
+`firmware/.clangd` points clangd at the generated `compile_commands.json`.
 
 Ensure your VSCode settings include:
 ```json
@@ -255,7 +303,7 @@ Then restart clangd: `Ctrl+Shift+P` → `clangd: Restart language server`
 
 ### Build fails with missing headers
 ```bash
-pio run -t clean && pio run
+pio run -e <env> -t clean && pio run -e <env>
 ```
 
 ### Upload fails

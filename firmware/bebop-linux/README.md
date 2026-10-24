@@ -1,345 +1,749 @@
-# Bebop Linux Firmware
+# bebop-linux
 
-Linux-based firmware for the Bebop robot using SocketCAN and ONNX Runtime for neural network inference.
+The robot runtime on the Jetson AGX Thor (`bebop-linux.service`): a SocketCAN
+motor/wheel supervisor behind a protobuf-over-WebSocket API on `:9090`. Today
+it drives the wheeled v3 chassis. It keeps the Robstride MIT-mode joint path
+(joint config and limits, the DialIn hold, the joint bench commands,
+`MotorState` telemetry, `sysid`) for the two Robstride arms that come next.
 
-## Features
+| Part | What the runtime does with it |
+|---|---|
+| Two ODrive S1 BotWheels on `can4`, node ids 36 (left) / 46 (right) | differential drive: twist → wheel velocity, wheel-encoder odometry. The front wheels are passive casters |
+| Robstride PowerBoard on `can0`, address `0xAA` | battery / rail / branch-current / fault telemetry at 1 Hz |
+| Robstride RS01–RS04 joints | MIT-mode hold and bench commands; `bebop_wheeled.yaml` has no `joints:` yet |
+| BNO085 behind the Teensy 4.1 `teensy_bridge` (USB serial) | orientation telemetry, only when the YAML has an `imu:` block (`bebop_wheeled.yaml` has none) |
+| `bebop-vision`, `bebop-voice`, `bebop-model-download@<id>` | started (vision and voice also stopped) through `systemctl` for the app; unit state mirrored in telemetry |
+| `--capture-dir` (`/var/lib/bebop-captures`) | the always-on 1 Hz `system_*.mcap` log; capture listing, download and Rerun conversion over HTTP |
 
-- **50 Hz control loop** (configurable up to 200+ Hz)
-- **SocketCAN** for direct CAN bus communication
-- **ONNX Runtime** for neural network policy inference
-- **Robstride motor support** (RS01-RS04) with MIT-style impedance control
-- **ODrive motor support** (S1) with velocity control
-- **Protobuf-over-WebSocket runtime API** (`ws://<robot>:9090/ws`) for teleoperation
-- **Safety checks** with IMU-based fall detection
+Clients: `bebop-app`, and bebop-vision's `RobotClient` (the recorder and the
+voice agent).
 
 ## Architecture
 
+### Threads
+
+| Thread | Rate | Work |
+|---|---|---|
+| `control-loop` (OS thread, `SCHED_FIFO` priority 80) | 100 Hz | watchdog → telemetry probe → drive → joint hold (DialIn only) |
+| `rx-<iface>`, one per bus that opened at startup | per frame | drain the socket; route Robstride, ODrive and PowerBoard frames to the supervisor |
+| `powerboard-<iface>` | `power.poll_interval_ms` (1 s) | status and branch-current queries |
+| IMU serial reader (only with `imu:`) | per frame | Teensy frames → the shared IMU snapshot |
+| `system-capture` | 1 Hz | the `system_*.mcap` log |
+| `vision-service`, `voice-service`, `model-provision` | 1.5 s poll | `systemctl` bridges and model provisioning |
+| tokio runtime | | HTTP and WebSocket server; per connection a reader, a telemetry pump, an event forwarder and a writer |
+
+### Control loop
+
+`src/main.rs`, `src/realtime.rs`. The loop is a dedicated OS thread, not a
+tokio task: it raises itself to `SCHED_FIFO` priority 80 and sleeps on an
+absolute `CLOCK_MONOTONIC` deadline (`clock_nanosleep(TIMER_ABSTIME)`), so its
+wakes don't drift; a tick that falls a full period behind is dropped, not
+replayed. Without `CAP_SYS_NICE` it logs a warning and runs under
+`SCHED_OTHER`.
+
+Loop health is logged every 5 s on target `bebop_linux::loop`:
+`100 Hz control loop healthy` at INFO (`hz`, `cycles`, `mean_work_us`,
+`max_work_us`, `max_interval_us`), or `100 Hz control loop missing its
+deadline` at WARN (plus `overruns`, `late_wakes`) once a tick's work took more
+than 10 ms or a wake-to-wake interval exceeded 15 ms.
+
+### Supervisor
+
+`src/safety/`. Every motor TX goes through `Supervisor`.
+
+- **Clamp.** Joint targets to `[pos_min, pos_max]`, velocity and torque
+  feed-forward to `vel_max` / `tau_max`; wheel commands to the wheel's
+  `vel_max`.
+- **Slew.** A joint target moves at most `slew.max_pos_step_per_tick` per tick
+  (a `SetMotorTarget` jump bypasses it: see the gap under
+  [Robstride joints](#robstride-joints)), a wheel command at most 1.0 rad/s
+  per tick.
+- **Direction.** Each actuator's `direction` sign is applied at the
+  motor⇄robot boundary, so everything above the drivers is in the robot
+  (URDF) frame.
+- **Feedback checks.** E-STOP latches on: feedback from an armed joint outside
+  its position envelope, above `vel_max` / `tau_max` / `temp_max`, or carrying
+  fault bits; a Robstride fault frame (type `0x15`) from any configured motor;
+  an ODrive heartbeat reporting an axis error from any configured wheel; a
+  failed joint or wheel command send.
+- **Watchdog.** In DialIn, an armed joint or wheel that has reported at least
+  once and then goes `feedback_timeout_ms` without a frame latches E-STOP.
+- **E-STOP latch.** Releases the drive seat, sends Disable to every joint and
+  wheel three times, and marks everything disarmed. While it is latched
+  nothing can be armed, the only mode change is to Idle, and no motion command
+  is sent. `ResetEStop` clears the latch and sends ODrive `Clear_Errors` to
+  every wheel; the mode is unchanged and everything stays disarmed.
+- **Shutdown.** The supervisor's `Drop` sends Disable to every motor on every
+  bus three times.
+- **Drive seat.** One connection drives at a time, and a person preempts an
+  autonomous client: see [Runtime API](#runtime-api).
+
+### Modes
+
+`src/mode.rs`.
+
+| Mode | Proto | Can arm | Per tick |
+|---|---|---|---|
+| Idle (boot) | `MODE_IDLE = 1` | nothing | telemetry probe; no watchdog |
+| DialIn (the app shows Drive / Armed) | `MODE_DIAL_IN = 2` | wheels and joints | watchdog, the twist for armed wheels, the hold cycle for armed joints |
+
+- Idle → DialIn arms nothing. DialIn → Idle disarms every joint and wheel and
+  releases the drive seat.
+- With E-STOP latched only `SetMode(MODE_IDLE)` is accepted; `ResetEStop`
+  does not change the mode.
+- Arming outside DialIn: `arming is only allowed in DialIn mode (currently Idle)`.
+- Any other mode value, the removed `MODE_RUN_POLICY = 3` included:
+  `unknown mode value 3`.
+
+### CAN buses
+
+`src/safety/bus_pool.rs`, `src/can_interface.rs`.
+
+- The bus list is every `can_interface` named under `wheels:`, `joints:` and
+  `power:`; the YAML has no separate list. Each bus gets one SocketCAN socket
+  at startup. A bus in `ERROR-PASSIVE` or `BUS-OFF` is logged with recovery
+  steps and a missing one with a warning; neither is fatal.
+- Arming and re-zeroing re-read the controller state
+  (`ip -details link show <iface>`) and refuse anything but `ERROR-ACTIVE`.
+- `BusPool::refresh_if_due` runs from the telemetry builder (so only while a
+  client streams telemetry or asks for a snapshot), at most every 5 s. It
+  re-opens a bus that is `BUS-OFF` (after `ip link set <iface> down` / `up`),
+  one that reads `ERROR-ACTIVE` while the last send on its socket failed (the
+  stale socket a USB-CAN replug leaves), and one that reads `ERROR-ACTIVE`
+  with no socket yet (absent at startup). While a netdev is gone it retries
+  the open on every pass. `ERROR-PASSIVE` alone (an unpowered peer) is left
+  as is.
+- **Gap (from the code; not reproduced on the robot).** Only the TX socket is
+  replaced, and after a replug only once a send on the stale socket has failed
+  (the PowerBoard poller's next query on its bus, the first arm attempt on a
+  wheel bus). The `rx-<iface>` threads and the PowerBoard poller keep the socket
+  they started with, and a bus that was absent at startup gets no RX thread
+  (nor, for the power bus, a poller), so feedback and power polling on a
+  re-opened or late bus stay dead until `bebop-linux` restarts.
+
+### Drive and odometry
+
+`src/drive.rs`.
+
+- Twist (`vx` m/s forward, `wz` rad/s, + = counter-clockwise) → wheel rad/s:
+  `v_l = (vx − wz·h) / r`, `v_r = (vx + wz·h) / r`, where `h` is half of
+  `drive.track_width` and `r` is `drive.wheel_radius`.
+- Each armed wheel: clamp to `vel_max`, slew, apply `direction`, send
+  `Set_Input_Vel` in turns/s.
+- Odometry: wheel encoders only (no IMU fusion), midpoint integration of the
+  measured wheel velocities every tick while at least one wheel is armed.
+  `ResetOdometry` zeroes it; it rides `DriveState.odom_x` / `odom_y` /
+  `odom_theta`.
+- `track_width: 0.402` is the effective track that makes encoder yaw match the
+  camera-IMU yaw: the geometric center-to-center is 369 mm and the casters
+  scrub in turns (`config/bebop_wheeled.yaml`). Odometry yaw over-read
+  in-place turns ~2× on carpet live on 2026-10-21, but stayed within 10 % of
+  the gyro on the 2026-10-18 drives (`AGENTS.md`); the camera gyros are the
+  heading reference.
+
+### ODrive wheels
+
+`src/odrive.rs`.
+
+- CANSimple, 11-bit ids `(node_id << 5) | cmd_id`: node 36's heartbeat is
+  `0x481`, node 46's encoder frame `0x5C9` (checked against live S1 traffic).
+- Arm: `Clear_Errors`, 10 ms, `Set_Controller_Mode` (velocity, passthrough),
+  `Set_Axis_State` `CLOSED_LOOP_CONTROL`. Disarm: `Set_Axis_State` `IDLE`.
+- Feedback is cyclic: the heartbeat `0x01` (axis error and state, 100 ms by
+  default) and encoder estimates `0x09` (10 ms by default).
+  `WheelState.axis_state` is the raw axis state: armed but still `IDLE` (1) is
+  the silent enable failure of a lost encoder calibration.
+- `CalibrateWheel` runs `FULL_CALIBRATION_SEQUENCE` on a disarmed wheel, in
+  either mode (the axis spins for ~20–30 s). CAN cannot save the result to the
+  S1: re-run it after a power cycle, or save it once over USB with
+  `odrivetool` (`save_configuration()`).
+- The firmware never assigns node ids. Set each S1's over USB first
+  (`odrv0.axis0.config.can.node_id = 36`).
+
+### PowerBoard
+
+`src/powerboard.rs`, `src/safety/power_monitor.rs`.
+
+- 29-bit extended frames. Every `poll_interval_ms` the poller sends a status
+  query (the reply carries battery and motor-rail voltage, board temperature,
+  the fault word and the rail states) and a branch-current query (AL / AR /
+  LL / LR); a version query goes out once at start.
+- Faults are logged at WARN and never latch E-STOP. The rail-control frame is
+  not sent.
+- `PowerStats`: `present` iff `power:` is configured; `status_stale` once the
+  last status reply is older than max(3 × poll interval, 2 s) (false before
+  the first reply: check `status_received`). State of charge is a linear
+  interpolation between `battery_cells × cell_empty_voltage` and
+  `battery_cells × cell_full_voltage` (−1 before the first reply), so it reads
+  low under heavy current draw.
+
+### IMU (optional)
+
+`src/imu_serial.rs`, `src/imu.rs`. Only with an `imu:` block; without one
+`ImuStats.present = false`. The BNO085 is wired to the Teensy 4.1
+(`firmware/bebop-locomotion`, env `teensy_bridge`), which streams 52-byte
+frames at 200 Hz over USB CDC: magic `0xBE 0xB0`, the raw sensor-frame
+quaternion from SH-2 report 0x28, gyro, accel and a CRC-16/CCITT-FALSE
+(`firmware/bebop-locomotion/include/ImuSerialProtocol.h`). The reader opens
+`imu.serial_device`, retries forever (0.5–5 s backoff), reopens the port after
+6 s of silence, applies `imu.mount:` and publishes a body-frame (FLU) XYZW
+quaternion. `ImuStats` carries `received`, `stale` (no frame for
+max(3 × `rotation_vector_period_ms`, 250 ms)), `last_update_age_ms` and the
+quaternion; the gyro is parsed but not sent.
+
+### Robstride joints
+
+`src/robstride.rs`; nothing configures one yet.
+
+- 29-bit extended frames, host id `0xFD`. The MIT operation-control frame
+  (type `0x01`) packs position on ±12.57 rad (±4π), velocity and torque on the
+  model's range, kp on 0–5000 and kd on 0–100 for every model.
+
+  | Model | Torque (Nm) | Velocity (rad/s) |
+  |---|---|---|
+  | RS01 | ±12 | ±45 |
+  | RS02 | ±17 | ±30 |
+  | RS03 | ±60 | ±20 |
+  | RS04 | ±120 | ±15 |
+
+  `RobstrideSpecs` also lists `kp_max` / `kd_max` per model (500 / 5 for RS01
+  and RS02); only `sysid` reads them, to clamp its own gains. Which kp / kd
+  wire range an RS01 or RS02 expects is unverified: check before configuring
+  one.
+- Feedback (`0x02`) and active reports (`0x18`) share one decoder; a fault
+  frame (`0x15`) latches E-STOP with its raw payload.
+- Arming needs DialIn, no E-STOP, a healthy bus and the joint inside its
+  position envelope. The slew tracker starts at the current position, and
+  every tick re-sends the hold target with `hold_gains`.
+- `SetMotorTarget` clamps the target to the envelope. **Known gap:** it writes
+  the target straight into the slew tracker, so a target jump reaches the
+  motor in one step instead of being slew-limited (inert while no joints are
+  configured).
+- `SetMechanicalZero` (disarmed joint, healthy bus): Disable, 20 ms, `SET_ZERO`
+  (`0x06`, stored in the motor's flash), 20 ms. `SetMechanicalZeroAll` checks
+  every joint first (all disarmed, every bus healthy), re-zeroes them all,
+  waits 150 ms and reports `VERIFY FAILED` for any joint whose fresh position
+  reads beyond ±0.05 rad or that has sent no feedback.
+- While any client subscribes to telemetry, disarmed joints are enabled with
+  zero gains and 10 ms active reporting, so positions stream in Idle (one
+  joint re-asserted per tick, each once a second); the last unsubscribe
+  disables them.
+- The parameter and run-mode register map (`param::*`, `mode::*`, `GET_ID`,
+  `PARAM_READ`, `PARAM_WRITE`) is kept for the arms; nothing sends it yet.
+
+### HTTP
+
+`src/server/ws.rs`. On `server.bind_addr` (`0.0.0.0:9090`), with permissive
+CORS.
+
+| Route | Does |
+|---|---|
+| `GET /healthz` | `ok` |
+| `GET /ws` | the [runtime API](#runtime-api) |
+| `GET /captures` | `{"files": [{name, sizeBytes, modifiedMs, active}]}`, newest first. Only `navd_session_*.mcap` (bebop-vision's recorder) and `system_*.mcap`; `active` marks the open system segment |
+| `POST /captures/finalize` | roll the open `system_*` segment over (waits up to 3 s for the next one) and return `{"ok": true}`; used by `bebop-vision/tools/pull_captures.py` |
+| `GET /captures/finalize-dl/<name>` | finalize `<name>` first if it is the open system segment, then redirect (307) to `/captures/dl/<name>`; the app downloads the live segment this way |
+| `GET /captures/rrd/<stem>.rrd` | convert `<stem>.mcap` with `--rerun-converter` and serve the `.rrd`, cached next to it (reused while newer than the MCAP; the oldest `.rrd` evicted above 4 GiB); 503 until `scripts/setup-rerun.sh` has installed the converter |
+| `GET /captures/dl/<name>` | any file in the capture dir, with range requests |
+
+Old `policy_capture_*.mcap` files are no longer listed but still download
+through `/captures/dl/<name>`.
+
+### Service bridges
+
+`src/vision.rs`, `src/voice.rs`. `SetVisionEnabled` / `SetVoiceEnabled` queue
+`systemctl start` or `stop` of `bebop-vision.service` / `bebop-voice.service`
+on a background thread and ack at once (a first voice start can take minutes
+while TensorRT engines build). Each bridge polls `systemctl show` every 1.5 s
+into `VisionState` / `VoiceState`: `present` (`LoadState=loaded`), `running`
+(`ActiveState=active`), `state` (`ActiveState`), `detail` (`SubState`, plus
+`Result` when it isn't `success`, or the last `systemctl` error) and
+`service`. Both are separate units because this one is sandboxed
+(`ProtectHome=read-only`, `PrivateTmp=true`); `install-jetson.sh` installs
+them un-enabled, and `--enable-autostart` opts them into boot.
+
+### Model provisioning
+
+`src/model.rs`.
+
+- The catalog is `/home/bebop/bebop/bebop-vision/config/models.yaml`, shared
+  with the Python downloader and read at startup.
+- `SetHfToken` writes `/etc/bebop/hf_token` (mode 0600, atomic rename);
+  `ClearHfToken` deletes it. The token is never echoed back; telemetry carries
+  only `ModelState.token_set`.
+- `DownloadModel` checks the id (known, `kind: hf`), the template unit and, for
+  a gated repo, the token, then runs
+  `systemctl start --no-block bebop-model-download@<id>.service`. Progress
+  comes from `/run/bebop/models/<id>.json`; readiness from the files under
+  `/home/bebop/bebop/bebop-vision/weights` (for a snapshot download, its
+  `.bebop-complete` marker).
+- `ModelState`: `token_set`, `present` (the template unit is installed),
+  `disk_free_bytes`, `detail`, and per catalog entry its catalog fields plus
+  the live `ready`, `state` (`idle`, `downloading`, `ready`, `failed`,
+  `unauthorized`), `detail`, `bytes_downloaded` and `bytes_total`.
+  `kind: local` entries report presence only. There is no per-purpose model
+  selection.
+
+### System log
+
+`src/system_capture.rs`, `protos/system.proto`. The firmware's only MCAP
+writer: on from start to exit (idle, thermal soak and spin-up included), at
+1 Hz, into `--capture-dir`.
+
+| Channel | Schema | Content |
+|---|---|---|
+| `/power` | `bebop.system.Power` | the PowerBoard snapshot: voltages, branch currents, board temperature, fault word, state of charge |
+| `/host` | `bebop.system.Host` | CPU, GPU, RAM, capture-disk fill, load averages, thermal zones |
+| `/session` | `bebop.system.SessionMarker` | `start` / `stop` when drive-active (DialIn, no E-STOP, every wheel armed) flips; `session` is a `%Y%m%d_%H%M%S` stamp, the `navd_session_*.mcap` naming format, for joining a drive session to the system timeline |
+
+Protobuf with the `FileDescriptorSet` embedded (generated by `build.rs`), Zstd
+chunks, one file per `system_<YYYYmmdd_HHMMSS>.mcap`. It is flushed every 1 s
+and fsynced every 5 s, and rotates daily, at 64 MiB, or on a finalize request;
+the oldest `system_*` files (and their `.rrd`) are pruned above 2 GiB. SIGTERM
+and Ctrl-C finish the open file with a footer.
+
+### Source
+
+| Path | |
+|---|---|
+| `src/main.rs` | CLI, startup, the control loop, shutdown |
+| `src/config.rs` | YAML schema and validation, Robstride model specs |
+| `src/mode.rs` | Idle / DialIn |
+| `src/safety/` | `supervisor.rs` (TX path, drive seat, watchdog, E-STOP, RX threads), `bus_pool.rs`, `limits.rs`, `power_monitor.rs` |
+| `src/can_interface.rs` | SocketCAN wrapper and frame parsers |
+| `src/robstride.rs`, `src/odrive.rs`, `src/powerboard.rs` | device protocols |
+| `src/drive.rs` | differential-drive kinematics and odometry |
+| `src/imu.rs`, `src/imu_serial.rs` | the IMU snapshot and the Teensy reader |
+| `src/server/` | routes and connection tasks (`ws.rs`), request dispatch (`handlers.rs`), telemetry frames (`telemetry.rs`) |
+| `src/system_capture.rs`, `src/capture_control.rs`, `protos/system.proto`, `build.rs` | the system log and its finalize control |
+| `src/vision.rs`, `src/voice.rs`, `src/model.rs` | systemd bridges, model provisioning |
+| `src/realtime.rs` | `SCHED_FIFO` and absolute-deadline sleep |
+| `src/bin/sysid.rs` | the actuator sysid bench |
+| `config/bebop_wheeled.yaml` | the robot config |
+| `deploy/systemd/bebop-linux.service` | the unit |
+
+## Requirements and build
+
+- Linux with SocketCAN. The robot is a Jetson AGX Thor (JetPack 7.2, aarch64).
+- Rust (CI pins 1.90.0), `protoc` (apt `protobuf-compiler`; prost-build
+  compiles `bebop-proto` and `protos/system.proto` at build time) and a C
+  compiler for the vendored zstd. No ONNX Runtime, no libudev.
+
+```sh
+cd firmware/bebop-linux
+cargo build --release    # target/release/bebop-linux and target/release/sysid
+cargo test               # no CAN hardware needed
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Main Control Loop (50 Hz)                │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │   IMU    │→ │  Observe │→ │  Policy  │→ │ Commands │   │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
-│        ↑                          ↑              │          │
-│        │                          │              ↓          │
-│  ┌──────────┐              ┌──────────┐   ┌──────────┐    │
-│  │    WS    │              │   ONNX   │   │ SocketCAN│    │
-│  │ /ws 9090 │              │  Model   │   │   Bus    │    │
-│  └──────────┘              └──────────┘   └──────────┘    │
-└─────────────────────────────────────────────────────────────┘
-                                                  │
-                    ┌─────────────────────────────┼─────────────────────────────┐
-                    ↓                             ↓                             ↓
-            ┌──────────────┐             ┌──────────────┐             ┌──────────────┐
-            │  Robstride   │             │  Robstride   │             │   ODrive     │
-            │  Hip Motor   │             │  Knee Motor  │             │   Wheel      │
-            └──────────────┘             └──────────────┘             └──────────────┘
+
+CI (`.github/workflows/ci.yml`, `RUSTFLAGS=-D warnings`, apt
+`protobuf-compiler` only):
+
+| Job | Runner | Steps |
+|---|---|---|
+| `firmware-rust` | `ubuntu-latest` | `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` |
+| `firmware-jetson` | `ubuntu-22.04-arm` | `cargo build --release`, stage and upload the bundle; on a `firmware/v*` tag, also publish a GitHub Release |
+
+There is no crate-wide `allow(dead_code)`: the only `dead_code` allows are on
+the Robstride register tables and the PowerBoard rail-control constants.
+
+## Release and deploy
+
+### Bundle
+
+`firmware-jetson` packs `bebop-linux-aarch64.tar.gz` and its `.sha256` on every
+CI run (artifact `bebop-linux-aarch64`) and attaches both to a GitHub Release
+on `firmware/v*` tags:
+
+```
+bin/bebop-linux
+config/*.yaml                 # today only bebop_wheeled.yaml
+systemd/bebop-linux.service
+VERSION                       # sha, ref, run_id, built_at
 ```
 
-## Requirements
-
-### System Requirements
-
-- Linux (tested on Ubuntu 22.04+, Raspberry Pi OS, Jetson)
-- Rust 1.70+ (install via [rustup](https://rustup.rs/))
-- CAN bus interface (USB-CAN adapter, built-in CAN, etc.)
-- ONNX Runtime 1.16+ (dynamically loaded)
-
-### Hardware Setup
-
-1. **CAN Interface**: Configure your CAN interface at 1 Mbps:
-
-```bash
-# Bring up can0 at 1 Mbps
-sudo ip link set can0 type can bitrate 1000000
-sudo ip link set can0 up
-
-# Verify
-ip link show can0
+```sh
+git tag firmware/v0.2.0 && git push origin firmware/v0.2.0    # cut a release
 ```
 
-2. **ONNX Runtime**: Install ONNX Runtime:
+### Install
 
-```bash
-# Download from https://github.com/microsoft/onnxruntime/releases
-# Or install via package manager if available
+`scripts/install-jetson.sh`, run on the robot from `~/bebop`:
 
-# For aarch64 (Jetson, Raspberry Pi):
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-linux-aarch64-1.16.3.tgz
-tar xzf onnxruntime-linux-aarch64-1.16.3.tgz
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/onnxruntime-linux-aarch64-1.16.3/lib
-
-# For x86_64:
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-linux-x64-1.16.3.tgz
-```
-
-## Building
-
-```bash
-# Debug build
-cargo build
-
-# Release build (optimized)
-cargo build --release
-
-# Run tests
-cargo test
-```
-
-## Releasing & deploying to a Jetson
-
-`bebop-linux` ships as a single tarball that bundles the aarch64 binary,
-the joint config (`bebop_v2.yaml`), the ONNX policy (`policy.onnx` +
-`policy.onnx.data`), and the systemd unit. The robot's runtime, config
-and policy weights are always rolled forward together so a "good build"
-on the Jetson is exactly the contents of one tarball.
-
-### Cutting a release
-
-```bash
-# from a clean main checkout
-git tag firmware/v0.2.0
-git push origin firmware/v0.2.0
-```
-
-The `firmware-jetson` job in `.github/workflows/ci.yml` builds the
-binary on `ubuntu-22.04-arm`, packs `bebop-linux-aarch64.tar.gz`
-(`bin/`, `config/`, `systemd/`, `VERSION`) with a sibling `.sha256`,
-and publishes both to a GitHub Release named after the tag.
-
-### Installing on the Jetson
-
-The `scripts/install-jetson.sh` installer fetches the latest matching
-Release by default. From any reasonably fresh checkout on the robot:
-
-```bash
-sudo ./scripts/install-jetson.sh --linux-only
-```
-
-That one command installs the latest tagged firmware bundle, writes the
-config and policy into `/etc/bebop/`, installs the systemd unit, and
-enables + restarts `bebop-linux.service`.
-
-For pinned or pre-release installs:
-
-```bash
+```sh
+sudo ./scripts/install-jetson.sh --linux-only                      # latest firmware/v* Release
 sudo ./scripts/install-jetson.sh --linux-only --release firmware/v0.2.0
-sudo ./scripts/install-jetson.sh --linux-only --run-id N
+sudo ./scripts/install-jetson.sh --linux-only --run-id <CI_RUN_ID>  # one CI run's artifact
+sudo ./scripts/install-jetson.sh --linux-only --local [--build]     # this checkout
 ```
 
-For installing straight from a local checkout (no GitHub round-trip —
-useful for on-device dev iteration):
+- Without `--linux-only` the same run also installs `bebop-agent`.
+- The GitHub sources need `gh` authenticated (root's, or the invoking user's,
+  which the installer reuses). The bundle's checksum is verified when a
+  `.sha256` ships with it.
+- `--local` stages `target/release/bebop-linux`, `config/*.yaml` and the unit
+  from the working tree, without GitHub; `--build` first runs
+  `cargo build --release` as the invoking user in a login shell.
 
-```bash
-# build first, then install the pre-built binary + working-tree configs
-cargo build --release            # in firmware/bebop-linux/
-sudo ./scripts/install-jetson.sh --linux-only --local
+What it lays down:
 
-# or do both in one shot (cargo runs as your invoking user)
-sudo ./scripts/install-jetson.sh --linux-only --local --build
-```
+| Path | |
+|---|---|
+| `/usr/local/bin/bebop-linux` | the binary |
+| `/etc/bebop/<config>.yaml` | the active config (`bebop_wheeled.yaml` by default), replaced on every run; the previous copy is kept as `<config>.yaml.bak` when it differed |
+| `/etc/bebop/config-yaml-name` | the active config's filename, reused by later runs |
+| `/etc/systemd/system/bebop-linux.service` | `ExecStart` runs `--config /etc/bebop/bebop_wheeled.yaml --capture-dir /var/lib/bebop-captures` |
+| `/etc/systemd/system/bebop-linux.service.d/10-config.conf` | only when the shipped unit doesn't already run the active config (a non-default `--config-yaml`, or an older bundle); removed otherwise |
+| `/var/lib/bebop-captures/` | the capture dir, owned root:root 0750 by the unit's `StateDirectory=` |
 
-It lays things down as:
+The same run installs `bebop-vision.service`, `bebop-voice.service` and
+`bebop-model-download@.service` un-enabled (fetched from `main`, or
+`--branch`, through the GitHub contents API; from the working tree with
+`--local`), installs and enables `bebop-gpu-clocks.service`, then enables and
+restarts `bebop-linux`.
 
-```
-/usr/local/bin/bebop-linux
-/etc/bebop/bebop_v2.yaml          # overwritten; previous saved as .yaml.bak
-/etc/bebop/policy.onnx            # graph
-/etc/bebop/policy.onnx.data       # external-data weights (must travel with policy.onnx)
-/etc/systemd/system/bebop-linux.service
-```
+The active config is `--config-yaml <name>.yaml`, else
+`/etc/bebop/config-yaml-name`, else `bebop_wheeled.yaml`, and must be a
+`config/*.yaml` in the bundle. A robot that still remembers `bebop_v2.yaml`
+stops with `bundle is missing bebop_v2.yaml ... pick one with --config-yaml
+<name> (later runs remember it)`: run once with `--config-yaml bebop_wheeled.yaml`.
 
-The unit invokes `bebop-linux --config /etc/bebop/bebop_v2.yaml`, which
-resolves `--policy` to `<config-dir>/policy.onnx` by default — so the
-policy files just need to sit next to the YAML.
+Older installs can leave `/etc/bebop/bebop_v2.yaml`,
+`/etc/bebop/policy.onnx{,.data}` and `/etc/bebop/model_selection.json` behind.
+Nothing reads them; delete them by hand.
 
-### Rolling back
+Deploy the firmware, bebop-vision and the app from the same commit: the runtime
+proto dropped fields on 2026-10-24 (see `jetson-agent/bebop-proto/README.md`).
 
-Either re-run the installer pointing at the previous tag
-(`--release firmware/v0.1.9`) or restore the saved YAML on its own:
+Host setup for the buses and the Teensy: `--setup-can` blacklists `mttcan`,
+loads `gs_usb` and has systemd-networkd bring every `can*` up at 1 Mbps
+(`--build-gs-usb` builds `gs_usb` when the kernel lacks it); `--setup-imu`
+writes the Teensy `16c0:048c` udev rule (`/dev/bebop-imu`,
+`/dev/bebop-imu-debug`, `/dev/bebop-control`).
 
-```bash
-sudo mv /etc/bebop/bebop_v2.yaml.bak /etc/bebop/bebop_v2.yaml
+### Roll back
+
+```sh
+sudo ./scripts/install-jetson.sh --linux-only --release <older tag>
+# or only the config:
+sudo mv /etc/bebop/bebop_wheeled.yaml.bak /etc/bebop/bebop_wheeled.yaml
 sudo systemctl restart bebop-linux
 ```
 
 ## Running
 
-### Basic Usage
-
-```bash
-# Run with default settings
-./target/release/bebop-linux --model model.onnx
-
-# Specify CAN interface
-./target/release/bebop-linux --model model.onnx --can can0
-
-# Run at 100 Hz
-./target/release/bebop-linux --model model.onnx --rate 100
-
-# Simulation mode (no hardware)
-./target/release/bebop-linux --sim
-
-# Passthrough mode (no policy)
-./target/release/bebop-linux --no-policy
+```
+bebop-linux [-c|--config <PATH>] [--capture-dir <DIR>] [--rerun-converter <PATH>] [-h|--help]
 ```
 
-### Command Line Options
+| Flag | Default | |
+|---|---|---|
+| `-c`, `--config <PATH>` | `config/bebop_wheeled.yaml` (relative to the working directory) | the robot YAML; there is no built-in fallback |
+| `--capture-dir <DIR>` | `~/bebop-captures` (`~` from `$HOME`) | system log output, and what `/captures` lists and serves |
+| `--rerun-converter <PATH>` | `/usr/local/bin/bebop-mcap-to-rrd` | the MCAP → `.rrd` converter behind `/captures/rrd` |
+| `-h`, `--help` | | print usage, exit 0 |
 
-| Option | Short | Default | Description |
-|--------|-------|---------|-------------|
-| `--model` | `-m` | `model.onnx` | Path to ONNX policy file |
-| `--can` | `-c` | `can0` | CAN interface name |
-| `--rate` | `-r` | `50` | Control loop rate (Hz) |
-| `--no-policy` | | | Disable policy, passthrough mode |
-| `--sim` | | | Simulation mode (no hardware) |
-| `--help` | `-h` | | Print help |
+Any other argument prints `unknown arg: <arg>` and exits 2, the removed
+`--policy` / `-p` included: a hand-written unit override that still passes it
+crash-loops under `Restart=on-failure`.
 
-### Environment Variables
+`RUST_LOG` sets the log filter (default `info,bebop_linux=debug`; the unit sets
+`info,bebop_linux=info`). The unit runs as root: `SCHED_FIFO` needs
+`CAP_SYS_NICE`, the HF token is root-only, and the bridges call `systemctl`.
+systemd's SIGTERM, like Ctrl-C, shuts down cleanly: the threads stop, the
+system log gets its footer, and every motor is disabled.
 
-```bash
-# Set log level
-export RUST_LOG=debug  # or info, warn, error
+By hand, from a checkout:
 
-# Specify CAN interfaces
-export CAN_INTERFACES=can0,can1,can2,can3
+```sh
+sudo systemctl stop bebop-linux     # it holds :9090 and drives the same buses
+cd firmware/bebop-linux && cargo build --release
+sudo RUST_LOG=info ./target/release/bebop-linux \
+    --config config/bebop_wheeled.yaml --capture-dir /tmp/bebop-captures
+```
+
+Live checks: `systemctl is-active bebop-linux`,
+`curl http://127.0.0.1:9090/healthz`, `journalctl -u bebop-linux -n 50 --no-pager`.
+
+## Configuration
+
+One YAML, loaded at startup: `config/bebop_wheeled.yaml` ships and is
+installed as `/etc/bebop/bebop_wheeled.yaml`. A config needs `wheels:`,
+`joints:` or both; any validation error stops startup (the unit retries every
+3 s). Unknown keys are ignored, so older files still load (unless they set
+`imu.source: spi`); these are no longer read: `defaults.policy`,
+`policy_gain_clamps`, `slew.arm_ramp_s`, `slew.abort_ramp_s`,
+`wheels.*.torque_limit`, `imu.spi_device`, `imu.int_chip`, `imu.int_line`,
+`imu.rst_chip`, `imu.rst_line`, `imu.spi_max_speed_hz`.
+
+The shipped values:
+
+```yaml
+wheels:
+  left:  { can_interface: can4, node_id: 36, direction: 1.0,  vel_max: 20.0, feedback_timeout_ms: 250 }
+  right: { can_interface: can4, node_id: 46, direction: -1.0, vel_max: 20.0, feedback_timeout_ms: 250 }
+drive:   { left_wheel: left, right_wheel: right, wheel_radius: 0.0855, track_width: 0.402 }
+power:   { can_interface: can0, power_id: 170, poll_interval_ms: 1000,
+           battery_cells: 13, cell_full_voltage: 4.20, cell_empty_voltage: 3.00 }
+server:  { bind_addr: 0.0.0.0:9090, telemetry_default_hz: 30, telemetry_max_hz: 100,
+           operator_timeout_ms: 500, operator_grace_ms: 2000 }
+```
+
+### `wheels.<name>`
+
+| Key | Default | |
+|---|---|---|
+| `can_interface` | required | |
+| `node_id` | required | 0–63, unique per bus; set on the S1 over USB |
+| `direction` | `1` | `+1` / `-1`, the motor → robot sign |
+| `vel_max` | required | rad/s. Every commanded wheel speed is clamped to it (20 rad/s ≈ 1.7 m/s on the 0.0855 m wheel); the measured speed is not checked against it |
+| `feedback_timeout_ms` | `100` | the watchdog budget (encoder frames every 10 ms, heartbeats every 100 ms) |
+
+### `drive`
+
+| Key | |
+|---|---|
+| `left_wheel`, `right_wheel` | names under `wheels:` (required) |
+| `wheel_radius` | m (required); the BotWheel is 171 mm across |
+| `track_width` | the full left-right spacing in m (required); the firmware stores half |
+
+### `power`
+
+| Key | Default | |
+|---|---|---|
+| `can_interface` | required | `can0` on this robot (wiring confirmed 2026-10-03; pointed at `can4` it reads zero) |
+| `power_id` | `170` (`0xAA`) | the board address, 0–255 |
+| `poll_interval_ms` | `1000` | at least 50 |
+| `battery_cells` | `13` | series count; the pack is 13s2p Molicel INR21700-P45B |
+| `cell_full_voltage` | `4.20` | V per cell |
+| `cell_empty_voltage` | `3.00` | V per cell, a conservative anchor (the P45B cutoff is 2.50 V) |
+
+Without `power:` the runtime starts the same and reports
+`power.present = false`.
+
+### `server`
+
+| Key | Default | |
+|---|---|---|
+| `bind_addr` | `0.0.0.0:9090` | |
+| `telemetry_default_hz` | `30` | the rate for `SubscribeTelemetry.rate_hz = 0` |
+| `telemetry_max_hz` | `100` | cap on a requested rate |
+| `operator_timeout_ms` | `500` | a non-zero twist not refreshed this long is zeroed; `0` disables |
+| `operator_grace_ms` | `2000` | the drive-seat grace; `0` disables arbitration (last writer wins) |
+
+### `joints.<name>` and `defaults` (the arms)
+
+No shipped config has a `joints:` block yet. Joint order follows the YAML.
+
+| Key | Default | |
+|---|---|---|
+| `can_interface` | required | |
+| `motor_id` | required | 1–255, unique per bus |
+| `model` | required | `RS01`, `RS02`, `RS03`, `RS04` |
+| `hard_limits.pos_min` / `pos_max` | `-0.5` / `0.5` | rad, robot frame; `pos_min < pos_max` |
+| `hard_limits.vel_max` | `2.0` | rad/s |
+| `hard_limits.tau_max` | `8.0` | Nm |
+| `hard_limits.temp_max` | `65.0` | °C |
+| `hard_limits.feedback_timeout_ms` | `100` | |
+| `hold_gains.kp` / `kd` | `5.0` / `1.0` | the DialIn hold |
+| `test_gains.kp` / `kd` | `30.0` / `2.0` | only `kd` is read, by `sysid` (its default `--kd`); `kp` is unused |
+| `slew.max_pos_step_per_tick` | `0.005` | rad per 10 ms tick |
+| `direction` | `1` | `+1` / `-1` |
+
+A top-level `defaults:` block takes the same `hard_limits`, `hold_gains`,
+`test_gains`, `slew` and `direction` keys for every joint; per-joint keys win
+field by field. Joints and wheels can share one config. The shape, as the
+parser test in `src/config.rs` uses it (not the arms' real ids or limits):
+
+```yaml
+defaults:
+  hard_limits: { pos_min: -0.5, pos_max: 0.5, vel_max: 2.0, tau_max: 8.0,
+                 temp_max: 65.0, feedback_timeout_ms: 100 }
+  hold_gains: { kp: 5.0, kd: 1.0 }
+  test_gains: { kp: 30.0, kd: 2.0 }
+  slew: { max_pos_step_per_tick: 0.01 }
+joints:
+  shoulder_pitch_left_joint:
+    can_interface: can1
+    motor_id: 11
+    model: RS03
+    direction: -1
+    hard_limits: { pos_min: -1.5, pos_max: 1.5, tau_max: 30.0 }
+    hold_gains: { kp: 40.0, kd: 3.0 }
+  elbow_left_joint: { can_interface: can1, motor_id: 12, model: RS02 }
+```
+
+### `imu` (optional)
+
+| Key | Default | |
+|---|---|---|
+| `source` | `serial` | aliases `usb`, `teensy`; anything else (`spi` included) is a load error |
+| `serial_device` | `/dev/ttyACM0` | use `/dev/bebop-imu` (from `install-jetson.sh --setup-imu`) |
+| `rotation_vector_period_ms` | `50` | seeds the stale check, max(3 ×, 250 ms); the bridge sends a frame every 5 ms |
+| `mount.sensor_x` / `sensor_y` / `sensor_z` | identity | the body axis (`+x`, `-x`, `+y`, `-y`, `+z`, `-z`; FLU) each sensor axis points along; all three, forming a proper rotation |
+
+```yaml
+imu:
+  serial_device: /dev/bebop-imu
+  rotation_vector_period_ms: 5
+  mount: { sensor_x: "-y", sensor_y: "+x", sensor_z: "+z" }    # example
 ```
 
 ## Runtime API
 
-The operator app (and `bebop-vision`'s `RobotClient`) talk to the runtime
-over a binary protobuf WebSocket on `:9090/ws`, one
-`ClientRuntimeMessage` / `ServerRuntimeMessage` per frame (schema:
-`jetson-agent/bebop-proto/proto/bebop_runtime.proto`). The old UDP JSON
-command port (10000) is gone.
+`ws://<robot>:9090/ws`: one `ClientRuntimeMessage` per binary WebSocket
+message in, one `ServerRuntimeMessage` out, no extra framing (schema:
+`jetson-agent/bebop-proto/proto/bebop_runtime.proto`). Text frames are ignored.
+
+| Request | Effect | Refused when |
+|---|---|---|
+| `ClientHello {name, autonomous}` | names the connection (trimmed, control characters dropped, at most 32 characters; empty clears it) and sets whether it is autonomous | |
+| `SubscribeTelemetry {rate_hz}` / `UnsubscribeTelemetry` | this connection's `TelemetryFrame` stream; `rate_hz = 0` means `telemetry_default_hz`, capped at `telemetry_max_hz` | |
+| `GetSnapshot` | one `Snapshot` (the telemetry frame's fields) | |
+| `SetMode {mode}` | `MODE_IDLE` or `MODE_DIAL_IN` | E-STOP latched (except to Idle); unknown value |
+| `SetVelocityCommand {linear_x, angular_z}` | the drive twist, m/s and rad/s (no effect without `drive:`) | a non-zero twist while another connection holds a fresh seat, unless a person preempts an autonomous holder (a stop is ignored instead) |
+| `SetWheelEnabled {wheel_name, enabled}` / `SetAllWheelsEnabled {enabled}` | arm or disarm wheels | arming: not DialIn, E-STOP, bus unhealthy |
+| `CalibrateWheel {wheel_name}` | ODrive full calibration | wheel armed, E-STOP, bus unhealthy |
+| `ResetOdometry` | zero the odometry pose | |
+| `EmergencyStop {reason}` / `ResetEStop` | latch / clear the E-STOP | reset: no E-STOP latched |
+| `SetMotorEnabled {joint_name, enabled}` / `SetAllMotorsEnabled {enabled}` | arm or disarm joints | arming: not DialIn, E-STOP, bus unhealthy, joint outside its envelope |
+| `SetMotorTarget {joint_name, position_rad}` | the hold target of an armed joint | not DialIn, E-STOP, joint disarmed |
+| `SetMechanicalZero {joint_name}` / `SetMechanicalZeroAll` | re-zero joints | E-STOP, a joint armed, a bus unhealthy |
+| `SetVisionEnabled {enabled}` / `SetVoiceEnabled {enabled}` | start or stop the unit | unit not installed |
+| `SetHfToken {token}` / `ClearHfToken` / `DownloadModel {model_id}` | model provisioning | see [Model provisioning](#model-provisioning) |
+| `RestartRuntime` | acks, then `systemctl restart --no-block bebop-linux.service`; the link drops | anything armed |
+
+Replies carry the request's `request_id`: `Ack {ok, message}`, `Error
+{message}` or `Snapshot`. An accepted `SetVelocityCommand` gets no reply at
+all; a rejected one gets an `Error`. Pushed with `request_id = 0`:
+`TelemetryFrame`, and the only two supervisor events, `ModeChanged` and
+`EStopLatched`; arm state and E-STOP resets reach clients through telemetry.
+A frame that doesn't decode gets `Error: decode error: ...`; an empty, unknown
+or removed payload (the reserved tags 11 and 27, say) gets
+`Error: empty or unsupported client message`.
+
+The drive seat:
 
 - Drive with `SetVelocityCommand` (fire-and-forget: an accepted twist gets
-  no reply, a rejected one gets an `Error`). One connection holds the
-  drive seat at a time; any number may watch. A stop from a client that
-  doesn't hold the seat is ignored while someone else is driving;
-  `EmergencyStop` from anyone always latches.
+  no reply, a rejected one gets an `Error`). One connection holds the drive
+  seat at a time; any number may watch. The first non-zero twist claims a free
+  seat, and each non-zero twist from the holder refreshes it (the app re-sends
+  its twist at ~10 Hz while driving; a stop does not refresh it). Another
+  connection's non-zero twist is rejected until the holder's last non-zero
+  twist is older than `server.operator_grace_ms`; then it takes over. A stop
+  from a client that doesn't hold the seat is ignored while someone else is
+  driving; `EmergencyStop` from anyone always latches.
+- The seat is released when the holder disconnects (a non-zero twist is
+  zeroed and `DriveState.operator_stale` set), on the operator-link timeout,
+  on E-STOP, and on DialIn → Idle.
+- Operator-link timeout: a non-zero twist not refreshed within
+  `server.operator_timeout_ms` is zeroed by the watchdog (so in DialIn). It is
+  a controlled stop: the wheels stay armed, `DriveState.operator_stale` stays
+  set until the next accepted drive command, and the seat is released.
 - Name a connection with `ClientHello { name, autonomous }`; the seat
   holder's name rides `DriveState.active_operator_name` in telemetry and
   `DriveState.active_operator_autonomous` says whether software holds it.
 - **Preemption.** A connection that sends `autonomous = true` (the voice
   agent's `move_relative`) holds the seat only until a person touches the
-  controls: any drive command from a non-autonomous connection — a zero
-  twist included — takes a fresh autonomous seat at once, and the person's
+  controls: any drive command from a non-autonomous connection, a zero
+  twist included, takes a fresh autonomous seat at once, and the person's
   twist applies (a stop halts the robot). A preempting stop claims a fresh
   seat for `operator_grace_ms`, so the autonomous client can't take it back
   (other people wait out that window too). The seat decision and the twist
   write happen under one lock, so a holder's in-flight twist can never land
-  after the preempting stop. The reverse never happens: an
-  autonomous connection is rejected (its stops ignored) while anyone else
-  holds a fresh seat. Each preemption logs `operator preemption: ...` at
-  WARN. Person-vs-person arbitration is unchanged (`operator_grace_ms`).
+  after the preempting stop. The reverse never happens: an autonomous
+  connection is rejected (its stops ignored) while anyone else holds a fresh
+  seat. Each preemption logs `operator preemption: ...` at WARN.
+  Person-vs-person arbitration is the `operator_grace_ms` rule above.
 - Telemetry (`SubscribeTelemetry`) is latest-value per connection: on a
   slow link stale frames are dropped, never queued ahead of replies.
 
-## Converting Your Model to ONNX
+## sysid
 
-If your policy is trained in PyTorch:
+`src/bin/sysid.rs`: a single-joint Robstride bench for the arms. It drives
+one actuator through an excitation maneuver and logs synchronized feedback to
+CSV, which `sim/bebop_training/tools/sysid_fit.py` fits to the Isaac Lab
+`DCMotorCfg` parameters (`friction`, `armature`, `velocity_limit`,
+`saturation_effort`). It reuses `RobotConfig`, `CanInterface` and
+`RobstrideMotor` but bypasses the supervisor and the WebSocket server, with
+its own envelope: a per-command clamp, a feedback watchdog, a limit and fault
+abort (kinematic limits need 3 consecutive bad frames) and a Ctrl-C ramp-down.
 
-```python
-import torch
-import torch.onnx
+`--config` is required and must define the joint under `joints:`. No shipped
+config does, so on `bebop_wheeled.yaml` it exits 1 with
+``robot config "..." has no `joints:` table``. `cargo build --release` builds
+it; the CI bundle doesn't ship it. Stop the runtime first so two controllers
+don't share the bus:
 
-# Load your trained policy
-model = YourPolicy()
-model.load_state_dict(torch.load("policy.pt"))
-model.eval()
-
-# Create dummy input matching observation size
-dummy_input = torch.randn(1, 30)  # [batch, obs_dim]
-
-# Export to ONNX
-torch.onnx.export(
-    model,
-    dummy_input,
-    "model.onnx",
-    input_names=["obs"],
-    output_names=["actions"],
-    dynamic_axes={"obs": {0: "batch"}, "actions": {0: "batch"}},
-    opset_version=14,
-)
+```sh
+sudo systemctl stop bebop-linux
+cargo run --release --bin sysid -- \
+    --config /etc/bebop/<robot>.yaml --joint <name> \
+    --maneuver friction-sweep --setup hanging
+python sim/bebop_training/tools/sysid_fit.py ~/bebop-sysid-logs
 ```
 
-## Configuration
+| `--setup` (required) | Maneuvers allowed |
+|---|---|
+| `bench`: one motor on a fixture | all five |
+| `hanging`: the limb swings free | `friction-sweep`, `torque-step`, `torque-chirp` |
+| `stand`: the limb is loaded | `friction-sweep`, `torque-chirp` |
 
-### Observation Format (must match training!)
+| `--maneuver` | Measures | Motion (defaults) |
+|---|---|---|
+| `friction-sweep` (default) | `friction` | continuous rotation both ways at `--vel-steps` (6) speeds up to `--vel-max-frac` (0.6) × `vel_max`, `--dwell-s` (1.2) each; kp 0, kd `--kd` (`test_gains.kd`) |
+| `torque-step` | `armature` | a `+` and a `-` kick of `--tau-frac` (0.3) × `tau_max` for `--step-duration` (0.3 s) |
+| `torque-chirp` | `armature` | sine torque sweeping `--chirp-f0` → `--chirp-f1` (0.5 → 6 Hz) over `--chirp-duration` (10 s) |
+| `noload-speed` | `velocity_limit` | bench only, needs `--allow-cap-override`: a torque ramp over `--ramp-s` (3 s), held for `--hold-s` (2 s), on a free shaft |
+| `stall-torque` | `saturation_effort` | bench only, needs `--allow-cap-override`: the same ramp against a blocked output |
 
-| Index | Description | Scaling |
-|-------|-------------|---------|
-| 0-2 | Base linear velocity (x, y, z) | × SCALE_LIN_VEL |
-| 3-5 | Base angular velocity (x, y, z) | × SCALE_ANG_VEL |
-| 6-8 | Projected gravity | (no scaling) |
-| 9-11 | Command velocity (vx, vy, wz) | × SCALE_LIN_VEL/ANG_VEL |
-| 12-17 | Joint positions (relative to default) | × SCALE_DOF_POS |
-| 18-23 | Joint velocities | × SCALE_DOF_VEL |
-| 24-29 | Last action | (no scaling) |
-
-### Motor Configuration
-
-Edit `src/config.rs` to match your hardware:
-
-```rust
-JointConfig {
-    name: "left_hip_pitch".to_string(),
-    index: 0,
-    can_id: 31,
-    can_bus: "can0".to_string(),
-    motor_type: MotorType::Robstride(RobstrideModel::RS04),
-    default_position: 0.0,
-    position_min: -0.8,
-    position_max: 0.8,
-    kp: 50.0,
-    kd: 2.0,
-},
-```
-
-## Comparison to Teensy Firmware
-
-| Feature | Teensy | Linux |
-|---------|--------|-------|
-| Control Rate | 200 Hz | 50-500 Hz |
-| CAN Interface | FlexCAN_T4 | SocketCAN |
-| Policy Inference | Embedded C++ | ONNX Runtime |
-| ROS Integration | micro-ROS | Native ROS 2 (optional) |
-| Development | PlatformIO | Cargo |
-| Debug | Serial | Full Linux tooling |
-| Multi-bus | 3 buses max | Unlimited (per hardware) |
+Other flags: `--motor-id <id> --bus <iface>` instead of `--joint`; `--out`
+(`~/bebop-sysid-logs`); `--rate-hz` (500); `--set-zero` (re-zero before
+enabling); `--allow-cap-override` (widens `vel_max` / `tau_max` to the model's
+full range, after a confirmation prompt); `--free-spin` (bench only: widens the
+position limit to the encoder's ±4π and the velocity limit to the model's
+rated speed). Each run writes
+`<out>/sysid_<joint>_<maneuver>_<YYYYmmdd_HHMMSS>.csv`, the maneuver spelled
+with `_` (`friction_sweep`), with the columns
+`t_s,maneuver,joint,model,cmd_pos,cmd_vel,cmd_tau,cmd_kp,cmd_kd,fb_pos,fb_vel,fb_tau,fb_temp`.
+Exit codes: 0 done (or a clean Ctrl-C ramp-down), 1 setup error, 2 safety abort
+(clap's usage errors, such as a missing `--setup`, also exit 2).
 
 ## Troubleshooting
 
-### CAN Bus Issues
-
-```bash
-# Check CAN interface status
-ip -details link show can0
-
-# Monitor CAN traffic
-candump can0
-
-# Check for bus errors
-dmesg | grep can0
+```sh
+ip -brief link show type can       # which can* exist
+ip -details link show can4         # "can state ERROR-ACTIVE" is healthy
+candump can4                       # raw traffic (can-utils)
+dmesg | grep -i -e can -e gs_usb
+journalctl -u bebop-linux -n 50 --no-pager
 ```
 
-### Permission Issues
+| Symptom | Cause and fix |
+|---|---|
+| `CAN bus is in ERROR-PASSIVE` (or `BUS-OFF`); `refusing to arm ...: bus canN is not healthy` | nothing powered is acknowledging on that bus. Check power and cabling, replug the hub, then `sudo ip link set canN down`, `sudo ip link set canN type can bitrate 1000000`, `sudo ip link set canN up` |
+| `CAN bus unavailable at startup; starting anyway` | the interface doesn't exist: the hub is unplugged or renumbered, `gs_usb` isn't loaded, or `mttcan` holds `can0`. `sudo ./scripts/install-jetson.sh --setup-can` (it prints `REBOOT REQUIRED` when `mttcan` stays loaded) |
+| A bus came up after startup, or the USB-CAN hub was replugged | restart `bebop-linux` (Diagnostics › Services in the app, or `sudo systemctl restart bebop-linux`); see the gap under [CAN buses](#can-buses) |
+| PowerBoard readings stay zero (`status_received = false`) | `power.can_interface` names the wrong bus; on this robot it is `can0` |
+| A wheel arms but doesn't turn, `axis_state` stays 1 (`IDLE`) | lost encoder calibration: `CalibrateWheel`, then persist it with `odrivetool` |
+| E-STOP re-latches right after `ResetEStop` | a persistent ODrive axis error (e.g. `THERMISTOR_DISCONNECTED`, which `Clear_Errors` doesn't clear) re-latches on the next heartbeat; fix it at the ODrive |
+| `control loop: could not set SCHED_FIFO` | not root / no `CAP_SYS_NICE`; the loop runs, with jitter under load |
+| `100 Hz control loop missing its deadline` | a tick's work or its wake slipped; compare `max_work_us` and `max_interval_us` in the line |
 
-```bash
-# Add user to dialout group (for USB-CAN adapters)
-sudo usermod -a -G dialout $USER
+## Removed
 
-# Or run with sudo (not recommended for production)
-sudo ./target/release/bebop-linux
-```
+On 2026-10-24 the firmware lost the retired v2 legged humanoid and the
+Orin-Nano SPI IMU path:
 
-### ONNX Runtime Issues
+- the ONNX policy runner: `MODE_RUN_POLICY`, the observation builder, policy
+  I/O telemetry and dry-run, `--policy`, the `ort` dependency,
+  `config/policy.onnx{,.data}` and `config/bebop_v2.yaml`;
+- the 100 Hz `policy_capture_*.mcap` with its ROS 2 CDR schemas
+  (`src/logging/`);
+- the SPI IMU thread in `src/imu.rs`, the vendored `vendor/bno08x-rs`,
+  `gpiod` and the `imu-probe` bin.
 
-```bash
-# Set library path
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/path/to/onnxruntime/lib
-
-# Check if library is found
-ldd target/release/bebop-linux | grep onnx
-```
+History: `git log -- firmware/bebop-linux/src/policy_runner.rs
+firmware/bebop-linux/src/bin/imu_probe.rs firmware/bebop-linux/config/bebop_v2.yaml`.
+The `--model`, `--can`, `--rate`, `--no-policy` and `--sim` flags that
+earlier versions of this README showed were removed from `src/main.rs` on
+2026-05-05; the `CAN_INTERFACES` variable was never read by the code.

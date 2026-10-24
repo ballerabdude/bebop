@@ -142,12 +142,13 @@ The install is the easy part. A self-imitation loop needs four stages:
 4. **Promote** — checkpoint → ONNX / GR00T policy server → into the drive path.
 
 Constraints to design around:
-- **One camera process.** `docs/navd.md` §2.8: pyorbbecsdk capture is serial
-  and the GIL is already the bottleneck — never train while the recorder runs.
+- **One camera process.** `docs/architecture.md` (Camera rules): pyorbbecsdk
+  capture is serial and the GIL is already the bottleneck — never train while
+  the recorder runs.
 - GPU contention and 120 W thermals/power; schedule training when idle.
 - Disk: a GR00T 3B fine-tune checkpoint is ~24 GB each (safetensors + optimizer).
 
 ## See also
-- `docs/navd.md` — recorder, MCAP channels, training layout.
+- `docs/data-collection.md` — recorder, MCAP channels, training layout.
 - `sim/README.md` — workstation container and URDF→USD workflow.
 - `sim/docker/` + `docker-compose.yml` — the x86 training environment.

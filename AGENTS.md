@@ -11,45 +11,70 @@
   said "Orin Nano" — that is stale; anything derived for tegra234 GPIO/line
   numbering does **not** carry over (see the GPIO gotcha below). On-device
   training env for this box lives in `sim/setup/thor/`.
+- **Robot (v3): wheeled differential drive.** Two ODrive S1 BotWheels on
+  `can4` (node ids 36 left / 46 right; the firmware never assigns node ids,
+  set them on the S1 over USB with `odrivetool`), the Robstride PowerBoard on
+  `can0` (battery and rails, polled at 1 Hz) and passive front casters, all in
+  `firmware/bebop-linux/config/bebop_wheeled.yaml` (`wheels:`, `drive:`,
+  `power:`, `server:`; no `imu:` block, and the arms' `joints:` block is not
+  there yet). The firmware has two modes: Idle (boot; nothing can be armed)
+  and DialIn (the armed drive mode). Two Robstride arms come next, so the
+  MIT-mode joint path, joint config and limits, the DialIn joint hold, the
+  joint bench commands, `MotorState` telemetry and the `sysid` bin stay.
+  Cameras: two Orbbec Gemini 335Lg (near `CPBLC53000PE`, far
+  `CPBLC53000ED`), hardware-synced at 848x480@30.
 - Repo on the robot: `~/bebop` (same monorepo layout as here).
 - Python env: ONE venv for the whole project, `~/bebop/bebop-vision/.venv`
   (created `--system-site-packages` so JetPack's TensorRT bindings are
   visible), run as `/home/bebop/bebop/bebop-vision/.venv/bin/python`.
-  Versions live in `bebop-vision/requirements.txt` (torch 2.13.0+cu132,
-  transformers 5.14.1, numpy 2.2.6, venv-local scipy); it pins a version only
-  where one is actually required — the cu132 torch/torchvision pair, the
-  pyorbbecsdk2 SDK build, onnxruntime-gpu's CUDA-13 build, tensorrt-edgellm's
-  engine format — and uses floors otherwise. `pyorbbecsdk2` is deliberately
+  Versions live in `bebop-vision/requirements.txt`; it pins a version only
+  where one is actually required — the cu132 torch/torchvision pair (torch
+  2.13.0+cu132), onnxruntime-gpu's CUDA-13 build, tensorrt-edgellm's engine
+  format — and uses floors otherwise (the verified robot set has
+  transformers 5.14.1, numpy 2.2.6 and a venv-local scipy).
+  `pyorbbecsdk2` (pinned `==2.1.2`, the `jetson` extra) is deliberately
   **not** in that file: it hard-pins `av==12.3.0` while
   `tensorrt-edgellm[server]` hard-pins `av==17.1.0`, so `--setup-voice`
-  installs it with `--no-deps` (capture only). That is why `pip check` always
-  reports that one conflict — expected, do not chase it.
+  installs it with `--no-deps` (capture only). That is why `pip check`
+  always reports that one conflict — expected, do not chase it.
   The old "numpy pinned 1.26.4, never upgrade" note is **stale**: pyorbbecsdk2
   2.1.2 works under numpy 2.2.6 (verified). The venv-local scipy matters —
   without it, transformers' optional scipy import falls back to the system
   numpy-1-built scipy and dies on `from numpy import Inf`.
   `requirements.lock.txt` (generated; see its header) pins the exact verified
   set and `--setup-voice` prefers it over the floors — regenerate it after any
-  deliberate upgrade, or the robot and the lock drift apart.
+  deliberate upgrade, or the robot and the lock drift apart. It still lists
+  `cuvslam`, which only the removed live SLAM imported; the lock is a
+  `pip freeze` of the robot venv, so the entry stays until cuvslam is
+  uninstalled there and the lock regenerated.
 - Firmware: `bebop-linux.service` runs as root from
-  `/usr/local/bin/bebop-linux`; config `/etc/bebop/bebop_wheeled.yaml`.
+  `/usr/local/bin/bebop-linux`; the shipped unit's ExecStart passes
+  `--config /etc/bebop/bebop_wheeled.yaml --capture-dir /var/lib/bebop-captures`
+  (without `--config`, `bebop-linux` falls back to
+  `config/bebop_wheeled.yaml`). The capture dir holds the firmware's
+  always-on 1 Hz system log (`system_*.mcap`) next to the recorder's
+  `navd_session_*.mcap`.
 - Other services: `bebop-agent` owns port 9091 (its `/healthz` + setup
   WebSocket) — do NOT use 9091 for anything new. Firmware WS/HTTP is 9090,
   the bebop-vision videoserver is 9092 (WHEP video, `/snapshot`, and the
-  drive-note routes `POST /intent`, `POST /event`, `GET /notes` that write
-  into the active MCAP segment), the places service is 9095, voice is
-  9093, and the `bebop-models` supervisor is 9094. `bebop-vision.service`
-  (root) runs the Python recorder; it and `bebop-voice.service` ship
-  un-enabled so the operator owns the GPU and can start/stop them from the app
-  (the firmware shells out to `systemctl` and mirrors the unit state in
-  telemetry, `VisionState`). `install-jetson.sh --enable-autostart` opts both
-  into boot, which this robot has.
-- **Place memory is lofi by default.** A 1 Hz DINOv3 scout writes **pending**
-  places (no LLM); the app reviews/imports them in batches, optionally asking
-  the 27B for a name suggestion per place. Do not enable `--place-router` for
-  normal battery runs: it asks the 27B every tick (measured ~12 W average at a
-  45 s interval). Pending places are invisible to `whereami`/navigation until
-  imported.
+  drive-note routes: `POST /intent` and `POST /event` write into the active
+  MCAP segment, `GET /notes` returns the current intent and queue counts),
+  the places service is 9095, voice is 9093, and the `bebop-models`
+  supervisor is 9094 (9096 live SLAM and 9097 nav are gone).
+  `bebop-vision.service` (root) runs the Python recorder; it and
+  `bebop-voice.service` ship un-enabled so the operator owns the GPU and can
+  start/stop them from the app (the firmware shells out to `systemctl` and
+  mirrors the unit state in telemetry, `VisionState`).
+  `install-jetson.sh --enable-autostart` opts both into boot, which this
+  robot has. Model weights download through
+  `bebop-model-download@<id>.service`, which the firmware starts for the app.
+- **Place memory is lofi.** A 1 Hz DINOv3 scout writes **pending** places (no
+  LLM); the app reviews/imports them in batches, optionally asking the 27B
+  for a name suggestion per place (`POST /places/pending/{id}/suggest`,
+  through `bebop_vision/vlm.py`; `--router-url` defaults to the cascade brain
+  that bebop-voice serves on `:8012`). Pending places are invisible to
+  `/whereami` and the place graph until imported. See `docs/places.md`. The
+  every-tick `--place-router` is gone (2026-10-24, see Driving / navigation).
 - **TensorRT Edge-LLM is the only generative runtime.** Every generative
   model (omni, or the cascade's ASR + brain + TTS, or a future VLA) is a
   `tensorrt-edgellm-serve` child — a checkpoint + an engine cache + a port.
@@ -57,12 +82,13 @@
   `bebop-models` (:9094, root, installed by `install-jetson.sh --setup-models`)
   owns the GPU budget and that lifecycle (`kind: edgellm|external|tracked`);
   `bebop-voice` (:9093, root, operator-toggled from the app) is a client that
-  either supervises its own Edge-LLM child or delegates to the supervisor
+  supervises its own Edge-LLM children (the default cascade's three stages,
+  or the omni checkpoint) or, for omni, delegates to the supervisor
   (`omni_supervisor_url`).
 - `bebop-agent` is provisioning-only: Wi-Fi (nmcli) + a Hosted Network
-  hotspot (`Bebop-<machine-id>`, WPA2 passphrase `bebopbebop`, gateway
-  `192.168.42.1:9091`) + the setup server. It no longer does BLE,
-  containers, OTA, or controller pairing.
+  hotspot (`Bebop-<first 6 chars of /etc/machine-id>`, WPA2 passphrase
+  `bebopbebop`, gateway `192.168.42.1:9091`) + the setup server. It no longer
+  does BLE, containers, OTA, or controller pairing.
 - Network mode is a two-way switch with **no fallback**: `ap` (Hosted
   Network, boot default) or `client` (Known Network). The **physical button
   press** toggles it; the app cannot.
@@ -83,9 +109,14 @@
 - **USB type gotcha:** `USB_TRIPLE_SERIAL` changes the Teensy PID from
   `16c0:048b` → `16c0:048c`, so the udev rules/`/dev/bebop-imu` symlink only
   exist after re-running `install-jetson.sh --setup-imu`. Interface map:
-  if00=`/dev/bebop-imu` (IMU frames, `bebop-linux`), if02=`/dev/bebop-imu-debug`,
-  if04=`/dev/bebop-control` (control frames, `bebop-agent`). The IMU frame
-  format is unchanged.
+  if00=`/dev/bebop-imu` (IMU frames; `bebop-linux` reads them only when the
+  robot YAML has an `imu:` block, and `bebop_wheeled.yaml` has none),
+  if02=`/dev/bebop-imu-debug`, if04=`/dev/bebop-control` (control frames,
+  `bebop-agent`). The IMU frame format is unchanged. Flash the Teensy with
+  `pio run -e teensy_bridge --target upload` (in `firmware/bebop-locomotion`):
+  `just fw-build` / `just fw-flash` build PlatformIO's default env `sim`
+  (`USB_DUAL_SERIAL`), which drops `/dev/bebop-control` and with it the mode
+  button.
 - AP capability on this robot is confirmed (`nmcli -f WIFI-PROPERTIES.AP
   dev show wlP1p1s0` → yes; `iw list` shows `* AP`). It is a single radio,
   so the hotspot and a client Wi-Fi connection are mutually exclusive —
@@ -95,7 +126,9 @@
 ## Deployment process (what actually works)
 
 1. **Code changes on the workstation → commit → push.** CI (ci.yml)
-   builds the firmware release artifact on every push to `main`; runs are
+   builds the firmware release artifact on every push to `main`
+   (`bebop-linux-aarch64`: `bin/bebop-linux`, `config/*.yaml` — today only
+   `bebop_wheeled.yaml` — `systemd/bebop-linux.service`, `VERSION`); runs are
    listed via the GitHub API (no `gh` CLI on this machine):
    `curl -s https://api.github.com/repos/ballerabdude/bebop/actions/runs?per_page=3`.
 2. **Python changes (bebop-vision)**: fastest path is scp the changed
@@ -105,12 +138,33 @@
    local changes/untracked files, they are scp leftovers —
    `git stash push -u` then pull (stash contents are redundant with the
    pushed commits).
-3. **Firmware changes**: do NOT hand-build on the Jetson (`cargo` there
-   is only usable inside a login shell, and `nohup` strips PATH). Use the
-   installer against a green CI run:
-   `sudo ./scripts/install-jetson.sh --linux-only --run-id <CI_RUN_ID>`
-   (run from `~/bebop` on the Jetson after pulling). Requires the
-   recorder/bebop-vision processes stopped first.
+3. **Firmware changes**: two paths, both run from `~/bebop` on the Jetson
+   after pulling, with the recorder/bebop-vision processes stopped first.
+   - **CI bundle**: against a green CI run,
+     `sudo ./scripts/install-jetson.sh --linux-only --run-id <CI_RUN_ID>`.
+   - **Local build** (user-approved 2026-10-23, no CI wait):
+     `bash -lc 'cd ~/bebop/firmware/bebop-linux && cargo build --release'`
+     (`cargo` is only on PATH in a login shell, and `nohup` strips PATH;
+     ~53 s incremental on 2026-10-23), then
+     `sudo ./scripts/install-jetson.sh --local --linux-only --skip-prereqs`.
+     `--local --linux-only --build` runs the same build itself (as
+     `SUDO_USER`, in a login shell).
+
+   Either way the installer restarts `bebop-linux`, rewrites the vision and
+   voice units without changing their enablement, and overwrites the active
+   `/etc/bebop/<config>.yaml` from the bundle (a previous copy that differs
+   is saved as `<name>.yaml.bak`), so diff the robot's copy against the repo
+   first. Since 2026-10-24 the shipped `bebop-linux.service` itself runs
+   `/etc/bebop/bebop_wheeled.yaml` (the default `--config-yaml`), so the
+   installer removes its managed drop-in
+   `/etc/systemd/system/bebop-linux.service.d/10-config.conf`; it writes one
+   only for a non-default `--config-yaml` or an older bundle whose unit runs
+   another file. The choice is remembered in `/etc/bebop/config-yaml-name`; if
+   that still names `bebop_v2.yaml`, the install stops at the bundle check, so
+   run it once with `--config-yaml bebop_wheeled.yaml`. Files older bundles
+   installed (`/etc/bebop/bebop_v2.yaml`, `/etc/bebop/policy.onnx{,.data}`)
+   and any `/etc/bebop/model_selection.json` stay in place; nothing reads
+   them (harmless).
 4. **Never test mid-session**: check
    `pgrep -af 'record-nav[d]|main.p[y]'` before touching cameras or
    restarting services. `pkill -f 'record-navd'` matches the invoking
@@ -121,21 +175,31 @@
 ## Testing on the Jetson
 
 - Python tests: `cd ~/bebop/bebop-vision && .venv/bin/python -m pytest
-  tests/ -q` (364 tests, no hardware needed). Run after every deploy.
-- Rust tests are CI-side (fmt + clippy + `cargo test`: the workspace in
-  `jetson-agent`, and `firmware/bebop-linux`); on-Jetson builds are for
-  deploy only, never for testing.
+  tests/ -q` (no hardware needed; 267 passed + 1 skipped on the workstation
+  on 2026-10-24, the skip being `test_mcap_h265_hardware`, which needs
+  NVENC, so the robot count can differ slightly). Run after every deploy. A
+  workstation venv needs the `server` extra (fastapi, uvicorn, pydantic,
+  httpx), or the voice and supervisor tests skip.
+- Rust tests are CI-side (fmt + clippy `-D warnings` + `cargo test`: the
+  workspace in `jetson-agent`, 11 bebop-agent tests, and
+  `firmware/bebop-linux`, 116 lib tests, as of 2026-10-24); on-Jetson builds
+  are for deploy only, never for testing.
+- App tests run on the workstation, not in CI: `cd bebop-app && npm test`
+  (125 node tests, 2026-10-24).
 - Camera exclusivity: ONE process per camera. The recorder
-  (`--record-navd`) and goal-drive (`--goal-drive`) each open the rig;
-  OrbbecViewer or a stray test process holding a camera surfaces as
-  `uvc_open failed: -6` / missing device.
+  (`main.py --record-navd`, run by `bebop-vision.service`; single-instance
+  lock `/tmp/navd_recorder.lock`) holds the rig, so stop it before a camera
+  bench tool (`tools/orbbec_sync_test.py`, `orbbec_slot_probe.py`,
+  `orbbec_imu_probe.py`). OrbbecViewer or a stray test process holding a
+  camera surfaces as `uvc_open failed: -6` / missing device.
 - Operator video: the bebop-vision process serves every stream over
   WebRTC (WHEP) on `:9092/whep?stream=color_near|color_far|depth_near|
   depth_far` — H.264 over SRTP/UDP, ~150 ms; the app is WebRTC-only (no
-  MJPEG/fMP4/MSE). `/snapshot?stream=...` still returns a JPEG (tools,
-  tests). Needs the `gstreamer1.0-nice` apt plugin or `webrtcbin` stays
-  in NULL — `install-jetson.sh` installs it. The firmware `/video` is
-  removed (OBSBOT retired, plan §9).
+  MJPEG/fMP4/MSE). `/snapshot?stream=...` still returns a JPEG (the voice
+  agent's live context, tools, tests). Needs the `gstreamer1.0-nice` apt
+  plugin or `webrtcbin` stays in NULL — `install-jetson.sh` installs it
+  (skipped with `--skip-prereqs`). The firmware `/video` is gone (the OBSBOT
+  webcam was retired 2026-09-06).
 - Live state checks: `journalctl -u bebop-linux -n 5 --no-pager`,
   `systemctl is-active bebop-linux`, `curl http://127.0.0.1:9090/healthz`.
 
@@ -149,15 +213,76 @@
   voice `navigate` tools, `docs/nav.md`, and the nav cone / depth tuning
   tools. History: `git log -- bebop-vision/bebop_vision/nav`. The stash
   `depthsim` (2026-10-22) holds a depth-only simulator built on that
-  package. The place graph (`/places/graph`, traversal edges) stays.
-- **Drop `--nav` from `/etc/bebop/vision.env` before deploying this**;
-  `main.py` no longer accepts it and the service would fail to start.
+  package. The place graph (`/places/graph`, traversal edges) stays, but
+  since then nothing in the tree calls its only edge writer,
+  `POST /places/{from}/edges/{to}`.
 - The old `--goal-drive` / `--navd-model` planner is gone (d99a250,
   2026-09-09; archived on `exp/navd-ai-20260909`). The BEV student
   (runtime, model, training and eval tools) was removed from the tree on
   2026-10-23; the dataset extractor, SAM teacher, learned ego footprint and
-  geometry helpers stay. **Drop `--no-bev` from `/etc/bebop/vision.env`**
-  before deploying: `main.py` no longer accepts it.
+  geometry helpers stay.
+- **More went on 2026-10-24** (dead-code cleanup; place memory is described
+  in `docs/places.md`):
+  - Live SLAM: `bebop_vision/slam/` (the observe-only cuVSLAM RGB-D
+    localization POC and its :9096 status server), the `--live-slam*` flags,
+    `tools/slam_replay.py` and `tools/slam_turn_test.py`, plus the per-place
+    structure submaps it fed (`places/submap.py`, `GET/POST /places/{id}/map`)
+    and the app's place capture, Local map card and Live SLAM diagnostics row.
+    History: `git log -- bebop-vision/bebop_vision/slam
+    bebop-vision/bebop_vision/places/submap.py`.
+  - The legacy every-tick place router: `bebop_vision/router/`
+    (`--place-router`, `--router-interval`, `--router-cooldown`,
+    `--router-voice-url`, `/router/*` on :9095). It asked the 27B every tick
+    (measured 2026-10-18: ~12 W average at a 45 s interval). Its
+    OpenAI-compatible `ChatVLMClient` moved to `bebop_vision/vlm.py` and still
+    serves the name suggestions. History: `git log --
+    bebop-vision/bebop_vision/router`.
+  - The navd-v0 label fusion and review dashboard: `tools/fuse_navd_labels.py`,
+    `tools/sam_floor_label.py`, `config/raylut_{near,far}.npz`,
+    `bebop-vision/dashboard/`, `tools/dashboard_{api,core}.py` and
+    `just review`. The navd-v0 dataset layout stays
+    (`tools/extract_all_navd.py` + `tools/mcap_extract.py`, the extract step of
+    `just pull-data`). History: `git log -- bebop-vision/dashboard
+    bebop-vision/tools/fuse_navd_labels.py`.
+  - The model-purpose selector (`SetModelPurpose`, `ModelState.selection`,
+    the app's per-purpose radios in Settings › Models): no service ever
+    acted on the choice it persisted in `/etc/bebop/model_selection.json`.
+    History: `git log -S SetModelPurpose`.
+  - Smaller items: place tags; `bebop_vision/download_sam3.py` (use
+    `python -m bebop_vision.download_model sam3.1`);
+    `tools/orbbec_intrinsics.py` and `tools/dump_color_calib.py` (to re-dump
+    the calibration, delete `config/orbbec_intrinsics_<serial>.json` and
+    restart bebop-vision; `OrbbecCamera` rewrites it);
+    `tools/h264_sw_encode_bench.py`; the foxglove `RawImage` schema.
+  - Firmware: the retired v2 legged humanoid stack (the ONNX `RunPolicy`
+    runner and observation builder, policy I/O telemetry + dry-run, the 100 Hz
+    policy-capture MCAP with its CDR/ROS 2 schemas, `config/bebop_v2.yaml`,
+    `config/policy.onnx{,.data}`, `ort`, `--policy`) and the Orin-Nano SPI IMU
+    path (`imu-probe`, the vendored `vendor/bno08x-rs`, `gpiod`;
+    `imu.source: spi` is now a load error). History: `git log --
+    firmware/bebop-linux/src/policy_runner.rs
+    firmware/bebop-linux/vendor/bno08x-rs`. `bebop_runtime.proto` reserves
+    every removed tag and name (`bus_status`, `policy_io`, `MODE_RUN_POLICY`,
+    `set_model_purpose`, `heading_accuracy_rad`, ...).
+  - Docs: the historical design docs (navd, its Phase B handoff, the BEV
+    student notes, live SLAM) are deleted (history:
+    `git log --diff-filter=D -- docs/`); `docs/places.md` replaces the
+    place-router and internal-map docs.
+- **Before deploying, `/etc/bebop/vision.env` must carry no removed
+  `main.py` flag**: `--nav*`, `--teach-*` and `--follow-patch-size`
+  (2026-10-22), `--no-bev` and `--bev*` (2026-10-23), `--live-slam*`,
+  `--place-router`, `--router-interval`, `--router-cooldown`,
+  `--router-voice-url` (2026-10-24). argparse exits 2 on an unknown flag and
+  `Restart=on-failure` turns that into a restart loop; the installer does not
+  touch `vision.env` (see the vision.env gotcha below).
+  `--router-url`, `--router-model` and `--router-timeout` stay.
+- Ship the firmware, bebop-vision and the app together and reload open app
+  tabs: an app build from before 2026-10-24 reads `place.tags.length`
+  unguarded and breaks once the places backend stops sending `tags`. The navd
+  Rerun blueprint changed too (`rerun_dashboards/navd_blueprint.py` and the
+  regenerated `bebop_navd.rbl`; the mode panel plots 1 idle / 2 dial-in), so
+  re-run `sudo ./scripts/setup-rerun.sh` on the robot after pulling; it
+  reinstalls the converter's copies and drops cached `.rrd` files.
 - Wheel odometry heading over-read in-place turns ~2x on carpet live on
   2026-10-21; the camera gyros are the heading truth (optical->body
   rotation, third row, as the removed `nav/pose.py` did). Fitted drive
@@ -179,35 +304,45 @@
   as root — and the bracket trick in a separate ssh command.
 - `install-jetson.sh` prereqs: don't add flags without initializing the
   variable in the defaults block (`set -u` will kill the script).
+- Writing `/etc/bebop/vision.env` over ssh: piping the content into an
+  `echo bebop | sudo -S tee ...` wrapper leaves the file EMPTY (the password
+  pipe replaces tee's stdin), so the service quietly runs with no extra flags
+  (seen 2026-10-21). Cache the credentials first
+  (`echo bebop | sudo -S -p '' -v`), then write with
+  `sudo -n bash -c 'cat > /etc/bebop/vision.env' <<'EOF'`, `cat` the file
+  back, and after the restart check the flag with
+  `pgrep -af 'main.p[y]' | grep -o -- --<flag>`.
 - Hosted Network bring-up uses NetworkManager shared mode
   (`nmcli con add ... 802-11-wireless.mode ap ipv4.method shared`). The
   regulatory domain is unset (`country 00`) on this robot; AP on 2.4 GHz
   still works, but set `iw reg set <CC>` if a channel is rejected. Creating
   the profile (`con add`) does not disrupt the current Wi-Fi link; only
   `con up` does — safe to validate command syntax read-only.
-- Jetson header GPIO bias lives in the **pinmux**, not in the runtime line
-  request: `libgpiod`/`gpiocdev` bias flags are effectively a no-op, so an
-  input with `PULL=NONE` floats. On Orin (tegra234) you can read a pin's
-  pinmux register with `sudo busybox devmem <addr>` (address per pin in NVIDIA's
-  `jetson-gpio` `gpio_pin_data.py`; e.g. Orin pin 29 = `0x2430068`), pull is
-  bits [11:10] (0=none, 1=down, 2=up). **Those addresses are tegra234-specific
-  and do not apply to Thor (tegra264)** — the Thor pin table in the same file
-  exposes no pinmux addresses, so re-derive on this robot before relying on it.
-  Wire a button to the **opposite** rail of the pin's built-in pull so no
-  external resistor is needed.
-- IMU SPI GPIO defaults are likewise Orin Nano: `firmware/bebop-linux/config/bebop_v2.yaml`
-  and `src/bin/imu_probe.rs` use `gpiochip0:144` (header pin 7, INT) and
-  `gpiochip0:85` (header pin 15, RST). On Thor the header lines map to tegra264
-  controllers and differ — override `int_chip`/`int_line`/`rst_chip`/`rst_line`
-  for the actual wiring.
+- Jetson header GPIO bias (it only matters for bebop-agent's
+  `button_source="gpio"` fallback now) lives in the **pinmux**, not in the
+  runtime line request: `libgpiod`/`gpiocdev` bias flags are effectively a
+  no-op, so an input with `PULL=NONE` floats. On Orin (tegra234) you can read
+  a pin's pinmux register with `sudo busybox devmem <addr>` (address per pin
+  in NVIDIA's `jetson-gpio` `gpio_pin_data.py`; e.g. Orin pin 29 =
+  `0x2430068`), pull is bits [11:10] (0=none, 1=down, 2=up). **Those
+  addresses are tegra234-specific and do not apply to Thor (tegra264)** — the
+  Thor pin table in the same file exposes no pinmux addresses, so re-derive
+  on this robot before relying on it. Wire a button to the **opposite** rail
+  of the pin's built-in pull so no external resistor is needed.
 - Protobuf: three binding sets (Rust prost auto via build.rs, app TS via
   `npm run gen-proto` in bebop-app/, Python pb2 checked in at
   `bebop-vision/bebop_vision/proto/bebop/runtime/v1/`). The Python pb2
-  regenerates with the proto staged at
-  `bebop/runtime/v1/bebop_runtime.proto` (matching the package path),
-  NOT from the flat proto root.
-- GIL: pyorbbecsdk capture must stay serial (§2.8 of docs/navd.md);
-  thread pools are fine for numpy/cv2 work only.
+  regenerates with the system `protoc` (libprotoc 3.21.12) and the proto
+  staged at `bebop/runtime/v1/bebop_runtime.proto` (matching the package
+  path), NOT from the flat proto root.
+  `sim/bebop_training/proto/bebop_runtime_pb2.py` is an older fourth copy
+  (2026-07-13) that is not regenerated.
+- Camera threads: pyorbbecsdk never runs in a thread pool. Each camera has
+  its own capture thread (`orbbec.py`, `orbbec-<role>`) feeding a latest-wins
+  slot; pooled capture triggered `malloc(): unaligned fastbin chunk` heap
+  corruption (2026-09-06). Thread pools are fine for GIL-releasing numpy/cv2
+  work only (the recorder's per-camera PNG/JPEG encodes and RGB->BGR
+  conversion), and MCAP writes stay serial (the writer is not thread-safe).
 - OpenBLAS/OpenMP: on the Thor, numpy's OpenBLAS worker pool spin-waits
   after even tiny matmuls. A standalone BEV run (since removed) measured 429% CPU
   with five BLAS threads at 70-90% each for a ~35 ms tick. `main.py`
@@ -218,6 +353,19 @@
   848x480@30 on the Thor). The old "matched 15 fps / 30+30 starves the GIL"
   rule was measured on the Orin Nano with the old BEV worker; without a BEV
   the Thor recorder sustains ~29 Hz at 30+30 (the 10 Hz BEV worker is gone).
-  The 2026-10-18 recorder stalls (2-18 per session, 0.5-1.2 s; frames, odom
-  and gyro lost together) have not recurred in 10 segments recorded since
-  `--no-bev`, but their cause is not established; see `docs/path-model.md`.
+- Recorder stalls from garbage collection: a full (gen-2) collection holds
+  the GIL while it walks every tracked object, so every thread stops.
+  Measured on the Thor 2026-10-23 (c90f238): 227 k tracked objects after the
+  imports (55 ms per full collection), 505 k with the places DINOv3 ViT-L
+  loaded (154 ms), seen as 150-180 ms recorder stalls (frame and gyro gaps),
+  usually tipped over by the place scout's allocations. `main.py` therefore
+  calls `bebop_vision/gc_tuning.freeze_heap()` (`gc.collect()` +
+  `gc.freeze()`) after startup and after the places encoder warmup; a full
+  collection then scans only new objects (< 1 ms). Call it again after any
+  new large lazy load. `--no-gc-freeze` is for comparisons only;
+  `--stall-watch FILE` (`bebop_vision/stall_watch.py`) logs GIL stalls with
+  every thread's stack, plus collections over `--stall-gc-ms`. Whether the
+  longer 2026-10-18 stalls (2-18 per session, 0.5-1.2 s; frames, odom and
+  gyro lost together, BEV worker still running) had the same cause is not
+  established; they did not recur in the 10 segments recorded after
+  `--no-bev`. See `docs/path-model.md`.

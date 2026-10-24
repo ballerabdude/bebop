@@ -1,472 +1,431 @@
-# Voice + agent: on-robot voice and text turns
+# Voice + agent (`bebop-voice`, `:9093`)
 
-`bebop-voice` (:9093) is the robot's **agent server**: the operator talks *or
-types* to the robot, and it answers with streamed text, optional speech, and
-tool calls (place memory, robot status, drive notes, bounded motion). Fully
-local: every model runs on the robot.
+`bebop-voice` is the robot's agent server: the operator talks or types to
+the robot, and it answers with streamed text, optional speech and tool calls
+(place memory, robot status, drive notes, bounded motion). Every model runs
+on the robot as a TensorRT Edge-LLM server ([`models.md`](models.md)).
 
-**Engines.** `cascade` (ASR → VLM brain → TTS) is the **default** and the only
-engine with tools. `omni` (end-to-end Qwen3-Omni) stays selectable as a
-chat-only engine — it has no tools (the omni server rejects tools combined
-with audio output) and underperformed the cascade in use. `/healthz` and
-`/config` report `tools_supported` so the app can say so.
+| | |
+|---|---|
+| Code | `bebop-vision/bebop_vision/voice_server.py` (FastAPI + uvicorn) |
+| Unit | `bebop-vision/deploy/systemd/bebop-voice.service`: root, `/home/bebop/bebop/bebop-vision/.venv/bin/python -u -m bebop_vision.voice_server`, `Restart=on-failure`, `TimeoutStopSec=60` |
+| Start/stop | the firmware (`SetVoiceEnabled`), from the app's Autonomy console or Diagnostics › Services; installed but not enabled (`install-jetson.sh --enable-autostart` opts it into boot) |
+| Ports | `9093` (gateway, `0.0.0.0`); cascade stages on `127.0.0.1`: `8011` ASR, `8012` brain, `8013` TTS; omni child `8000` |
+| State | `/var/lib/bebop-voice/config.json` (operator settings); `/var/lib/bebop-voice/edgellm/` (engine caches: `asr/`, `tts/`, `brain/` for the cascade, the directory itself for the omni child) |
 
-The protocol the app speaks is in [Agent protocol](#agent-protocol-voice-ws-9093).
-The sections after it are the original omni bring-up notes, kept as history.
+Audio never passes through the firmware. The runtime WebSocket (`:9090`)
+carries only control and status; the voice stack is its own unit because it
+owns large GPU models under the repo checkout while `bebop-linux` runs
+sandboxed (`ProtectHome=read-only`), and its engine builds stay out of the
+safety-critical process (`firmware/bebop-linux/src/voice.rs`).
 
-## Why Qwen3-Omni + TensorRT Edge-LLM
+## Engines
 
-- **One model, native speech-out.** `Qwen/Qwen3-Omni-30B-A3B-Instruct`
-  (Apache-2.0) takes audio (or text/image) in and emits text **and 24 kHz
-  speech** out. No ASR → LLM → TTS glue, so prosody and turn feel are preserved.
-- **NVIDIA supports it on Thor.** TensorRT Edge-LLM (TRT-Edge-LLM) lists Qwen3
-  Omni 30B-A3B as a supported model with a six-engine layout (Thinker, Talker,
-  CodePredictor, audio encoder, visual encoder, Code2Wav) and a streaming
-  Thinker/Talker path.
-- **Prebuilt aarch64 wheel — no source build.** The wheel matrix includes
-  *Jetson Thor: JetPack 7.0/7.1/7.2, CUDA 13, SM110, platform TensorRT 10*.
-  So the robot runs `pip install "tensorrt-edgellm[server]==0.11.0"` and
-  `tensorrt-edgellm-serve`, not a CMake/CuTeDSL build.
-- **HF provisioning already exists.** The model is a normal HF checkpoint; we
-  extend the existing catalog/downloader to fetch a full-repo snapshot.
+`backend` in the config picks one engine; only that one is loaded. A saved
+change (Settings › Voice & agent › Engine, or `POST /config`) applies on the
+next service start; `--backend` overrides the saved choice for that run
+and is written back only if a `POST /config` then saves the config.
 
-Hardware context: Thor dev kit, 122 GB unified RAM, ~273 GB/s bandwidth,
-JetPack 7.2 / CUDA 13.2 / sm_110. Qwen3-30B-A3B-class MoE runs ~60-80 tok/s at
-C=1 on Thor, which is enough for conversational latency.
+| Engine | Pipeline | Tools | |
+|---|---|---|---|
+| `cascade` | ASR -> VLM brain -> TTS, three Edge-LLM servers | yes | default |
+| `omni` | one end-to-end Qwen3-Omni-30B-A3B model | none (chat only) | selectable |
 
-## Architecture
+Config files written before `config_version: 2` saved `omni` on every write,
+so a pre-v2 `omni` is migrated to `cascade` on load; a v2 file keeps the
+operator's choice.
 
-```
-   phone / PC (Tauri app)
-   ┌──────────────────────────────────────────────┐
-   │  VoiceScreen.tsx                             │
-   │   • getUserMedia → 16 kHz mono PCM16         │
-   │   • AudioContext playback of 24 kHz PCM16    │
-   │   • control over runtime WS (:9090)          │
-   │   • audio over voice WS (:9093)              │
-   └───────────────┬───────────────────┬──────────┘
-                   │ control           │ audio (turn-based)
-        ┌──────────▼─────────┐   ┌─────▼──────────────────────────┐
-        │ bebop-linux (:9090)│   │ bebop-voice.service (:9093)    │
-        │  SetVoiceEnabled   │   │  Python WS gateway             │
-        │  VoiceState        │   │   ├─ spawns tensorrt-edgellm-  │
-        │  systemctl start/  │   │   │   serve on 127.0.0.1:8000  │
-        │  stop voice unit   │   │   ├─ WAV/PCM → OpenAI audio in  │
-        └────────────────────┘   │   └─ text + PCM chunks → app   │
-                                 └─────┬──────────────────────────┘
-                                       │ OpenAI-compatible HTTP
-                                 ┌─────▼──────────────────────────┐
-                                 │ tensorrt-edgellm-serve         │
-                                 │ Qwen3-Omni-30B-A3B (6 engines) │
-                                 │ cache: /var/lib/bebop-voice/   │
-                                 └────────────────────────────────┘
-```
+### Cascade backend (default)
 
-### Why a separate port for audio
+| Stage | Model (HF repo id) | Port | Endpoint | Ready when `/health` reports |
+|---|---|---|---|---|
+| ASR | `Qwen/Qwen3-ASR-1.7B` | 8011 | `POST /v1/audio/transcriptions` | `transcription` |
+| Brain | `RadixArk/Qwen3.8-27B-NVFP4` (multimodal) | 8012 | `POST /v1/chat/completions`, streamed, with tools | `chat` |
+| TTS | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | 8013 | `POST /v1/audio/speech` (`response_format: pcm`, 24 kHz) | `speech` |
 
-The runtime WS (`:9090`) is protobuf, one envelope per frame, and the firmware
-would have to relay raw audio to the Python service. The video stack already
-establishes the pattern of a separate Python server on its own port (`:9092`).
-Voice audio gets `:9093`; the runtime WS stays the **control plane** (start/stop
-+ status), which is what "reuse the websocket session" means here.
+- `CascadePipeline` starts the stages one at a time (ASR, TTS, brain) to
+  bound GPU memory and reuses a stage that already answers. Each runs
+  `tensorrt-edgellm-serve <repo id> --cache-dir <cache>/<stage> --port <port>
+  --host 127.0.0.1` (TTS through the `edge_serve` launcher, below), given the
+  operator's token as `HF_TOKEN` (`models.load_token()`: the `HF_TOKEN`
+  environment variable, `/etc/bebop/hf_token`, then `bebop-vision/.env`). The
+  catalog's `qwen3-asr-1.7b`, `qwen3-tts-1.7b` and `qwen3.8-27b-nvfp4`
+  snapshots under `weights/` are not read by `voice_server.py`.
+- The first start builds each stage's engines; a stage gets up to 90 min
+  (`BUILD_TIMEOUT_S`). A failed stage sets `phase: error`
+  (`<stage> failed to start`).
+- Brain flags: `--enable-auto-tool-choice --tool-call-parser qwen3_xml
+  --max-input-len 8192 --max-kv-cache-capacity 16384 --speculative-config
+  '{"method": "mtp", "num_speculative_tokens": 3}'`. MTP uses the
+  checkpoint's own layers (no draft model); the mode is part of the engine
+  bundle name, so toggling it means one rebuild.
+- TTS runs through `python -m bebop_vision.edge_serve`, a drop-in launcher
+  that strips the VLM-only `max_image_tokens*` kwargs Edge-LLM 0.11.0
+  forwards to its TTS runtime.
+- A turn: transcribe (voice turns) -> brain with the system prompt and,
+  with live context on, the robot status, both camera frames and the tools
+  (`max_tokens` 512, temperature 0.7, at most 3 brain calls: tool rounds,
+  then the answer) -> TTS per finished sentence while the reply streams.
+- Voices are the TTS server's speaker ids (`/v1/voices`, e.g. `aiden`,
+  `dylan`, `eric`, `serena`). The configured voice is used when the TTS lists
+  it (or the list is unavailable), else `aiden` (or the first listed one).
 
-## Model provisioning
+### Omni backend (chat only)
 
-`bebop-vision/config/models.yaml` gains a snapshot entry:
+The catalog's `voice` entry, `qwen3-omni-30b`
+(`Qwen/Qwen3-Omni-30B-A3B-Instruct`, snapshot, not gated), from one of three
+sources; the first configured one wins:
 
-```yaml
-  - id: qwen3-omni-30b
-    name: Qwen3-Omni 30B-A3B
-    description: End-to-end speech-to-speech (audio in, natural speech out).
-    kind: hf
-    purpose: voice
-    repo: Qwen/Qwen3-Omni-30B-A3B-Instruct
-    download: snapshot
-    dest: qwen3-omni-30b
-    revision: main
-    gated: false
-    bytes: 63000000000
-```
+| Source | Config | Lifecycle owner |
+|---|---|---|
+| Supervisor | `omni_supervisor_url` (+ `omni_backend_id`, default `omni-edgellm`) | `bebop-models` (`:9094`): `POST /models/{id}/load` blocks until ready and returns `base_url`; on service stop it unloads only with `omni_unload_on_stop` |
+| External | `omni_url` | someone else (debug): an OpenAI-compatible server; the service polls `GET /v1/models` for up to 10 min |
+| Local Edge-LLM child | neither set (default) | `bebop-voice` (`EdgeLLMServer`, port 8000, cache `/var/lib/bebop-voice/edgellm`) |
 
-The catalog schema gains `download: files|snapshot` and `dest`:
+Provisioning the local child:
 
-- `files` (default) — the existing per-file `hf_hub_download` behavior.
-- `snapshot` — `snapshot_download` the whole repo into
-  `weights/<dest or id>/`, then write a `.bebop-complete` marker. The firmware
-  treats that marker as `ready` (a 60 GB tree must not be walked every poll).
+1. Settings › Models: download `qwen3-omni-30b` (into
+   `weights/qwen3-omni-30b/`, done when `.bebop-complete` exists).
+2. `sudo ./scripts/install-jetson.sh --quantize-voice` (after
+   `--setup-voice`; `--num-samples`, default 512): `tensorrt-edgellm-quantize
+   llm --quantization nvfp4` into `weights/qwen3-omni-30b-nvfp4/`. The
+   installer notes that Edge-LLM supports Qwen3-Omni only at NVFP4 (or INT4
+   AWQ); the FP16 checkpoint builds engines but fails runtime init.
+3. The service serves `weights/qwen3-omni-30b-nvfp4/` when it has a
+   `config.json`, else the snapshot; with neither it reports `phase: error`,
+   `omni checkpoint not provisioned (see docs/voice.md)`.
 
-The app's Models page renders it automatically (grouped under "voice") and the
-existing download button drives `bebop-model-download@qwen3-omni-30b.service`.
-The HF token flow is unchanged.
+The child runs `tensorrt-edgellm-serve <dir> --cache-dir ... --port 8000
+--enable-auto-tool-choice --tool-call-parser qwen3_xml` plus any
+`--edgellm-arg`; no tools are ever sent, so the parser flags are inert. The
+first start builds six TensorRT engines, reported through `/healthz`
+(`component`, `components_done`, `log_tail`). After its `/health` answers,
+the service runs one text and one short silent-audio warm-up turn before
+`ready`: the first generation after engine load came out garbled on the
+Thor.
 
-**Quantization (open):** the 30B checkpoint is ~60 GB in BF16. TRT-Edge-LLM can
-serve it directly (checkpoint-direct builder), or we first run
-`tensorrt-edgellm-quantize` to NVFP4 (~20 GB, faster) using the `[tools]` extra
-on the robot. v1 can serve BF16 to reduce moving parts; NVFP4 is the tuning
-step. Engine build is cached in `/var/lib/bebop-voice/edgellm` and happens on
-first voice-service start (surfaced as `VoiceState.detail = "building engines"`).
+An omni turn is one model call: the user's audio (or text) and, with live
+context on, both camera frames and the robot status; text and base64 PCM16
+audio stream back (`modalities: [text, audio]`, text only for
+`speak: false`). Voice turns get no `transcript` event (there is no ASR).
+Default voice `chelsie`; speaker ids from the server's `/v1/voices`.
+Measured against the live omni server (2026-10-04): each 1280×800 snapshot
+costs ~480 prompt tokens (~960 for both) and the audio ~80; that engine was
+built `i4096-b1-kv8192` (~4,096 input tokens), so keep history short.
 
-## Wire protocol
+## Control plane: runtime WS `:9090`
 
-### Control (runtime WS `:9090`)
-
-- `ClientRuntimeMessage.SetVoiceEnabled { bool enabled }` (tag 28) — firmware
-  shells out to `systemctl start/stop bebop-voice.service`, mirroring
-  `SetVisionEnabled`.
-- `TelemetryFrame.voice` / `Snapshot.voice` (tag 21) — new `VoiceState`:
+- `SetVoiceEnabled { bool enabled }` (`ClientRuntimeMessage` tag 28): the
+  firmware (`src/voice.rs`) queues `systemctl start|stop bebop-voice.service`
+  on a worker thread and acks at once (`voice start requested`); an
+  uninstalled unit gets an error reply.
+- The worker re-polls `systemctl show` every 1.5 s; telemetry carries
+  `VoiceState` (`TelemetryFrame.voice` / `Snapshot.voice`, tag 21):
 
 ```proto
 message VoiceState {
-  bool   present = 1;   // unit installed
-  bool   running = 2;   // systemd active
-  string state   = 3;   // raw ActiveState
-  string detail  = 4;   // SubState / last error / "building engines"
-  string service = 5;
-  string model   = 6;   // catalog id being served
-  bool   ready   = 7;   // engines built and server answering /health
+  bool   present = 1;  // LoadState=loaded
+  bool   running = 2;  // ActiveState=active
+  string state   = 3;  // raw ActiveState
+  string detail  = 4;  // SubState (+ " (Result)" unless success), or the last systemctl error
+  string service = 5;  // "bebop-voice.service"
+  reserved 6;          // `model`, removed 2026-10-24
+  reserved "model";
 }
 ```
 
-### Agent protocol (voice WS `:9093`)
+`running` means the Python gateway is up, not that the models are ready;
+readiness is `/healthz` `phase`.
 
-One WebSocket, `ws://<robot>:9093/voice?session=<id>[&voice=<speaker>]`, carries
-voice and typed turns. JSON text frames are control/events; binary frames are
-PCM16 audio (16 kHz-ish mono up, 24 kHz mono down). `session` keys the
-conversation history (kept across reconnects, LRU of 32 sessions); without it
-each connection gets a fresh history.
+## HTTP (`:9093`)
+
+CORS `*`. `/healthz` and `/config` answer at once, also while engines build
+or after a failure.
+
+`GET /healthz`:
+
+| Key | Meaning |
+|---|---|
+| `ok` | `phase` is `ready` or `stub` |
+| `phase` | `idle`, `starting`, `building`, `ready`, `error`, `stub` |
+| `detail` | last meaningful status line, e.g. `starting brain (RadixArk/Qwen3.8-27B-NVFP4)`, `cascade ready` |
+| `model` | `cascade`; for omni the catalog id, `qwen3-omni (supervised:<id>)` or `qwen3-omni (external)`; `stub` |
+| `heartbeat_ms`, `heartbeat_age_s`, `elapsed_s`, `component`, `components_done`, `log_tail` | build progress of the local omni child (`log_tail`: its last 20 log lines); the other engines only stamp `heartbeat_ms` once ready |
+| `backend` | the configured engine, `cascade` or `omni` (it takes effect on the next start) |
+| `tools_supported` | turns go to the cascade |
+| `tools_enabled`, `motion_enabled` | the two permission switches |
+| `turns_active`, `turn_active` | running turns server-wide, and whether there is one |
+
+`GET /config` returns the settings plus `voices` (speaker ids of the running
+engine), `backends` (`["omni", "cascade"]`) and `tools_supported`.
+`POST /config` takes any subset of the fields below, saves
+`/var/lib/bebop-voice/config.json` and returns the same view; an unknown
+voice is 400 (when the engine lists voices), a failed save 500.
+
+| Field | Default | Applies |
+|---|---|---|
+| `voice` | `chelsie` | next turn |
+| `system_prompt` | a short Bebop persona | next turn |
+| `history_turns` | `4` (clamped 0-20) | next turn |
+| `keep_audio_history` | `false` | omni only: keep the user's audio in history |
+| `tools_enabled` | `true` | next turn: live context and the non-motion tools |
+| `motion_enabled` | `false` | next turn: adds `move_relative` |
+| `backend` | `cascade` | next service start |
+| `omni_supervisor_url`, `omni_backend_id` (`omni-edgellm`), `omni_unload_on_stop` (`false`), `omni_url` | empty | next service start |
+
+A saved `omni_backend_id` of `omni-vllm` (the removed vLLM container) is
+rewritten to `omni-edgellm` on load.
+
+CLI (`python -m bebop_vision.voice_server`): `--host` (`0.0.0.0`), `--port`
+(`9093`), `--cache-dir` (`/var/lib/bebop-voice/edgellm`); `--backend`,
+`--omni-url`, `--omni-supervisor-url`, `--omni-backend-id` override the saved
+config; `--voice`, `--system-prompt`, `--history-turns`,
+`--keep-audio-history`, `--no-tools` apply only when no config file exists;
+`--edgellm-arg` (repeatable) goes to the omni child; `--stub` replaces the
+models with a fixed text reply and a 440 Hz tone; `--check` prints the resolved
+config and checkpoint state, then exits.
+
+## Agent protocol (voice WS `:9093`)
+
+`ws://<robot>:9093/voice?session=<id>` carries voice and typed turns. JSON
+text frames are control and events; binary frames are mono PCM16 (up: at the
+`sample_rate` given in `utterance_start`, default 16000; down: 24 kHz).
+`session` keys the conversation history, kept across reconnects (LRU of 32
+sessions); without it each connection gets a fresh history. There is no
+voice override on the socket: the speaker is `POST /config` `voice`. A
+connection opened before the engine is ready gets
+`{"type": "error", "message": "voice service not ready (<phase>): <detail>"}`
+and is closed.
 
 **Turn model.** Each turn runs as its own server task, so the socket keeps
-reading while the brain thinks, speaks or drives. **At most one turn per
-session runs at a time; a new turn while one runs is rejected**
-(`turn_rejected`) — send `cancel` first. (Rejecting rather than
-auto-cancelling keeps a stray second message from silently aborting a motion.)
-A turn that was cancelled but is still winding down (stopping the wheels) does
-not block: the next turn waits for it, then starts. Events for a turn go to
-the socket that started it.
+reading while the brain thinks, speaks or drives. At most one turn per
+session runs; a new one is rejected (`turn_rejected`), so send `cancel`
+first. Rejecting rather than auto-cancelling keeps a stray second message
+from silently aborting a motion. A cancelled turn that is still winding down
+(stopping the wheels) does not block: the next turn waits for it (up to
+10 s), then starts. Events go to the socket that started the turn.
 
-App → robot:
+App -> robot:
 
 | Message | Meaning |
 |---|---|
-| `{"type":"utterance_start","sample_rate":48000,"format":"pcm16","speak"?:bool,"turn_id"?:str}` | start recording a voice turn; binary PCM16 frames follow |
-| `{"type":"utterance_end"}` | end of the utterance → starts the voice turn (empty audio → just `done`) |
-| `{"type":"user_text","text":"...","speak"?:bool,"turn_id"?:str}` | a typed turn: the text goes straight to the brain (no ASR) |
+| `{"type":"utterance_start","sample_rate":48000,"format":"pcm16","speak"?:bool,"turn_id"?:str}` | start a voice turn; binary PCM16 frames follow |
+| `{"type":"utterance_end"}` | end of the utterance: the turn starts (no audio: just `done`) |
+| `{"type":"user_text","text":"...","speak"?:bool,"turn_id"?:str}` | a typed turn; the text goes straight to the model (no ASR) |
 | `{"type":"cancel"}` | cancel the session's running turn (no-op when idle) |
-| `{"type":"reset"}` | cancel any running turn, then clear the session history (→ `{"type":"reset"}`) |
+| `{"type":"reset"}` | cancel any running turn, then clear the session history (answers `{"type":"reset"}`) |
 
-`speak` is a JSON bool and defaults to `true` (the strings `"false"`, `"0"`,
-`"no"`, `"off"` are also read as false); `false` skips TTS for that turn (no `audio_*`
-events, no binary frames). `turn_id` (≤64 chars) lets the client pick the id;
-otherwise the server assigns one.
+`speak` defaults to `true`; `false`, `0` and the strings `"false"`, `"0"`,
+`"no"`, `"off"`, `""` skip TTS for that turn (no `audio_*` events, no binary
+frames). `turn_id` (1-64 characters) lets the client pick the id; otherwise
+the server assigns one. A voice turn takes both from `utterance_start`.
 
-Robot → app (every event carries `turn_id`):
+Robot -> app, per turn (each carries `turn_id`):
 
 | Event | Fields |
 |---|---|
 | `turn_start` | `source: "voice"\|"text"`, `speak` |
-| `transcript` | `text` (the ASR result, or the typed text), `final: true`, `source` |
-| `assistant_delta` | `text` — streamed reply text (concatenate) |
+| `transcript` | `text` (the ASR result or the typed text), `final: true`, `source`; none for an omni voice turn |
+| `assistant_delta` | `text`: streamed reply text (concatenate) |
 | `tool_call` | `call_id`, `name`, `args` (parsed JSON object) |
 | `tool_result` | `call_id`, `ok`, `text` (what the model was told), `ms` |
-| `motion_progress` | `call_id`, `done_m`, `total_m`, `done_deg`, `total_deg` (~5 Hz during `move_relative`, plus a final one) |
+| `motion_progress` | `call_id`, `done_m`, `total_m`, `done_deg`, `total_deg`: ~5 Hz during `move_relative`, plus a final one |
 | `audio_start` / `audio_end` | `sample_rate: 24000`, `format: "pcm16"`; binary PCM16 frames in between |
-| `turn_end` | `status: "done"\|"cancelled"\|"error"`, `error?` — always the last event of a turn |
-| `turn_rejected` | `reason: "busy"`, `active_turn_id`, `source` (no turn was started; no `turn_end` follows; no legacy `error` is sent with it) |
+| `turn_end` | `status: "done"\|"cancelled"\|"error"`, `error?`: always the turn's last event |
 
-Ordering within a turn: `turn_start` → `transcript` → `audio_start`? →
-(`assistant_delta` | `tool_call` → `motion_progress`* → `tool_result`)* →
-`audio_end`? → `turn_end`. `ok: false` marks a refusal or failure (a tool that
-declined to move, an unreachable service); the text says why. A cancelled
-tool reports `tool_result{ok:false,text:"cancelled"}`.
+Outside a turn (no `turn_id`):
 
-**Legacy messages** (for the pre-agent app, kept while cheap): `text{delta}`
-mirrors each `assistant_delta`; `tool{name}` mirrors `tool_call`; `done`
-precedes every `turn_end` that is `done`/`cancelled`, and `error{message}`
-precedes an `error` one (and answers bad frames; `turn_rejected` has no legacy mirror). New
-clients should key off the typed events and ignore these.
-
-**Cancel.** `cancel`, `reset` and a socket disconnect cancel the running turn:
-brain streaming and TTS stop immediately; `move_relative` checks the turn's
-cancel flag every 50 ms control tick (and task cancellation lands at each
-tick's sleep). Its `finally` blocks always send a zero twist, then undo what
-it changed (disarm / restore the mode) before the turn ends `cancelled`.
-There is no confirmation gate for motion (operator decision): motion is gated
-by `motion_enabled` and the drive-seat rule below.
-
-**History** keeps whole turns — the user's words (transcript or typed text),
-each tool-calling assistant message with its tool results, and the reply —
-bounded by `history_turns` *turns* (not messages). Camera frames are never
-kept. A cancelled turn is still committed (cut-off tool calls get a
-"cancelled" result, the reply ends "(interrupted)") so the model knows what
-already happened. For omni, a spoken user turn is kept only with
-`keep_audio_history`; `keep_audio_history` does not apply to the cascade (it
-keeps the transcript).
-
-**Busy signal.** `GET /healthz` adds `turn_active` (bool) and `turns_active`
-(int, server-wide), plus `tools_supported`, `tools_enabled` and
-`motion_enabled`. The place router's `VoiceBusyProbe`
-(`bebop_vision/router/voice_busy.py`) skips its background tick while a turn
-runs. It treats a stopped voice service (connection refused) as idle, and
-fails **closed** (busy) when the service is up but times out, errors, or
-reports no turn signal.
-
-**Permissions.** `tools_enabled` gates live context (camera frames + robot
-status) *and* the non-motion tools; `motion_enabled` adds `move_relative`.
-Both are in `GET /config` (with `tools_supported`) and settable with
-`POST /config`.
-
-### Live context (omni: single pass, no tools)
-
-Earlier revisions used a `describe_scene` tool. That forced a two-phase turn
-because `/v1/chat/completions` **rejects `tools` combined with audio output**
-(`400 unsupported_feature`). It also tempted the model to re-emit the tool-call
-XML instead of answering. Both are gone.
-
-Now every voice turn is a **single model call**: the user's audio plus the
-robot's current **near + far camera frames**, with a one-line robot status in
-the system prompt. `_run_turn` gathers the context before calling the model —
-`live_context()`:
-
-- `robot_state_text()` opens `ws://127.0.0.1:9090/ws`, sends `GetSnapshot`, and
-  formats mode / E-STOP / armed wheels / battery / odom as JSON.
-- `_snapshot_views()` fetches **both** cameras (`color_near` and `color_far`)
-  from `:9092/snapshot`. If they are down, it asks the firmware to enable
-  vision (`SetVisionEnabled(true)`) and waits (bounded) for the first frames.
-
-The frames are attached to the user turn as two labelled `image_url` parts; the
-status is appended to the system prompt. Frames are **not** kept in history
-(only the current turn's views are sent).
-
-**Token budget** (measured against the live server): snapshots are 1280×800 and
-cost **~480 tokens each (~960 for both)**; audio adds ~80; the engine is built
-`i4096-b1-kv8192` (max ~4,096 input tokens), so keep history small. No money
-cost — it is local ViT encode + prefill latency per turn.
-
-Toggle with the Voice page's "Live context" switch (`VoiceConfig.tools_enabled`,
-`--no-tools`) to disable the images/status for pure chit-chat.
-
-## Cascade backend (multi-hop: ASR → brain → TTS)
-
-Selected by `VoiceConfig.backend` (`cascade`, the default, or `omni`;
-`--backend`). Config files written before `config_version: 2` saved the old
-`omni` default on every write, so a pre-v2 file's `omni` is migrated to
-`cascade` on load; a v2 file keeps whatever the operator chose.
-The cascade uses the **best model per stage**, each its own Edge-LLM OpenAI
-server (all served checkpoint-direct, engines cached):
-
-| Stage | Model | Endpoint |
-|---|---|---|
-| ASR | `Qwen/Qwen3-ASR-1.7B` | `POST /v1/audio/transcriptions` (`file`) |
-| Brain | `RadixArk/Qwen3.8-27B-NVFP4` (multimodal, 256k) | `POST /v1/chat/completions` |
-| TTS | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | `POST /v1/audio/speech` → 24 kHz PCM |
-
-Ports 8011/8012/8013. `CascadePipeline` supervises them (sequential engine
-builds to bound GPU memory); `_run_turn_cascade` does: transcribe (voice
-turns only) → attach robot status + both camera frames → chat (with tools) →
-synthesize per sentence (unless `speak: false`), streaming the events above.
-
-Because the brain is a text/VLM model, **native tool calling works** here (the
-omni server rejects tools combined with audio output).
-
-Two Edge-LLM 0.11.0 notes:
-- `tensorrt-edgellm-serve` forwards VLM-only `max_image_tokens*` kwargs to the
-  standalone TTS runtime, which rejects them. `bebop_vision.edge_serve` is a
-  drop-in launcher that strips them (the service uses it for the TTS stage).
-- TTS voices differ from omni voices (`aiden`, `dylan`, `eric`, `serena`, …);
-  `resolve_cascade_voice` maps the configured voice or falls back to `aiden`.
-
-## Omni backend sources
-
-The `omni` backend is one end-to-end Qwen3-Omni model, but the service can get
-it three ways — only the selected source is loaded:
-
-| Source | Config | Who owns the lifecycle |
-|---|---|---|
-| **Supervisor** | `omni_supervisor_url` (+ `omni_backend_id`) | `bebop-models` (:9094) — GPU budget + eviction |
-| Edge-LLM child (default) | (both empty) | `bebop-voice` itself (`EdgeLLMServer`) |
-| External URL | `omni_url` | someone else — debug escape hatch |
-
-Every one of these is a **TensorRT Edge-LLM** process: Edge-LLM is the robot's
-only generative runtime (see [`models.md`](models.md)).
-
-With `omni_supervisor_url` set, `SupervisedServer` POSTs
-`/models/{id}/load` to the supervisor on start (which blocks until the backend
-is ready — the first start builds TensorRT engines, which is slow) and uses the
-`base_url` it returns; on stop it optionally `unload`s
-(`omni_unload_on_stop`). The supervisor is the single control plane for voice,
-vision, navigation and a future VLA. Set it from the app's Voice page
-(**Omni source (supervisor)**) or the Models page (**GPU budget** card).
-
-## Components and changes
-
-| Area | Files | State |
-|---|---|---|
-| Catalog + downloader | `bebop-vision/config/models.yaml`, `bebop_vision/models.py`, `bebop_vision/download_model.py`, `firmware/bebop-linux/src/model.rs`, `tests/test_models.py` | ✅ done |
-| Design | `docs/voice.md` | ✅ |
-| Firmware control | `jetson-agent/bebop-proto/proto/bebop_runtime.proto`, `firmware/bebop-linux/src/voice.rs`, `src/server/{ws,handlers,telemetry}.rs`, `src/main.rs` | ✅ deployed to robot |
-| App control + page | `bebop-app/src/proto/*`, `runtime/{types,wsTransport,index}.ts`, `screens/VoiceScreen.tsx`, `voice/useVoiceSession.ts`, `screens/DashboardScreen.tsx`, `screens/MotorBenchScreen.tsx`, `App.tsx` | ✅ done (push-to-talk) |
-| Voice service | `bebop-vision/bebop_vision/voice_server.py`, `deploy/systemd/bebop-voice.service`, `tests/test_voice_server.py` | ✅ deployed to robot |
-| Live context (single pass) | `bebop-vision/bebop_vision/voice_server.py` (`live_context`, `robot_state_text`, `_snapshot_views`, `_run_turn`), `bebop-app/src/{screens/VoiceScreen.tsx,voice/useVoiceSession.ts}` | ✅ done (both camera frames + status every turn) |
-| Install | `scripts/install-jetson.sh` (`--setup-voice`), `requirements.txt` | ✅ venv bootstrapped on robot |
-| Bring-up | engine build, latency tuning, NVFP4 | ⏳ model downloading; engine build next |
-
-### Bring-up status (2026-10-04)
-
-- Firmware (branch `feat/voice-omni`) installed on the Thor via
-  `install-jetson.sh --local --build --linux-only`; the catalog serves 6
-  models including `qwen3-omni-30b`, and the app shows it on the Models page.
-- `tensorrt-edgellm[server]==0.11.0` (aarch64 wheel, 447 MB) installed into
-  the shared `bebop-vision/.venv`; `runtime.load()` validated.
-- `voice_server --stub` protocol verified on the Thor (text + 24 kHz PCM).
-- Remaining: finish the Qwen3-Omni snapshot download, start
-  `bebop-voice.service` (first start builds the six TensorRT engines), then
-  test push-to-talk from the app.
-
-## Latency budget (target)
-
-| Stage | Budget |
+| Frame | When |
 |---|---|
-| Client capture + VAD end-of-utterance | ~0.2-0.3 s |
-| Audio encode + transport (LAN) | ~0.05 s |
-| Thinker prefill + first Talker frame | ~0.3-0.5 s |
-| Code2Wav + transport + playback | ~0.1 s |
-| **End-to-end** | **~0.7-1.0 s** |
+| `turn_rejected` | `reason: "busy"`, `active_turn_id`, `source`; no turn starts, the running one is unaffected |
+| `done` | an `utterance_end` with no audio |
+| `error` | `message`: not ready (then the socket closes), a bad JSON frame, an empty `user_text`, a socket error |
+| `reset` | the reply to `reset` |
 
-Knobs: `codec_chunk_frames` (smaller = sooner but rougher), `talker_top_k`,
-`max_audio_length`, and a short system prompt.
+Clients key off these typed events; nothing else is sent (no `text`/`tool`
+mirrors, no `done`/`error` next to `turn_end`).
 
-## Mobile
+Ordering within a turn: `turn_start` -> `transcript` -> `audio_start`? ->
+(`assistant_delta` | `tool_call` -> `motion_progress`* -> `tool_result`)* ->
+`audio_end`? -> `turn_end`. `ok: false` marks a refusal or failure (a tool
+that declined to move, an unreachable service); the text says why. A tool
+cut off by a cancel reports `tool_result{ok: false, text: "cancelled"}`.
 
-The Voice page is touch-first:
+**Cancel.** `cancel`, `reset` and closing the socket cancel the running
+turn: brain streaming and TTS stop at once; `move_relative` checks the
+turn's cancel flag every 50 ms control tick (task cancellation also lands at
+each tick's sleep). Its `finally` always sends a zero twist and undoes what
+it changed (disarm, restore the mode) before the turn ends `cancelled`.
+There is no confirmation gate for motion (operator decision): motion is
+gated by `motion_enabled` and the drive-seat rule below.
 
-- **Tap-to-talk toggle**, not press-and-hold. Hold fights the microphone
-  permission prompt (the prompt steals the pointer, so `pointerup` never
-  fires and the mic stays open) and touch `pointerleave` jitter. Tap starts
-  capture, tap again sends. `useVoiceSession` uses `AudioWorklet` with a
-  `ScriptProcessorNode` fallback for pre-AudioWorklet WebViews, reads back
-  `ctx.sampleRate` (mobile often ignores the requested 16 kHz), and maps
-  `getUserMedia` failures to actionable messages.
-- **No zoom / callout / pull-to-refresh** (`index.html` viewport +
-  `App.css` `touch-action`, `-webkit-touch-callout`, `overscroll-behavior`),
-  plus `env(safe-area-inset-bottom)` padding.
+**History** keeps whole turns, bounded by `history_turns` turns (not
+messages): the user's words (transcript or typed text), each tool-calling
+assistant message with its tool results, and the reply. Camera frames are
+never kept. A cancelled turn is still committed (cut-off tool calls get a
+placeholder result, the reply ends "(interrupted)") so the model knows what
+already happened. Omni keeps a spoken user turn only with
+`keep_audio_history`; the cascade keeps its transcript.
 
-### The secure-context problem (important)
+## Live context
 
-`getUserMedia` only works in a **secure context** — HTTPS or a native app.
-But the app talks to the robot over **cleartext** `ws://<ip>:9090`,
-`ws://<ip>:9093`, and `http://<ip>:9093/healthz`. So:
+With `tools_enabled`, every turn (either engine) carries:
 
-- **Mobile browser over plain HTTP** (`http://<workstation>:1420`): mic is
-  blocked by the secure-context requirement.
-- **Served over HTTPS**: the cleartext robot sockets become *mixed content*
-  and are blocked.
+- the robot status: `GetSnapshot` over `ws://127.0.0.1:9090/ws`, as JSON
+  (`mode`, `estop`, `estop_reason`, `wheels_armed`, `drive`, `odom`,
+  `battery_pct`, `battery_v`, `vision_running`) in the system prompt. A
+  fetch measured a flat ~2 s (2026-10-16), so it is cached (15 s TTL) and
+  refreshed every 5 s in the background;
+- both color frames, `color_near` and `color_far`, from
+  `http://127.0.0.1:9092/snapshot?stream=...`, in the user message. When
+  neither arrives the service sends `SetVisionEnabled(true)` and retries for
+  up to ~15 s.
 
-The clean path is **Tauri mobile**, whose webview is a secure custom scheme
-and can be configured to allow cleartext to the LAN. When adding mobile
-targets (`tauri android init` / `tauri ios init`):
+The switch is Settings › Voice & agent › Live context and tools
+(`tools_enabled`; `--no-tools` when no config file exists).
 
-- **iOS** `Info.plist`: `NSMicrophoneUsageDescription`, and an ATS exception
-  (`NSAllowsLocalNetworking` or a per-host exception) for the robot.
-- **Android** `AndroidManifest.xml`: `RECORD_AUDIO`, and
-  `android:usesCleartextTraffic="true"` (or a network-security-config scoped
-  to the LAN).
-- The alternative, browser-only deployment would require terminating TLS on
-  the robot (self-signed) and using `wss://` / `https://`.
+## Tools (cascade only)
 
-For **dev**, see [`dev-https.md`](dev-https.md): the Chrome
-`unsafely-treat-insecure-origin-as-secure` flag (desktop), or a self-signed
-Caddy proxy (`Caddyfile.dev`). The app picks `wss`/`https` automatically when
-the page is HTTPS (`bebop-app/src/runtime/urls.ts`).
-
-## Risks / open questions
-
-1. **Engine build time & disk.** First serve builds six engines; budget tens of
-   GB and several minutes. Confirm the wheel builds Qwen3-Omni without the
-   `[tools]` extra (checkpoint-direct builder) or whether NVFP4 quantization is
-   required first.
-2. **Talker `text_projection`.** The C++ build needs `-DENABLE_CUTE_DSL=gemm`;
-   the prebuilt wheel should already handle this — verify audio is not garbled.
-3. **GPU/bandwidth contention** with `bebop-vision` (camera + navd ONNX). The
-   LLM is bandwidth-bound; schedule voice when not training/recording heavily.
-4. **Audio transport choice.** v1 uses a dedicated `:9093` WS. If a single
-   connection is required, audio can move onto `:9090` as a protobuf `bytes`
-   envelope (precedent: `NavMaskFrame.grid`), at the cost of a firmware relay.
-5. **Model license/gating.** Qwen3-Omni is Apache-2.0; verify the HF repo is
-   not gated (if it is, flip `gated: true` and the token flow already works).
-
-## Tools the voice brain can call
-
-The cascade brain is served with OpenAI tools from `voice_server.py`. The brain
-plans a tool call, the service executes it, the result goes back, and the
-answer is spoken — text streams and TTS is synthesised per sentence throughout.
+The brain gets OpenAI tools; the service runs each call, returns the
+result, and the answer streams (and is spoken per sentence) as usual.
 
 | Tool | Does | Switch |
 |---|---|---|
-| `where_am_i`, `list_places`, `place_facts` | read place memory (HTTP `:9095`) | `tools_enabled` |
-| `remember_place`, `add_place_fact`, `rename_place`, `forget_place` | write it | `tools_enabled` |
-| `robot_status` | read mode / E-STOP / armed wheels / odom / battery | `tools_enabled` |
-| `note_drive_intent`, `mark_drive_event` | write the drive intent / a marker into the active recording (HTTP `:9092` `/intent`, `/event`) | `tools_enabled` |
-| `move_relative` | bounded odom-relative motion | **`motion_enabled`** |
+| `where_am_i`, `list_places`, `place_facts` | read place memory over HTTP `:9095` ([`places.md`](places.md)) | `tools_enabled` |
+| `remember_place`, `add_place_fact`, `rename_place`, `forget_place` | write it (`remember_place` is `POST /places`, the current view of every camera) | `tools_enabled` |
+| `robot_status` | the cached status line: mode, E-STOP, armed wheels, odometry, battery | `tools_enabled` |
+| `note_drive_intent` `{text, from_place?, to_place?}` | the drive intent, `POST :9092/intent` (an empty text clears it) | `tools_enabled` |
+| `mark_drive_event` `{kind: obstacle\|recovery\|exclude\|note, note?}` | a marker, `POST :9092/event`; 409 (no segment recording) is reported as not marked | `tools_enabled` |
+| `move_relative` `{forward_m?, turn_deg?}` | bounded odom-relative motion | `motion_enabled` |
 
-The place tools go over HTTP because the places service lives in the
-`bebop-vision` process; the robot tools talk to the runtime WS (`:9090`).
+There are no navigation tools: `move_relative` is the only motion tool
+since the navigation stack was stripped on 2026-10-22. The app disables
+"Allow moves" while "Live context and tools" is off.
 
 ### Motion is deliberately narrow
 
-`move_relative` takes `forward_m` and/or `turn_deg` and is **odom-relative
-only** — there is no map, so it cannot accept "the door" or a room name (see
-the localisation note in `bebop_vision/places/__init__.py`). It:
+`move_relative` is odom-relative only; there is no map, so it cannot take
+"the door" or a room name. It:
 
-- is gated by its own `motion_enabled` switch, **not** the app's casual
-  "live context" toggle;
-- clamps a single call to ≤2 m and ≤180°;
-- **refuses while another client holds the drive seat**
-  (`DriveState.has_active_operator && !you_are_active_operator`);
-- **yields to any person at once (preemption).** Voice's runtime
-  connection announces `ClientHello { name: "voice", autonomous: true }`.
-  The firmware hands an autonomous holder's seat to the first drive command
-  — **zero or non-zero** — from a non-autonomous connection, and applies
-  that twist. So deflecting a person's joystick takes over immediately, and
-  an explicit stop from the app (`twistStream.forceStop()`) halts the robot
-  and takes the seat. Note the app writes release stops only when it owes
-  one (it drove, or holds the seat), so a viewer who never drove sends no
-  stop on release: an app "Stop voice" control shown while
-  `active_operator_autonomous` is set must call `forceStop()`, not
-  `stop()`. A preempting stop claims a fresh seat for `operator_grace_ms`
-  (so voice can't take it back; other people wait out that window too, and
-  telemetry shows the person as driving). Voice sees
-  `has_active_operator && !you_are_active_operator` in the next telemetry
-  frame and stops within one 50 ms tick without sending another non-zero
-  twist (it never fights for the seat; the firmware would reject it while
-  the person's seat is fresh, and an autonomous client can never take a
-  fresh seat). The tool ends `ok: false` with
-  `stopped: <name> took over after <distance> (<pose>). I let them drive.`
-  and the turn continues with that result. Voice leaves the wheels armed and
-  the mode alone for the new holder instead of disarming them.
-  `DriveState.active_operator_autonomous` tells viewers voice is driving.
-  `cancel` / `reset` / closing the socket and the E-STOP stop it too;
-- if the wheels are **already armed** (a person armed them, in `DIAL_IN`), it
-  drives as-is and **leaves them armed and the mode untouched**; otherwise it
-  arms for the duration only — mode → `DIAL_IN` (arming requires it), enable
-  the wheels, move — and on **every exit path** stops, then undoes only what
-  it changed (disarm if it armed, restore the mode if it switched it);
-- stops within one 50 ms tick on `cancel` / disconnect, E-STOP, link loss or
-  a person taking the seat, and reports how far it actually got (`ok: false`);
-- closes the loop on wheel odometry and reports the distance telemetry
-  actually showed, not the distance requested;
-- relies on the firmware as the backstop: the operator-link watchdog zeroes a
-  stale twist (a crashed tool coasts to a stop, it does not run away), every
-  command is slewed/clamped, and one WS client holds the drive assignment.
+- clamps one call to ≤ 2 m and ≤ 180°, at ≤ 0.2 m/s and ≤ 0.6 rad/s
+  (tolerance 3 cm / 0.06 rad); with both given it turns on the spot first,
+  then drives, holding the heading;
+- refuses while the E-STOP is latched, while another client holds the drive
+  seat (`DriveState.has_active_operator && !you_are_active_operator`), when
+  the wheels are armed in a mode other than `DIAL_IN`, when the runtime does
+  not answer within 5 s, or when dial-in or arming does not happen;
+- if the wheels are already armed in `DIAL_IN` (a person armed them), drives
+  as-is and leaves them armed and the mode untouched; otherwise arms for the
+  duration only: mode -> `DIAL_IN` (arming requires it), arm all wheels,
+  each step waited up to 4 s;
+- **yields to any person at once.** Its runtime connection announces
+  `ClientHello { name: "voice", autonomous: true }`. The firmware hands an
+  autonomous holder's seat to the first drive command, zero or non-zero,
+  from a non-autonomous connection and applies that twist; a preempting stop
+  claims a fresh seat for `server.operator_grace_ms` (2000 ms), so voice
+  cannot take it back. Voice sees the seat taken in the next telemetry
+  frame, stops within one 50 ms tick without another non-zero twist, ends
+  the tool `ok: false` with `stopped: <name> took over after <distance>
+  (<pose>). I let them drive.`, and leaves the wheels and mode to the new
+  holder. The app writes a release stop only when it owes one, so an app
+  control that stops voice must call `twistStream.forceStop()`, not
+  `stop()`.
+  `DriveState.active_operator_autonomous` tells viewers voice is driving;
+- stops within one tick on `cancel` / disconnect, E-STOP, a lost runtime
+  link or a person taking the seat, and reports how far it actually got;
+- closes the loop on wheel odometry and reports what telemetry showed, not
+  what was asked; wheel-odometry heading over-read in-place turns ~2x on
+  carpet live on 2026-10-21 (`AGENTS.md`), so turns can come up short there;
+- on every exit path stops, then undoes only what it changed (disarm if it
+  armed, restore the mode if it switched it), unless another client now
+  holds the seat;
+- relies on the firmware as the backstop: the operator watchdog
+  (`server.operator_timeout_ms`, 500 ms) zeroes a stale twist (a crashed
+  tool coasts to a stop), every wheel command is slewed and clamped to
+  `vel_max`, and one WS client holds the drive seat.
 
 ### E-STOP is operator-only
 
-**No tool can latch, clear or reset an E-STOP.** A latched one means a person
-has to go and look at the robot, so the brain may only *report* the state and
-reason (`robot_status`) and refuse to move — `move_relative` bails before it
-arms anything, leaving the mode at `IDLE` with the wheels disarmed. A test
-asserts that no advertised tool name contains estop/reset/arm, so this cannot
-regress by accident.
+No tool latches, clears or resets an E-STOP. A latched one means a person
+has to go and look at the robot, so the brain may only report it
+(`robot_status`) and refuse to move: `move_relative` bails before it arms
+anything. `test_no_model_tool_can_control_the_estop`
+(`tests/test_voice_server.py`) asserts that no place, status or motion tool
+name contains `estop`, `e_stop`, `reset`, `clear` or `arm`. `RobotClient`
+(`bebop_vision/robot.py`) has no E-STOP reset; only the app clears a latch
+(`ResetEStop` over its own runtime connection).
 
-`RobotClient.reset_estop()` exists but is for the **operator app**
-(`bebop-app` binds `ResetEStop`), never the model. A misheard "clear the
-e-stop" that actually cleared one would defeat the whole mechanism.
+## Measured latency (cascade)
+
+Thor, 2026-10-16 (`git show 714ad2d`): a 4.5 s utterance over `/voice`,
+mean time from the last spoken word to the first audio byte.
+
+| Pipeline | First audio |
+|---|---|
+| brain waits for the whole reply, robot status fetched per turn | 6.22 s |
+| + streamed brain, TTS per sentence | 5.49 s |
+| + cached robot status | 3.50 s |
+
+The remaining ~3.5 s was ASR ~0.4 s, first token ~0.5 s (two images = 977
+prompt tokens, 0.41 s prefill), the first sentence (~1.3 s of decode at
+22 tok/s) and TTS's first chunk (~0.4 s): it is set by the length of the
+model's first sentence. TTS runs ~2x faster than playback, so it stays
+ahead.
+
+## App
+
+| Piece | File (`bebop-app/src/`) |
+|---|---|
+| Agent console, `#/r/:host/autonomy` (Stop task, transcript, camera, robot status) | `screens/autonomy/AutonomyScreen.tsx`, `Composer.tsx`, `Transcript.tsx`, `RobotStatus.tsx` |
+| Socket and turn model | `voice/useAgentSession.ts`, `voice/agentTurns.ts` |
+| Mic capture and playback | `voice/useVoiceIO.ts` |
+| `/healthz` and `/config` | `voice/voiceService.ts` |
+| Settings › Voice & agent | `screens/autonomy/VoiceSettings.tsx`, mounted by `app/routes/SettingsRoute.tsx` |
+| Start/stop (`SetVoiceEnabled`) | the console's service card; `screens/diagnostics/ServicesTab.tsx` |
+
+## Mobile
+
+- The mic is hold-to-talk; a tap (< 300 ms) latches it and a second tap
+  sends, which also survives the permission prompt stealing the pointer.
+  Capture is an AudioWorklet with a ScriptProcessorNode fallback; it asks
+  for 16 kHz, reads back `ctx.sampleRate` (mobile often ignores the request)
+  and reports that rate in `utterance_start`. `getUserMedia` failures map to
+  actionable messages.
+- No double-tap zoom, long-press callout or pull-to-refresh (`App.css`
+  `touch-action: manipulation`, `-webkit-touch-callout: none`,
+  `overscroll-behavior: none`); pinch zoom stays allowed (the `index.html`
+  viewport no longer disables it). `viewport-fit=cover` plus
+  `env(safe-area-inset-*)` padding keep the shell clear of notches.
+
+### The secure-context problem
+
+`getUserMedia` works only in a secure context (HTTPS, localhost or a native
+app), but the robot's services are cleartext (`ws://<robot>:9090`,
+`ws://<robot>:9093`, `http://<robot>:9093/healthz`). A plain-HTTP page gets
+no mic; an HTTPS page has its cleartext sockets blocked as mixed content.
+The app picks `wss`/`https` itself when the page is HTTPS
+(`bebop-app/src/runtime/urls.ts`), so a TLS proxy in front of the robot
+works; for development see [`dev-https.md`](dev-https.md) (Chrome's
+insecure-origin flag, the `Caddyfile.dev` proxy, Tailscale).
+
+A native build of the unused `bebop-app/src-tauri/` shell would avoid both
+(a secure custom scheme that can allow LAN cleartext). It would need, on
+iOS, `NSMicrophoneUsageDescription` and an ATS exception
+(`NSAllowsLocalNetworking` or a per-host one), and on Android
+`RECORD_AUDIO` and `android:usesCleartextTraffic="true"` (or a
+network-security-config scoped to the LAN).
+
+## Install
+
+- `sudo ./scripts/install-jetson.sh --setup-voice` (`--setup-voice-only`
+  skips the binary install) creates or refreshes the single
+  `bebop-vision/.venv` (`--system-site-packages`, so JetPack's TensorRT
+  bindings are visible), installs `requirements.lock.txt` (else the
+  `requirements.txt` floors), among them Edge-LLM 0.11.0
+  (`tensorrt-edgellm[server,server-tools,tools]==0.11.0`, a prebuilt aarch64
+  wheel for JetPack 7.x, CUDA 13, SM110: nothing compiles on the robot), and
+  checks that `tensorrt_edgellm.runtime.load()` works.
+- The normal install path installs `bebop-voice.service`, not enabled.
+- Omni only: download the checkpoint, then `--quantize-voice` (above).
+- The cascade stages are not in the `bebop-models` registry, so the
+  supervisor's GPU budget does not count them ([`models.md`](models.md)).

@@ -21,7 +21,7 @@ an SPA fallback.
 | `#/setup/connect` → `wifi` → `identity` | **Setup** wizard, outside the robot shell. Over the robot's hotspot the address is `192.168.42.1`. Finishes on the robot's Drive page |
 | `#/r/:host/drive` | **Drive**: video-first teleop (touch joystick, WASD / arrows, gamepad) |
 | `#/r/:host/autonomy` | **Autonomy**: the agent console (text and push-to-talk turns, tool and motion events, cancel) |
-| `#/r/:host/autonomy/memory[?view=map]` | **Memory**: pending-place review and import, teaching, known places; the per-place map and the place graph |
+| `#/r/:host/autonomy/memory[?view=map]` | **Memory**: the Places tab (recognition, pending-place review and import, teaching, known places) and the Place graph tab (`?view=map`, read-only). Protocol: `docs/places.md` |
 | `#/r/:host/diagnostics/:tab` | **Diagnostics**: `motors`, `power-imu`, `captures`, `services`, `cameras` |
 | `#/r/:host/settings/:section` | **Settings**: `network` (Wi-Fi status, hotspot), `models` (GPU budget, model downloads), `voice` (agent engine, voice, persona) |
 
@@ -33,20 +33,19 @@ Everything under `#/r/:host/` sits in one shell (`src/app/AppShell.tsx`):
   dock directly above the tabs. Dock and tabs are part of the layout, not
   overlays, so they never cover page content. The dock shows the latch
   reason ("Right motor fault: DC bus over-voltage") and a small Reset.
+  At 500 px tall or less the tab bar turns compact and the E-STOP moves
+  into the status bar.
 - **Tablets (768-1279 px)**: icon rail on the left, E-STOP at the right of
   the status bar, and a full-width strip under it with the reason and Reset
   while latched. Short viewports (≤500 px tall, i.e. landscape phones) drop
   the strip and show the reason and Reset inline in the status bar.
 - **Desktop (≥1280 px)**: the same with a labeled rail.
-- **Drive** is full-bleed: the rail collapses, the phone tab bar becomes a
-  menu button, and on phones the E-STOP floats bottom-right at `z-40`
-  (above any page overlay up to `z-39`). Its footprint grows while latched
-  (about 240 x 112 px), so the shell publishes the measured corner as
-  `--estop-float-w` / `--estop-float-h` on `<html>` for Drive to pad against.
+- **Drive** gets the same navigation as every other section: on phones the
+  in-flow E-STOP dock and tab bar, on wider screens a side rail that stays
+  icon-only to give the video more width.
 - **Dialogs never cover the E-STOP**: the shell publishes
-  `--shell-top-inset` / `--shell-bottom-inset`, and `ui/Dialog` and the
-  nav sheet stop at those edges. Changing section scrolls the page to the
-  top.
+  `--shell-top-inset` / `--shell-bottom-inset` on `<html>`, and `ui/Dialog`
+  stops at those edges. Changing section scrolls the page to the top.
 - **Space** triggers the E-STOP anywhere outside a text field. The button
   latches optimistically and follows telemetry; a press that never reached
   the robot turns into a pulsing RETRY. Reset is deliberately a quiet
@@ -65,11 +64,10 @@ behind a TLS proxy, see `src/runtime/urls.ts`).
 |---|---|---|---|
 | 9090 | `bebop-linux` firmware | WS `/ws`, binary protobuf (`bebop_runtime.proto`); HTTP `/healthz`, `/captures*` | Telemetry, twists, E-STOP, modes, unit start/stop, capture downloads. The safety authority |
 | 9091 | `bebop-agent` | WS `/ws`, binary protobuf (`bebop.proto`); HTTP `/healthz` | Setup: Wi-Fi scan/join, robot name, hotspot settings |
-| 9092 | `bebop-vision` videoserver | WHEP (`POST /whep?stream=…`, `DELETE` the session), H.264 over WebRTC; HTTP `/snapshot`, drive notes (`/intent`, `/event`, `/notes`) | Video (one encoder per stream shared by all viewers) |
+| 9092 | `bebop-vision` videoserver | WHEP (`POST /whep?stream=…`, `DELETE` the session), H.264 over WebRTC; HTTP `/snapshot`, drive notes (`/intent`, `/event`, `/notes`) | Video (one encoder per stream shared by all viewers); Drive's drive notes |
 | 9093 | `bebop-voice` | WS `/voice` (JSON events + PCM16); HTTP `/healthz`, `/config` | Agent turns (`user_text`, typed events, cancel), voice settings. Protocol: `docs/voice.md` |
 | 9094 | `bebop-models` | HTTP `/healthz`, `/models`, `POST /models/{id}/load\|unload` (CORS `*`) | GPU budget and Edge-LLM backend lifecycle |
-| 9095 | places (inside `bebop-vision`) | HTTP `/places`, `/places/pending`, `/whereami`, `/places/graph`, `/places/{id}/map` | Place memory. One shared poller per robot session |
-| 9096 | live SLAM (only with `--live-slam`) | HTTP `/structure` | "Capture this place" on the Memory map |
+| 9095 | places (inside `bebop-vision`) | HTTP `/healthz`, `/places`, `/places/pending` (`/{id}/suggest`, `/import`), `/whereami`, `/places/graph`, `/places/{id}` (`/views`, `/facts`, `/keyframes/…`, `DELETE`) | Place memory: review and import, teaching, recognition, the place graph. One shared poller per robot session; the Place graph tab polls `/places/graph` itself |
 
 `RobotProvider` (`src/robot/session.tsx`) owns one firmware socket per host,
 a ref-counted telemetry store (rate = the fastest mounted consumer, link
@@ -106,7 +104,9 @@ Tests are plain `node:test` files that import the TypeScript sources
 directly (`--experimental-transform-types`), so pure modules import their
 siblings with explicit `.ts` extensions. They cover the twist stream, drive
 input arbiter, telemetry/reconnect logic, E-STOP latch and reason text, the
-setup transport lifecycle, the agent turn model and the map helpers.
+setup transport lifecycle, the agent turn model, the places poller, drive
+notes and the drive HUD, the model-eviction preview and the place-graph
+helpers (`npm run test:map` runs only those).
 
 ## On the robot
 
@@ -134,14 +134,15 @@ src/
 ├── voice/          agent session, voice I/O worklets, voice service HTTP
 ├── input/          drive input arbiter, gamepad, keyboard, control profiles
 ├── components/
-│   ├── ui/         the kit: Button, Card, Banner, StatusPill, Stat, Tabs,
+│   ├── ui/         the kit: Button, Card, Banner, StatusPill, Tabs, Spinner,
 │   │               SegmentedControl, Switch, Field, Dialog/useConfirm, PageState
 │   └── *.tsx       VideoFeed, DriveJoystick, GamepadDrive, AIModelCard, ...
 ├── screens/
 │   ├── drive/      Drive page
 │   ├── autonomy/   agent console and voice settings
-│   ├── memory/     PlacesView, PendingReview, KnownPlaces, MapView,
-│   │               LocalMapCanvas, PlaceGraphCard, pollers, mapView helpers
+│   ├── memory/     PlacesView, WhereAmICard, PendingReview, KnownPlaces,
+│   │               MapView + PlaceGraphCard (the place graph), the graph
+│   │               poller and helpers (mapPolling, mapView), places REST calls
 │   ├── diagnostics/ one file per tab
 │   ├── settings/   Network, model supervisor
 │   └── WifiScreen, ConfigScreen (setup steps)

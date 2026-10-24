@@ -1,120 +1,320 @@
 # Architecture
 
+The robot is a Jetson AGX Thor Developer Kit (tegra264; JetPack 7.2 /
+L4T R39.2.1, CUDA 13.2, Python 3.12) on a differential-drive base. Every
+on-robot piece is a systemd unit. The operator app runs in a browser and
+talks to each service directly: there is no backend in between and no login.
+
+## Hardware the code talks to
+
+| Part | Link | Used by |
+|---|---|---|
+| 2× ODrive S1 + BotWheel (left node 36, right node 46); passive front casters | CAN `can4` | `bebop-linux` (`wheels:` + `drive:` in `bebop_wheeled.yaml`) |
+| Robstride PowerBoard (address `0xAA`) on a 13s2p Li-ion pack | CAN `can0`, status polled at 1 Hz | `bebop-linux` (`power:`) |
+| USB-CAN hub (gs_usb / candleLight) | `can*` at 1 Mbit/s via systemd-networkd | set up by `install-jetson.sh --setup-can` |
+| Teensy 4.1 running `teensy_bridge`: BNO085 IMU, mode button (pin 2 to GND) | USB CDC `16c0:048c`: `/dev/bebop-imu` (if00), `/dev/bebop-imu-debug` (if02), `/dev/bebop-control` (if04) | `bebop-agent` (button); `bebop-linux` (IMU, only when the YAML has an `imu:` block; `bebop_wheeled.yaml` has none) |
+| 2× Orbbec Gemini 335Lg: near `CPBLC53000PE`, far `CPBLC53000ED` | USB 3; hardware-synced 848×480 @ 30 (near PRIMARY, far SECONDARY_SYNCED) | `bebop-vision` |
+| Robstride actuators for the two arms (next) | CAN, MIT mode | `bebop-linux` joint path; no shipped config has a `joints:` block yet |
+
+## Services and ports
+
+| Port | Unit (process) | When it runs | Serves |
+|---|---|---|---|
+| 9090 | `bebop-linux.service` (`/usr/local/bin/bebop-linux`) | always | runtime WS `/ws` (protobuf, `bebop_runtime.proto`), `/healthz`, `/captures*` |
+| 9091 | `bebop-agent.service` (`/usr/local/bin/bebop-agent`) | always | setup WS `/ws` (protobuf, `bebop.proto`), `/healthz`, status page `/` |
+| 9092 | `bebop-vision.service` (`main.py`) | started from the app; at boot with `--enable-autostart` | WHEP video `/whep`, `/snapshot`, drive notes `/intent`, `/event`, `/notes` |
+| 9095 | the same process | with `bebop-vision` (`--no-places` turns it off) | place memory: `/places*`, `/whereami`, `/places/graph` |
+| 9093 | `bebop-voice.service` (`bebop_vision.voice_server`) | started from the app; at boot with `--enable-autostart` | agent WS `/voice`, `/healthz`, `/config` |
+| 9094 | `bebop-models.service` (`bebop_vision.models_supervisor`) | enabled by `install-jetson.sh --setup-models` | `/healthz`, `/models`, `POST /models/{id}/load`, `POST /models/{id}/unload` |
+| 8011-8013 (127.0.0.1), 8000 | `tensorrt-edgellm-serve` children | on demand | the cascade's ASR, brain and TTS (8011, 8012, 8013); omni (8000; `bebop-models` binds it to 127.0.0.1, `bebop-voice`'s own omni child passes no `--host`) |
+| — | `bebop-model-download@<id>.service` | on demand, from the app | downloads one model from the catalog |
+| 1420 | `bebop-app.service` (optional) | installed by `bebop-app/deploy/install-app-dev.sh` | the app on the Vite dev server |
+
+Ports 9096 (live SLAM) and 9097 (the nav driver) are gone: removed on
+2026-10-24 and 2026-10-22 (history: `git log -- bebop-vision/bebop_vision/slam`,
+`git log -- bebop-vision/bebop_vision/nav`).
+
 ## Components
 
-### `jetson-agent/bebop-agent` (Rust, systemd service)
+### `jetson-agent/bebop-agent`
 
-The provisioning daemon. It owns first-time Wi-Fi setup and the Hosted Network
-fallback; everything else on the robot runs as native binaries/venvs.
+Provisioning only: Wi-Fi, the Hosted Network and the mode button. One tokio
+task per subsystem (`src/`):
 
-Subsystems (see `jetson-agent/bebop-agent/src/`):
+- **`wifi/`**: wraps `nmcli` to scan and join networks and polls the link.
+- **`ap.rs`**: the Hosted Network supervisor. It hosts the `Bebop-<id>`
+  hotspot while `mode = "ap"` and lowers it for `mode = "client"`,
+  re-checking every second (it re-raises a hotspot something else took
+  down). There is no automatic fallback between the modes.
+- **`button.rs`, `control_serial.rs`**: the mode button. With the default
+  `button_source = "serial"` the switch is on the Teensy, which debounces it
+  and sends press/release frames on `/dev/bebop-control`. Holding it for
+  `button_hold_secs` (default 5) toggles the mode and persists it to
+  `/etc/bebop/agent.toml`. `button_source = "gpio"` keeps the Orin Nano path
+  (a header line through `gpiocdev`); the Thor has no usable GPIO header.
+- **`server.rs`, `dispatcher.rs`**: the setup server on
+  `network.setup_bind_addr` (default `0.0.0.0:9091`).
 
-- **`wifi/`** — wraps `nmcli` to scan/join Wi-Fi, and polls link status.
-- **`ap.rs`** — Hosted Network supervisor. Hosts the `Bebop-XXXX` hotspot
-  while `mode = "ap"` and tears it down for `mode = "client"`. No automatic
-  fallback; the mode is a two-way switch.
-- **`button.rs`** — the physical mode button (GPIO press) that toggles
-  `ap` ⇄ `client` and persists the choice.
-- **`server.rs`** — setup server: protobuf-over-WebSocket (`:9091`) plus a
-  status page. Reachable on the LAN or over the Hosted Network.
-- **`dispatcher.rs`** — maps `ClientRequest`s to Wi-Fi / config actions.
-- **`state.rs`** — shared in-memory state (`Arc<Inner>` with async `RwLock`s).
+Protocol and button details: [`setup-protocol.md`](setup-protocol.md).
 
-See [`setup-protocol.md`](setup-protocol.md) for the wire protocol.
+### `jetson-agent/bebop-proto`
 
-### `jetson-agent/bebop-proto` (Rust, shared crate)
+Both wire schemas, compiled by `prost-build` (`build.rs` compiles every
+`.proto` in `proto/`):
 
-Protobuf schema for the setup protocol, compiled with `prost-build` into
-Rust types used by the agent. The companion app generates TypeScript
-bindings from the same `.proto` via `npm run gen-proto`.
+- `bebop.proto` → `bebop_proto::v1`: the setup API (`bebop-agent`).
+- `bebop_runtime.proto` → `bebop_proto::runtime::v1`: the runtime API
+  (`bebop-linux`, which depends on the crate by path).
 
-### `firmware/bebop-linux` (Rust, systemd service)
+The app generates TypeScript from the same directory (`npm run gen-proto`,
+output committed under `bebop-app/src/proto/`). bebop-vision's runtime
+bindings are checked in under `bebop_vision/proto/bebop/runtime/v1/`,
+generated by protoc from a copy staged at `bebop/runtime/v1/`. Removed
+fields (the oneof fields of removed messages included) and enum values keep
+their tags and names reserved.
 
-The robot firmware: SocketCAN + ODRIVE/Robstride control loop, safety
-supervisor, IMU, and the runtime WebSocket API (`:9090`) the operator app
-drives through. Runs as a native binary (`bebop-linux.service`). The vision
-stack runs from a Python venv (`bebop-vision/`) and serves MJPEG on `:9092`.
+### `firmware/bebop-linux`
 
-The firmware also owns start/stop control of the vision stack: it drives the
-`bebop-vision.service` systemd unit (`systemctl start/stop`) and reflects the
-unit's state in telemetry (`VisionState`). The operator app's Teleop screen
-has the Start/Stop vision button. The unit is installed by
-`scripts/install-jetson.sh` but **not enabled** — it stays stopped until the
-operator starts it, and its own sandbox (venv, Orbbec `/dev` nodes, `/tmp`
-lock) is intentionally separate from `bebop-linux.service`'s.
+The runtime and the safety authority. CLI: `-c`/`--config` (default
+`config/bebop_wheeled.yaml`; the unit runs `/etc/bebop/bebop_wheeled.yaml`),
+`--capture-dir` (default `~/bebop-captures`; the unit passes
+`/var/lib/bebop-captures`), `--rerun-converter` (default
+`/usr/local/bin/bebop-mcap-to-rrd`) and `-h`/`--help`. Any other argument
+exits with status 2.
 
-### `bebop-vision` (Python, `bebop-vision.service`)
+- **Modes.** `Idle` (boot; nothing can be armed) and `DialIn` (armed: wheels
+  track the operator twist, joints run the hold cycle). Going back to Idle
+  disarms everything. An E-STOP latches, disables every motor on every bus
+  and allows only the move to Idle; `ResetEStop` clears the latch and leaves
+  everything disarmed.
+- **Control loop.** A dedicated OS thread at 100 Hz (`SCHED_FIFO` priority
+  80, absolute `CLOCK_MONOTONIC` deadlines) runs the watchdog, the drive
+  twist for armed wheels and the joint hold cycle, and logs a loop-health
+  summary every 5 s.
+- **Supervisor** (`src/safety/`). Every motor command passes through it:
+  limit clamps (a wheel's `vel_max` clamps the command; it is not an E-STOP
+  on measured speed), slew limits, feedback checks, and a watchdog that
+  latches E-STOP when an armed wheel or joint that has reported once goes
+  `feedback_timeout_ms` without a frame. Dropping the supervisor sends
+  `Disable` to every motor three times. `BusPool` opens every CAN interface
+  the YAML names; a missing or unhealthy bus is logged, not fatal, and
+  nothing arms on it. While telemetry is being built (a subscribed client or
+  a snapshot request) the pool re-probes the buses every 5 s and re-opens
+  one that was missing, holds a dead socket or is BUS-OFF (bouncing the
+  link first). The RX threads (one per bus) and the PowerBoard poller start
+  once, on the sockets opened at startup: a bus opened or re-opened later is
+  written to, but its frames are not read (nor, for the power bus, polled)
+  until `bebop-linux` restarts (a code reading, not reproduced on the robot;
+  see the firmware README's CAN buses section).
+- **Drive seat.** One client drives at a time: the first non-zero twist
+  claims the seat, and other clients' twists are rejected (their stops
+  ignored) until the holder has been idle for `server.operator_grace_ms`
+  (2000 in `bebop_wheeled.yaml`). A person preempts an autonomous holder at
+  once, with a twist or a stop. `EmergencyStop` is never arbitrated: anyone
+  can halt the robot. A non-zero twist not refreshed within
+  `operator_timeout_ms` (500) is zeroed: the wheels ramp to 0 and stay armed.
+- **Wheels.** ODrive S1 velocity control (`Set_Input_Vel`) from the
+  differential-drive geometry, plus wheel-encoder odometry. The firmware
+  never assigns ODrive node ids; set them over USB with `odrivetool`.
+- **PowerBoard.** A poller thread requests status every `poll_interval_ms`
+  and caches battery, rail and fault readings for telemetry. It never trips
+  E-STOP.
+- **IMU.** Optional: with an `imu:` block it reads the Teensy's BNO085
+  frames from the serial device and applies `imu.mount`.
+- **Runtime API** (axum on `:9090`). `/ws` carries one protobuf message per
+  binary frame. Per connection: telemetry at the subscribed rate (default
+  30 Hz, capped at `server.telemetry_max_hz`), replies, and two pushed
+  events (`ModeChanged`, `EStopLatched`). HTTP: `GET /healthz`,
+  `GET /captures` (lists `navd_session_*.mcap` and `system_*.mcap`),
+  `POST /captures/finalize`, `GET /captures/finalize-dl/<name>`,
+  `GET /captures/rrd/<stem>.rrd` (Rerun conversion through
+  `/usr/local/bin/bebop-mcap-to-rrd`, installed by `scripts/setup-rerun.sh`)
+  and `GET /captures/dl/<name>`.
+- **Service bridges.** `SetVisionEnabled` and `SetVoiceEnabled` run
+  `systemctl start|stop` on `bebop-vision.service` / `bebop-voice.service`
+  from a background thread; a 1.5 s poll reports the unit state as
+  `VisionState` / `VoiceState`. They are separate units because
+  `bebop-linux` is sandboxed (`ProtectHome=read-only`, `PrivateTmp=true`).
+  `RestartRuntime` restarts `bebop-linux.service` itself and is refused while
+  anything is armed.
+- **Model weights.** `SetHfToken` writes `/etc/bebop/hf_token` (mode 0600;
+  telemetry carries only `token_set`). `DownloadModel` starts
+  `bebop-model-download@<id>.service`, which fetches one entry of
+  `bebop-vision/config/models.yaml` into `bebop-vision/weights/` and writes
+  progress to `/run/bebop/models/<id>.json`; `ModelState` relays it.
+- **System log.** A 1 Hz thread writes `system_*.mcap` (`/power`, `/host`,
+  `/session`; protobuf from the crate's own `protos/system.proto`) into the
+  capture dir from start to exit. Files roll daily or at 64 MiB; the oldest
+  are pruned above 2 GiB.
 
-The robot vision stack: Orbbec depth/color rig, navd MCAP recorder, and the
-MJPEG operator video server (`:9092`). Runs as root from the repo venv
-(`/home/bebop/bebop/bebop-vision/.venv`) — root matches the documented manual
-recorder and is required because the shared capture dir is root-owned
-(`bebop-linux.service`'s `StateDirectory=`), the Orbbec SDK writes `Log/` and
-the recorder lock into `/tmp`, and only one process may hold the camera.
-Started/stopped from the app via the firmware; see `docs/navd.md`.
+The crate also builds `sysid`, a single-joint Robstride system-identification
+bench that bypasses the supervisor; it needs a config with a `joints:` block.
 
-### `bebop-app` (Tauri 2 + React + TypeScript)
+### `bebop-vision`
 
-The customer-facing companion app:
+Python, one venv on the robot (`bebop-vision/.venv`, created with
+`--system-site-packages` so JetPack's TensorRT is visible; built by
+`install-jetson.sh --setup-voice`). Three long-running units, all running
+from the checkout at `/home/bebop/bebop/bebop-vision`:
 
-- **Provisioning** — talks to `bebop-agent`'s setup server over WebSocket
-  (`SetupTransport`, `:9091`) to join Wi-Fi and name the robot. Over the
-  robot's Hosted Network during first-time setup, or over the LAN afterwards.
-- **Operating** — talks to `bebop-linux`'s runtime server (`RuntimeTransport`,
-  `:9090`) for telemetry, modes, motor bench, and driving; and to the
-  bebop-vision server (`:9092`) for video. Client-side gamepad input uses the
-  Web Gamepad API and streams twists over the runtime WS — no robot-side
-  Bluetooth pairing is involved.
+- **`bebop-vision.service`** runs
+  `main.py --record-navd /var/lib/bebop-captures --auto --robot-url ws://127.0.0.1:9090/ws $BEBOP_VISION_EXTRA_ARGS`;
+  extra flags come from `/etc/bebop/vision.env`, and because `main.py`
+  rejects unknown flags, a removed flag left there keeps the unit in a
+  restart loop. The one process owns both cameras and runs:
+  - the **recorder**, a runtime-API client: with `--auto` it opens a
+    `navd_session_*.mcap` segment while the robot is in DialIn with every
+    wheel armed and no E-STOP, and prunes old sessions under
+    `--disk-budget-gb` (default 20). A segment holds both cameras' color
+    (H.265 via NVENC, JPEG fallback) and lossless depth, the camera IMUs,
+    `/cmd_vel`, `/odom`, the firmware's telemetry (`/runtime`,
+    `/runtime_events`) and the operator notes (`/intent`, `/event`, `/place`).
+    See [`data-collection.md`](data-collection.md).
+  - the **video server** (`:9092`): WebRTC (WHEP) H.264 streams `color_near`,
+    `color_far`, `depth_near`, `depth_far`, one shared encoder per stream for
+    up to `--video-max-viewers` (4) viewers; `/snapshot` JPEGs (the voice
+    agent's live context); the drive-note routes.
+  - **place memory** (`:9095`): a 1 Hz DINOv3 scout files pending places;
+    the operator reviews and imports them in the app, optionally asking a VLM
+    for a name (`--router-url`, default the cascade brain on `:8012`);
+    `/whereami` recognises the room; `/places/graph` holds places and
+    traversal edges. Data in `/var/lib/bebop-places`. See
+    [`places.md`](places.md).
+- **`bebop-voice.service`**: the agent gateway on `:9093`. The default
+  `cascade` engine supervises three Edge-LLM servers (ASR, a VLM brain with
+  tools, TTS); `omni` (Qwen3-Omni, chat only) is selectable and can be
+  delegated to `bebop-models`. It is a runtime-API client too (robot status,
+  bounded motion) and reads `:9092/snapshot` and `:9095`. See
+  [`voice.md`](voice.md).
+- **`bebop-models.service`**: the GPU budget and Edge-LLM lifecycle on
+  `:9094`, from `config/models_supervisor.yaml`. See [`models.md`](models.md).
 
-## Boot sequence on a Jetson
+The workstation side (`tools/`) pulls captures over the firmware's HTTP API
+(`just pull-data`: `pull_captures.py` → `extract_all_navd.py` →
+`session_ledger.py`) and builds labels and datasets from them
+(`bev_student_labels.py`, `bev_student_dataset.py`, `bev_ego_from_data.py`).
+
+#### Camera rules
+
+- One process per camera. `bebop-vision` holds both; a second recorder exits
+  on `/tmp/navd_recorder.lock` with the holder's PID, and OrbbecViewer or a
+  stray process holding a camera shows up as `uvc_open failed: -6`.
+- pyorbbecsdk never runs in a thread pool: each camera has its own capture
+  thread (`orbbec.py`) that feeds a latest-wins slot, and pooled capture
+  corrupted the heap (`malloc(): unaligned fastbin chunk`, 2026-09). The
+  recorder's pool runs only GIL-releasing numpy/cv2 work (PNG/JPEG encodes,
+  the RGB→BGR conversion), and MCAP writes stay serial (the writer is not
+  thread-safe).
+- Hardware sync phase-locks the two cameras, but each feeds its own
+  latest-wins slot, so two independent reads can land a frame apart. The
+  recorder pairs frames from per-camera histories instead.
+
+### `bebop-app`
+
+A web app (React + TypeScript + Vite). The browser talks to each robot
+service directly; every service allows any origin (CORS `*`).
+`src/robot/endpoints.ts` is the only place ports live, and
+`src/runtime/urls.ts` switches to `wss`/`https` when the page is HTTPS
+([`dev-https.md`](dev-https.md)).
+
+- **Setup**: `SetupTransport` to `:9091` (the wizard: connect, Wi-Fi,
+  identity; `192.168.42.1` over the hotspot) and Settings › Network.
+- **Runtime**: one socket per robot to `:9090` for telemetry, twists, E-STOP,
+  modes, unit start/stop (Diagnostics › Services, the Drive page, the
+  Autonomy page), the HF token and model downloads (Settings › Models). The
+  capture list and downloads (Diagnostics › Captures) are plain HTTP on the
+  same port (`/captures`).
+- **Video** over WHEP to `:9092`; the **agent console** to `:9093`; the GPU
+  budget card to `:9094`; **Memory** to `:9095`.
+- Gamepad, keyboard and touch input run in the browser and stream twists
+  over the runtime socket; nothing pairs with the robot.
+
+Serve it with `just app-web` (Vite on `:1420`), or install
+`bebop-app.service` on the robot (`bebop-app/deploy/install-app-dev.sh`), which
+runs the same dev server as the `bebop` user at `http://bebop.local:1420`.
+
+## Boot sequence
 
 ```
- power on
-   │
-   ▼
- systemd
-   ├── NetworkManager.service
-   ├── bebop-agent.service ──┐
-   │                         ▼
-   │                   bebop-agent main
-   │                   ├── Wi-Fi status poller
-   │                   ├── Hosted Network     (Bebop-XXXX, ap mode)
-   │                   └── setup server :9091
-   └── bebop-linux.service
-       └── runtime WS :9090 ─── SocketCAN ── motors
+power on
+  │
+  ▼
+systemd
+  ├── systemd-networkd ── can* up at 1 Mbit/s                       (--setup-can)
+  ├── udev ────────────── /dev/bebop-imu, -imu-debug, -control      (--setup-imu)
+  ├── NetworkManager
+  ├── bebop-agent ─────── Wi-Fi poller · Hosted Network · mode button · setup :9091
+  ├── bebop-linux ─────── Idle · control loop · CAN RX · PowerBoard · system log · :9090
+  ├── bebop-gpu-clocks ── oneshot: GPU devfreq governor → performance
+  ├── bebop-models ────── :9094                                     (--setup-models)
+  ├── bebop-vision ────── :9092 + :9095                             (--enable-autostart)
+  └── bebop-voice ─────── :9093                                     (--enable-autostart)
 ```
 
-On first boot the Hosted Network comes up immediately (boot default
-`mode = "ap"`); the user joins `Bebop-XXXX`, provisions Wi-Fi through the
-app, then presses the mode button to switch to Known Network, which
-joins the saved network and drops the hotspot.
+Without `--enable-autostart`, `bebop-vision` and `bebop-voice` stay stopped
+until the operator starts them from the app. `bebop-models`,
+`bebop-vision` and `bebop-voice` are ordered after `bebop-linux`; if the
+runtime socket is not up within 5 s the recorder exits and systemd restarts
+it (`Restart=on-failure`).
 
-## Process / trust boundaries
+On first boot the agent is in `ap` mode (the default): the hotspot
+`Bebop-<first 6 chars of /etc/machine-id>` serves the setup server at
+`192.168.42.1:9091`. The operator joins it, provisions Wi-Fi from the app
+(saved, not applied while hosting), then holds the mode button to switch to
+Known Network, which lowers the hotspot and joins the saved network.
 
-| Component     | Runs as | Why                                              |
-|---------------|---------|--------------------------------------------------|
-| `bebop-agent` | root    | NetworkManager write access (`nmcli` scan/join/AP) + GPIO |
-| `bebop-linux` | root    | SocketCAN, GPIO/SPI                             |
-| `bebop-vision`| root    | shared root-owned capture dir, Orbbec `Log/`, `/tmp` recorder lock |
-| mobile app    | off-device | untrusted; reachable only on the LAN/Hosted Network |
+## Trust boundaries
 
-## Hosted Network / button notes
+| Process | Runs as | Why |
+|---|---|---|
+| `bebop-agent` | root | NetworkManager writes (`nmcli` scan, join, hotspot); persists `/etc/bebop/agent.toml` |
+| `bebop-linux` | root | raw SocketCAN sockets, `SCHED_FIFO` for the control loop, the root-only HF token under `/etc/bebop`, `systemctl` for vision, voice, model downloads and its own restart |
+| `bebop-vision` | root | the capture dir is root-owned (`/var/lib/bebop-captures`, 0750, from `bebop-linux`'s `StateDirectory=`), the Orbbec SDK's `Log/`, the `/tmp/navd_recorder.lock` |
+| `bebop-voice` | root | the root-only HF token, weights in the checkout, the engine cache in `/var/lib/bebop-voice` |
+| `bebop-models` | root | starts and stops Edge-LLM child processes, reads the HF token |
+| `bebop-model-download@<id>` | root | reads the HF token, writes weights and `/run/bebop/models/<id>.json` |
+| `bebop-app` (optional) | `bebop` | serves the app's code; no robot access of its own |
+| the app in a browser | off-robot | untrusted |
 
-- The Jetson Orin Nano Wi-Fi module (Realtek RTL8822CE) supports AP mode.
-  Verify with `iw list` (`* AP`) or
-  `nmcli -f WIFI-PROPERTIES.AP dev show <iface>`.
-- It is a single radio: the robot cannot be a Wi-Fi client and a hotspot at
-  the same time, so mode switches drop the previous link.
-- The mode button defaults to header **pin 32** (`gpiochip0` line 41,
-  internal pull-down; wire the switch to 3.3 V, active-high, no resistor).
-  Avoid pins 7 and 15 (IMU INT/RST) and pin 29 (no internal pull). The setup passphrase is fixed
-  (`bebopbebop`) for now; move to a per-device derived code before customer
-  shipments.
+No robot service authenticates its clients: anyone on the robot's LAN or its
+hotspot can open the app and drive. `bebop-linux` is the safety authority
+(clamps, watchdogs, the E-STOP latch). The hotspot passphrase defaults
+to the same `bebopbebop` on every robot (Settings › Network can change it);
+the agent's config marks it to become a per-device code before robots ship
+to customers.
 
-## Cross-platform builds
+## Hosted Network on the Thor
 
-The agent has no Linux-specific dependencies beyond shelling out to `nmcli`
-at runtime, so `cargo check` / `cargo test` work on any host. Producing a
-real Jetson binary is a native arm64 `cargo build`, run on the robot, an
-arm64 dev box, or CI (`ubuntu-22.04-arm`), whose artifact is uploaded as
-`bebop-agent-aarch64`.
+- The agent uses the first Wi-Fi device `nmcli device status` lists:
+  `wlP1p1s0` on this robot, where AP mode is confirmed (AGENTS.md:
+  `nmcli -f WIFI-PROPERTIES.AP dev show wlP1p1s0` → yes, `iw list` shows
+  `* AP`). Both checks are read-only.
+- It is a single radio, so the hotspot and a client link are mutually
+  exclusive: a mode switch drops the previous link, including an SSH session
+  over Wi-Fi.
+- The hotspot is the NetworkManager profile `bebop-setup`: WPA2-PSK (RSN,
+  CCMP only), `ipv4.method shared` at `192.168.42.1/24` (NetworkManager
+  serves DHCP and DNS), 2.4 GHz unless `ap_band = "5"`. Switching to Known
+  Network lowers it and activates a saved client profile explicitly.
+- The regulatory domain is unset (`country 00`) on this robot (AGENTS.md).
+  A 2.4 GHz hotspot works; `iw reg set <CC>` fixes a rejected channel, and
+  5 GHz may need it.
+
+## Builds
+
+- Both Rust workspaces target Linux (SocketCAN, the GPIO character device,
+  `nmcli`) and build with Rust 1.90.0 (`jetson-agent/rust-toolchain.toml`;
+  CI uses the same) and `protoc`.
+- CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`,
+  `clippy -D warnings` and `cargo test` for `jetson-agent` and
+  `firmware/bebop-linux` on x86_64 Linux, then native arm64 release builds on
+  `ubuntu-22.04-arm` (glibc 2.35; the binaries run on the robot's Ubuntu
+  24.04). Artifacts: `bebop-agent-aarch64` (the binary) and
+  `bebop-linux-aarch64` (a tarball of `bin/bebop-linux`, `config/*.yaml`,
+  `systemd/bebop-linux.service` and `VERSION`). A `firmware/v*` tag also
+  publishes the tarball as a GitHub Release, which `install-jetson.sh`
+  installs by default.
+- No cross-compilation is configured. The other way to an arm64 binary is
+  to build on the robot (`just build-jetson` for the agent,
+  `install-jetson.sh --local --build` for both).
+- CI does not run the Python or app tests.

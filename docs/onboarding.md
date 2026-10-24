@@ -1,102 +1,118 @@
 # Onboarding
 
-## Prerequisites
+## Workstation
 
-### Your dev machine (macOS or Linux)
+- Linux. The Rust crates use Linux-only APIs (SocketCAN, the GPIO character
+  device); the app needs only Node.
+- Rust 1.90.0 through `rustup` (`jetson-agent/rust-toolchain.toml` pins it;
+  CI builds both Rust workspaces with it).
+- `protoc` (`apt install protobuf-compiler`): both Rust workspaces compile
+  their protos with `prost-build`.
+- Node 22 (`bebop-app/.nvmrc`) for the app.
+- Python 3.10 or newer for the `bebop-vision` tools and tests; the venv
+  setup is in [`../bebop-vision/README.md`](../bebop-vision/README.md).
+- Optional: [`just`](https://github.com/casey/just) for the repo-root
+  recipes, and Docker for the Isaac Sim / Isaac Lab / ROS 2 containers of the
+  retired v2 humanoid (`docker-compose.yml`).
 
-- Rust toolchain (`rustup`, current stable — pinned via
-  `jetson-agent/rust-toolchain.toml`)
-- `protoc` (the protobuf compiler) — `brew install protobuf` or
-  `apt install protobuf-compiler`
-- Docker Desktop / Docker Engine (used by `buildx` for the sim / ROS 2 dev
-  containers)
-- (Optional) [`just`](https://github.com/casey/just) for the canned
-  recipes in the top-level `justfile` (`just check`, `just build-jetson`,
-  `just deploy user@robot.local`, ...)
-- For working on the mobile app: Node 20+ (managed via `nvm`,
-  `.nvmrc` in `bebop-app`)
+## Build and test
 
-### Your Jetson (target)
+| Component | From the repo root |
+|---|---|
+| `jetson-agent` | `just check`, `just test`, `just lint` (`cargo check`/`test`/`clippy --workspace` in `jetson-agent/`) |
+| `firmware/bebop-linux` | `cd firmware/bebop-linux && cargo test` (CI also runs `cargo clippy --all-targets -- -D warnings`) |
+| `bebop-app` | `cd bebop-app && npm install && npm test` |
+| `bebop-vision` | `cd bebop-vision && .venv/bin/python -m pytest tests/ -q` |
 
-- JetPack ≥ 6.x (L4T r36.x) recommended
-- NetworkManager (usually default) — the agent uses `nmcli` to scan/join
-  Wi-Fi and to raise the Hosted Network
-- A Wi-Fi module that supports AP mode (the Orin Nano devkit's Realtek
-  RTL8822CE does; verify with `iw list` showing `* AP`)
+CI runs only the two Rust workspaces; run the app and Python tests yourself.
 
-## First build
+## The robot
 
-The Rust workspace lives in `jetson-agent/`:
+A Jetson AGX Thor Developer Kit on JetPack 7.2 / L4T R39.2.1, reachable as
+`ssh bebop@bebop.local`. The repo is checked out at `~/bebop`; the
+bebop-vision units hard-code `/home/bebop/bebop/bebop-vision`.
 
-```sh
-cd jetson-agent
-cargo build --workspace
-```
+`jetson-flash/` targets the Orin Nano devkit and does not apply to the Thor;
+flashing the Thor is not scripted in this repo.
 
-If you have `just` installed (recipes run from the repo root):
+### Installing the stack
 
-```sh
-just check     # cd jetson-agent && cargo check --workspace --all-targets
-just test      # cd jetson-agent && cargo test --workspace
-just lint      # cd jetson-agent && cargo clippy --workspace --all-targets -- -D warnings
-```
-
-## Running the agent on a Jetson
-
-> First time on a brand-new device? You need to flash Jetson Linux onto
-> the Orin Nano first — see [`../jetson-flash/README.md`](../jetson-flash/README.md).
-> Once L4T is installed and the Jetson boots, come back here.
-
-1. Build for arm64. The agent is built natively — no `cross` / QEMU /
-   Docker. Pick a build host:
-   - **On the robot (or any arm64 Ubuntu box):**
-     ```sh
-     just build-jetson
-     # equivalent to:
-     # cd jetson-agent && cargo build --release -p bebop-agent
-     ```
-   - **From an x86 dev machine:** grab the `bebop-agent-aarch64` artifact
-     from the latest green CI run on `main` (built on `ubuntu-22.04-arm`,
-     glibc 2.35 → JetPack 6 compatible).
-2. Push it to the robot and install:
-   ```sh
-   just deploy bebop@robot.local
-   # equivalent to:
-   # scp jetson-agent/target/release/bebop-agent bebop@robot.local:/tmp/
-   # rsync -a jetson-agent/deploy/ bebop@robot.local:/tmp/deploy/
-   # ssh bebop@robot.local 'sudo /tmp/deploy/scripts/install.sh /tmp/bebop-agent'
-   ```
-
-The install script drops the binary at `/usr/local/bin/bebop-agent`,
-installs the systemd unit from
-`jetson-agent/deploy/systemd/bebop-agent.service`, and seeds
-`/etc/bebop/agent.toml` from `jetson-agent/deploy/examples/agent.toml` if
-it doesn't already exist.
-
-The full robot stack (agent + firmware + vision) is installed by the
-repo-root `scripts/install-jetson.sh`; see `AGENTS.md` for the deploy
-process actually used on the bench.
-
-## Running the mobile app
-
-The companion app lives at [`bebop-app/`](../bebop-app/). Quick start
-(from `bebop-app/`):
+From `~/bebop` on the robot:
 
 ```sh
-nvm use
-npm install
-npm run tauri dev                                  # desktop dev build
-npm run tauri android init && npm run tauri android dev
-npm run tauri ios init     && npm run tauri ios dev
+sudo ./scripts/install-jetson.sh                    # latest firmware Release + latest green main agent (needs `gh auth login`)
+sudo ./scripts/install-jetson.sh --run-id <id>      # both daemons from one CI run
+sudo ./scripts/install-jetson.sh --local --build    # build and install from this checkout, no GitHub
 ```
 
-The app is also runnable in a plain browser with `npm run dev`; the
-provisioning surface is a WebSocket to the robot's setup server, so no
-browser Bluetooth support is required. The repo-root recipes `just
-app-dev` and `just app-web` wrap these.
+It installs `bebop-agent` and `bebop-linux` (binary,
+`/etc/bebop/bebop_wheeled.yaml`, unit), installs the `bebop-vision`,
+`bebop-voice` and `bebop-model-download@` units without enabling them, and
+enables `bebop-gpu-clocks`. Hardware and service setup is opt-in:
 
-## Next steps
+| Flag | Does |
+|---|---|
+| `--setup-can` | blacklists `mttcan`, loads `gs_usb`, brings `can*` up at 1 Mbit/s through systemd-networkd (`--build-gs-usb` builds the module if the kernel lacks it) |
+| `--setup-imu` | udev rule and symlinks for the Teensy: `/dev/bebop-imu`, `/dev/bebop-imu-debug`, `/dev/bebop-control` |
+| `--setup-orbbec` | Orbbec udev rules |
+| `--setup-voice` | builds `bebop-vision/.venv` (recorder, places, voice, TensorRT Edge-LLM) |
+| `--quantize-voice` | quantizes the downloaded Qwen3-Omni checkpoint to NVFP4 for the omni engine |
+| `--setup-models` | installs and enables `bebop-models.service` |
+| `--enable-autostart` | enables `bebop-vision` and `bebop-voice` at boot |
+| `--config-yaml <name>.yaml` | activates another robot config from the bundle (default `bebop_wheeled.yaml`; remembered in `/etc/bebop/config-yaml-name`) |
 
-- Read [`architecture.md`](architecture.md) to see how the pieces connect.
-- Read [`setup-protocol.md`](setup-protocol.md) for the provisioning wire
-  format and Hosted Network flow.
+`--setup-can`, `--setup-imu`, `--setup-orbbec`, `--setup-voice` and
+`--quantize-voice` have `-only` variants that skip the binaries;
+`--help` lists every flag. `sudo ./scripts/setup-rerun.sh` adds the
+MCAP → Rerun converter behind `GET /captures/rrd/<stem>.rrd`.
+[`../AGENTS.md`](../AGENTS.md) has the deploy process used on the bench and
+the checks to run before restarting services.
+
+### Running the agent on a Jetson
+
+To iterate on `bebop-agent` alone:
+
+```sh
+just build-jetson               # on an arm64 Linux host; or take bebop-agent-aarch64 from CI
+just deploy bebop@bebop.local   # scp the binary + rsync jetson-agent/deploy/, then run install.sh
+```
+
+`jetson-agent/deploy/scripts/install.sh` puts the binary at
+`/usr/local/bin/bebop-agent`, installs `bebop-agent.service`, and seeds
+`/etc/bebop/agent.toml` from `jetson-agent/deploy/examples/agent.toml` when
+it does not exist yet. It runs `systemctl enable --now`, which leaves an
+agent that is already running on the old binary:
+`sudo systemctl restart bebop-agent` picks up the new one.
+
+### The Teensy
+
+The robot's Teensy 4.1 runs the `teensy_bridge` env:
+
+```sh
+cd firmware/bebop-locomotion && pio run -e teensy_bridge --target upload
+```
+
+Then run `sudo ./scripts/install-jetson.sh --setup-imu-only` on the robot
+if `/dev/bebop-control` is missing (the udev rule matches the
+`USB_TRIPLE_SERIAL` id `16c0:048c`). `just fw-build` and `just fw-flash` use
+the default env (`sim`), whose USB setup lacks `/dev/bebop-control`, so
+flashing it disables the mode button.
+
+## Running the app
+
+```sh
+just app-web        # = cd bebop-app && npm run dev: Vite on 0.0.0.0:1420
+```
+
+Open `http://localhost:1420/#/` and add the robot (`bebop.local` or its IP;
+`192.168.42.1` over its hotspot). The microphone (push-to-talk) needs a
+secure context: see [`dev-https.md`](dev-https.md). To serve the app from
+the robot itself, run `npm install` in `bebop-app/` there, then
+`sudo ./bebop-app/deploy/install-app-dev.sh` installs `bebop-app.service`
+(the same dev server at `http://bebop.local:1420`).
+
+## Next
+
+- [`architecture.md`](architecture.md): how the pieces connect.
+- [`setup-protocol.md`](setup-protocol.md): provisioning and the mode
+  button.

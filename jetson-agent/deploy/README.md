@@ -7,7 +7,7 @@ Artifacts for shipping `bebop-agent` onto a Jetson.
 | `systemd/bebop-agent.service`       | systemd unit that starts the agent on boot.    |
 | `scripts/install.sh`                | Copies binary, config, and enables the unit.   |
 | `scripts/uninstall.sh`              | Removes the binary and unit (keeps state dir). |
-| `examples/agent.toml`               | Reference config (installed to `/etc/bebop/`). |
+| `examples/agent.toml`               | Reference config (installed as `/etc/bebop/agent.toml` when none exists). |
 | `debian/`                           | Reserved for `.deb` packaging (TODO).          |
 
 ## Typical flow
