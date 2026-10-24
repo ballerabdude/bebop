@@ -1,10 +1,11 @@
 [Unit]
-Description=Bebop voice — on-device speech-to-speech (Qwen3-Omni, TensorRT Edge-LLM) on :9093
+Description=Bebop voice — on-device agent gateway (TensorRT Edge-LLM: ASR -> brain -> TTS cascade, or Qwen3-Omni) on :9093
 Documentation=https://github.com/ballerabdude/bebop
-# The voice service owns a large GPU model and connects to the local
-# TensorRT Edge-LLM server it supervises. It does not need the runtime to be
-# up to start, but ordering keeps the two from racing at boot when the
-# operator has enabled this unit.
+# The voice service owns large GPU models and talks to the local TensorRT
+# Edge-LLM servers it supervises (the cascade by default; omni is selectable
+# from the app). It does not need the runtime to be up to start, but
+# ordering keeps the two from racing at boot when the operator has enabled
+# this unit.
 After=network-online.target bebop-linux.service
 Wants=network-online.target bebop-linux.service
 

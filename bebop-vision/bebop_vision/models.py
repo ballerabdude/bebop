@@ -162,10 +162,3 @@ def write_status(
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload))
     os.replace(tmp, path)
-
-
-def read_status(model_id: str) -> dict | None:
-    try:
-        return json.loads(status_path(model_id).read_text())
-    except (OSError, ValueError):
-        return None

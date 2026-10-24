@@ -18,7 +18,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/home/bebop/bebop/bebop-vision
 # The project's single venv (the same one bebop-voice runs from, so
 # fastapi/uvicorn/httpx are present). Registry at
-# config/models_supervisor.yaml (falls back to built-in defaults).
+# config/models_supervisor.yaml (BEBOP_MODELS_CONFIG overrides the path).
 ExecStart=/home/bebop/bebop/bebop-vision/.venv/bin/python -u -m bebop_vision.models_supervisor
 Restart=on-failure
 RestartSec=5

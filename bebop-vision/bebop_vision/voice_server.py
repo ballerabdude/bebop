@@ -1,7 +1,7 @@
 """On-device agent gateway: voice and text turns (TensorRT Edge-LLM).
 
-`bebop-voice.service` runs this as root from `bebop-vision/.venv-voice`. It
-owns two things:
+`bebop-voice.service` runs this as root from `bebop-vision/.venv`. It owns
+two things:
 
 1. **The model servers.** The default `cascade` backend supervises three
    `tensorrt-edgellm-serve` stages (ASR, a VLM brain with tools, TTS); the
@@ -27,7 +27,8 @@ one socket. Each turn runs as its own task, so `cancel` lands mid-turn:
     svc -> turn_start, transcript, assistant_delta, tool_call, tool_result,
            motion_progress, audio_start, <binary PCM16 24 kHz>, audio_end,
            turn_end{status: done|cancelled|error}, turn_rejected
-    svc -> legacy: text{delta}, tool{name}, done, error{message}
+    svc -> done (an empty utterance), error{message} (outside a turn: not
+           ready, a bad frame, an empty user_text)
 
 The full contract is in docs/voice.md ("Agent protocol").
 
@@ -317,10 +318,6 @@ class SessionStore:
                 self._map.popitem(last=False)
             return history
 
-    def clear(self, key: str) -> None:
-        with self._lock:
-            self._map.pop(key, None)
-
 
 # --- agent turns -------------------------------------------------------------
 #
@@ -406,7 +403,6 @@ class AgentTurn:
 
     async def delta(self, text: str) -> None:
         await self.emit("assistant_delta", text=text)
-        await self.out.json({"type": "text", "delta": text})  # legacy
 
     async def audio_start(self) -> None:
         if self.speak and not self.audio_open:
@@ -430,15 +426,6 @@ class AgentTurn:
     @property
     def running(self) -> bool:
         return self.task is not None and not self.task.done()
-
-
-def _adhoc_turn(ws: Any, text: str | None, turn: AgentTurn | None) -> AgentTurn:
-    """The turn to report on: the session's, or a throwaway one (tests)."""
-    if turn is not None:
-        return turn
-    return AgentTurn(turn_id=_new_turn_id(),
-                     source="text" if text is not None else "voice",
-                     out=TurnEmitter(ws))
 
 
 def _parse_speak(value: Any) -> bool:
@@ -486,10 +473,10 @@ async def run_agent_turn(
 ) -> None:
     """Run one turn's body with the lifecycle events around it.
 
-    Emits `turn_start`, then whatever the body emits, then the legacy
-    `done` (or `error`) and `turn_end{status}`. Cancellation (the `cancel`
-    message or a disconnect) ends the turn as `cancelled`; the body's own
-    `finally` blocks (stop + disarm, history commit) run first.
+    Emits `turn_start`, then whatever the body emits, then
+    `turn_end{status}`. Cancellation (the `cancel` message or a disconnect)
+    ends the turn as `cancelled`; the body's own `finally` blocks (stop +
+    disarm, history commit) run first.
     """
     if registry is not None:
         registry.running.add(turn)
@@ -514,10 +501,6 @@ async def run_agent_turn(
         status = "cancelled"
     try:
         await turn.audio_end()
-        if status == "error":
-            await turn.out.json({"type": "error", "message": error})  # legacy
-        else:
-            await turn.out.json({"type": "done"})  # legacy
         end: dict[str, Any] = {"status": status}
         if error:
             end["error"] = error
@@ -582,8 +565,8 @@ def _tool_args(arguments: str) -> dict[str, Any]:
     return args if isinstance(args, dict) else {}
 
 
-# Cache of the model's speaker ids (GET /v1/voices), so `/config` and the WS
-# can validate a requested voice without a round-trip every time.
+# Cache of the model's speaker ids (GET /v1/voices), so `/config` can validate
+# a requested voice without a round-trip every time.
 _VOICE_CACHE: dict[str, Any] = {"ts": 0.0, "voices": []}
 
 
@@ -613,18 +596,18 @@ def known_voices(server: "EdgeLLMServer | None") -> list[str]:
 
 # --- live context (cameras + robot status) --------------------------------
 #
-# Every voice turn is a single model call: the user's audio plus the robot's
-# current near/far camera frames, with a one-line robot status in the system
-# prompt. No tool calls — the model server rejects tools combined with audio
-# output, and attaching the frames directly is simpler and avoids the
-# tool-call round-trip (and its bugs) entirely.
+# With the operator's "live context" switch on (`tools_enabled`), every turn
+# carries the robot's current near/far camera frames in the user message and
+# a one-line robot status in the system prompt. Attaching them directly
+# needs no tool round-trip: omni (chat only) gets them in its single model
+# call, and the cascade brain gets them next to its tools.
 
 ROBOT_WS_URL = "ws://127.0.0.1:9090/ws"
 VISION_SNAPSHOT_BASE = "http://127.0.0.1:9092/snapshot?stream="
 # The rig has two cameras (near + far); both are attached to every turn.
 VISION_STREAMS = ("color_near", "color_far")
 
-_MODE_NAMES = {0: "UNSPECIFIED", 1: "IDLE", 2: "DIAL_IN", 3: "RUN_POLICY"}
+_MODE_NAMES = {0: "UNSPECIFIED", 1: "IDLE", 2: "DIAL_IN"}
 
 
 def _format_snapshot(snapshot: Any) -> str:
@@ -761,9 +744,7 @@ async def _snapshot_views() -> list[tuple[str, bytes]]:
     return views
 
 
-async def live_context(
-    status: Any | None = None,
-) -> tuple[str, list[tuple[str, bytes]]]:
+async def live_context() -> tuple[str, list[tuple[str, bytes]]]:
     """Gather the per-turn context: robot status + current camera frames.
 
     If the cameras are down, ask the firmware to start vision and wait a
@@ -773,8 +754,6 @@ async def live_context(
     state = await robot_state_text()
     views = await _snapshot_views()
     if not views and await _enable_vision():
-        if status is not None:
-            status.set(detail="waiting for cameras to start")
         for _ in range(10):
             await asyncio.sleep(1.5)
             views = await _snapshot_views()
@@ -825,7 +804,6 @@ class StageServer:
         capability: str,
         extra_args: list[str] | None = None,
         patched_launcher: bool = False,
-        status: "VoiceStatus | None" = None,
     ) -> None:
         self.name = name
         self.model = model
@@ -834,7 +812,6 @@ class StageServer:
         self.capability = capability
         self.extra_args = extra_args or []
         self.patched_launcher = patched_launcher
-        self.status = status
         self.proc: subprocess.Popen[str] | None = None
         self.ready = False
         self._lock = threading.Lock()
@@ -940,16 +917,12 @@ class StageServer:
 
 
 class CascadePipeline:
-    """Owns the stage servers and reports an aggregate status.
-
-    `brain` is optional: when a cloud brain (OpenRouter) is selected we skip
-    the local VLM entirely, so no GPU memory is spent on it.
-    """
+    """Owns the stage servers and reports an aggregate status."""
 
     def __init__(
         self,
         asr: StageServer,
-        brain: StageServer | None,
+        brain: StageServer,
         tts: StageServer,
         status: "VoiceStatus",
     ) -> None:
@@ -966,8 +939,7 @@ class CascadePipeline:
     def _run(self) -> None:
         self.status.set(phase="starting", detail="starting cascade")
         # Sequential: one engine build at a time keeps GPU memory bounded.
-        stages = [s for s in (self.asr, self.tts, self.brain) if s is not None]
-        for stage in stages:
+        for stage in (self.asr, self.tts, self.brain):
             self.status.set(detail=f"starting {stage.name} ({stage.model})")
             stage.start_and_wait()
             if not stage.ready:
@@ -980,19 +952,11 @@ class CascadePipeline:
 
     @property
     def ready(self) -> bool:
-        return (
-            self.asr.ready
-            and self.tts.ready
-            and (self.brain is None or self.brain.ready)
-        )
+        return self.asr.ready and self.tts.ready and self.brain.ready
 
     def stop(self) -> None:
         for stage in (self.asr, self.brain, self.tts):
-            if stage is not None:
-                stage.stop()
-
-    def model_ids(self) -> list[str]:
-        return [s.model for s in (self.asr, self.brain, self.tts) if s is not None]
+            stage.stop()
 
 
 async def _cascade_transcribe(stage: StageServer, wav_bytes: bytes) -> str:
@@ -1085,8 +1049,8 @@ def _sentence_chunks(buf: str) -> tuple[list[str], str]:
 # The places service lives inside `bebop-vision` (:9095) — a different process —
 # so the brain reaches it over the same HTTP API the app uses. Reads answer
 # questions about memory; writes (remember/fact/rename/forget) act only on an
-# explicit request, and reuse that API's guards (name uniqueness, cooldown,
-# per-place growth caps) instead of the router's autonomous path.
+# explicit request, and reuse that API's guards (name uniqueness, per-place
+# growth caps).
 PLACES_URL = "http://127.0.0.1:9095"
 # bebop-vision video server: also hosts the drive-note routes that write
 # into the active MCAP segment (POST /intent, POST /event).
@@ -1253,9 +1217,9 @@ async def _run_tool(name: str, arguments: str) -> str:
     """Run one voice tool; return a short result for the model.
 
     Reads answer questions about memory; writes act on an explicit request
-    ("remember this as the study"). The write path is the same one the app and
-    the router use, so it inherits their guards (name uniqueness, cooldown,
-    per-place growth caps) rather than inventing new ones.
+    ("remember this as the study"). The write path is the same one the app
+    uses, so it inherits its guards (name uniqueness, per-place growth caps)
+    rather than inventing new ones.
     """
     import httpx
 
@@ -1360,20 +1324,20 @@ async def _run_tool(name: str, arguments: str) -> str:
 #   * its own config switch (`motion_enabled`), NOT the casual "live context"
 #     toggle — nobody should arm a robot by flipping a context setting;
 #   * hard clamps on what a single call may ask for;
-#   * arming is explicit and temporary: mode -> DIAL_IN (arming requires it,
-#     supervisor.rs:544), enable all wheels, move, then stop + disarm + restore
-#     the mode. Every exit path stops the wheels.
+#   * arming is explicit and temporary: mode -> DIAL_IN (the firmware's
+#     `Supervisor::arm_wheel` refuses any other mode), enable all wheels, move,
+#     then stop + disarm + restore the mode. Every exit path stops the wheels.
 #   * the firmware is the backstop, not this code: its watchdog zeroes a stale
 #     twist (so a crashed tool coasts to a stop, it does not run away), it
-#     slews/clamps every command, `vel_max` trips E-STOP, and at most one WS
-#     client may hold the drive assignment.
+#     slews every wheel command and clamps it to the wheel's `vel_max`, and at
+#     most one WS client may hold the drive assignment.
 #   * NO E-STOP control, deliberately. There is no tool to latch, clear or
 #     reset one: an E-STOP means a person must go and look at the robot, so the
 #     brain may only *report* it and refuse to move (`move_relative` bails
 #     before arming; the mode ends at IDLE and the wheels stay disarmed).
-#     `RobotClient.reset_estop()` exists but is for the operator app, not the
-#     model. Do not wire it up here — a misheard "clear the e-stop" that
-#     actually clears one defeats the whole mechanism.
+#     `RobotClient` has no E-STOP reset on purpose. Do not add one here — a
+#     misheard "clear the e-stop" that actually clears one defeats the whole
+#     mechanism.
 # It is odom-relative only. There is no map: "move to the door" needs metric
 # localisation this robot does not have (see bebop_vision/places/__init__.py).
 MOTION_MAX_FORWARD_M = 2.0
@@ -1524,8 +1488,8 @@ async def _move_relative(args: dict[str, Any]) -> str:
     # Announced as "voice" (ClientHello), so the app shows who is driving,
     # and as autonomous: any person's drive input (a stop included) takes the
     # seat from this connection at once — see _run_move for how voice yields.
-    robot = RobotClient(url=ROBOT_WS_URL, name="bebop-voice-move",
-                        hello_name="voice", autonomous=True).start()
+    robot = RobotClient(url=ROBOT_WS_URL, hello_name="voice",
+                        autonomous=True).start()
     before_mode = None
     changed_mode = False
     armed_by_us = False
@@ -1554,8 +1518,8 @@ async def _move_relative(args: dict[str, Any]) -> str:
                 return ("Not moving: the wheels are armed in "
                         f"{_MODE_NAMES.get(st.mode, st.mode)} mode, not dial-in.")
         else:
-            # Arming requires DIAL_IN (or RUN_POLICY); DIAL_IN is the bring-up
-            # / teleop mode with the slew limit and watchdog enforced.
+            # Arming requires DIAL_IN, the bring-up / teleop mode with the
+            # slew limit and watchdog enforced.
             if before_mode != pb.MODE_DIAL_IN:
                 robot.set_mode(pb.MODE_DIAL_IN)
                 changed_mode = True
@@ -1796,17 +1760,14 @@ def resolve_cascade_voice(tts: StageServer | None, requested: str) -> str:
 
 
 async def _run_turn_cascade(
-    ws: Any,
+    turn: AgentTurn,
     history: list[dict[str, Any]],
     pcm: bytes,
     sample_rate: int,
     pipeline: CascadePipeline | None,
     *,
-    stub: bool,
     config: "VoiceConfig",
-    voice_override: str | None = None,
     text: str | None = None,
-    turn: AgentTurn | None = None,
 ) -> None:
     """One cascade turn: (ASR) -> brain with tools -> (TTS), streamed.
 
@@ -1816,26 +1777,6 @@ async def _run_turn_cascade(
     the turn's content. History gets the user's words, every tool call and
     result, and the reply, committed even when the turn is cancelled.
     """
-    turn = _adhoc_turn(ws, text, turn)
-    if stub:
-        said = text if text is not None else "(stub: audio received)"
-        await turn.emit("transcript", text=said, final=True, source=turn.source)
-        await turn.audio_start()
-        reply = ""
-        try:
-            async for ev in stream_stub([], config.voice):
-                if ev["type"] == "text":
-                    reply += ev["delta"]
-                    await turn.delta(ev["delta"])
-                elif ev["type"] == "audio":
-                    await turn.audio(ev["data"])
-            await turn.audio_end()
-        finally:
-            history.append({"role": "user", "content": said})
-            if reply.strip():
-                history.append({"role": "assistant", "content": reply.strip()})
-            _trim_history(history, config.history_turns)
-        return
     if pipeline is None:
         raise RuntimeError("cascade backend is not running")
 
@@ -1881,8 +1822,7 @@ async def _run_turn_cascade(
     # sentence at a time, so the first audio does not wait for the whole reply.
     # Measured on the Thor: first audio 5.8-6.7 s waiting for the full text vs
     # ~2 s pipelined. TTS runs ~2x faster than playback, so it stays ahead.
-    voice = (resolve_cascade_voice(pipeline.tts, voice_override or config.voice)
-             if turn.speak else "")
+    voice = resolve_cascade_voice(pipeline.tts, config.voice) if turn.speak else ""
     await turn.audio_start()
 
     async def say(sentence: str) -> None:
@@ -1974,7 +1914,6 @@ async def _execute_tool_call(turn: AgentTurn, call: dict[str, str]) -> dict[str,
     """Run one tool call with `tool_call`/`tool_result` events around it."""
     args = _tool_args(call["arguments"])
     await turn.emit("tool_call", call_id=call["id"], name=call["name"], args=args)
-    await turn.out.json({"type": "tool", "name": call["name"]})  # legacy
     status: dict[str, Any] = {"ok": True, "call_id": call["id"]}
     token = _TOOL_STATUS.set(status)
     t0 = time.monotonic()
@@ -2004,9 +1943,6 @@ class VoiceStatus:
     phase: str = "idle"  # idle|starting|building|ready|error|stub
     detail: str = ""
     model: str = ""
-    precision: str = ""
-    model_downloaded: bool = False
-    updated_ms: int = 0
     log_tail: list[str] = field(default_factory=list)
     # Liveness / progress. `heartbeat_ms` is refreshed by the supervisor loop
     # every couple of seconds even when the build logs go quiet, so the app can
@@ -2022,7 +1958,6 @@ class VoiceStatus:
             self.phase = phase
         if detail is not None:
             self.detail = detail
-        self.updated_ms = int(time.time() * 1000)
 
     def beat(self) -> None:
         self.heartbeat_ms = int(time.time() * 1000)
@@ -2034,9 +1969,6 @@ class VoiceStatus:
             "phase": self.phase,
             "detail": self.detail,
             "model": self.model,
-            "precision": self.precision,
-            "model_downloaded": self.model_downloaded,
-            "updated_ms": self.updated_ms,
             "heartbeat_ms": self.heartbeat_ms,
             "heartbeat_age_s": round((now - self.heartbeat_ms) / 1000, 1)
             if self.heartbeat_ms
@@ -2113,8 +2045,9 @@ class EdgeLLMServer:
             str(self.cache_dir),
             "--port",
             str(self.port),
-            # Agentic tool calling: the server parses the model's XML calls
-            # into OpenAI `tool_calls` (used by the read-only tools).
+            # Tool-call parsing (the model's XML calls -> OpenAI
+            # `tool_calls`). Omni turns are chat-only and send no tools, so
+            # these stay inert.
             "--enable-auto-tool-choice",
             "--tool-call-parser",
             "qwen3_xml",
@@ -2338,23 +2271,17 @@ class SupervisedServer:
         backend_id: str,
         status: "VoiceStatus",
         *,
-        port: int = 0,
         unload_on_stop: bool = False,
     ) -> None:
         self.supervisor_url = supervisor_url.rstrip("/")
         self.backend_id = backend_id
         self.status = status
-        self.port = port
         self.unload_on_stop = unload_on_stop
         self._base_url = ""
 
     @property
     def base_url(self) -> str:
-        if self._base_url:
-            return self._base_url
-        if self.port:
-            return f"http://127.0.0.1:{self.port}"
-        return self.supervisor_url
+        return self._base_url or self.supervisor_url
 
     def health_ok(self) -> bool:
         import httpx
@@ -2415,9 +2342,7 @@ def _friendly_detail(line: str) -> str:
     text = line.strip()
     # Drop the leading `HH:MM:SS LEVEL logger.name:` prefix when present.
     parts = text.split(":", 3)
-    if len(parts) == 4 and parts[0].count(":") == 2:
-        text = parts[3].strip()
-    elif len(parts) >= 3 and parts[0][:2].isdigit():
+    if len(parts) >= 3 and parts[0][:2].isdigit():
         text = parts[-1].strip()
     if len(text) > 160:
         text = text[:157] + "..."
@@ -2427,36 +2352,18 @@ def _friendly_detail(line: str) -> str:
 # --- generation -----------------------------------------------------------
 
 
-def wav_bytes_to_pcm16(wav_bytes: bytes) -> bytes:
-    """Extract raw PCM16 frames from a WAV container.
-
-    Some OpenAI-compatible servers stream audio as a base64 WAV inside
-    `delta.content` (tagged `modality: "audio"`), whereas Edge-LLM sends raw PCM
-    in `delta.audio.data`. Normalize both to raw PCM16 for the app.
-    """
-    with wave.open(io.BytesIO(wav_bytes), "rb") as w:
-        return w.readframes(w.getnframes())
-
-
 async def stream_completion(
     server: EdgeLLMServer,
     messages: list[dict[str, Any]],
     voice: str,
-    tools: list[dict[str, Any]] | None = None,
     *,
     audio: bool = True,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Yield events from the Edge-LLM chat stream.
+    """Yield events from the Edge-LLM chat stream (omni, chat only).
 
-    Events: `{"type":"text","delta"}` · `{"type":"audio","data"}` ·
-    `{"type":"tool_call","index","id","name","arguments"}`. Parses the OpenAI
-    SSE schema; audio rides in `delta.audio.data` (base64 PCM16), tool calls in
-    `delta.tool_calls` (the server parses the model's XML via qwen3_xml).
-
-    `audio=False` requests a text-only turn — required for tool calls, because
-    the server rejects `tools` combined with audio output
-    (`unsupported_feature`). `_run_turn` therefore plans/executes tools
-    text-only, then does one audio pass (no tools) to speak the answer.
+    Events: `{"type":"text","delta"}` · `{"type":"audio","data"}`. Parses the
+    OpenAI SSE schema; audio rides in `delta.audio.data` (base64 PCM16).
+    `audio=False` requests a text-only reply (a typed turn with speak=false).
     """
     import httpx
 
@@ -2470,9 +2377,6 @@ async def stream_completion(
         payload["audio"] = {"voice": voice, "format": "pcm16"}
     else:
         payload["modalities"] = ["text"]
-    if tools:
-        payload["tools"] = tools
-        payload["tool_choice"] = "auto"
     url = f"{server.base_url}/v1/chat/completions"
     async with httpx.AsyncClient(timeout=None) as client:
         async with client.stream("POST", url, json=payload) as resp:
@@ -2489,22 +2393,11 @@ async def stream_completion(
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                modality = chunk.get("modality")
                 for choice in chunk.get("choices", []):
                     delta = choice.get("delta") or choice.get("message") or {}
                     text = delta.get("content")
                     if text:
-                        if modality == "audio":
-                            # Base64 WAV in content.
-                            try:
-                                yield {
-                                    "type": "audio",
-                                    "data": wav_bytes_to_pcm16(base64.b64decode(text)),
-                                }
-                            except Exception:  # noqa: BLE001 - skip a bad chunk
-                                pass
-                        else:
-                            yield {"type": "text", "delta": text}
+                        yield {"type": "text", "delta": text}
                     audio = delta.get("audio")
                     if isinstance(audio, dict) and audio.get("data"):
                         try:
@@ -2514,15 +2407,6 @@ async def stream_completion(
                             }
                         except Exception:  # noqa: BLE001 - skip a bad chunk
                             pass
-                    for tc in delta.get("tool_calls") or []:
-                        fn = tc.get("function") or {}
-                        yield {
-                            "type": "tool_call",
-                            "index": int(tc.get("index", 0) or 0),
-                            "id": tc.get("id") or "",
-                            "name": fn.get("name") or "",
-                            "arguments": fn.get("arguments") or "",
-                        }
 
 
 async def stream_stub(
@@ -2551,7 +2435,6 @@ def _stream(
     server: EdgeLLMServer | None,
     messages: list[dict[str, Any]],
     voice: str,
-    tools: list[dict[str, Any]] | None,
     stub: bool,
     *,
     audio: bool = True,
@@ -2559,7 +2442,7 @@ def _stream(
     """Select the stub or the real model stream (monkeypatchable in tests)."""
     if stub or server is None:
         return stream_stub(messages, voice)
-    return stream_completion(server, messages, voice, tools, audio=audio)
+    return stream_completion(server, messages, voice, audio=audio)
 
 
 # --- gateway app ----------------------------------------------------------
@@ -2573,7 +2456,6 @@ def build_app(
     sessions: SessionStore | None = None,
     status: VoiceStatus | None = None,
     pipeline: CascadePipeline | None = None,
-    pipeline_status: VoiceStatus | None = None,
 ) -> Any:
     """Construct the FastAPI app.
 
@@ -2632,12 +2514,6 @@ def build_app(
             server is None and pipeline is not None
         )
 
-    def current_status() -> VoiceStatus:
-        """Status of the backend selected right now."""
-        if use_cascade():
-            return pipeline_status or status
-        return status
-
     def voices_list() -> list[str]:
         if config.backend == "cascade" and pipeline is not None:
             return cascade_voices(pipeline.tts)
@@ -2657,22 +2533,17 @@ def build_app(
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
-        snap = current_status().snapshot()
+        snap = status.snapshot()
         snap["backend"] = config.backend
-        snap["available"] = {"omni": server is not None, "cascade": pipeline is not None}
         # Only the cascade brain has tools (place memory, robot status,
         # motion); omni is chat-only.
         snap["tools_supported"] = use_cascade()
         snap["tools_enabled"] = config.tools_enabled
         snap["motion_enabled"] = config.motion_enabled
-        # In-flight turns (the place router's VoiceBusyProbe reads these).
+        # In-flight turns.
         snap["turns_active"] = registry.count
         snap["turn_active"] = registry.count > 0
         return JSONResponse(snap)
-
-    @app.get("/voices")
-    async def voices() -> JSONResponse:
-        return JSONResponse({"voices": voices_list(), "default": config.voice})
 
     @app.get("/config")
     async def get_config() -> JSONResponse:
@@ -2724,12 +2595,12 @@ def build_app(
     @app.websocket("/voice")
     async def voice_ws(ws: WebSocket) -> None:
         await ws.accept()
-        if current_status().phase not in READY_PHASES:
+        if status.phase not in READY_PHASES:
             await ws.send_text(
                 json.dumps(
                     {
                         "type": "error",
-                        "message": f"voice service not ready ({current_status().phase}): {current_status().detail}",
+                        "message": f"voice service not ready ({status.phase}): {status.detail}",
                     }
                 )
             )
@@ -2740,7 +2611,6 @@ def build_app(
         # connections get a fresh bucket each time.
         session_key = params.get("session") or f"anon-{id(ws)}"
         history = sessions.get(session_key)
-        requested_voice = params.get("voice")
         out = TurnEmitter(ws)
         # The utterance being recorded: None, or its control frame + chunks.
         utterance: dict[str, Any] | None = None
@@ -2750,8 +2620,8 @@ def build_app(
                              sample_rate: int) -> None:
             busy = registry.busy(session_key)
             if busy is not None:
-                # No legacy `error` alongside: an old client would flip to
-                # its error state mid-turn; it gets the running turn's `done`.
+                # No `error` alongside: the running turn is unaffected and
+                # still ends with its own `turn_end`.
                 await out.json({"type": "turn_rejected", "reason": "busy",
                                 "active_turn_id": busy.turn_id, "source": source})
                 return
@@ -2770,15 +2640,13 @@ def build_app(
             if use_cascade():
                 async def body() -> None:
                     await _run_turn_cascade(
-                        None, history, pcm, sample_rate, pipeline, stub=stub,
-                        config=config, voice_override=requested_voice,
-                        text=text, turn=turn)
+                        turn, history, pcm, sample_rate, pipeline,
+                        config=config, text=text)
             elif server is not None or stub:
                 async def body() -> None:
                     await _run_turn(
-                        None, history, pcm, sample_rate, server, stub=stub,
-                        config=config, voice_override=requested_voice,
-                        text=text, turn=turn)
+                        turn, history, pcm, sample_rate, server, stub=stub,
+                        config=config, text=text)
             else:
                 async def body() -> None:
                     raise RuntimeError("no voice backend available")
@@ -2862,7 +2730,7 @@ def build_app(
 
 
 async def _run_turn(
-    ws: Any,
+    turn: AgentTurn,
     history: list[dict[str, Any]],
     pcm: bytes,
     sample_rate: int,
@@ -2870,19 +2738,11 @@ async def _run_turn(
     *,
     stub: bool,
     config: VoiceConfig,
-    voice_override: str | None = None,
     text: str | None = None,
-    turn: AgentTurn | None = None,
 ) -> None:
-    """One omni turn: a single model call, no tools (omni rejects tools with
-    audio output). `text` set means a typed turn; `turn.speak=False` asks
-    for a text-only reply."""
-    turn = _adhoc_turn(ws, text, turn)
+    """One omni turn: a single model call, chat only (no tools). `text` set
+    means a typed turn; `turn.speak=False` asks for a text-only reply."""
     voice = config.voice
-    if voice_override:
-        available = known_voices(server)
-        if not available or voice_override in available:
-            voice = voice_override
 
     # Live context: current camera frames + robot status, attached to the same
     # request as the user's audio so every turn is a single model call.
@@ -2937,7 +2797,7 @@ async def _run_turn(
     final_text = ""
     finished = False
     try:
-        async for ev in _stream(server, messages, voice, None, stub, audio=turn.speak):
+        async for ev in _stream(server, messages, voice, stub, audio=turn.speak):
             if ev["type"] == "text":
                 final_text += ev["delta"]
                 await turn.delta(ev["delta"])
@@ -3090,17 +2950,17 @@ def main(argv: list[str] | None = None) -> int:
     pipeline: CascadePipeline | None = None
 
     if args.stub:
-        status = VoiceStatus(model="stub", model_downloaded=False)
+        status = VoiceStatus(model="stub")
         status.set(phase="stub", detail="stub mode (no models)")
     elif backend == "cascade":
-        status = VoiceStatus(model="cascade", precision="mixed", model_downloaded=True)
+        status = VoiceStatus(model="cascade")
         asr = StageServer(
             "asr", CASCADE_ASR_MODEL, args.cache_dir / "asr", CASCADE_ASR_PORT,
-            capability="transcription", status=status,
+            capability="transcription",
         )
         tts = StageServer(
             "tts", CASCADE_TTS_MODEL, args.cache_dir / "tts", CASCADE_TTS_PORT,
-            capability="speech", patched_launcher=True, status=status,
+            capability="speech", patched_launcher=True,
         )
         brain = StageServer(
             "brain", CASCADE_BRAIN_MODEL, args.cache_dir / "brain", CASCADE_BRAIN_PORT,
@@ -3110,7 +2970,6 @@ def main(argv: list[str] | None = None) -> int:
                 "--max-input-len", "8192", "--max-kv-cache-capacity", "16384",
                 "--speculative-config", CASCADE_BRAIN_SPECULATIVE,
             ],
-            status=status,
         )
         pipeline = CascadePipeline(asr, brain, tts, status)
         pipeline.start_background()
@@ -3118,10 +2977,7 @@ def main(argv: list[str] | None = None) -> int:
         # Preferred long-term mode: the bebop-models supervisor owns the backend
         # lifecycle + GPU budget. We ask it to load the backend and use its URL.
         status = VoiceStatus(
-            model=f"qwen3-omni (supervised:{config.omni_backend_id})",
-            precision=precision,
-            model_downloaded=True,
-        )
+            model=f"qwen3-omni (supervised:{config.omni_backend_id})")
         server = SupervisedServer(
             config.omni_supervisor_url,
             config.omni_backend_id,
@@ -3131,17 +2987,11 @@ def main(argv: list[str] | None = None) -> int:
         server.start_background()
     elif config.omni_url:
         # External omni backend — no supervision (debug escape hatch).
-        status = VoiceStatus(
-            model="qwen3-omni (external)", precision=precision, model_downloaded=True
-        )
+        status = VoiceStatus(model="qwen3-omni (external)")
         server = ExternalServer(config.omni_url, status)
         server.start_background()
     else:
-        status = VoiceStatus(
-            model=spec.id if spec else "qwen3-omni-30b",
-            precision=precision,
-            model_downloaded=downloaded,
-        )
+        status = VoiceStatus(model=spec.id if spec else "qwen3-omni-30b")
         if spec is not None and downloaded:
             server = EdgeLLMServer(
                 str(model_dir), args.cache_dir, status, extra_args=args.edgellm_arg
@@ -3164,7 +3014,6 @@ def main(argv: list[str] | None = None) -> int:
         sessions=sessions,
         status=status,
         pipeline=pipeline,
-        pipeline_status=status,
     )
     import uvicorn
 
@@ -3175,8 +3024,8 @@ def main(argv: list[str] | None = None) -> int:
         # systemd stops this unit with SIGTERM. uvicorn traps SIGTERM and shuts
         # down gracefully, but may exit via SystemExit, so tear our children
         # down here rather than relying on the lines after run() (and on
-        # atexit, which was not firing). This is what removes the model
-        # container / child process when Voice is toggled off.
+        # atexit, which was not firing). This is what stops the Edge-LLM
+        # child (or the cascade stages) when Voice is toggled off.
         if server is not None:
             server.stop()
         if pipeline is not None:

@@ -24,7 +24,8 @@ backends:
     cache_dir: /var/lib/bebop-voice/edgellm
     port: 8000
     serve_args:
-      # Parse the model's XML tool calls into OpenAI `tool_calls`.
+      # Parse the model's XML tool calls into OpenAI `tool_calls`. Omni is
+      # chat-only today (no tools are sent), so these stay inert.
       - "--enable-auto-tool-choice"
       - "--tool-call-parser"
       - "qwen3_xml"
@@ -34,8 +35,8 @@ backends:
   # The voice service supervises the cascade stages itself today (`StageServer`);
   # registering them here hands their lifecycle to this service.
 
+  # DINOv3 place memory inside bebop-vision (camera-coupled; not managed here).
   - id: vision
     purpose: vision
     kind: tracked
     footprint_gb: 6
-    note: "navd/DINOv3 inside bebop-vision (camera-coupled; not managed here)"

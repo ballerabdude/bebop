@@ -30,8 +30,8 @@ def test_stub_voice_turn_streams_text_and_audio():
         text = ""
         audio_bytes = 0
         saw_audio_start = False
-        saw_done = False
-        while True:
+        end = None
+        while end is None:
             msg = ws.receive()
             if msg.get("type") == "websocket.close":
                 break
@@ -39,16 +39,16 @@ def test_stub_voice_turn_streams_text_and_audio():
                 audio_bytes += len(msg["bytes"])
             elif "text" in msg and msg["text"] is not None:
                 ev = json.loads(msg["text"])
-                if ev["type"] == "text":
-                    text += ev["delta"]
+                if ev["type"] == "assistant_delta":
+                    text += ev["text"]
                 elif ev["type"] == "audio_start":
                     saw_audio_start = True
                     assert ev["sample_rate"] == 24000
-                elif ev["type"] == "done":
-                    saw_done = True
-                    break
+                elif ev["type"] in ("turn_end", "error"):
+                    end = ev
 
-    assert saw_done
+    assert end is not None and end["type"] == "turn_end"
+    assert end["status"] == "done"
     assert saw_audio_start
     assert "stub" in text
     assert audio_bytes > 0
@@ -69,7 +69,6 @@ def test_healthz_reports_phase_and_detail():
         phase="building",
         detail="building thinker layer 3/48",
         model="qwen3-omni-30b",
-        model_downloaded=True,
     )
     app = voice_server.build_app(None, stub=False, status=status)
     client = TestClient(app)
@@ -77,7 +76,6 @@ def test_healthz_reports_phase_and_detail():
     assert body["phase"] == "building"
     assert body["ok"] is False
     assert "thinker" in body["detail"]
-    assert body["model_downloaded"] is True
     assert body["model"] == "qwen3-omni-30b"
 
 
@@ -172,6 +170,16 @@ class _FakeWS:
         self.sent.append(("bytes", len(b)))
 
 
+def _turn(ws, *, source="voice"):
+    """A turn whose events go to `ws` (what the gateway builds per turn)."""
+    return voice_server.AgentTurn(turn_id="t1", source=source,
+                                  out=voice_server.TurnEmitter(ws))
+
+
+def _events(ws):
+    return [json.loads(payload) for kind, payload in ws.sent if kind == "text"]
+
+
 def test_run_turn_history_text_only_by_default():
     import asyncio
 
@@ -182,7 +190,8 @@ def test_run_turn_history_text_only_by_default():
     )
     asyncio.run(
         voice_server._run_turn(
-            ws, history, b"\x00\x00" * 100, 16000, None, stub=True, config=cfg
+            _turn(ws), history, b"\x00\x00" * 100, 16000, None, stub=True,
+            config=cfg
         )
     )
     assert any(m["role"] == "assistant" for m in history)
@@ -198,7 +207,8 @@ def test_run_turn_keeps_audio_when_enabled():
     cfg = voice_server.VoiceConfig(history_turns=2, keep_audio_history=True)
     asyncio.run(
         voice_server._run_turn(
-            ws, history, b"\x00\x00" * 100, 16000, None, stub=True, config=cfg
+            _turn(ws), history, b"\x00\x00" * 100, 16000, None, stub=True,
+            config=cfg
         )
     )
     roles = [m["role"] for m in history]
@@ -299,7 +309,7 @@ def test_run_turn_injects_live_context(monkeypatch):
     history: list[dict] = []
     cfg = voice_server.VoiceConfig(history_turns=2, tools_enabled=True)
 
-    async def fake_context(status=None):
+    async def fake_context():
         return '{"battery_pct": 88, "mode": "IDLE"}', [
             ("color_near", b"\xff\xd8near"),
             ("color_far", b"\xff\xd8far"),
@@ -307,7 +317,7 @@ def test_run_turn_injects_live_context(monkeypatch):
 
     seen: list[dict] = []
 
-    async def fake_stream(server, messages, voice, tools, stub, *, audio=True):
+    async def fake_stream(server, messages, voice, stub, *, audio=True):
         seen[:] = list(messages)
         yield {"type": "text", "delta": "The person is wearing red."}
 
@@ -316,7 +326,8 @@ def test_run_turn_injects_live_context(monkeypatch):
 
     asyncio.run(
         voice_server._run_turn(
-            ws, history, b"\x00\x00" * 100, 16000, None, stub=False, config=cfg
+            _turn(ws), history, b"\x00\x00" * 100, 16000, None, stub=False,
+            config=cfg
         )
     )
     # status + camera instructions go in the system prompt
@@ -374,17 +385,12 @@ def test_run_turn_cascade(monkeypatch):
 
     asyncio.run(
         voice_server._run_turn_cascade(
-            ws, history, b"\x00\x00" * 100, 16000, pipe, stub=False, config=cfg
+            _turn(ws), history, b"\x00\x00" * 100, 16000, pipe, config=cfg
         )
     )
-    kinds = []
-    text_deltas = []
-    for kind, payload in ws.sent:
-        if kind == "text":
-            ev = json.loads(payload)
-            kinds.append(ev.get("type"))
-            if ev.get("type") == "text":
-                text_deltas.append(ev["delta"])
+    events = _events(ws)
+    kinds = [ev["type"] for ev in events]
+    text_deltas = [ev["text"] for ev in events if ev["type"] == "assistant_delta"]
     audio_bytes = sum(n for kind, n in ws.sent if kind == "bytes")
     assert "transcript" in kinds
     assert "".join(text_deltas) == "Hi there! Bye now."
@@ -414,7 +420,7 @@ def test_run_turn_cascade_runs_a_places_tool(monkeypatch):
     async def fake_transcribe(stage, wav):
         return "where are we"
 
-    async def fake_context(status=None):
+    async def fake_context():
         return "", []
 
     rounds = {"n": 0}
@@ -448,7 +454,7 @@ def test_run_turn_cascade_runs_a_places_tool(monkeypatch):
 
     asyncio.run(
         voice_server._run_turn_cascade(
-            ws, history, b"\x00\x00" * 100, 16000, pipe, stub=False, config=cfg
+            _turn(ws), history, b"\x00\x00" * 100, 16000, pipe, config=cfg
         )
     )
     assert ran["name"] == "where_am_i"
@@ -456,9 +462,9 @@ def test_run_turn_cascade_runs_a_places_tool(monkeypatch):
     assert "where_am_i" in names and "robot_status" in names
     assert "move_relative" not in names  # motion is its own switch
     assert rounds["n"] == 2  # tool round, then the spoken answer
-    events = [json.loads(p) for k, p in ws.sent if k == "text"]
-    assert [e["name"] for e in events if e.get("type") == "tool"] == ["where_am_i"]
-    said = "".join(e["delta"] for e in events if e.get("type") == "text")
+    events = _events(ws)
+    assert [e["name"] for e in events if e["type"] == "tool_call"] == ["where_am_i"]
+    said = "".join(e["text"] for e in events if e["type"] == "assistant_delta")
     assert said == "You are in the office room."
     assert history[-1]["content"] == "You are in the office room."
 
@@ -737,11 +743,11 @@ def test_run_turn_skips_context_when_disabled(monkeypatch):
 
     called = {"n": 0}
 
-    async def fake_context(status=None):
+    async def fake_context():
         called["n"] += 1
         return "", []
 
-    async def fake_stream(server, messages, voice, tools, stub, *, audio=True):
+    async def fake_stream(server, messages, voice, stub, *, audio=True):
         yield {"type": "text", "delta": "hi"}
 
     monkeypatch.setattr(voice_server, "live_context", fake_context)
@@ -750,23 +756,11 @@ def test_run_turn_skips_context_when_disabled(monkeypatch):
     cfg = voice_server.VoiceConfig(tools_enabled=False)
     asyncio.run(
         voice_server._run_turn(
-            _FakeWS(), [], b"\x00\x00" * 100, 16000, None, stub=False, config=cfg
+            _turn(_FakeWS()), [], b"\x00\x00" * 100, 16000, None, stub=False,
+            config=cfg
         )
     )
     assert called["n"] == 0
-
-
-def test_wav_bytes_to_pcm16():
-    import io
-    import wave
-
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(24000)
-        w.writeframes(b"\x01\x02\x03\x04")
-    assert voice_server.wav_bytes_to_pcm16(buf.getvalue()) == b"\x01\x02\x03\x04"
 
 
 def test_config_tools_toggle(tmp_path, monkeypatch):

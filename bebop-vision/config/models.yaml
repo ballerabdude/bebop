@@ -46,10 +46,10 @@ models:
     revision: main
     gated: true
 
-  # DINOv3 backbones pair with SAM 3.1 for a stronger open-vocab stack.
+  # DINOv3 ViT-L/16: the place-memory encoder (bebop_vision/places/encoder.py).
   - id: dinov3-vitl16
     name: DINOv3 ViT-L/16
-    description: Self-supervised vision backbone (SAM 3.1 feature extractor).
+    description: Self-supervised vision backbone (place-memory descriptors).
     kind: hf
     purpose: backbone
     repo: facebook/dinov3-vitl16-pretrain-lvd1689m

@@ -21,8 +21,9 @@ HTTP API (default :9094):
     POST /models/{id}/load   start a backend (evicting others to fit budget)
     POST /models/{id}/unload stop a backend
 
-Registry entries come from `config/models_supervisor.yaml` (falls back to a
-built-in default).
+Registry entries come from `config/models_supervisor.yaml`
+(`BEBOP_MODELS_CONFIG` overrides the path); an unreadable registry leaves the
+supervisor with no backends.
 """
 
 from __future__ import annotations
@@ -57,26 +58,6 @@ REGISTRY_PATH = Path(
     )
 )
 
-# Built-in registry used when no config file is present.
-DEFAULT_REGISTRY: list[dict[str, Any]] = [
-    {
-        "id": "omni-edgellm",
-        "purpose": "voice",
-        "kind": "edgellm",
-        "footprint_gb": 20,
-        "model": "/home/bebop/bebop/bebop-vision/weights/qwen3-omni-30b-nvfp4",
-        "cache_dir": "/var/lib/bebop-voice/edgellm",
-        "port": 8000,
-        "serve_args": ["--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml"],
-    },
-    {
-        "id": "vision",
-        "purpose": "vision",
-        "kind": "tracked",  # lives inside bebop-vision; counted, not managed here
-        "footprint_gb": 6,
-    },
-]
-
 
 def _log(msg: str) -> None:
     print(f"[models] {msg}", flush=True)
@@ -110,7 +91,6 @@ class Backend:
             self.base_url = f"http://127.0.0.1:{self.port}"
         self.state = "stopped" if self.kind != "tracked" else "tracked"
         self.detail = ""
-        self.last_used = time.time()
         self.proc: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
 
@@ -119,7 +99,7 @@ class Backend:
     def argv(self) -> list[str]:
         """The `tensorrt-edgellm-serve` command line for this backend."""
         spec = self.spec
-        model = str(spec.get("model") or spec.get("model_dir") or "")
+        model = str(spec.get("model") or "")
         argv = [
             resolve_edgellm_bin(),
             model,
@@ -228,22 +208,18 @@ class Backend:
             "footprint_gb": self.footprint_gb,
             "base_url": self.base_url or None,
             "pid": self.proc.pid if self.proc is not None else None,
-            "idle_s": round(max(0.0, time.time() - self.last_used), 1),
         }
 
 
 def _load_registry() -> list[dict[str, Any]]:
-    if REGISTRY_PATH.is_file():
-        try:
-            import yaml  # type: ignore
+    try:
+        import yaml  # type: ignore
 
-            data = yaml.safe_load(REGISTRY_PATH.read_text()) or {}
-            entries = data.get("backends") or []
-            if entries:
-                return entries
-        except Exception as exc:  # noqa: BLE001
-            _log(f"registry parse failed ({exc}); using defaults")
-    return DEFAULT_REGISTRY
+        data = yaml.safe_load(REGISTRY_PATH.read_text()) or {}
+        return list(data.get("backends") or [])
+    except Exception as exc:  # noqa: BLE001
+        _log(f"registry {REGISTRY_PATH} unreadable ({exc}); no backends")
+        return []
 
 
 class Supervisor:

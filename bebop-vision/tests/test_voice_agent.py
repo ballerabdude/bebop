@@ -27,7 +27,7 @@ def _pipeline():
 
 
 def _app(monkeypatch, *, tools=True, motion=False):
-    async def no_context(status=None):
+    async def no_context():
         return "", []
 
     monkeypatch.setattr(vs, "live_context", no_context)
@@ -36,7 +36,7 @@ def _app(monkeypatch, *, tools=True, motion=False):
                          motion_enabled=motion, history_turns=4)
     status = vs.VoiceStatus(phase="ready")
     app = vs.build_app(None, stub=False, config=cfg, status=status,
-                       pipeline=_pipeline(), pipeline_status=status)
+                       pipeline=_pipeline())
     return app, cfg
 
 
@@ -52,11 +52,6 @@ def _read_turn(ws, *, until="turn_end"):
         events.append(ev)
         if ev["type"] == until:
             return events, audio
-
-
-def _new_events(events):
-    legacy = {"text", "tool", "done", "error"}
-    return [e for e in events if e["type"] not in legacy]
 
 
 def test_cascade_is_the_default_backend(tmp_path):
@@ -109,17 +104,15 @@ def test_text_turn_goes_to_the_brain_without_asr_or_tts(monkeypatch):
                                  "speak": False, "turn_id": "abc"}))
         events, audio = _read_turn(ws)
     assert audio == 0
-    kinds = [e["type"] for e in _new_events(events)]
+    # turn events only (no audio framing at all), every one tagged
+    kinds = [e["type"] for e in events]
     assert kinds == ["turn_start", "transcript", "assistant_delta",
                      "assistant_delta", "turn_end"]
-    assert all(e["turn_id"] == "abc" for e in _new_events(events))
+    assert all(e["turn_id"] == "abc" for e in events)
     assert events[0] == {"type": "turn_start", "turn_id": "abc",
                          "source": "text", "speak": False}
-    assert _new_events(events)[1]["text"] == "hi bebop"
+    assert events[1]["text"] == "hi bebop"
     assert events[-1]["status"] == "done"
-    # the legacy `done` precedes turn_end; no audio framing at all
-    assert [e["type"] for e in events][-2:] == ["done", "turn_end"]
-    assert "audio_start" not in kinds
     assert seen["messages"][-1]["content"][0]["text"] == "hi bebop"
 
 
@@ -137,7 +130,7 @@ def test_text_turn_speaks_when_asked(monkeypatch):
     with TestClient(app).websocket_connect("/voice") as ws:
         ws.send_text(json.dumps({"type": "user_text", "text": "count"}))
         events, audio = _read_turn(ws)
-    kinds = [e["type"] for e in _new_events(events)]
+    kinds = [e["type"] for e in events]
     assert kinds.index("audio_start") < kinds.index("audio_end") < kinds.index("turn_end")
     assert audio == 4  # two sentences x one 2-byte chunk
 
@@ -167,17 +160,14 @@ def test_tool_events_and_history_keep_the_whole_turn(monkeypatch):
         ws.send_text(json.dumps({"type": "user_text", "text": "what rooms?",
                                  "speak": False}))
         events, _ = _read_turn(ws)
-    new = _new_events(events)
-    kinds = [e["type"] for e in new]
+    kinds = [e["type"] for e in events]
     assert kinds.index("tool_call") < kinds.index("tool_result") < kinds.index("turn_end")
-    call = next(e for e in new if e["type"] == "tool_call")
+    call = next(e for e in events if e["type"] == "tool_call")
     assert call["name"] == "list_places" and call["call_id"] == "c1"
     assert call["args"] == {"x": 1}
-    result = next(e for e in new if e["type"] == "tool_result")
+    result = next(e for e in events if e["type"] == "tool_result")
     assert result["ok"] is True and result["call_id"] == "c1"
     assert "kitchen" in result["text"] and isinstance(result["ms"], int)
-    # legacy {"type":"tool"} still announced
-    assert any(e["type"] == "tool" for e in events)
 
     history = vs_sessions(app, "hist")
     roles = [m["role"] for m in history]
@@ -222,7 +212,7 @@ def test_cancel_ends_the_turn_and_frees_the_session(monkeypatch):
         ws.send_text(json.dumps({"type": "user_text", "text": "again"}))
         rej, _ = _read_turn(ws, until="turn_rejected")
         assert rej[-1]["reason"] == "busy"
-        # no legacy `error` (an old client would show an error mid-turn)
+        # no `error` frame: the running turn is unaffected
         assert not [e for e in rej if e["type"] == "error"]
         assert rej[-1]["active_turn_id"] == events[0]["turn_id"]
 
@@ -283,13 +273,12 @@ def test_voice_turn_still_works_and_reports_its_transcript(monkeypatch):
         ws.send_bytes(b"\x00\x00" * 200)
         ws.send_text(json.dumps({"type": "utterance_end"}))
         events, audio = _read_turn(ws)
-    new = _new_events(events)
-    assert new[0]["type"] == "turn_start" and new[0]["source"] == "voice"
-    transcript = next(e for e in new if e["type"] == "transcript")
+    assert events[0]["type"] == "turn_start" and events[0]["source"] == "voice"
+    transcript = next(e for e in events if e["type"] == "transcript")
     assert transcript["text"] == "hello robot" and transcript["final"] is True
     assert audio == 2
-    assert new[-1] == {"type": "turn_end", "turn_id": new[0]["turn_id"],
-                       "status": "done"}
+    assert events[-1] == {"type": "turn_end", "turn_id": events[0]["turn_id"],
+                          "status": "done"}
 
 
 def test_brain_failure_ends_the_turn_as_error(monkeypatch):
@@ -304,7 +293,8 @@ def test_brain_failure_ends_the_turn_as_error(monkeypatch):
         ws.send_text(json.dumps({"type": "user_text", "text": "hi", "speak": False}))
         events, _ = _read_turn(ws)
         assert events[-1]["status"] == "error" and "brain down" in events[-1]["error"]
-        assert any(e["type"] == "error" for e in events)  # legacy
+        # the failure rides turn_end alone
+        assert not [e for e in events if e["type"] == "error"]
         # the socket stays usable
         monkeypatch.setattr(vs, "_cascade_chat_stream", _quick_brain("fine"))
         ws.send_text(json.dumps({"type": "user_text", "text": "hi", "speak": False}))

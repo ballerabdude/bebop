@@ -1,4 +1,6 @@
-"""Tests for the model supervisor registry/API (no docker/GPU/Edge-LLM needed)."""
+"""Tests for the model supervisor registry/API (no GPU or Edge-LLM needed)."""
+
+from pathlib import Path
 
 import pytest
 
@@ -7,6 +9,10 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from bebop_vision import models_supervisor as ms  # noqa: E402
+
+# The registry bebop-models.service loads from the checkout.
+SHIPPED_REGISTRY = (Path(ms.__file__).resolve().parent.parent
+                    / "config" / "models_supervisor.yaml")
 
 
 class FakeProc:
@@ -48,9 +54,8 @@ def spawned(monkeypatch):
     return procs
 
 
-def test_supervisor_api(monkeypatch, tmp_path):
-    # Force the built-in registry (ignore any repo config).
-    monkeypatch.setattr(ms, "REGISTRY_PATH", tmp_path / "absent.yaml")
+def test_supervisor_api(monkeypatch):
+    monkeypatch.setattr(ms, "REGISTRY_PATH", SHIPPED_REGISTRY)
     app = ms.build_app(ms.Supervisor())
     client = TestClient(app)
 
@@ -127,9 +132,9 @@ def test_unsupported_kind_is_an_error():
     assert b.state == "error" and "unsupported kind" in b.detail
 
 
-def test_sleep_endpoint_is_gone(monkeypatch, tmp_path):
+def test_sleep_endpoint_is_gone(monkeypatch):
     """The vLLM-Omni sleep/wake API was removed with the container runtime."""
-    monkeypatch.setattr(ms, "REGISTRY_PATH", tmp_path / "absent.yaml")
+    monkeypatch.setattr(ms, "REGISTRY_PATH", SHIPPED_REGISTRY)
     client = TestClient(ms.build_app(ms.Supervisor()))
     assert client.post("/models/omni-edgellm/sleep").status_code == 404
     assert client.post("/models/omni-edgellm/wake").status_code == 404
@@ -152,9 +157,9 @@ def test_load_evicts_when_the_budget_is_tight(spawned, monkeypatch, tmp_path):
     assert sup.backends["second"].state == "ready"
 
 
-def test_cors_headers_and_preflight(monkeypatch, tmp_path):
+def test_cors_headers_and_preflight(monkeypatch):
     """The app fetches :9094 cross-origin; GETs carry ACAO and POSTs preflight."""
-    monkeypatch.setattr(ms, "REGISTRY_PATH", tmp_path / "absent.yaml")
+    monkeypatch.setattr(ms, "REGISTRY_PATH", SHIPPED_REGISTRY)
     client = TestClient(ms.build_app(ms.Supervisor()))
     origin = "http://127.0.0.1:5173"
 

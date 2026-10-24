@@ -77,8 +77,6 @@ def test_status_round_trip(monkeypatch, tmp_path):
     payload = json.loads(path.read_text())
     assert payload["state"] == "downloading"
     assert payload["bytes_downloaded"] == 10
-    assert models.read_status("sam3.1") == payload
-    assert models.read_status("missing") is None
 
 
 def test_classify_and_detail_map_auth_errors():
