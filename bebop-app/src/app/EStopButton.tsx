@@ -232,7 +232,7 @@ export function EStopDock({
     <div
       ref={rootRef}
       className={cn(
-        "flex shrink-0 items-center gap-2 border-t px-3 py-2 md:hidden",
+        "flex shrink-0 items-center gap-2 border-t px-3 py-2 md:hidden [@media(max-height:500px)]:hidden",
         estop.latched || estop.error
           ? "border-danger/40 bg-danger/10"
           : "border-border bg-bg-elev/80",
@@ -255,11 +255,11 @@ export function EStopBar({ className }: { className?: string }) {
   const estop = useEStop();
   const showReason = estop.latched || !!estop.error;
   return (
-    <div className={cn("hidden items-center gap-2 md:flex", className)}>
+    <div className={cn("hidden items-center gap-2 md:flex [@media(max-height:500px)]:flex", className)}>
       {showReason ? (
         <span
           role={estop.error ? "alert" : "status"}
-          className="hidden max-w-[19rem] min-w-0 truncate text-label font-semibold text-danger-fg [@media(max-height:500px)]:block"
+          className="hidden max-w-[min(19rem,30vw)] min-w-0 truncate text-label font-semibold text-danger-fg [@media(max-height:500px)]:block"
         >
           {estop.error
             ? `${estop.errorKind === "estop" ? "E-STOP not sent" : "Reset failed"}: ${estop.error}`

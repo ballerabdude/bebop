@@ -3,23 +3,21 @@
 //
 //   phones   (<768)      bottom tab bar (safe-area aware) with the E-STOP
 //                        dock directly above it, both in the layout flow so
-//                        they never cover page content
+//                        they never cover page content; landscape phones
+//                        (<=500 px tall) keep the tab bar but put the E-STOP
+//                        in the status bar to save height
 //   tablets  (768-1279)  compact icon rail on the left, E-STOP top-right
 //   desktop  (>=1280)    labeled side rail, E-STOP top-right
 //
-// The Drive page hides most chrome: the rail collapses to icons, the phone
-// tab bar is replaced by a menu button, and only the status bar and E-STOP
-// remain. On phones the E-STOP then floats bottom-right at z-40 (above any
-// page overlay up to z-39). Its size depends on the latch state (about
-// 240 x 112 px latched), so the shell publishes the measured corner as
-// `--estop-float-w` / `--estop-float-h` on <html>; Drive pads against those.
+// Every section, Drive included, gets the same navigation; on Drive the
+// side rail just collapses to icons to give the video more width.
 //
-// The shell also publishes `--shell-top-inset` / `--shell-bottom-inset` (the
-// status bar, and the phone E-STOP dock + tab bar or floating E-STOP). Modal
-// layers (ui/Dialog, the nav sheet) stop at those edges, so the E-STOP is
+// The shell publishes `--shell-top-inset` / `--shell-bottom-inset` (the
+// status bar, and the phone E-STOP dock + tab bar). Modal
+// layers (ui/Dialog) stop at those edges, so the E-STOP is
 // never dimmed or covered while a confirm is open.
 
-import { Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useLayoutEffect, useRef } from "react";
 import type { ReactNode, Ref, RefObject } from "react";
 import { Link, NavLink, Outlet, useLocation, useParams } from "react-router";
 
@@ -39,7 +37,6 @@ import {
   DiagnosticsIcon,
   DriveIcon,
   MemoryIcon,
-  MenuIcon,
   RobotsIcon,
   SettingsIcon,
 } from "./icons";
@@ -128,15 +125,7 @@ const MODE_LABEL: Record<string, string> = {
   RUN_POLICY: "Policy",
 };
 
-function StatusBar({
-  onMenu,
-  showMenu,
-  headerRef,
-}: {
-  onMenu: () => void;
-  showMenu: boolean;
-  headerRef: Ref<HTMLElement>;
-}) {
+function StatusBar({ headerRef }: { headerRef: Ref<HTMLElement> }) {
   const { host } = useRobot();
   const link = useConnection();
   const s = useTelemetry(selectStatus, 5);
@@ -162,16 +151,6 @@ function StatusBar({
       className="sticky top-0 z-30 border-b border-border bg-bg/90 pt-safe backdrop-blur-md"
     >
       <div className="flex min-h-14 items-center gap-2 px-3 py-1.5 sm:px-4 md:min-h-16 [@media(max-height:500px)]:min-h-12 [@media(max-height:500px)]:py-1">
-        {showMenu ? (
-          <button
-            type="button"
-            onClick={onMenu}
-            aria-label="Open navigation"
-            className="inline-flex h-touch w-touch shrink-0 items-center justify-center rounded-card text-text-dim hover:bg-bg-elev-2 hover:text-text md:hidden"
-          >
-            <MenuIcon />
-          </button>
-        ) : null}
         <Link
           to="/"
           className="flex min-h-touch min-w-0 shrink items-center gap-1 rounded-card pr-2 text-left hover:bg-bg-elev-2"
@@ -235,7 +214,7 @@ function StatusBar({
             </StatusPill>
           ) : null}
         </div>
-        <EStopBar className="ml-auto shrink-0" />
+        <EStopBar className="ml-auto min-w-0" />
       </div>
       <EStopStrip />
     </header>
@@ -294,7 +273,7 @@ function BottomTabs({ host, navRef }: { host: string; navRef: Ref<HTMLElement> }
               to={robotPath(host, item.section)}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "flex h-14 flex-col items-center justify-center gap-0.5 text-caption font-semibold",
+                "flex h-14 flex-col items-center justify-center gap-0.5 text-caption font-semibold [@media(max-height:500px)]:h-11 [@media(max-height:500px)]:flex-row [@media(max-height:500px)]:gap-1.5",
                 active ? "text-accent" : "text-text-dim",
               )}
             >
@@ -305,43 +284,6 @@ function BottomTabs({ host, navRef }: { host: string; navRef: Ref<HTMLElement> }
         })}
       </div>
     </nav>
-  );
-}
-
-function NavSheet({ host, open, onClose }: { host: string; open: boolean; onClose: () => void }) {
-  if (!open) return null;
-  return (
-    <div
-      className="fixed inset-x-0 top-0 bottom-[var(--shell-bottom-inset,0px)] z-[55] bg-black/55 md:hidden"
-      onClick={onClose}
-    >
-      <div
-        className="absolute inset-x-0 bottom-0 rounded-t-card border-t border-border bg-bg-elev pb-safe"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="grid grid-cols-3 gap-1 p-3">
-          {NAV.map((item) => (
-            <NavLink
-              key={item.label}
-              to={robotPath(host, item.section)}
-              onClick={onClose}
-              className="flex h-20 flex-col items-center justify-center gap-1 rounded-card text-label font-semibold text-text-dim hover:bg-bg-elev-2 hover:text-text"
-            >
-              <item.icon />
-              {item.label}
-            </NavLink>
-          ))}
-          <Link
-            to="/"
-            onClick={onClose}
-            className="flex h-20 flex-col items-center justify-center gap-1 rounded-card text-label font-semibold text-text-dim hover:bg-bg-elev-2 hover:text-text"
-          >
-            <RobotsIcon />
-            Robots
-          </Link>
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -402,7 +344,6 @@ function Shell() {
   const { host } = useRobot();
   const { pathname } = useLocation();
   const immersive = pathname.endsWith("/drive");
-  const [menuOpen, setMenuOpen] = useState(false);
   const headerRef = useRef<HTMLElement | null>(null);
   const dockRef = useRef<HTMLDivElement | null>(null);
   const tabsRef = useRef<HTMLElement | null>(null);
@@ -423,7 +364,7 @@ function Shell() {
     <div className="flex h-dvh w-full overflow-hidden">
       <SideRail host={host} compact={immersive} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <StatusBar headerRef={headerRef} showMenu={immersive} onMenu={() => setMenuOpen(true)} />
+        <StatusBar headerRef={headerRef} />
         <main
           ref={mainRef}
           id="main"
@@ -436,12 +377,11 @@ function Shell() {
             <Outlet />
           </Suspense>
         </main>
-        {/* Phones: E-STOP dock + tabs sit below the scroll area, in flow.
-            On the full-bleed Drive page the dock floats bottom-right. */}
-        <EStopDock rootRef={dockRef} floating={immersive} />
-        {immersive ? null : <BottomTabs host={host} navRef={tabsRef} />}
+        {/* Phones: E-STOP dock + tabs sit below the scroll area, in flow,
+            on every section (Drive included) so navigation is the same. */}
+        <EStopDock rootRef={dockRef} />
+        <BottomTabs host={host} navRef={tabsRef} />
       </div>
-      <NavSheet host={host} open={menuOpen} onClose={() => setMenuOpen(false)} />
       <EStopHotkey />
     </div>
   );

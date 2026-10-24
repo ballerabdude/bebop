@@ -120,8 +120,7 @@ export function ControlsDrawer({
       <div
         className={cn(
           "min-h-0 flex-1 overflow-y-auto overscroll-contain",
-          // Phones: the floating E-STOP covers the bottom-right corner.
-          docked ? "pb-safe" : "pb-[calc(160px+env(safe-area-inset-bottom))] md:pb-safe",
+          "pb-safe",
         )}
       >
         {error ? (
@@ -356,7 +355,7 @@ export function ControlsDrawer({
   }
   return (
     // Inside the page (absolute), so the shell's status bar and its E-STOP
-    // stay uncovered; z-[38] keeps it under the phones' floating E-STOP.
+    // stay uncovered; z-[38] keeps it under the shell's E-STOP.
     <div className={cn("absolute inset-0 z-[38] overflow-hidden", !open && "pointer-events-none")} aria-hidden={!open}>
       <div
         className={cn(

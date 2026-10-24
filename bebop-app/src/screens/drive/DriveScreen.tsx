@@ -8,8 +8,9 @@
 // The controls drawer (wheels, mode, vision, odometry, gamepad) slides over
 // on phones / tablets and docks as a side panel on desktop.
 //
-// The shell owns the status bar and the global E-STOP (bottom-right on
-// phones, top-right from md up); nothing here is placed under it.
+// The shell owns the status bar, the tab bar / rail and the global E-STOP
+// (a dock above the phone tab bar, top-right from md up or on landscape
+// phones); the page lays out between them.
 //
 // Driving: `useDrive` (twist stream + input arbiter: joystick, WASD /
 // arrows, gamepad behind the RT deadman). Every lifecycle stop lives there.
@@ -119,8 +120,7 @@ export function DriveScreen() {
   const wide = useMedia("(min-width: 1280px)");
   const stacked = useMedia("(orientation: portrait)");
   const short = useMedia("(max-height: 520px)");
-  // Small landscape phones (<768 wide): the shell's E-STOP floats in the
-  // bottom-right corner and there is no room for a marker column, so the
+  // Small landscape phones (<768 wide): no room for a marker column, so the
   // markers and intent move into a toolbar panel.
   const phoneLand = !md && !stacked;
 
@@ -508,7 +508,7 @@ export function DriveScreen() {
     </>
   );
 
-  const joySize = stacked ? (md ? 210 : 168) : short ? 160 : 188;
+  const joySize = stacked ? (md ? 210 : 168) : phoneLand ? 120 : short ? 160 : 188;
   const joystick = wheeled ? (
     <div className="rounded-full bg-black/35 backdrop-blur-sm">
       <DriveJoystick
@@ -555,9 +555,6 @@ export function DriveScreen() {
     />
   );
 
-  // Phones (<md): the shell's E-STOP floats bottom-right (~160 x 88 px; with
-  // the latch reason above it, most of the width and ~150 px). Keep clear.
-  const estopTall = !md && (estop.latched || !!estop.error);
   const toastEl = (cls: string) => (
     <ToastView toast={toast.toast} onDismiss={toast.dismiss} className={cn("absolute inset-x-0 z-[39] px-4", cls)} />
   );
@@ -597,7 +594,7 @@ export function DriveScreen() {
           <div
             className={cn(
               "flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-3 pt-2.5",
-              estopTall ? "pb-[152px]" : "pb-[max(16px,env(safe-area-inset-bottom))]",
+              "pb-4",
             )}
           >
             <div className="flex flex-wrap items-center gap-2">
@@ -611,10 +608,8 @@ export function DriveScreen() {
             <div className="flex-1" />
             {wheeled ? (
               <div className="flex items-start gap-3">
-                {/* While latched on a phone the E-STOP's reason card covers
-                    this corner; the joystick can't drive anyway. */}
-                {estopTall ? null : joystick}
-                <div className={cn("flex gap-2", estopTall ? "flex-row" : "flex-col items-start")}>
+                {joystick}
+                <div className="flex flex-col items-start gap-2">
                   {driveChips}
                 </div>
               </div>
@@ -650,14 +645,12 @@ export function DriveScreen() {
                   )}
                 >
                   {phoneLand ? (
-                    // The HUD rides beside the joystick: the bottom-right
-                    // corner belongs to the shell's E-STOP.
+                    // Too narrow for a marker column: the HUD rides beside
+                    // the joystick and the markers live in the Mark panel.
                     <>
                       {joystick}
-                      <div className="flex flex-col items-start gap-2">
-                        {hud}
-                        <div className="flex flex-col items-start gap-2">{driveChips}</div>
-                      </div>
+                      <div className="flex flex-col items-start gap-2">{driveChips}</div>
+                      {hud}
                     </>
                   ) : short ? (
                     <>
