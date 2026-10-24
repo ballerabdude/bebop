@@ -128,6 +128,10 @@ def run_record_navd(args):
     import math
 
     _acquire_recorder_lock()
+    if args.stall_watch:
+        from bebop_vision.stall_watch import StallWatch
+        StallWatch(args.stall_watch, threshold_ms=args.stall_ms).start()
+        print(f"[stall-watch] logging stalls >= {args.stall_ms:.0f} ms to {args.stall_watch}")
     # Operator notes (intent / events / places) shared by the video server's
     # routes, the scout and every recorder segment.
     notes = SessionNotes()
@@ -506,6 +510,12 @@ def main():
                         help="voice /healthz URL probed to skip router ticks "
                              "while a voice turn is in flight (fail-open)")
     parser.add_argument("--robot-url", default=DEFAULT_URL)
+    parser.add_argument("--stall-watch", metavar="FILE", default=None,
+                        help="diagnostic: log GIL stalls (with every thread's "
+                             "stack, captured during the stall) and long GC "
+                             "pauses to FILE (bebop_vision/stall_watch.py)")
+    parser.add_argument("--stall-ms", type=float, default=150.0,
+                        help="stall threshold for --stall-watch (default 150)")
     args = parser.parse_args()
 
     if args.place_router and args.no_places:
