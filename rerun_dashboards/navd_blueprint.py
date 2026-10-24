@@ -13,13 +13,13 @@ of time-series on the right:
 
 The wheel, chassis and drive-power panels read `/runtime`, the firmware
 telemetry frames the recorder stores since 2026-10-23
-(`bebop.runtime.v1.ServerRuntimeMessage`; acks, mode / E-STOP events and nav
-goals go to `/runtime_events`, because Rerun plots a non-telemetry row as 0): the selectors walk
-`.payload.telemetry.<field>`, enums decode as `{name, value}` (so `.mode.value`
-plots 1 idle / 2 dial-in / 3 run-policy) and bools plot as 0/1 steps. Wheel
-index 0 is left and 1 is right, the firmware's config order. Older sessions
-have no `/runtime`, `/intent`, `/event` or `/place`, so those panels stay
-empty.
+(`bebop.runtime.v1.ServerRuntimeMessage`; acks and mode / E-STOP events go
+to `/runtime_events`, because Rerun plots a non-telemetry row as 0): the
+selectors walk `.payload.telemetry.<field>`, enums decode as `{name, value}`
+(so `.mode.value` plots 1 idle / 2 dial-in) and bools plot as 0/1 steps.
+Wheel index 0 is left and 1 is right, the firmware's config order. Older
+sessions have no `/runtime`, `/intent`, `/event` or `/place`, so those
+panels stay empty.
 
 The telemetry messages are Protobuf structs (`bebop.navd.Twist`/`Odom`/
 `ImuAccel`/`ImuGyro`), so their fields are plotted directly by mapping each
@@ -96,7 +96,7 @@ WHEELS = (
         (RUNTIME, f"{_TEL}.wheels[1].target_velocity_rad_s", "target", _TARGET),
     )),
 )
-MODE = ("/runtime", "mode (1 idle, 2 dial-in, 3 policy)", (
+MODE = ("/runtime", "mode (1 idle, 2 dial-in)", (
     (RUNTIME, f"{_TEL}.mode.value", "mode", (150, 90, 255)),))
 # One small step plot per flag (0/1 lines on a shared plot hide each other);
 # single series, so the title says it all and the legend stays off.

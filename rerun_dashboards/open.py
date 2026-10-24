@@ -17,9 +17,8 @@ A URL is downloaded once into the cache dir (default
 `~/.cache/bebop/captures`, override with `--cache-dir`) and reused while
 the server-side size matches.
 
-A session cut short by a sudden power loss has no MCAP footer and the
-viewer will reject it; run `python tools/mcap_recover.py <in> <out>` first
-to rewrite a terminated copy.
+A session cut short by a sudden power loss has no MCAP footer either; it
+is repaired the same way on load (its last partial chunk is lost).
 
 Why the SDK does the loading: the viewer only applies a blueprint to
 recordings with the same application id, and opening a `.mcap` directly

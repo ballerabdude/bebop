@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 #
 # Builds the `gs_usb` kernel module out-of-tree and installs it under
-# /lib/modules/$(uname -r)/extra/. NVIDIA's stock JetPack 6 kernel
-# (5.15.148-tegra at the time of writing) ships *without*
-# CONFIG_CAN_GS_USB, so the candleLight / Geschwister Schneider
-# USB-CAN hub the robot uses (USB id 1d50:606f) has no driver until
-# this script runs once.
+# /lib/modules/$(uname -r)/extra/. On a kernel built *without*
+# CONFIG_CAN_GS_USB (NVIDIA's stock JetPack 6 kernel, 5.15.148-tegra,
+# was one), the candleLight / Geschwister Schneider USB-CAN hub the robot
+# uses (USB id 1d50:606f) has no driver until this script runs once.
 #
 # Idempotent: bails out cleanly if `gs_usb` is already loaded or
 # already installed somewhere modprobe can find it.
@@ -100,7 +99,7 @@ echo "    kernel build dir: ${KBUILD}"
 # Fetch gs_usb.c that matches the running kernel
 # ---------------------------------------------------------------------------
 
-# 5.15.148-tegra → 5.15.148 → 5.15
+# e.g. 5.15.148-tegra → 5.15.148 → 5.15
 KBASE_FULL="$(echo "${KVER}" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
 KBASE_MAJOR="$(echo "${KBASE_FULL}" | cut -d. -f1-2)"
 echo "==> kernel base version: ${KBASE_FULL} (${KBASE_MAJOR}.y)"

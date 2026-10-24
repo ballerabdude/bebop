@@ -3,8 +3,8 @@
 # Set up on-robot MCAP -> Rerun (.rrd) conversion.
 #
 # Creates a dedicated venv (pinned to the viewer's Rerun version), installs
-# the converter + dashboard blueprint, and drops a wrapper the firmware
-# calls from `GET /captures/rerun/<name>`.
+# the converter + dashboard blueprints, and drops a wrapper the firmware
+# calls from `GET /captures/rrd/<stem>.rrd`.
 #
 # Idempotent. Run from a repo checkout on the robot:
 #

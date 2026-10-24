@@ -1,10 +1,10 @@
 [Unit]
-Description=bebop: pin GPU devfreq governor to performance (navd inference latency)
-# The Orin's nvhost_podgov idles the GPU at ~306 MHz; bebop-vision's navd
-# student model infers only ~5 Hz (worker-paced), so every onnxruntime CUDA
-# run paid the clock ramp: 107-118 ms unpinned vs 74 ms flat with this
-# governor set (bench 2026-09-07, see docs/navd.md). The firmware's control
-# loop and any future GPU consumer benefit from the same pinning.
+Description=bebop: pin GPU devfreq governor to performance (GPU inference latency)
+# Measured on the Orin, whose nvhost_podgov idled the GPU at ~306 MHz: the
+# since-removed navd student model inferred only ~5 Hz (worker-paced), so
+# every CUDA run paid the clock ramp: 107-118 ms unpinned vs 74 ms flat with
+# this governor set (bench 2026-09-07). The same pinning applies to every
+# GPU consumer on the robot (bebop-vision's perception, the Edge-LLM models).
 After=multi-user.target
 
 [Service]
