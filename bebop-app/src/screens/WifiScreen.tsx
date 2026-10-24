@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
-import type { BebopTransport, WifiNetwork, WifiStatus } from "../ble";
-import { Banner, Button, Card, Field, Spinner } from "../components/ui";
+import type { BebopTransport, WifiNetwork, WifiStatus } from "../setup";
+import { Banner, Button, Card, Field, INPUT_CLASS, Spinner } from "../components/ui";
 
 export function WifiScreen({
   transport,
@@ -151,7 +151,7 @@ export function WifiScreen({
               value={password}
               onChange={(e) => setPassword(e.currentTarget.value)}
               placeholder="••••••••"
-              className="bg-bg-elev border border-border rounded-[var(--radius-card)] px-3.5 py-3 text-text outline-none focus:border-accent transition-colors duration-120"
+              className={INPUT_CLASS}
             />
           </Field>
         ) : null}
@@ -198,7 +198,7 @@ export function WifiScreen({
             value={manualSsid}
             onChange={(e) => setManualSsid(e.currentTarget.value)}
             placeholder="MyHomeWiFi"
-            className="bg-bg-elev border border-border rounded-[var(--radius-card)] px-3.5 py-3 text-text outline-none focus:border-accent"
+            className={INPUT_CLASS}
           />
         </Field>
         <Field label="Password" hint="Leave blank for an open network.">
@@ -208,7 +208,7 @@ export function WifiScreen({
             value={password}
             onChange={(e) => setPassword(e.currentTarget.value)}
             placeholder="••••••••"
-            className="bg-bg-elev border border-border rounded-[var(--radius-card)] px-3.5 py-3 text-text outline-none focus:border-accent"
+            className={INPUT_CLASS}
           />
         </Field>
 
@@ -253,7 +253,7 @@ export function WifiScreen({
                 Currently connected
               </div>
               <div className="font-semibold">{currentStatus.ssid}</div>
-              <div className="text-text-dim text-[13px]">
+              <div className="text-text-dim text-body-sm">
                 {currentStatus.ipAddress || "no IP"}
               </div>
             </div>
@@ -275,7 +275,7 @@ export function WifiScreen({
           return (
             <li
               key={`${n.ssid}\x00${n.security}`}
-              className={`border rounded-[var(--radius-card)] overflow-hidden ${
+              className={`border rounded-card overflow-hidden ${
                 isCurrent ? "bg-accent/10 border-accent/40" : "bg-bg-elev border-border"
               }`}
             >
@@ -293,12 +293,12 @@ export function WifiScreen({
                   <div className="font-semibold flex items-center gap-2">
                     {n.ssid}
                     {isCurrent ? (
-                      <span className="text-[11px] font-normal text-accent bg-accent/15 px-1.5 py-0.5 rounded-full">
+                      <span className="text-caption font-normal text-accent bg-accent/15 px-1.5 py-0.5 rounded-full">
                         connected
                       </span>
                     ) : null}
                   </div>
-                  <div className="text-text-dim text-[13px] mt-0.5">
+                  <div className="text-text-dim text-body-sm mt-0.5">
                     {n.security} · {n.signalDbm} dBm
                   </div>
                 </div>

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 
-import { getOrCreateRuntimeTransport } from "../runtime";
-import type { ModelEntryView, ModelView, RuntimeTransport } from "../runtime";
+import { useRuntime, useTelemetry } from "../robot/session";
+import type { ModelEntryView, ModelView } from "../runtime";
 import { Banner, Button, Card, Field } from "./ui";
 
 const EMPTY_MODEL: ModelView = {
@@ -39,39 +39,17 @@ function titleCase(s: string): string {
 /// Renders nothing when `model.present === false` unless `showWhenUnavailable`
 /// is set (the dedicated Models screen uses that to explain the gap).
 export function AIModelCard({
-  robotIp,
-  runtimePort = 9090,
   showWhenUnavailable = false,
 }: {
-  robotIp: string;
-  runtimePort?: number;
   showWhenUnavailable?: boolean;
 }) {
-  const transportRef = useRef<RuntimeTransport | null>(null);
-  const [model, setModel] = useState<ModelView>(EMPTY_MODEL);
+  const transport = useRuntime();
+  // The catalog changes slowly; 2 Hz is plenty for download progress.
+  const model = useTelemetry((s) => s?.model ?? EMPTY_MODEL, 2);
   const [tokenDraft, setTokenDraft] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!robotIp) return;
-    const transport = getOrCreateRuntimeTransport(robotIp, runtimePort);
-    transportRef.current = transport;
-    let cancelled = false;
-    const offTelemetry = transport.onTelemetry((s) => {
-      if (!cancelled) setModel(s.model);
-    });
-    void transport
-      .connect(robotIp, runtimePort)
-      .then(() => transport.subscribeTelemetry(5))
-      .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      });
-    return () => {
-      cancelled = true;
-      offTelemetry();
-    };
-  }, [robotIp, runtimePort]);
 
   const groups = useMemo(() => {
     const map = new Map<string, ModelEntryView[]>();
@@ -83,16 +61,6 @@ export function AIModelCard({
     }
     return [...map.entries()];
   }, [model.models]);
-
-  if (!robotIp) {
-    return showWhenUnavailable ? (
-      <Card>
-        <p className="py-2 text-sm text-text-dim">
-          Connect the robot to a network to configure its models.
-        </p>
-      </Card>
-    ) : null;
-  }
 
   if (!model.present) {
     return showWhenUnavailable ? (
@@ -111,7 +79,6 @@ export function AIModelCard({
     ) : null;
   }
 
-  const transport = transportRef.current;
   const downloading = model.models.some((m) => m.state === "downloading");
   const selectionFor = (purpose: string) =>
     model.selection.find((s) => s.purpose === purpose)?.modelId ?? "";
@@ -141,18 +108,18 @@ export function AIModelCard({
               Hugging Face token
             </div>
             {model.diskFreeBytes > 0 ? (
-              <div className="text-[12px] text-text-dim">
+              <div className="text-label text-text-dim">
                 {fmtBytes(model.diskFreeBytes)} free
               </div>
             ) : null}
           </div>
           {model.tokenSet ? (
             <div className="flex items-center justify-between gap-3">
-              <div className="text-[13px] text-text-dim">Token saved.</div>
+              <div className="text-body-sm text-text-dim">Token saved.</div>
               <Button
                 variant="ghost"
                 loading={busy === "clear-token"}
-                onClick={() => run("clear-token", () => transport!.clearHfToken())}
+                onClick={() => run("clear-token", () => transport.clearHfToken())}
               >
                 Clear
               </Button>
@@ -170,7 +137,7 @@ export function AIModelCard({
                   value={tokenDraft}
                   onChange={(e) => setTokenDraft(e.currentTarget.value)}
                   placeholder="hf_…"
-                  className="w-full bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-2.5 text-text outline-none focus:border-accent"
+                  className="w-full bg-bg-elev-2 border border-border rounded-card px-3 py-2.5 text-text outline-none focus:border-accent"
                 />
               </Field>
               <Button
@@ -179,7 +146,7 @@ export function AIModelCard({
                 disabled={tokenDraft.trim().length < 8}
                 onClick={() =>
                   run("save-token", async () => {
-                    await transport!.setHfToken(tokenDraft.trim());
+                    await transport.setHfToken(tokenDraft.trim());
                     setTokenDraft("");
                   })
                 }
@@ -210,10 +177,10 @@ export function AIModelCard({
                   {selected ? (
                     <button
                       type="button"
-                      className="text-[12px] text-text-dim hover:text-text"
+                      className="inline-flex h-control-sm items-center rounded-input px-2 text-label text-text-dim hover:text-text pointer-coarse:h-touch"
                       onClick={() =>
                         run(`purpose:${purpose}`, () =>
-                          transport!.setModelPurpose(purpose, ""),
+                          transport.setModelPurpose(purpose, ""),
                         )
                       }
                     >
@@ -232,12 +199,12 @@ export function AIModelCard({
                       anyDownloading={downloading}
                       onSelect={() =>
                         run(`purpose:${purpose}`, () =>
-                          transport!.setModelPurpose(purpose, entry.id),
+                          transport.setModelPurpose(purpose, entry.id),
                         )
                       }
                       onDownload={() =>
                         run(`download:${entry.id}`, () =>
-                          transport!.downloadModel(entry.id),
+                          transport.downloadModel(entry.id),
                         )
                       }
                     />
@@ -254,20 +221,20 @@ export function AIModelCard({
 
 function StatusPill({ entry }: { entry: ModelEntryView }) {
   if (entry.ready) {
-    return <span className="text-[12px] font-semibold text-success">Ready</span>;
+    return <span className="text-label font-semibold text-success">Ready</span>;
   }
   if (entry.kind !== "hf") {
-    return <span className="text-[12px] text-text-dim">Not present</span>;
+    return <span className="text-label text-text-dim">Not present</span>;
   }
   switch (entry.state) {
     case "downloading":
-      return <span className="text-[12px] font-semibold text-accent">Downloading…</span>;
+      return <span className="text-label font-semibold text-accent">Downloading…</span>;
     case "unauthorized":
-      return <span className="text-[12px] font-semibold text-danger">Token rejected</span>;
+      return <span className="text-label font-semibold text-danger">Token rejected</span>;
     case "failed":
-      return <span className="text-[12px] font-semibold text-danger">Failed</span>;
+      return <span className="text-label font-semibold text-danger">Failed</span>;
     default:
-      return <span className="text-[12px] text-text-dim">Not downloaded</span>;
+      return <span className="text-label text-text-dim">Not downloaded</span>;
   }
 }
 
@@ -304,17 +271,22 @@ function ModelRow({
         aria-checked={selected}
         aria-label={`Use ${entry.name || entry.id}`}
         onClick={onSelect}
-        className={`mt-1 shrink-0 w-4 h-4 rounded-full border-2 transition-colors ${
-          selected ? "border-accent bg-accent" : "border-border hover:border-accent"
-        }`}
-      />
+        className="group -m-2 flex h-control-sm w-10 shrink-0 items-start justify-center pt-3 pointer-coarse:h-touch"
+      >
+        <span
+          aria-hidden
+          className={`h-4 w-4 rounded-full border-2 transition-colors ${
+            selected ? "border-accent bg-accent" : "border-border group-hover:border-accent"
+          }`}
+        />
+      </button>
       <div className="min-w-0 flex-1 flex flex-col gap-1.5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="font-semibold leading-tight">
               {entry.name || entry.id}
             </div>
-            <div className="text-[12px] text-text-dim leading-snug">
+            <div className="text-label text-text-dim leading-snug">
               {entry.description || entry.repo || entry.id}
             </div>
           </div>
@@ -333,7 +305,7 @@ function ModelRow({
                 style={{ width: pct === 0 ? "20%" : `${pct}%` }}
               />
             </div>
-            <div className="text-[11px] text-text-dim">
+            <div className="text-caption text-text-dim">
               {fmtBytes(entry.bytesDownloaded)}
               {entry.bytesTotal > 0 ? ` / ${fmtBytes(entry.bytesTotal)}` : ""}
             </div>
@@ -343,7 +315,7 @@ function ModelRow({
         {!isDownloading &&
         entry.detail &&
         (entry.state === "failed" || entry.state === "unauthorized") ? (
-          <div className="text-[11px] text-danger leading-snug">{entry.detail}</div>
+          <div className="text-caption text-danger leading-snug">{entry.detail}</div>
         ) : null}
 
         {downloadable ? (
@@ -358,7 +330,7 @@ function ModelRow({
             </Button>
           </div>
         ) : entry.kind !== "hf" && !entry.ready ? (
-          <div className="text-[11px] text-text-dim leading-snug">
+          <div className="text-caption text-text-dim leading-snug">
             Train on the robot or copy from a workstation.
           </div>
         ) : null}

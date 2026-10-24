@@ -45,22 +45,22 @@ export function ControlProfilePicker({ full = false }: { full?: boolean }) {
                       ? "bg-accent/15 border-accent/40 text-accent"
                       : "bg-bg-elev border-border text-text hover:bg-bg-elev-2"
                   }`
-                : `px-2 py-0.5 rounded-md text-[11px] font-semibold uppercase tracking-wider cursor-pointer ${
+                : `h-8 px-2 rounded-md text-caption font-semibold uppercase tracking-wider cursor-pointer pointer-coarse:h-10 ${
                     p.id === active.id
                       ? "bg-accent/15 text-accent"
                       : "bg-transparent text-text-dim hover:text-text"
                   }`
             }
           >
-            <span className={full ? "block text-[13px] font-semibold" : undefined}>
+            <span className={full ? "block text-body-sm font-semibold" : undefined}>
               {p.label}
             </span>
             {full ? (
               <>
-                <span className="block text-[11px] font-normal text-text-dim leading-snug mt-0.5">
+                <span className="block text-caption font-normal text-text-dim leading-snug mt-0.5">
                   {p.description}
                 </span>
-                <span className="block text-[10px] font-mono font-normal text-text-dim/80 mt-1">
+                <span className="block text-micro font-mono font-normal text-text-dim/80 mt-1">
                   dz {(p.stickDeadzone * 100).toFixed(0)}%
                   {p.expo > 0 ? ` · expo ${p.expo.toFixed(1)}` : ""} · {p.maxLinear} m/s ·{" "}
                   {p.maxAngular} rad/s · {p.dialInRate} rad/s

@@ -1,30 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+// Autonomy: talk to the robot's agent (`bebop-voice.service`, :9093).
+//
+// Service lifecycle (start/stop) goes over the runtime WS; audio and the
+// conversation go over the service's own socket. Engine, voice and persona
+// live in Settings › Voice. The global E-STOP in the shell stops any motion
+// a tool starts. The text console, transcript and tool cards come with the
+// Autonomy redesign; this keeps push-to-talk working inside the shell.
 
-import {
-  getOrCreateRuntimeTransport,
-  type RuntimeTransport,
-  type VoiceView,
-} from "../runtime";
-import { Banner, Button, Card, Field } from "../components/ui";
-import {
-  useVoiceConfig,
-  useVoiceHealth,
-  useVoiceSession,
-  type VoiceConfigView,
-} from "../voice/useVoiceSession";
+import { useEffect, useState } from "react";
+import { Link } from "react-router";
 
-const EMPTY_VOICE: VoiceView = {
-  present: false,
-  running: false,
-  state: "",
-  detail: "",
-  service: "",
-  model: "",
-};
+import { Banner, Button, Card, CardHeader, cn, StatusDot } from "../components/ui";
+import type { Tone } from "../components/ui";
+import { robotPath } from "../app/paths";
+import { useRobot, useRuntimeAction, useTelemetry } from "../robot/session";
+import { useVoiceConfig, useVoiceHealth, useVoiceSession } from "../voice/useVoiceSession";
 
 const SESSION_KEY = "bebop.voice.session";
-const INPUT_CLASS =
-  "w-full bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-2.5 text-text outline-none focus:border-accent";
 
 function formatElapsed(s: number): string {
   if (!s || s < 0) return "";
@@ -51,32 +42,25 @@ function loadSessionId(): string {
   return makeSessionId();
 }
 
-/// Voice (speech-to-speech) control + status. Start/stop the on-robot
-/// `bebop-voice.service` (Qwen3-Omni via TensorRT Edge-LLM) over the runtime
-/// WebSocket; audio is served by that unit on :9093. Voice, persona, and
-/// context are edited here and persisted on the robot (`/config`).
-export function VoiceScreen({
-  robotIp,
-  runtimePort = 9090,
-  onBack,
-}: {
-  robotIp: string;
-  runtimePort?: number;
-  onBack: () => void;
-}) {
-  const transportRef = useRef<RuntimeTransport | null>(null);
-  const [voice, setVoice] = useState<VoiceView>(EMPTY_VOICE);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+export function VoiceScreen() {
+  const { host } = useRobot();
+  const voice = useTelemetry(
+    (s) => ({
+      present: !!s?.voice.present,
+      running: !!s?.voice.running,
+      state: s?.voice.state ?? "",
+      detail: s?.voice.detail ?? "",
+      model: s?.voice.model ?? "",
+      loaded: !!s,
+    }),
+    5,
+  );
+  const { busy, error, run } = useRuntimeAction();
   const [sessionId, setSessionId] = useState<string>(() => loadSessionId());
-  const [personaDraft, setPersonaDraft] = useState("");
-  const [supervisorDraft, setSupervisorDraft] = useState("");
-  const [savingCfg, setSavingCfg] = useState<string | null>(null);
-  const [cfgError, setCfgError] = useState<string | null>(null);
 
-  const cfg = useVoiceConfig(robotIp, 9093, voice.running);
-  const health = useVoiceHealth(robotIp, 9093, voice.running);
-  const session = useVoiceSession(robotIp, 9093, { session: sessionId });
+  const health = useVoiceHealth(host, voice.running);
+  const cfg = useVoiceConfig(host, voice.running);
+  const session = useVoiceSession(host, { session: sessionId });
 
   useEffect(() => {
     try {
@@ -85,39 +69,6 @@ export function VoiceScreen({
       /* ignore */
     }
   }, [sessionId]);
-
-  const systemPrompt = cfg.config?.system_prompt;
-  useEffect(() => {
-    if (systemPrompt !== undefined) setPersonaDraft(systemPrompt);
-  }, [systemPrompt]);
-
-  const supervisorUrl = cfg.config?.omni_supervisor_url;
-  useEffect(() => {
-    if (supervisorUrl !== undefined) setSupervisorDraft(supervisorUrl);
-  }, [supervisorUrl]);
-
-  // Telemetry: service lifecycle state from the runtime WS.
-  useEffect(() => {
-    if (!robotIp) return;
-    const transport = getOrCreateRuntimeTransport(robotIp, runtimePort);
-    transportRef.current = transport;
-    let cancelled = false;
-    const offTelemetry = transport.onTelemetry((s) => {
-      if (!cancelled) setVoice(s.voice);
-    });
-    void transport
-      .connect(robotIp, runtimePort)
-      .then(() => transport.subscribeTelemetry(5))
-      .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      });
-    return () => {
-      cancelled = true;
-      offTelemetry();
-    };
-  }, [robotIp, runtimePort]);
-
-  const transport = transportRef.current;
 
   const ready = health?.ok ?? false;
   const building = health?.phase === "starting" || health?.phase === "building";
@@ -139,357 +90,183 @@ export function VoiceScreen({
     building && health
       ? `${health.detail}${health.elapsedS ? ` · ${formatElapsed(health.elapsedS)}` : ""}`
       : health?.detail || voice.detail;
-  const stale = Boolean(
-    building && health?.heartbeatAgeS != null && health.heartbeatAgeS > 10,
-  );
-  const dotClass = ready
-    ? "bg-success"
-    : failed || stale
-      ? "bg-danger"
-      : building
-        ? "bg-accent animate-pulse"
-        : "bg-text-dim/40";
+  const stale = Boolean(building && health?.heartbeatAgeS != null && health.heartbeatAgeS > 10);
+  const tone: Tone = ready ? "ok" : failed || stale ? "err" : building ? "info" : "dim";
   const talkActive = session.phase === "listening";
-
-  async function toggle() {
-    if (!transport) return;
-    setError(null);
-    setBusy(true);
-    try {
-      await transport.setVoiceEnabled(!voice.running);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveCfg(key: string, partial: Partial<VoiceConfigView>) {
-    setCfgError(null);
-    setSavingCfg(key);
-    try {
-      await cfg.save(partial);
-    } catch (e) {
-      setCfgError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSavingCfg(null);
-    }
-  }
+  const engine = cfg.config?.backend ?? "";
 
   return (
-    <div className="flex flex-col flex-1 gap-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
-      <h2 className="text-2xl font-bold mt-2">Voice</h2>
-      <p className="text-text-dim leading-relaxed">
-        Talk to the robot. Speech-to-speech runs on-device with Qwen3-Omni;
-        download the voice model from the Models page first.
-      </p>
+    <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 pt-4 sm:px-6">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <h1 className="text-lg font-semibold">Autonomy</h1>
+          <p className="text-body-sm text-text-dim">
+            Talk to the robot. It can look around, remember places and make
+            small moves; E-STOP stops it any time.
+          </p>
+        </div>
+        <Link
+          to={robotPath(host, "settings")}
+          className="inline-flex h-control-sm items-center rounded-card border border-border px-3 text-body-sm font-semibold text-text-dim hover:bg-bg-elev-2 hover:text-text pointer-coarse:h-touch"
+        >
+          Voice settings
+        </Link>
+      </div>
 
       {error ? <Banner tone="error">{error}</Banner> : null}
 
-      {!voice.present ? (
-        <Banner tone="info">
-          Voice support isn&apos;t installed on this robot yet. Deploy the
-          current firmware and the <code>bebop-voice.service</code> unit (see{" "}
-          <code>scripts/install-jetson.sh</code>), then reconnect.
-        </Banner>
-      ) : (
-        <Card>
-          <div className="py-2 flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <div className="text-xs text-text-dim uppercase tracking-wider">
-                Speech-to-speech
-              </div>
-              <div className="flex items-center gap-2">
-                <div className={`w-2.5 h-2.5 rounded-full ${dotClass}`} />
-                <span className="text-[12px] text-text-dim">{statusText}</span>
-              </div>
-            </div>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
+        {!voice.loaded ? (
+          <Card>
+            <p className="text-sm text-text-dim">Waiting for telemetry…</p>
+          </Card>
+        ) : !voice.present ? (
+          <Banner tone="info">
+            Voice isn&apos;t installed on this robot. Deploy the{" "}
+            <code>bebop-voice.service</code> unit (see{" "}
+            <code>scripts/install-jetson.sh</code>), then reconnect.
+          </Banner>
+        ) : (
+          <Card className="flex flex-col gap-3">
+            <CardHeader
+              eyebrow="Agent service"
+              title={
+                <span className="inline-flex items-center gap-2">
+                  <StatusDot tone={tone} pulse={building} label={statusText} />
+                  {statusText}
+                </span>
+              }
+            />
             {voice.model ? (
-              <div className="text-[13px] text-text-dim font-mono">
+              <div className="font-mono text-body-sm text-text-dim">
                 {voice.model}
                 {health?.precision ? ` · ${health.precision}` : ""}
+                {engine ? ` · ${engine}` : ""}
               </div>
             ) : null}
             {statusDetail ? (
-              <div
-                className={`text-[12px] leading-snug ${
-                  failed ? "text-danger" : "text-text-dim"
-                }`}
-              >
+              <div className={cn("text-label leading-snug", failed ? "text-danger-fg" : "text-text-dim")}>
                 {statusDetail}
               </div>
             ) : null}
+            {engine === "omni" ? (
+              <Banner tone="warning">
+                The omni engine has no tools: the robot can talk but not check
+                places or move. Switch to cascade in Voice settings.
+              </Banner>
+            ) : null}
             {stale ? (
               <Banner tone="error">
-                No heartbeat for {Math.round(health?.heartbeatAgeS ?? 0)}s — the
-                build may be stuck. Check{" "}
-                <code>journalctl -u bebop-voice</code>.
+                No heartbeat for {Math.round(health?.heartbeatAgeS ?? 0)}s; the
+                build may be stuck. Check <code>journalctl -u bebop-voice</code>.
               </Banner>
             ) : building && health && health.componentsDone.length > 0 ? (
-              <div className="text-[11px] text-text-dim leading-snug">
+              <div className="text-caption leading-snug text-text-dim">
                 built: {health.componentsDone.join(", ")}
                 {health.component ? ` · now: ${health.component}` : ""}
               </div>
             ) : null}
             <Button
-              variant={voice.running ? "ghost" : "secondary"}
-              loading={busy}
-              onClick={toggle}
+              variant={voice.running ? "secondary" : "success"}
+              loading={busy === "voice"}
+              onClick={() => {
+                const next = !voice.running;
+                void run("voice", (t) => t.setVoiceEnabled(next));
+              }}
             >
               {voice.running ? "Stop voice service" : "Start voice service"}
             </Button>
             {!voice.running ? (
-              <p className="text-[12px] text-text-dim leading-relaxed">
-                The first start downloads nothing but builds the model&apos;s
-                TensorRT engines — this can take several minutes.
+              <p className="text-label leading-relaxed text-text-dim">
+                The first start builds the model&apos;s TensorRT engines and can
+                take several minutes.
               </p>
             ) : null}
-          </div>
-        </Card>
-      )}
+          </Card>
+        )}
 
-      <Card>
-        <div className="py-2 flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <div className="text-xs text-text-dim uppercase tracking-wider">
-              Talk
-            </div>
-            <span className="flex items-center gap-2 text-[12px] text-text-dim">
-              {talkActive ? (
-                <span className="w-2 h-2 rounded-full bg-danger animate-pulse" />
-              ) : null}
-              {session.phase === "listening"
-                ? "Listening…"
-                : session.phase === "thinking"
-                  ? session.lastTool
-                    ? `Checking (${session.lastTool})…`
-                    : "Thinking…"
-                  : session.phase === "speaking"
-                    ? "Speaking…"
-                    : session.phase === "connecting"
-                      ? "Connecting…"
-                      : session.phase === "error"
-                        ? "Error"
-                        : ""}
-            </span>
-          </div>
+        <Card className="flex flex-col gap-3">
+          <CardHeader
+            eyebrow="Talk"
+            actions={
+              <>
+                <span className="flex items-center gap-2 text-label text-text-dim">
+                  {talkActive ? (
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-danger" />
+                  ) : null}
+                  {session.phase === "listening"
+                    ? "Listening…"
+                    : session.phase === "thinking"
+                      ? session.lastTool
+                        ? `Checking (${session.lastTool})…`
+                        : "Thinking…"
+                      : session.phase === "speaking"
+                        ? "Speaking…"
+                        : session.phase === "connecting"
+                          ? "Connecting…"
+                          : session.phase === "error"
+                            ? "Error"
+                            : ""}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={!ready}
+                  onClick={() => {
+                    setSessionId(makeSessionId());
+                    session.resetContext();
+                  }}
+                >
+                  New conversation
+                </Button>
+              </>
+            }
+          />
           {session.error ? <Banner tone="error">{session.error}</Banner> : null}
           <Button
             variant={talkActive ? "primary" : "secondary"}
-            disabled={
-              !ready ||
-              session.phase === "thinking" ||
-              session.phase === "speaking"
-            }
-            onClick={() =>
-              talkActive ? session.stopTalking() : void session.startTalking()
-            }
+            size="lg"
+            disabled={!ready || session.phase === "thinking" || session.phase === "speaking"}
+            onClick={() => (talkActive ? session.stopTalking() : void session.startTalking())}
             onContextMenu={(e) => e.preventDefault()}
-            className="w-full py-5 text-base select-none touch-none"
+            className="h-20 w-full touch-none select-none text-base"
           >
             {talkActive ? "Tap to send" : "Tap to talk"}
           </Button>
+          {session.motion || session.phase === "thinking" || session.phase === "speaking" ? (
+            <Button
+              variant={session.motion ? "danger" : "secondary"}
+              size="lg"
+              onClick={() => session.cancel()}
+              className="w-full"
+            >
+              {session.motion
+                ? `Cancel move (${session.motion.totalM ? `${session.motion.doneM.toFixed(2)} / ${session.motion.totalM.toFixed(2)} m` : `${Math.round(session.motion.doneDeg)} / ${Math.round(session.motion.totalDeg)}°`})`
+                : "Cancel"}
+            </Button>
+          ) : null}
+          {session.busy ? (
+            <Banner tone="info">The robot is still on the previous request. Cancel it first.</Banner>
+          ) : null}
           {session.reply ? (
-            <p className="text-[14px] leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
+            <p className="max-h-72 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed">
               {session.reply}
             </p>
           ) : (
-            <p className="text-[13px] text-text-dim leading-relaxed">
+            <p className="text-body-sm leading-relaxed text-text-dim">
               {ready
-                ? "Tap the button, speak, then tap again to send. The robot replies with speech."
+                ? "Tap, speak, then tap again to send. The robot replies with speech."
                 : building
                   ? "Waiting for the engines to finish building…"
                   : failed
-                    ? "The voice service reported an error — see the status above."
-                    : "Start the voice service above, then tap to talk."}
+                    ? "The voice service reported an error; see its status."
+                    : "Start the voice service, then tap to talk."}
             </p>
           )}
-          <p className="text-[11px] text-text-dim leading-snug">
-            Microphone access needs a secure connection — use the app over
-            HTTPS or the native build on a phone.
+          <p className="text-caption leading-snug text-text-dim">
+            Microphone access needs a secure page (HTTPS) or the native app.
           </p>
-        </div>
-      </Card>
-
-      {voice.present && voice.running ? (
-        <Card>
-          <div className="py-2 flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <div className="text-xs text-text-dim uppercase tracking-wider">
-                Voice &amp; personality
-              </div>
-              <button
-                type="button"
-                className="text-[12px] text-text-dim hover:text-text disabled:opacity-50"
-                disabled={cfg.config == null}
-                onClick={() => {
-                  setSessionId(makeSessionId());
-                  session.resetContext();
-                }}
-              >
-                New conversation
-              </button>
-            </div>
-            {cfgError ? <Banner tone="error">{cfgError}</Banner> : null}
-            {!cfg.config ? (
-              <p className="text-[13px] text-text-dim">Loading settings…</p>
-            ) : (
-              <>
-                <Field
-                  label="Voice"
-                  hint="Speaker baked into the checkpoint (from the model)."
-                >
-                  <select
-                    className={INPUT_CLASS}
-                    value={cfg.config.voice}
-                    disabled={
-                      savingCfg === "voice" || cfg.config.voices.length === 0
-                    }
-                    onChange={(e) =>
-                      void saveCfg("voice", { voice: e.currentTarget.value })
-                    }
-                  >
-                    {(cfg.config.voices.length
-                      ? cfg.config.voices
-                      : [cfg.config.voice]
-                    ).map((v) => (
-                      <option key={v} value={v}>
-                        {v}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <Field
-                  label="Memory"
-                  hint="How many past turns the robot carries into the next reply."
-                >
-                  <select
-                    className={INPUT_CLASS}
-                    value={cfg.config.history_turns}
-                    disabled={savingCfg === "turns"}
-                    onChange={(e) =>
-                      void saveCfg("turns", {
-                        history_turns: Number(e.currentTarget.value),
-                      })
-                    }
-                  >
-                    <option value={0}>Off</option>
-                    <option value={2}>2 turns</option>
-                    <option value={4}>4 turns</option>
-                    <option value={8}>8 turns</option>
-                    <option value={12}>12 turns</option>
-                  </select>
-                </Field>
-                <label className="flex items-center gap-2 text-[13px] text-text-dim">
-                  <input
-                    type="checkbox"
-                    checked={cfg.config.keep_audio_history}
-                    disabled={savingCfg === "audio"}
-                    onChange={(e) =>
-                      void saveCfg("audio", {
-                        keep_audio_history: e.currentTarget.checked,
-                      })
-                    }
-                  />
-                  Remember my voice (keeps your audio in context; slower)
-                </label>
-                <label className="flex items-center gap-2 text-[13px] text-text-dim">
-                  <input
-                    type="checkbox"
-                    checked={cfg.config.tools_enabled}
-                    disabled={savingCfg === "tools"}
-                    onChange={(e) =>
-                      void saveCfg("tools", {
-                        tools_enabled: e.currentTarget.checked,
-                      })
-                    }
-                  />
-                  Live context (attach the camera views and robot status to
-                  every turn)
-                </label>
-                <Field
-                  label="Engine"
-                  hint="omni = one end-to-end model; cascade = ASR → Qwen3.8 brain → TTS. Toggle Voice off/on to apply (only the selected backend loads)."
-                >
-                  <select
-                    className={INPUT_CLASS}
-                    value={cfg.config.backend}
-                    disabled={savingCfg === "backend"}
-                    onChange={(e) =>
-                      void saveCfg("backend", { backend: e.currentTarget.value })
-                    }
-                  >
-                    {(cfg.config.backends.length
-                      ? cfg.config.backends
-                      : ["omni", "cascade"]
-                    ).map((b) => (
-                      <option key={b} value={b}>
-                        {b === "cascade"
-                          ? "Cascade (best model per stage)"
-                          : "Omni (end-to-end)"}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                {cfg.config.backend === "omni" && (
-                  <Field
-                    label="Omni source (supervisor)"
-                    hint="Optional. If set, the bebop-models supervisor owns the omni backend (GPU budget + lifecycle). Leave empty to supervise Edge-LLM locally. Applies on the next Voice toggle."
-                  >
-                    <input
-                      className={INPUT_CLASS}
-                      placeholder="http://127.0.0.1:9094"
-                      spellCheck={false}
-                      value={supervisorDraft}
-                      onChange={(e) =>
-                        setSupervisorDraft(e.currentTarget.value)
-                      }
-                      onBlur={() => {
-                        const next = supervisorDraft.trim();
-                        if (next !== (cfg.config?.omni_supervisor_url ?? "")) {
-                          void saveCfg("supervisor", {
-                            omni_supervisor_url: next,
-                          });
-                        }
-                      }}
-                    />
-                  </Field>
-                )}
-                <Field
-                  label="Personality"
-                  hint="System prompt. Applies on the next turn."
-                >
-                  <textarea
-                    className={`${INPUT_CLASS} min-h-24`}
-                    value={personaDraft}
-                    spellCheck={false}
-                    onChange={(e) => setPersonaDraft(e.currentTarget.value)}
-                    onBlur={() => {
-                      const next = personaDraft.trim();
-                      if (
-                        cfg.config &&
-                        next &&
-                        next !== cfg.config.system_prompt
-                      ) {
-                        void saveCfg("persona", { system_prompt: next });
-                      }
-                    }}
-                  />
-                </Field>
-                <p className="text-[11px] text-text-dim leading-snug">
-                  Conversation context is kept per session and cleared by{" "}
-                  <strong>New conversation</strong>.
-                </p>
-              </>
-            )}
-          </div>
         </Card>
-      ) : null}
-
-      <div className="mt-auto pt-4">
-        <Button variant="ghost" onClick={onBack}>
-          Back
-        </Button>
       </div>
     </div>
   );

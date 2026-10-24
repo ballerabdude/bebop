@@ -1,58 +1,80 @@
-// Virtual differential-drive joystick, shared by the motor bench and
+// On-screen differential-drive joystick, shared by the motor bench and
 // the teleop screen. Drag the knob from the centre: up/down maps to
-// forward/reverse, left/right to turn. Release snaps back and stops the
-// robot. WASD / arrow keys do the same for keyboard operators, and
-// releasing all drive keys also stops.
+// forward/reverse, left/right to turn. Release snaps back and stops.
 //
-// Safety contract with the parent (which owns the twist stream,
-// `src/runtime/twistStream.ts`): every way a gesture can end without
-// further pointer/key events still sends a stop —
-//   * pointer released / cancelled            → onStop
-//   * last drive key released                  → onStop
-//   * keyboard drive active at unmount        → onStop (effect cleanup)
-//   * pointer drag active at unmount           → onStop (effect cleanup)
-//   * `disabled` flips on mid-gesture (E-STOP,
-//     mode change, screen switch)             → onStop for the active
-//    gesture, and keyboard bindings are dropped entirely.
-// The parent's `onStop` must supersede anything mid-flight.
+// Touch only: WASD / arrows and the gamepad are handled by the drive-input
+// arbiter (`src/input/useDriveInput.ts`), which this reports into through
+// `onTwist` / `onStop` (pass `drive.touch.onTwist` / `drive.touch.onStop`).
+//
+// Touch handling: the pad captures the pointer that started the drag (a
+// second finger is ignored), `touch-action: none` keeps the page from
+// scrolling or zooming while dragging, and every way a drag can end
+// without a pointerup still reports a stop:
+//   * pointer released / cancelled / capture lost  -> onStop
+//   * window blur mid-drag                         -> onStop
+//   * `disabled` flips on mid-drag (E-STOP, mode)   -> onStop
+//   * unmount mid-drag                             -> onStop
+// A small centre dead zone reads as neutral, so sliding back to the
+// middle counts as "released" for the arbiter's re-engage rule.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getActiveControlProfile } from "../input";
 
+/// Smallest pad that stays usable with a thumb.
+export const JOYSTICK_MIN_SIZE = 160;
+/// Default pad diameter, px.
+export const JOYSTICK_DEFAULT_SIZE = 200;
+/// Knob diameter floor: a comfortable touch target.
+const KNOB_MIN = 48;
+/// Normalised radius treated as neutral.
+const CENTER_DEADZONE = 0.06;
+
 export function DriveJoystick({
   onTwist,
   onStop,
   disabled,
+  size = JOYSTICK_DEFAULT_SIZE,
+  showHint = true,
 }: {
   onTwist: (vx: number, wz: number) => void;
   onStop: () => void;
   disabled: boolean;
+  /// Pad diameter in px; clamped to at least `JOYSTICK_MIN_SIZE`.
+  size?: number;
+  /// Show the "drag to drive" caption under the pad.
+  showHint?: boolean;
 }) {
-  const padRef = useRef<HTMLDivElement | null>(null);
-  const draggingRef = useRef(false);
-  const [knob, setKnob] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const diameter = Math.max(JOYSTICK_MIN_SIZE, Math.round(size));
+  const knob = Math.max(KNOB_MIN, Math.round(diameter * 0.28));
+  const travel = (diameter - knob) / 2;
 
-  // Latest callbacks in refs so the keyboard/unmount cleanups below can
-  // stay bound for the component's whole lifetime instead of being
-  // torn down on every parent render.
+  const padRef = useRef<HTMLDivElement | null>(null);
+  /// Pointer id of the active drag, or null.
+  const pointerRef = useRef<number | null>(null);
+  const [pos, setPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  /// The drag is resting in the centre dead zone and neutral was already
+  /// reported: further moves inside it report nothing (each neutral report
+  /// can put a (0, 0) frame on the wire while this client holds the seat).
+  const inDeadzoneRef = useRef(false);
+
   const onTwistRef = useRef(onTwist);
   onTwistRef.current = onTwist;
   const onStopRef = useRef(onStop);
   onStopRef.current = onStop;
 
-  const apply = useCallback((nx: number, ny: number) => {
-    // Joystick convention: up = forward, right = turn right (+wz = left turn).
-    const profile = getActiveControlProfile();
-    const vx = -ny * profile.maxLinear;
-    const wz = -nx * profile.maxAngular;
-    setKnob({ x: nx, y: ny });
-    onTwistRef.current(vx, wz);
-  }, []);
-
   const release = useCallback(() => {
-    draggingRef.current = false;
-    setKnob({ x: 0, y: 0 });
+    if (pointerRef.current === null) return;
+    const pad = padRef.current;
+    const id = pointerRef.current;
+    pointerRef.current = null;
+    inDeadzoneRef.current = false;
+    try {
+      if (pad?.hasPointerCapture(id)) pad.releasePointerCapture(id);
+    } catch {
+      /* pointer already gone */
+    }
+    setPos({ x: 0, y: 0 });
     onStopRef.current();
   }, []);
 
@@ -63,7 +85,7 @@ export function DriveJoystick({
       const rect = pad.getBoundingClientRect();
       const cx = rect.left + rect.width / 2;
       const cy = rect.top + rect.height / 2;
-      const radius = rect.width / 2;
+      const radius = Math.max(1, (rect.width - knob) / 2);
       let nx = (clientX - cx) / radius;
       let ny = (clientY - cy) / radius;
       const mag = Math.hypot(nx, ny);
@@ -71,149 +93,107 @@ export function DriveJoystick({
         nx /= mag;
         ny /= mag;
       }
-      apply(nx, ny);
+      setPos({ x: nx, y: ny });
+      if (mag < CENTER_DEADZONE) {
+        if (!inDeadzoneRef.current) {
+          inDeadzoneRef.current = true;
+          onTwistRef.current(0, 0);
+        }
+        return;
+      }
+      inDeadzoneRef.current = false;
+      // Up = forward, right = turn right (+wz = left turn).
+      const profile = getActiveControlProfile();
+      onTwistRef.current(-ny * profile.maxLinear + 0, -nx * profile.maxAngular + 0);
     },
-    [apply],
+    [knob],
   );
 
-  // A pointer drag that ends in unmount (screen switched mid-gesture)
-  // never sees pointerup — halt from the unmount cleanup instead. Focus
-  // leaving the window mid-drag can swallow pointerup too: release then.
+  // Disabled mid-drag: end the gesture.
   useEffect(() => {
-    const onBlur = () => {
-      if (draggingRef.current) release();
-    };
+    if (disabled) release();
+  }, [disabled, release]);
+
+  // Focus leaving the window can swallow pointerup; unmount never sees it.
+  useEffect(() => {
+    const onBlur = () => release();
     window.addEventListener("blur", onBlur);
     return () => {
       window.removeEventListener("blur", onBlur);
-      if (draggingRef.current) onStopRef.current();
+      release();
     };
   }, [release]);
-
-  // Keyboard drive: WASD + arrow keys. Held keys compose a twist;
-  // releasing the last drive key stops. Bound only while enabled so a
-  // not-drivable state (E-STOP, wrong mode) can't leak held-key twists
-  // into the transport. Limits come from the active control profile,
-  // read per event so a picker change applies immediately.
-  useEffect(() => {
-    if (disabled) return;
-    const keys = new Set<string>();
-    const forward = ["w", "arrowup"];
-    const back = ["s", "arrowdown"];
-    const left = ["a", "arrowleft"];
-    const right = ["d", "arrowright"];
-
-    const compute = () => {
-      const { maxLinear, maxAngular } = getActiveControlProfile();
-      let vx = 0;
-      let wz = 0;
-      if (forward.some((k) => keys.has(k))) vx += maxLinear;
-      if (back.some((k) => keys.has(k))) vx -= maxLinear;
-      if (left.some((k) => keys.has(k))) wz += maxAngular;
-      if (right.some((k) => keys.has(k))) wz -= maxAngular;
-      return { vx, wz };
-    };
-
-    const isDriveKey = (k: string) =>
-      forward.includes(k) ||
-      back.includes(k) ||
-      left.includes(k) ||
-      right.includes(k);
-
-    const onKeyDown = (e: globalThis.KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      if (!isDriveKey(k)) return;
-      e.preventDefault();
-      keys.add(k);
-      const { vx, wz } = compute();
-      onTwistRef.current(vx, wz);
-    };
-    const onKeyUp = (e: globalThis.KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      if (!isDriveKey(k)) return;
-      keys.delete(k);
-      if (keys.size === 0) {
-        onStopRef.current();
-      } else {
-        const { vx, wz } = compute();
-        onTwistRef.current(vx, wz);
-      }
-    };
-    // Focus leaving the window (Alt+Tab, a click into another app, an OS
-    // dialog) delivers the held keys' keyup to whatever has focus now, so
-    // they would stay held here and the twist stream would keep re-sending
-    // the twist. Losing focus or going hidden releases every drive key.
-    const releaseAll = () => {
-      if (keys.size === 0) return;
-      keys.clear();
-      onStopRef.current();
-    };
-    const onVisibility = () => {
-      if (document.hidden) releaseAll();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-    window.addEventListener("blur", releaseAll);
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
-      window.removeEventListener("blur", releaseAll);
-      document.removeEventListener("visibilitychange", onVisibility);
-      // Keys held at teardown (component unmount or `disabled` flipping
-      // on mid-drive) will never see their keyup — stop from here.
-      releaseAll();
-    };
-  }, [disabled]);
-
-  const knobPx = padRef.current ? padRef.current.offsetWidth / 2 : 88;
 
   return (
     <div className="flex flex-col items-center gap-2">
       <div
         ref={padRef}
-        className={`relative w-44 h-44 rounded-full border border-border bg-bg-elev-2/60 select-none touch-none ${
+        role="application"
+        aria-label="Drive joystick"
+        aria-disabled={disabled}
+        className={`relative shrink-0 rounded-full border border-border bg-bg-elev-2/60 select-none touch-none overscroll-contain [-webkit-touch-callout:none] [-webkit-user-select:none] ${
           disabled ? "opacity-40 cursor-not-allowed" : "cursor-grab active:cursor-grabbing"
         }`}
+        style={{ width: diameter, height: diameter }}
         onPointerDown={(e) => {
-          if (disabled) return;
-          draggingRef.current = true;
-          e.currentTarget.setPointerCapture(e.pointerId);
+          if (disabled || pointerRef.current !== null) return;
+          if (e.pointerType === "mouse" && e.button !== 0) return;
+          e.preventDefault();
+          pointerRef.current = e.pointerId;
+          try {
+            e.currentTarget.setPointerCapture(e.pointerId);
+          } catch {
+            /* capture is best-effort */
+          }
           handleMove(e.clientX, e.clientY);
         }}
         onPointerMove={(e) => {
-          if (!draggingRef.current) return;
+          if (e.pointerId !== pointerRef.current) return;
+          e.preventDefault();
           handleMove(e.clientX, e.clientY);
         }}
-        onPointerUp={release}
-        onPointerCancel={release}
+        onPointerUp={(e) => {
+          if (e.pointerId === pointerRef.current) release();
+        }}
+        onPointerCancel={(e) => {
+          if (e.pointerId === pointerRef.current) release();
+        }}
+        onLostPointerCapture={(e) => {
+          if (e.pointerId === pointerRef.current) release();
+        }}
+        onContextMenu={(e) => e.preventDefault()}
       >
         {/* Cardinal markers */}
-        <span className="absolute left-1/2 top-2 -translate-x-1/2 text-[10px] text-text-dim">
+        <span className="pointer-events-none absolute left-1/2 top-2 -translate-x-1/2 text-[10px] text-text-dim">
           fwd
         </span>
-        <span className="absolute left-1/2 bottom-2 -translate-x-1/2 text-[10px] text-text-dim">
+        <span className="pointer-events-none absolute left-1/2 bottom-2 -translate-x-1/2 text-[10px] text-text-dim">
           rev
         </span>
-        <span className="absolute top-1/2 left-2 -translate-y-1/2 text-[10px] text-text-dim">
+        <span className="pointer-events-none absolute top-1/2 left-2 -translate-y-1/2 text-[10px] text-text-dim">
           L
         </span>
-        <span className="absolute top-1/2 right-2 -translate-y-1/2 text-[10px] text-text-dim">
+        <span className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 text-[10px] text-text-dim">
           R
         </span>
         {/* Knob */}
         <div
-          className="absolute w-10 h-10 -translate-x-1/2 -translate-y-1/2 rounded-full bg-accent shadow-md"
+          className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full bg-accent shadow-md"
           style={{
-            left: `calc(50% + ${(knob.x * knobPx).toFixed(1)}px)`,
-            top: `calc(50% + ${(knob.y * knobPx).toFixed(1)}px)`,
+            width: knob,
+            height: knob,
+            left: `calc(50% + ${(pos.x * travel).toFixed(1)}px)`,
+            top: `calc(50% + ${(pos.y * travel).toFixed(1)}px)`,
           }}
           aria-hidden
         />
       </div>
-      <div className="text-[11px] text-text-dim">
-        Drag to drive · WASD / arrows
-      </div>
+      {showHint ? (
+        <div className="text-[11px] text-text-dim">
+          Drag to drive
+          <span className="hidden pointer-fine:inline"> · WASD / arrows</span>
+        </div>
+      ) : null}
     </div>
   );
 }

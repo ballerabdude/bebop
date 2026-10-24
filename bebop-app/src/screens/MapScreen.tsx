@@ -1,6 +1,5 @@
 import {
   startTransition,
-  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -9,7 +8,9 @@ import {
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 import { Banner, Button, Card } from "../components/ui";
-import { httpUrl } from "../runtime/urls";
+import { PLACES_POLL_MS } from "../robot/placesStore";
+import { usePlaces, useRobot } from "../robot/session";
+import { PORTS } from "../robot/endpoints";
 import {
   decodePlaceLayer,
   fitPlanView,
@@ -59,32 +60,45 @@ import {
 /// structure), while the grey cells are obstacles/furniture and the green cells
 /// are observed free space.
 
-const PLACES_PORT = 9095;
-const STRUCTURE_PORT = 9096;
 const MIN_POLL_MS = 2000;
 const LARGE_POLL_MS = 5000;
 const HUGE_POLL_MS = 10000;
 const GRAPH_POLL_MS = 15000;
-const PLACES_POLL_MS = 15000;
-const WHEREAMI_POLL_MS = 3000;
 const REQUEST_TIMEOUT_MS = 4000;
 const POST_TIMEOUT_MS = 15000;
 const LARGE_BYTES = 1_500_000;
 const HUGE_BYTES = 2_800_000;
 const MAX_PLAN_PRIMITIVES = 30000;
 
-const FREE_FILL = "rgba(53,194,143,0.16)";
-const OBSTACLE_FILL = "rgba(216,222,233,0.30)";
-const WALL_STROKE = "#d8dee9";
-const ANCHOR_FILL = "#ffd166";
-const EDGE_STROKE = "rgba(79,140,255,0.72)";
-const NODE_FILL = "#4f8cff";
-
-interface MapScreenProps {
-  robotIp: string;
-  onBack: () => void;
-  backLabel?: string;
+// Canvas palette from the design tokens (App.css `--color-canvas-*`), with
+// the original values as fallbacks for a missing stylesheet.
+function canvasToken(name: string, fallback: string): string {
+  if (typeof document === "undefined") return fallback;
+  const v = getComputedStyle(document.documentElement)
+    .getPropertyValue(`--color-canvas-${name}`)
+    .trim();
+  return v || fallback;
 }
+const PALETTE = {
+  get free() {
+    return canvasToken("free", "rgba(53,194,143,0.16)");
+  },
+  get obstacle() {
+    return canvasToken("obstacle", "rgba(216,222,233,0.30)");
+  },
+  get wall() {
+    return canvasToken("wall", "#d8dee9");
+  },
+  get anchor() {
+    return canvasToken("anchor", "#ffd166");
+  },
+  get edge() {
+    return canvasToken("edge", "rgba(79,140,255,0.72)");
+  },
+  get node() {
+    return canvasToken("node", "#4f8cff");
+  },
+};
 
 interface PlaceListEntry {
   id: string;
@@ -121,11 +135,22 @@ function placePath(placeId: string, suffix: string): string {
   return `/places/${encodeURIComponent(placeId)}${suffix}`;
 }
 
-export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProps) {
-  const [places, setPlaces] = useState<PlaceListEntry[]>([]);
-  const [placesLoading, setPlacesLoading] = useState(true);
-  const [placesError, setPlacesError] = useState<string | null>(null);
-  const [where, setWhere] = useState<WhereAmI | null>(null);
+export function MapScreen() {
+  const { endpoints } = useRobot();
+  const api = endpoints.places;
+  const [paused, setPaused] = useState(false);
+  // Shared /places + /whereami poller. While paused this view keeps the
+  // last values (frozen) and stops counting as a poll consumer.
+  const shared = usePlaces(!paused);
+  const frozen = useRef(shared);
+  if (!paused) frozen.current = shared;
+  const places = frozen.current.places as unknown as PlaceListEntry[];
+  const placesLoading = frozen.current.loading || frozen.current.reachable === null;
+  const placesError = frozen.current.error
+    ? `${frozen.current.error}. Places runs in bebop-vision on :${PORTS.places}.`
+    : null;
+  const where = frozen.current.whereami as WhereAmI | null;
+  const refreshPlaces = shared.refresh;
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const [map, setMap] = useState<PlaceMap | null>(null);
@@ -144,7 +169,6 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
   const [graphError, setGraphError] = useState<string | null>(null);
   const [graphReceivedAt, setGraphReceivedAt] = useState(0);
 
-  const [paused, setPaused] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
   const [now, setNow] = useState(() => performance.now());
 
@@ -218,59 +242,9 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
 
   // --- places list + recognition -----------------------------------------
 
-  const loadPlaces = useCallback(async () => {
-    if (!robotIp) return;
-    setPlacesLoading(true);
-    try {
-      const res = await fetch(httpUrl(robotIp, PLACES_PORT, "/places"), {
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error(await readError(res));
-      const body = (await res.json()) as { places?: PlaceListEntry[] };
-      setPlaces(Array.isArray(body.places) ? body.places : []);
-      setPlacesError(null);
-    } catch (e) {
-      setPlacesError(
-        `${(e as Error).message}. Places runs in bebop-vision on :${PLACES_PORT}.`,
-      );
-    } finally {
-      setPlacesLoading(false);
-    }
-  }, [robotIp]);
-
   useEffect(() => {
-    void loadPlaces();
-  }, [loadPlaces, retryKey]);
-
-  useEffect(() => {
-    if (paused || !robotIp) return;
-    const id = window.setInterval(() => {
-      if (liveRef.current) void loadPlaces();
-    }, PLACES_POLL_MS);
-    return () => window.clearInterval(id);
-  }, [loadPlaces, paused, robotIp]);
-
-  const pollWhere = useCallback(async () => {
-    if (!robotIp) return;
-    try {
-      const res = await fetch(httpUrl(robotIp, PLACES_PORT, "/whereami"), {
-        cache: "no-store",
-      });
-      if (!res.ok) return;
-      setWhere((await res.json()) as WhereAmI);
-    } catch {
-      /* transient; the places list surfaces hard errors */
-    }
-  }, [robotIp]);
-
-  useEffect(() => {
-    if (paused || !robotIp) return;
-    void pollWhere();
-    const id = window.setInterval(() => {
-      if (liveRef.current) void pollWhere();
-    }, WHEREAMI_POLL_MS);
-    return () => window.clearInterval(id);
-  }, [pollWhere, paused, robotIp]);
+    if (retryKey > 0) void refreshPlaces();
+  }, [retryKey, refreshPlaces]);
 
   // Drop a selection that disappeared. A manual pick wins over recognition
   // until that place is gone; otherwise default to the recognized place from
@@ -314,7 +288,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
   // --- selected place local map ------------------------------------------
 
   useEffect(() => {
-    if (paused || !robotIp || !selectedId) return;
+    if (paused || !selectedId) return;
     let cancelled = false;
     let timer = 0;
     let ctrl: AbortController | null = null;
@@ -324,7 +298,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
       const timeout = window.setTimeout(() => ctrl?.abort(), REQUEST_TIMEOUT_MS);
       try {
         const res = await fetch(
-          httpUrl(robotIp, PLACES_PORT, placePath(selectedId, "/map")),
+          api(placePath(selectedId, "/map")),
           { cache: "no-store", signal: ctrl.signal },
         );
         if (res.status === 404) {
@@ -333,7 +307,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
           let graphStatus: number | null = null;
           try {
             const g = await fetch(
-              httpUrl(robotIp, PLACES_PORT, "/places/graph"),
+              api("/places/graph"),
               { cache: "no-store" },
             );
             graphStatus = g.status;
@@ -408,12 +382,12 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
       window.clearTimeout(timer);
       ctrl?.abort();
     };
-  }, [robotIp, selectedId, paused, retryKey]);
+  }, [api, selectedId, paused, retryKey]);
 
   // --- place graph -------------------------------------------------------
 
   useEffect(() => {
-    if (paused || !robotIp) return;
+    if (paused) return;
     let cancelled = false;
     let timer = 0;
     let ctrl: AbortController | null = null;
@@ -422,7 +396,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
       ctrl = new AbortController();
       const timeout = window.setTimeout(() => ctrl?.abort(), REQUEST_TIMEOUT_MS);
       try {
-        const res = await fetch(httpUrl(robotIp, PLACES_PORT, "/places/graph"), {
+        const res = await fetch(api("/places/graph"), {
           cache: "no-store",
           signal: ctrl.signal,
         });
@@ -470,7 +444,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
       window.clearTimeout(timer);
       ctrl?.abort();
     };
-  }, [robotIp, paused, retryKey]);
+  }, [api, paused, retryKey]);
 
   // --- local map geometry + fit ------------------------------------------
 
@@ -603,13 +577,13 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
       }
     };
 
-    drawLayer(layers.free, FREE_FILL);
-    drawLayer(layers.occupied, OBSTACLE_FILL);
+    drawLayer(layers.free, PALETTE.free);
+    drawLayer(layers.occupied, PALETTE.obstacle);
 
     // Walls are real bounding structure only and may legitimately be absent
     // or few; obstacles still show through the grey grid layer.
     if (map.walls.length > 0 && primitives < budgetLimit) {
-      ctx.strokeStyle = WALL_STROKE;
+      ctx.strokeStyle = PALETTE.wall;
       ctx.lineWidth = 2;
       ctx.lineCap = "round";
       ctx.beginPath();
@@ -632,7 +606,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
       // Screen-space left normal (screen Y points down).
       const px = -hy;
       const py = hx;
-      ctx.fillStyle = ANCHOR_FILL;
+      ctx.fillStyle = PALETTE.anchor;
       ctx.beginPath();
       ctx.moveTo(sx + hx * 15, sy + hy * 15);
       ctx.lineTo(sx - hx * 6 + px * 6, sy - hy * 6 + py * 6);
@@ -701,7 +675,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
     const budget = MAX_PLAN_PRIMITIVES;
 
     ctx.lineWidth = 1.5;
-    ctx.strokeStyle = EDGE_STROKE;
+    ctx.strokeStyle = PALETTE.edge;
     for (const edge of graphLayout.edges) {
       if (primitives >= budget) break;
       ctx.beginPath();
@@ -734,7 +708,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
       const radius = 7 + Math.min(6, node.degree);
       ctx.beginPath();
       ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = NODE_FILL;
+      ctx.fillStyle = PALETTE.node;
       ctx.fill();
       ctx.strokeStyle = "rgba(242,244,247,0.7)";
       ctx.lineWidth = 1;
@@ -818,7 +792,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
           REQUEST_TIMEOUT_MS,
         );
         try {
-          const res = await fetch(httpUrl(robotIp, PLACES_PORT, "/whereami"), {
+          const res = await fetch(api("/whereami"), {
             cache: "no-store",
             signal: ctrl.signal,
           });
@@ -843,7 +817,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
           window.clearTimeout(timeout);
         }
       }
-      setWhere(latestWhere);
+      void refreshPlaces();
       const gate = placeCaptureGate(selectedId, placeName, latestWhere);
       if (!gate.allowed) {
         setCaptureNote(`${gate.reason} Nothing was captured.`);
@@ -861,7 +835,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
         );
         try {
           const res = await fetch(
-            httpUrl(robotIp, STRUCTURE_PORT, "/structure"),
+            endpoints.slam("/structure"),
             { cache: "no-store", signal: ctrl.signal },
           );
           if (res.status === 404 || res.status === 503) {
@@ -923,7 +897,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
       const timeout = window.setTimeout(() => ctrl.abort(), POST_TIMEOUT_MS);
       try {
         const res = await fetch(
-          httpUrl(robotIp, PLACES_PORT, placePath(selectedId, "/map")),
+          api(placePath(selectedId, "/map")),
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -978,11 +952,11 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
   // --- status copy --------------------------------------------------------
 
   const badge = (() => {
-    const danger = "bg-danger/15 text-[#ffb5b8] border-danger/40";
+    const danger = "bg-danger/15 text-danger-fg border-danger/40";
     const dim = "bg-bg-elev-2 text-text-dim border-border";
     const accent = "bg-accent/15 text-accent border-accent/40";
     const ok = "bg-success/15 text-success border-success/40";
-    const stale = "bg-danger/12 text-[#ffb5b8] border-danger/35";
+    const stale = "bg-danger/12 text-danger-fg border-danger/35";
     if (paused)
       return { label: "PAUSED · MAP FROZEN", className: dim };
     if (placesError) return { label: "PLACES UNREACHABLE", className: danger };
@@ -1055,7 +1029,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
           </p>
         </div>
         <span
-          className={`self-start rounded-full border px-2.5 py-1 text-[11px] font-semibold tracking-wide ${badge.className}`}
+          className={`self-start rounded-full border px-2.5 py-1 text-caption font-semibold tracking-wide ${badge.className}`}
         >
           {badge.label}
         </span>
@@ -1070,9 +1044,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
       {placesError ? (
         <Banner tone="error">
           Can&rsquo;t read the places list from{" "}
-          <code>
-            {robotIp}:{PLACES_PORT}/places
-          </code>
+          <code>{api("/places")}</code>
           . {placesError}
           <div className="mt-2">
             <Button variant="secondary" onClick={() => setRetryKey((k) => k + 1)}>
@@ -1091,17 +1063,17 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
             </div>
             <div className="flex items-center gap-2">
               {where?.matched && where.place ? (
-                <span className="text-[11px] text-text-dim">
+                <span className="text-caption text-text-dim">
                   recognized: <span className="text-text">{where.place.name}</span>
                 </span>
               ) : (
-                <span className="text-[11px] text-text-dim">
+                <span className="text-caption text-text-dim">
                   recognized: {where ? "unknown" : "—"}
                 </span>
               )}
               <Button
                 variant="ghost"
-                onClick={() => void loadPlaces()}
+                onClick={() => void refreshPlaces()}
                 loading={placesLoading}
                 disabled={paused}
               >
@@ -1124,7 +1096,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
                       manualPick.current = true;
                       setSelectedId(p.id);
                     }}
-                    className={`rounded-[var(--radius-card)] border px-3 py-2 text-sm transition-colors ${
+                    className={`min-h-touch rounded-card border px-3 py-2 text-sm transition-colors ${
                       active
                         ? "border-accent bg-bg-elev-2 text-text"
                         : "border-border bg-bg-elev text-text-dim hover:bg-bg-elev-2"
@@ -1132,7 +1104,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
                   >
                     {p.name}
                     {where?.matched && where.place?.id === p.id ? (
-                      <span className="ml-2 text-[10px] text-success">here</span>
+                      <span className="ml-2 text-micro text-success">here</span>
                     ) : null}
                   </button>
                 );
@@ -1155,7 +1127,6 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
               setPaused(next);
               if (next) return;
               setMapError(null);
-              setPlacesError(null);
               setRetryKey((k) => k + 1);
             }}
           >
@@ -1170,17 +1141,17 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
           >
             Capture this place
           </Button>
-          <span className="text-[11px] text-text-dim">
+          <span className="text-caption text-text-dim">
             drag to pan · wheel/pinch to zoom
           </span>
         </div>
         {captureBlockReason ? (
-          <div className="text-[11px] text-text-dim pb-2">
+          <div className="text-caption text-text-dim pb-2">
             {captureBlockReason}
           </div>
         ) : null}
         {captureNote ? (
-          <div className="text-[11px] text-text-dim pb-2">{captureNote}</div>
+          <div className="text-caption text-text-dim pb-2">{captureNote}</div>
         ) : null}
       </Card>
 
@@ -1193,7 +1164,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
 
       <div
         ref={wrapRef}
-        className="relative h-[440px] sm:h-[540px] rounded-[var(--radius-card)] border border-border overflow-hidden bg-[#0b0d10]"
+        className="relative h-[440px] sm:h-[540px] rounded-card border border-border overflow-hidden bg-[#0b0d10]"
       >
         <canvas
           ref={canvasRef}
@@ -1213,11 +1184,11 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
           </div>
         ) : null}
         {paused ? (
-          <div className="absolute bottom-2 right-2 rounded-md bg-bg/85 border border-border px-2 py-1 text-[11px] text-text-dim">
+          <div className="absolute bottom-2 right-2 rounded-md bg-bg/85 border border-border px-2 py-1 text-caption text-text-dim">
             frozen
           </div>
         ) : null}
-        <div className="absolute bottom-2 left-2 rounded-md bg-bg/85 border border-border px-2 py-1 text-[10px] text-text-dim max-w-[76%]">
+        <div className="absolute bottom-2 left-2 rounded-md bg-bg/85 border border-border px-2 py-1 text-micro text-text-dim max-w-[76%]">
           <div className="flex flex-wrap items-center gap-2">
             <span className="inline-flex items-center gap-1">
               <i className="inline-block w-2.5 h-2.5 rounded-sm bg-success/30" />
@@ -1335,7 +1306,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
             <div className="text-xs text-text-dim uppercase tracking-wider">
               Place graph
             </div>
-            <span className="text-[11px] text-text-dim">
+            <span className="text-caption text-text-dim">
               {graph
                 ? `${graph.nodes.length} place${graph.nodes.length === 1 ? "" : "s"} · ${graph.edges.length} recorded route${graph.edges.length === 1 ? "" : "s"}`
                 : "—"}
@@ -1353,7 +1324,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
           ) : null}
           <div
             ref={graphWrapRef}
-            className="relative h-[360px] rounded-[var(--radius-card)] border border-border overflow-hidden bg-[#0b0d10]"
+            className="relative h-[360px] rounded-card border border-border overflow-hidden bg-[#0b0d10]"
           >
             <canvas
               ref={graphCanvasRef}
@@ -1367,7 +1338,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
             ) : null}
             {graphLayout &&
             (graphLayout.hiddenNodes > 0 || graphLayout.hiddenEdges > 0) ? (
-              <div className="absolute bottom-2 right-2 rounded-md bg-bg/85 border border-border px-2 py-1 text-[10px] text-text-dim">
+              <div className="absolute bottom-2 right-2 rounded-md bg-bg/85 border border-border px-2 py-1 text-micro text-text-dim">
                 showing {graphLayout.nodes.length}/
                 {graphLayout.nodes.length + graphLayout.hiddenNodes} places ·{" "}
                 {graphLayout.edges.length}/
@@ -1376,7 +1347,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
             ) : null}
           </div>
           {graph && graph.edges.length > 0 ? (
-            <ul className="flex flex-col gap-1 text-[11px] font-mono text-text-dim">
+            <ul className="flex flex-col gap-1 text-caption font-mono text-text-dim">
               {graph.edges.slice(0, 12).map((e: PlaceGraphEdge) => (
                 <li key={`${e.from}->${e.to}`}>
                   <span className="text-text">
@@ -1395,7 +1366,7 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
       </Card>
 
       <div className="flex items-center justify-between gap-3 mt-auto pt-2">
-        <span className="text-[11px] text-text-dim">
+        <span className="text-caption text-text-dim">
           Read-only ·{" "}
           {placesLoading && places.length === 0
             ? "connecting…"
@@ -1411,9 +1382,6 @@ export function MapScreen({ robotIp, onBack, backLabel = "Back" }: MapScreenProp
                     : ""
                 }`}
         </span>
-        <Button variant="ghost" onClick={onBack}>
-          {backLabel}
-        </Button>
       </div>
     </div>
   );
@@ -1430,11 +1398,11 @@ function Stat({
 }) {
   return (
     <div className="min-w-0">
-      <div className="text-[11px] uppercase tracking-wider text-text-dim">
+      <div className="text-caption uppercase tracking-wider text-text-dim">
         {label}
       </div>
       <div
-        className={`font-mono text-[13px] truncate ${valueClass}`}
+        className={`font-mono text-body-sm truncate ${valueClass}`}
         title={value}
       >
         {value}

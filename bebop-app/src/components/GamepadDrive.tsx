@@ -1,64 +1,36 @@
-// Bluetooth-gamepad → differential-drive teleop bridge.
+// Gamepad status card and button actions for wheeled teleop.
 //
-// The wheeled-chassis counterpart of `GamepadDriver` (which handles
-// per-joint dial-in on legged robots). Streams body twists through
-// the runtime WS `SetVelocityCommand` path — the same one the
-// on-screen `DriveJoystick` and the WASD keyboard drive use — so no
-// firmware or agent change is involved.
+// Driving itself lives in the drive-input arbiter
+// (`src/input/useDriveInput.ts`): it polls the pad, applies the RT
+// deadman (`DEADMAN_THRESHOLD`, 0.4) and merges the sticks with the
+// on-screen joystick and WASD into the one twist stream, along with the
+// stop rules (deadman release, pad drop, blur / hidden tab, re-engage
+// after a halt). This card shows the pad, the deadman, what the sticks
+// request and why driving is blocked, picks the stick layout and profile,
+// and handles the pad's buttons:
 //
-// Bindings mirror the dial-in bridge so muscle memory transfers between
-// flows:
-//
-//   * sticks drive the chassis — layout selectable below,
-//   * RT is a deadman; release to halt,
-//   * trigger pressure scales the request so a light pull creeps,
+//   * sticks drive the chassis (layout selectable below),
+//   * RT is a deadman; release to halt; trigger pressure scales speed,
 //   * B latches E-STOP, A clears it,
 //   * L3 arms / disarms every wheel.
-//
-// The firmware holds the last commanded twist until told otherwise,
-// so this component owns *stopping*: deadman release, E-STOP latch,
-// pad disconnect, unmount, tab hidden, and a watchdog on tick
-// freshness all enqueue a (0, 0) twist exactly once per drive cycle.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import { getActiveControlProfile, subscribeGamepad, useGamepad } from "../input";
+import {
+  DEADMAN_THRESHOLD,
+  getActiveControlProfile,
+  gamepadTwist,
+  getGamepadLayout,
+  setGamepadLayout,
+  subscribeGamepad,
+  useGamepad,
+  useGamepadLayout,
+} from "../input";
 import type { GamepadSnapshot, LogicalSnapshot } from "../input";
 import type { RuntimeMode, WheelView } from "../runtime";
-import { ControllerIcon, Hint, prettifyGamepadId } from "./GamepadDriver";
+import { ControllerIcon, Hint, prettifyGamepadId } from "./gamepadBits";
 import { ControlProfilePicker } from "./ControlProfilePicker";
-
-// Drive soft limits come from the active control profile
-// (`../input/profile.ts`) — switched at runtime from the picker on
-// this card. The firmware clamps to each wheel's `vel_max`
-// regardless, so the profile only bounds what the operator can
-// request with a full stick deflection. Shared with the on-screen
-// `DriveJoystick` / WASD keyboard drive in `MotorBenchScreen`.
-
-/// Stick layout. `split` (default): left stick ↕ drives, right stick ↔
-/// turns. `arcade`: the left stick does both, matching the on-screen
-/// joystick's convention.
-type DriveLayout = "split" | "arcade";
-
-const LAYOUT_STORAGE_KEY = "bebop.driveLayout";
-
-/// Deadman engages at this trigger pressure. Matches the dial-in
-/// bridge's threshold so the feel is identical between flows.
-const DEADMAN_THRESHOLD = 0.4;
-
-/// If no gamepad tick arrives for this long while driving, halt.
-/// Covers the RAF poll loop stalling (tab backgrounded, WebView
-/// paused) and a pad that silently drops off mid-drive. Sits just
-/// above the firmware's 200 ms operator link-loss watchdog
-/// to avoid racing the ~60 Hz poll loop's normal jitter.
-const WATCHDOG_MS = 250;
-
-/// Minimum twist change worth a WS write. Filters stick sensor noise
-/// around centre while the deadman is held; the parent's twist stream
-/// (`src/runtime/twistStream.ts`) caps the rest at ~30 Hz and owns the
-/// keepalive that refreshes a steady stick.
-const TWIST_EPS = 1e-3;
 
 /// UI-only state (deadman pill, twist readout) refreshes at ~10 Hz
 /// instead of RAF rate.
@@ -68,143 +40,68 @@ interface GamepadDriveProps {
   wheels: WheelView[];
   mode: RuntimeMode;
   estopLatched: boolean;
-  /// Stream a body twist (vx m/s, wz rad/s, +wz = left turn). Throttling
-  /// and the keepalive belong to the parent's twist stream, same as the
-  /// on-screen joystick.
-  onTwist: (vx: number, wz: number) => void;
-  /// One-shot stop; goes out immediately and ends the keepalive.
-  onStop: () => void;
+  /// @deprecated Ignored: the pad drives through `useDriveInput`.
+  onTwist?: (vx: number, wz: number) => void;
+  /// @deprecated Ignored: the pad drives through `useDriveInput`.
+  onStop?: () => void;
   onEStop: () => void;
   onResetEStop: () => void;
   /// Arm / disarm every wheel (L3 toggles between the two).
   onSetAllWheels: (enabled: boolean) => void;
 }
 
-/// Renders a compact status card and streams gamepad-driven twists to
-/// the parent. Returns null whenever no pad is connected so the bench
-/// layout doesn't reserve space for it.
+/// Renders a compact status card and handles the pad's buttons. Returns
+/// null whenever no pad is connected so the layout doesn't reserve space.
 export function GamepadDrive({
   wheels,
   mode,
   estopLatched,
-  onTwist,
-  onStop,
   onEStop,
   onResetEStop,
   onSetAllWheels,
 }: GamepadDriveProps) {
   const { connected, id, standard } = useGamepad();
+  const layout = useGamepadLayout();
 
-  const [layout, setLayout] = useState<DriveLayout>(loadLayout);
-  // Live deadman state surfaced for the UI. Refreshed at ~10 Hz so we
-  // don't re-render every animation frame.
   const [deadmanHeld, setDeadmanHeld] = useState(false);
-  // Throttled mirror of the outgoing twist for the readout row.
+  // Throttled mirror of what the sticks request (local; the drive card
+  // shows what the firmware reports).
   const [twistView, setTwistView] = useState<{ vx: number; wz: number }>({
     vx: 0,
     wz: 0,
   });
-  // Most recent logical snapshot, kept for the chord-label hints in
-  // the UI so they re-skin to whichever mapping the active pad uses
-  // (LB/RB vs L1/R1 etc.).
+  // Most recent logical snapshot, for the chord-label hints (LB/RB vs
+  // L1/R1 etc.).
   const [logicalView, setLogicalView] = useState<LogicalSnapshot | null>(null);
 
-  // Refs that the per-frame subscriber reads. Using refs (rather than
-  // closing over state) keeps the subscription alive for the lifetime
-  // of the component instead of being torn down on every state change
-  // — that would reset the hook's edge-detection state and cause every
-  // E-STOP press to fire twice. Same pattern as `GamepadDriver`.
+  // Refs read by the per-frame subscriber, so the subscription lives for
+  // the component's lifetime (re-subscribing would reset edge detection
+  // and fire an E-STOP press twice).
   const wheelsRef = useRef(wheels);
   wheelsRef.current = wheels;
   const modeRef = useRef(mode);
   modeRef.current = mode;
   const estopRef = useRef(estopLatched);
   estopRef.current = estopLatched;
-  const layoutRef = useRef(layout);
-  layoutRef.current = layout;
-  const onTwistRef = useRef(onTwist);
-  onTwistRef.current = onTwist;
-  const onStopRef = useRef(onStop);
-  onStopRef.current = onStop;
   const onEStopRef = useRef(onEStop);
   onEStopRef.current = onEStop;
   const onResetEStopRef = useRef(onResetEStop);
   onResetEStopRef.current = onResetEStop;
   const onSetAllWheelsRef = useRef(onSetAllWheels);
   onSetAllWheelsRef.current = onSetAllWheels;
-  // Drive-session state, all subscriber-owned:
-  //
-  //   * `drivingRef` — a drive cycle is open (deadman held + gated on);
-  //     flipping false→true on the first dispatched twist and back on
-  //     the first stop, so the parent's `onStop` fires exactly once
-  //     per release rather than every tick.
-  //   * `lastSentRef` — last dispatched twist; invariant: non-null iff
-  //     a drive cycle is open. Filters sub-epsilon re-sends.
-  //   * `lastTickAtRef` — timestamp of the most recent gamepad tick,
-  //     feeds the watchdog below.
-  const drivingRef = useRef(false);
-  const lastSentRef = useRef<{ vx: number; wz: number } | null>(null);
-  const lastTickAtRef = useRef(0);
   const lastUiAtRef = useRef(0);
 
-  // Close the current drive cycle, if any. Idempotent per cycle: the
-  // first call after release enqueues the (0, 0) twist through the
-  // parent's stop path (which supersedes anything mid-flight), and
-  // later no-op calls are swallowed.
-  const stopDriving = useCallback(() => {
-    if (!drivingRef.current) return;
-    drivingRef.current = false;
-    lastSentRef.current = null;
-    onStopRef.current();
-  }, []);
-
-  // Per-frame subscription. On teardown — pad disconnect or unmount —
-  // halt the chassis if a drive cycle was open.
   useEffect(() => {
     if (!connected) return;
-    const unsub = subscribeGamepad((snap) => onTick(snap));
-    return () => {
-      unsub();
-      stopDriving();
-    };
+    return subscribeGamepad((snap) => onTick(snap));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected]);
 
-  // Watchdog: if we're mid-drive and the RAF ticks dry up, stop. The
-  // firmware holds the last commanded twist until changed, so this is
-  // the backstop that guarantees the chassis halts even when the poll
-  // loop dies without a disconnect event (backgrounded WebView, pad
-  // battery pulling mid-drive).
-  useEffect(() => {
-    if (!connected) return;
-    const iv = window.setInterval(() => {
-      if (performance.now() - lastTickAtRef.current > WATCHDOG_MS) {
-        stopDriving();
-      }
-    }, 100);
-    return () => window.clearInterval(iv);
-  }, [connected, stopDriving]);
-
-  // Backgrounding the tab freezes the RAF loop (and browsers throttle
-  // timers, which would delay the watchdog); halt immediately instead.
-  useEffect(() => {
-    const onVisibility = () => {
-      if (document.hidden) {
-        stopDriving();
-      }
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () =>
-      document.removeEventListener("visibilitychange", onVisibility);
-  }, [stopDriving]);
-
   function onTick(snap: GamepadSnapshot) {
     const now = performance.now();
-    lastTickAtRef.current = now;
     const lg = snap.logical;
 
-    // ----- e-stop / clear (rising-edge on East / South) ---------------
-    // Same bindings as the dial-in bridge so muscle memory transfers.
+    // ----- e-stop / clear (rising edge on East / South) ---------------
     if (lg.estopEdge && !estopRef.current) {
       onEStopRef.current();
     }
@@ -212,11 +109,9 @@ export function GamepadDrive({
       onResetEStopRef.current();
     }
 
-    // ----- arm / disarm all wheels (rising-edge on L3) ----------------
-    // Mirrors the card's "Enable wheels" / "Disable wheels" buttons:
-    // arms everything unless all are already armed. Gated on mode +
-    // E-STOP the same way the buttons are; a press at the wrong time
-    // just does nothing rather than surfacing a firmware rejection.
+    // ----- arm / disarm all wheels (rising edge on L3) ----------------
+    // Mirrors the "Enable wheels" / "Disable wheels" buttons, gated on
+    // mode + E-STOP the same way; a press at the wrong time does nothing.
     const wheels = wheelsRef.current;
     const armedCount = wheels.filter((w) => w.armed).length;
     if (
@@ -228,57 +123,18 @@ export function GamepadDrive({
       onSetAllWheelsRef.current(armedCount !== wheels.length);
     }
 
-    // ----- twist streaming ---------------------------------------------
-    // Drive only while the deadman is held and the same gates as the
-    // on-screen joystick pass: no E-STOP, a drive-capable mode, and at
-    // least one armed wheel. Trigger pressure scales the request —
-    // just-clearing the deadman threshold creeps (~64% of the soft
-    // limit), a full pull reaches it — mirroring the dial-in bridge's
-    // "trigger as gain" feel.
-    const trigger = lg.deadman;
-    const deadman = trigger >= DEADMAN_THRESHOLD;
-    const canDrive =
-      deadman &&
-      !estopRef.current &&
-      (modeRef.current === "DIAL_IN" || modeRef.current === "RUN_POLICY") &&
-      armedCount > 0;
-
-    // Stick convention matches the on-screen pad: up = forward,
-    // right = turn right (+wz = left turn, hence the sign flip).
-    // Limits come from the active profile; read per tick so a picker
-    // change applies to the very next frame. When the PTZ bridge is
-    // active the right stick belongs to the camera, so the layout is
-    // forced to arcade — the left stick does both.
-    const effectiveLayout: DriveLayout = layoutRef.current;
-    const profile = getActiveControlProfile();
-    const gain = 0.4 + 0.6 * Math.min(1, Math.max(0, trigger));
-    const turnStick = effectiveLayout === "arcade" ? snap.lx : snap.rx;
-    const vx = canDrive ? snap.ly * profile.maxLinear * gain : 0;
-    const wz = canDrive ? -turnStick * profile.maxAngular * gain : 0;
-
-    if (canDrive) {
-      const last = lastSentRef.current;
-      if (
-        last === null ||
-        Math.abs(last.vx - vx) > TWIST_EPS ||
-        Math.abs(last.wz - wz) > TWIST_EPS
-      ) {
-        lastSentRef.current = { vx, wz };
-        drivingRef.current = true;
-        onTwistRef.current(vx, wz);
-      }
-    } else {
-      stopDriving();
-    }
-
     // ----- throttled UI updates ----------------------------------------
     if (now - lastUiAtRef.current > UI_INTERVAL_MS) {
       lastUiAtRef.current = now;
+      const deadman = lg.deadman >= DEADMAN_THRESHOLD;
+      const t = gamepadTwist(
+        { lx: snap.lx, ly: snap.ly, rx: snap.rx, deadman: lg.deadman },
+        getGamepadLayout(),
+        getActiveControlProfile(),
+      ) ?? { vx: 0, wz: 0 };
       setDeadmanHeld((prev) => (prev !== deadman ? deadman : prev));
       setTwistView((prev) =>
-        Math.abs(prev.vx - vx) > 0.02 || Math.abs(prev.wz - wz) > 0.02
-          ? { vx, wz }
-          : prev,
+        Math.abs(prev.vx - t.vx) > 0.02 || Math.abs(prev.wz - t.wz) > 0.02 ? t : prev,
       );
       setLogicalView((prev) =>
         prev === null || prev.mappingName !== lg.mappingName ? lg : prev,
@@ -286,18 +142,7 @@ export function GamepadDrive({
     }
   }
 
-  const chooseLayout = useCallback((next: DriveLayout) => {
-    setLayout(next);
-    try {
-      window.localStorage.setItem(LAYOUT_STORAGE_KEY, next);
-    } catch {
-      /* localStorage may be disabled — preference just won't persist */
-    }
-    // Force the next tick to re-send under the new mapping even if the
-    // composed twist happens to be numerically unchanged (e.g. both
-    // turn sticks idling at 0 while driving straight).
-    lastSentRef.current = null;
-  }, []);
+  const chooseLayout = setGamepadLayout;
 
   const friendlyName = useMemo(() => prettifyGamepadId(id), [id]);
 
@@ -314,7 +159,7 @@ export function GamepadDrive({
       : armedWheelCount === 0
         ? "enable the wheels"
         : null;
-  const effectiveLayout: DriveLayout = layout;
+  const effectiveLayout = layout;
 
   return (
     <div className="rounded-[var(--radius-card)] border border-border bg-bg-elev px-3.5 py-2.5 flex flex-col gap-2">
@@ -328,7 +173,7 @@ export function GamepadDrive({
           </span>
           <div className="min-w-0">
             <div className="text-[11px] uppercase tracking-wider text-text-dim font-semibold">
-              Bluetooth controller · drive
+              Gamepad · drive
             </div>
             <div className="text-sm font-semibold truncate" title={id}>
               {friendlyName}
@@ -341,7 +186,7 @@ export function GamepadDrive({
               className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold border ${
                 standard
                   ? "bg-bg-elev-2 text-text-dim border-border"
-                  : "bg-yellow-500/15 text-yellow-700 dark:text-yellow-300 border-yellow-500/40"
+                  : "bg-yellow-500/15 text-yellow-300 border-yellow-500/40"
               }`}
               title={
                 standard
@@ -401,7 +246,7 @@ export function GamepadDrive({
         </span>
         {driveBlockReason ? (
           <span
-            className="text-[11px] text-yellow-700 dark:text-yellow-300"
+            className="text-[11px] text-yellow-300"
             title="Reason gamepad input will be ignored even with the deadman held"
           >
             blocked: {driveBlockReason}
@@ -450,7 +295,7 @@ function LayoutOption({
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`px-2 py-0.5 rounded-md text-[11px] font-semibold uppercase tracking-wider cursor-pointer ${
+      className={`px-2.5 py-1 min-h-8 rounded-md text-[11px] font-semibold uppercase tracking-wider cursor-pointer ${
         active
           ? "bg-accent/15 text-accent"
           : "bg-transparent text-text-dim hover:text-text"
@@ -464,16 +309,6 @@ function LayoutOption({
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
-
-function loadLayout(): DriveLayout {
-  try {
-    return window.localStorage.getItem(LAYOUT_STORAGE_KEY) === "arcade"
-      ? "arcade"
-      : "split";
-  } catch {
-    return "split";
-  }
-}
 
 function fmt(v: number): string {
   return v >= 0 ? `+${v.toFixed(2)}` : v.toFixed(2);

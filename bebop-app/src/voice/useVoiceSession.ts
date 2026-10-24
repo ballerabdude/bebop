@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { httpUrl, wsUrl } from "../runtime/urls";
+import { endpoints, PORTS } from "../robot/endpoints";
 
 /// Turn-based speech-to-speech client for `bebop-voice.service` (:9093).
 ///
@@ -29,10 +29,23 @@ export interface VoiceSession {
   error: string | null;
   /** Name of the tool the robot is currently running, if any. */
   lastTool: string | null;
+  /** Progress of a running `move_relative` (null when not moving). */
+  motion: VoiceMotion | null;
+  /** Set when the server rejected a turn because one is still running. */
+  busy: boolean;
   startTalking: () => Promise<void>;
   stopTalking: () => void;
+  /** Cancel the running turn (stops speech and any voice-driven motion). */
+  cancel: () => void;
   /** Clear the server-side conversation context for this session. */
   resetContext: () => void;
+}
+
+export interface VoiceMotion {
+  doneM: number;
+  totalM: number;
+  doneDeg: number;
+  totalDeg: number;
 }
 
 export interface VoiceSessionOptions {
@@ -114,7 +127,6 @@ function micErrorMessage(e: unknown): string {
 
 export function useVoiceSession(
   host: string,
-  port = 9093,
   options: VoiceSessionOptions = {},
 ): VoiceSession {
   const { voice, session } = options;
@@ -123,6 +135,8 @@ export function useVoiceSession(
   const [reply, setReply] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [lastTool, setLastTool] = useState<string | null>(null);
+  const [motion, setMotion] = useState<VoiceMotion | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -143,7 +157,7 @@ export function useVoiceSession(
       }
       stopCaptureRef.current?.();
     };
-  }, [host, port]);
+  }, [host]);
 
   const ensurePlayback = useCallback(() => {
     if (!playbackCtxRef.current) {
@@ -186,6 +200,12 @@ export function useVoiceSession(
         name?: string;
         text?: string;
         sample_rate?: number;
+        status?: string;
+        error?: string;
+        done_m?: number;
+        total_m?: number;
+        done_deg?: number;
+        total_deg?: number;
       };
       try {
         msg = JSON.parse(ev.data);
@@ -211,6 +231,37 @@ export function useVoiceSession(
         case "done":
           setPhase("idle");
           setLastTool(null);
+          setMotion(null);
+          break;
+        // Typed agent events (docs/voice.md). The legacy `text`/`tool`/`done`
+        // mirrors above still drive the reply/phase; these add what the
+        // legacy set can't express.
+        case "turn_start":
+          setBusy(false);
+          break;
+        case "motion_progress":
+          setMotion({
+            doneM: msg.done_m ?? 0,
+            totalM: msg.total_m ?? 0,
+            doneDeg: msg.done_deg ?? 0,
+            totalDeg: msg.total_deg ?? 0,
+          });
+          break;
+        case "tool_result":
+          setMotion(null);
+          break;
+        case "turn_end":
+          setMotion(null);
+          setBusy(false);
+          if (msg.status !== "error") {
+            setPhase((p) => (p === "listening" ? p : "idle"));
+            setLastTool(null);
+          }
+          break;
+        case "turn_rejected":
+          // A turn is still running; nothing new started and no turn_end
+          // follows. The running turn's own turn_end returns us to idle.
+          setBusy(true);
           break;
         case "error":
           setError(msg.message ?? "voice error");
@@ -232,18 +283,17 @@ export function useVoiceSession(
       const qs = new URLSearchParams();
       if (voice) qs.set("voice", voice);
       if (session) qs.set("session", session);
-      const suffix = qs.toString() ? `?${qs.toString()}` : "";
-      const ws = new WebSocket(wsUrl(host, port, "/voice") + suffix);
+      const ws = new WebSocket(endpoints(host).voiceWs(qs.toString()));
       ws.binaryType = "arraybuffer";
       ws.onopen = () => resolve(ws);
-      ws.onerror = () => reject(new Error(`voice socket error (${host}:${port})`));
+      ws.onerror = () => reject(new Error(`voice socket error (${host}:${PORTS.voice})`));
       ws.onclose = () => {
         if (wsRef.current === ws) wsRef.current = null;
       };
       ws.onmessage = handleMessage;
       wsRef.current = ws;
     });
-  }, [host, port, handleMessage, voice, session]);
+  }, [host, handleMessage, voice, session]);
 
   const stopCapture = useCallback(() => {
     capturingRef.current = false;
@@ -364,6 +414,13 @@ export function useVoiceSession(
     stopCapture();
   }, [stopCapture]);
 
+  const cancel = useCallback(() => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "cancel" }));
+    }
+  }, []);
+
   const resetContext = useCallback(() => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -378,8 +435,11 @@ export function useVoiceSession(
     reply,
     error,
     lastTool,
+    motion,
+    busy,
     startTalking,
     stopTalking,
+    cancel,
     resetContext,
   };
 }
@@ -414,7 +474,6 @@ export interface VoiceHealth {
 /// listening, or when the service is stopped.
 export function useVoiceHealth(
   host: string,
-  port = 9093,
   enabled = true,
   pollMs = 1500,
 ): VoiceHealth | null {
@@ -428,7 +487,7 @@ export function useVoiceHealth(
     let timer: ReturnType<typeof setTimeout> | null = null;
     const tick = async () => {
       try {
-        const res = await fetch(httpUrl(host, port, "/healthz"), {
+        const res = await fetch(endpoints(host).voiceHttp("/healthz"), {
           cache: "no-store",
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -464,7 +523,7 @@ export function useVoiceHealth(
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [host, port, enabled, pollMs]);
+  }, [host, enabled, pollMs]);
   return health;
 }
 
@@ -497,8 +556,8 @@ function configFromJson(j: Record<string, unknown>): VoiceConfigView {
     history_turns: Number(j.history_turns ?? 0),
     keep_audio_history: Boolean(j.keep_audio_history),
     tools_enabled: Boolean(j.tools_enabled),
-    backend: String(j.backend ?? "omni"),
-    backends: Array.isArray(j.backends) ? (j.backends as string[]) : ["omni", "cascade"],
+    backend: String(j.backend ?? "cascade"),
+    backends: Array.isArray(j.backends) ? (j.backends as string[]) : ["cascade", "omni"],
     voices: Array.isArray(j.voices) ? (j.voices as string[]) : [],
     omni_supervisor_url: String(j.omni_supervisor_url ?? ""),
     omni_backend_id: String(j.omni_backend_id ?? "omni-edgellm"),
@@ -507,7 +566,6 @@ function configFromJson(j: Record<string, unknown>): VoiceConfigView {
 
 export function useVoiceConfig(
   host: string,
-  port = 9093,
   enabled = true,
 ): VoiceConfigState {
   const [config, setConfig] = useState<VoiceConfigView | null>(null);
@@ -522,7 +580,7 @@ export function useVoiceConfig(
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetch(httpUrl(host, port, "/config"), {
+        const res = await fetch(endpoints(host).voiceHttp("/config"), {
           cache: "no-store",
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -537,11 +595,11 @@ export function useVoiceConfig(
     return () => {
       cancelled = true;
     };
-  }, [host, port, enabled, nonce]);
+  }, [host, enabled, nonce]);
 
   const save = useCallback(
     async (partial: Partial<VoiceConfigView>) => {
-      const res = await fetch(httpUrl(host, port, "/config"), {
+      const res = await fetch(endpoints(host).voiceHttp("/config"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(partial),
@@ -553,7 +611,7 @@ export function useVoiceConfig(
       setConfig(configFromJson((await res.json()) as Record<string, unknown>));
       setError(null);
     },
-    [host, port],
+    [host],
   );
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);

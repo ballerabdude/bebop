@@ -1,13 +1,17 @@
 // SetupTransport — protobuf-over-WebSocket client for `bebop-agent`'s
-// provisioning server (`jetson-agent/bebop-agent/src/server.rs`).
+// provisioning server (`jetson-agent/bebop-agent/src/server.rs`, :9091).
 //
 // Two ways the app reaches it:
-//   * Over the LAN once the robot is on Wi-Fi (host = robot IP:9091).
+//   * Over the LAN once the robot is on Wi-Fi (host = robot IP).
 //   * Directly over the robot's setup hotspot during first-time setup
-//     (host = the hotspot gateway, e.g. 192.168.42.1:9091).
+//     (host = the hotspot gateway, 192.168.42.1).
 //
-// The runtime/operator surface (motors, telemetry, video) is separate and
-// lives on `bebop-linux` at :9090/:9092.
+// The socket opens lazily on the first request and re-opens on the next
+// request after a drop (e.g. the robot switching networks), so callers never
+// manage its lifecycle beyond a final `disconnect()`.
+//
+// The runtime/operator surface (motors, telemetry, video) is separate; see
+// `src/robot/endpoints.ts`.
 
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 
@@ -27,6 +31,7 @@ import {
   type ClientRequest,
   type NetworkConfig as ProtoNetworkConfig,
 } from "../proto/bebop_pb";
+import { endpoints } from "../robot/endpoints";
 import type { BebopTransport, WifiJoinResult } from "./transport";
 import type {
   ApBand,
@@ -37,10 +42,6 @@ import type {
   WifiNetwork,
   WifiStatus,
 } from "./types";
-
-/// Default port for the agent's setup server. The firmware runtime server
-/// (`bebop-linux`) runs on 9090.
-export const DEFAULT_SETUP_PORT = 9091;
 
 const REQUEST_TIMEOUT_MS = 12_000;
 
@@ -58,10 +59,9 @@ export class SetupTransport implements BebopTransport {
   private nextRequestId = 1;
   private pending = new Map<number, PendingResolver>();
 
-  constructor(
-    private readonly host: string,
-    private readonly port: number = DEFAULT_SETUP_PORT,
-  ) {}
+  private opening: Promise<void> | null = null;
+
+  constructor(readonly host: string) {}
 
   // -------------------------------------------------------------- lifecycle
 
@@ -69,6 +69,14 @@ export class SetupTransport implements BebopTransport {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       return Promise.resolve();
     }
+    if (this.opening) return this.opening;
+    this.opening = this.open().finally(() => {
+      this.opening = null;
+    });
+    return this.opening;
+  }
+
+  private open(): Promise<void> {
     if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
       try {
         this.ws.close();
@@ -78,7 +86,7 @@ export class SetupTransport implements BebopTransport {
       this.ws = null;
     }
     return new Promise((resolve, reject) => {
-      const url = `ws://${this.host}:${this.port}/ws`;
+      const url = endpoints(this.host).setupWs;
       const ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
       this.ws = ws;
@@ -157,14 +165,18 @@ export class SetupTransport implements BebopTransport {
     return reply.payload;
   }
 
-  private requestRaw(payload: ClientPayload): Promise<AgentResponse> {
+  private async requestRaw(payload: ClientPayload): Promise<AgentResponse> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new Error("setup connection is not open"));
+      await this.connect();
+    }
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error("setup connection is not open");
     }
     const requestId = this.nextRequestId++;
     const msg = create(ClientRequestSchema, { requestId, payload });
     const bytes = toBinary(ClientRequestSchema, msg);
-    this.ws.send(bytes);
+    ws.send(bytes);
 
     return new Promise<AgentResponse>((resolve, reject) => {
       const timer = setTimeout(() => {

@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { Banner, Button, Card, Field, Spinner } from "../components/ui";
-import { httpUrl } from "../runtime/urls";
+import { Banner, Button, Card, Field, INPUT_CLASS, Spinner } from "../components/ui";
+import { usePlaces, useRobot } from "../robot/session";
+import { PORTS } from "../robot/endpoints";
 
 /// Places: review and teach the robot's semantic place memory. Talks to the
-/// Places service that runs inside bebop-vision on :9095 (started with the
-/// vision card). A place is a named room/location with keyframe images,
+/// Places service that runs inside bebop-vision (:9095, started with the
+/// vision service). Recognition (`/whereami`) comes from the session's
+/// shared places poller. A place is a named room/location with keyframe images,
 /// DINOv3 descriptors for recognition, and operator/vision facts.
 
-const PLACES_PORT = 9095;
-const WHEREAMI_POLL_MS = 3000;
 
 interface Fact {
   text: string;
@@ -73,10 +73,8 @@ function baseName(path: string): string {
   return path.split("/").pop() ?? path;
 }
 
-function keyframeUrl(robotIp: string, placeId: string, path: string): string {
-  return httpUrl(
-    robotIp,
-    PLACES_PORT,
+function keyframeUrl(api: (path: string) => string, placeId: string, path: string): string {
+  return api(
     `/places/${encodeURIComponent(placeId)}/keyframes/${encodeURIComponent(baseName(path))}`,
   );
 }
@@ -91,20 +89,14 @@ async function readError(res: Response): Promise<string> {
   return `${res.status} ${res.statusText}`;
 }
 
-export function PlacesScreen({
-  robotIp,
-  onBack,
-}: {
-  robotIp: string;
-  runtimePort?: number;
-  onBack: () => void;
-}) {
+export function PlacesScreen() {
+  const { endpoints } = useRobot();
+  const api = endpoints.places;
   const [places, setPlaces] = useState<Place[]>([]);
   const [pending, setPending] = useState<Place[]>([]);
   const [pendingSelected, setPendingSelected] = useState<string[]>([]);
   const [pendingNames, setPendingNames] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<string | null>(null);
-  const [where, setWhere] = useState<WhereAmI | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pendingBusy, setPendingBusy] = useState(false);
@@ -114,20 +106,19 @@ export function PlacesScreen({
   const [newName, setNewName] = useState("");
   const [factText, setFactText] = useState("");
   const [live, setLive] = useState(true);
-
-  const liveRef = useRef(live);
-  liveRef.current = live;
+  const shared = usePlaces(live);
+  const where = shared.whereami as WhereAmI | null;
+  const refreshShared = shared.refresh;
 
   const load = useCallback(async () => {
-    if (!robotIp) return;
     setLoading(true);
     setError(null);
     try {
       const [confirmedRes, pendingRes] = await Promise.all([
-        fetch(httpUrl(robotIp, PLACES_PORT, "/places"), {
+        fetch(api("/places"), {
           cache: "no-store",
         }),
-        fetch(httpUrl(robotIp, PLACES_PORT, "/places/pending"), {
+        fetch(api("/places/pending"), {
           cache: "no-store",
         }),
       ]);
@@ -157,37 +148,18 @@ export function PlacesScreen({
     } catch (e) {
       setError(
         `${(e as Error).message}. Is the vision card on? (Places runs in ` +
-          `bebop-vision on :${PLACES_PORT}.)`,
+          `bebop-vision on :${PORTS.places}.)`,
       );
     } finally {
       setLoading(false);
     }
-  }, [robotIp]);
-
-  const pollWhere = useCallback(async () => {
-    if (!robotIp) return;
-    try {
-      const res = await fetch(httpUrl(robotIp, PLACES_PORT, "/whereami"), {
-        cache: "no-store",
-      });
-      if (!res.ok) return;
-      setWhere(await res.json());
-    } catch {
-      /* transient; the load() path surfaces hard errors */
-    }
-  }, [robotIp]);
+    void refreshShared();
+  }, [api, refreshShared]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  useEffect(() => {
-    void pollWhere();
-    const id = window.setInterval(() => {
-      if (liveRef.current) void pollWhere();
-    }, WHEREAMI_POLL_MS);
-    return () => window.clearInterval(id);
-  }, [pollWhere]);
 
   async function teach() {
     const name = newName.trim();
@@ -196,7 +168,7 @@ export function PlacesScreen({
     setError(null);
     setNote(null);
     try {
-      const res = await fetch(httpUrl(robotIp, PLACES_PORT, "/places"), {
+      const res = await fetch(api("/places"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
@@ -223,7 +195,7 @@ export function PlacesScreen({
     setError(null);
     try {
       const res = await fetch(
-        httpUrl(robotIp, PLACES_PORT, `/places/${encodeURIComponent(selected)}/facts`),
+        api(`/places/${encodeURIComponent(selected)}/facts`),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -246,7 +218,7 @@ export function PlacesScreen({
     setNote(null);
     try {
       const res = await fetch(
-        httpUrl(robotIp, PLACES_PORT, `/places/${encodeURIComponent(id)}/views`),
+        api(`/places/${encodeURIComponent(id)}/views`),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -276,7 +248,7 @@ export function PlacesScreen({
     setError(null);
     try {
       const res = await fetch(
-        httpUrl(robotIp, PLACES_PORT, `/places/${encodeURIComponent(id)}`),
+        api(`/places/${encodeURIComponent(id)}`),
         { method: "DELETE" },
       );
       if (!res.ok) throw new Error(await readError(res));
@@ -309,10 +281,7 @@ export function PlacesScreen({
 
   async function suggestOne(id: string): Promise<boolean> {
     const res = await fetch(
-      httpUrl(
-        robotIp,
-        PLACES_PORT,
-        `/places/pending/${encodeURIComponent(id)}/suggest`,
+      api(`/places/pending/${encodeURIComponent(id)}/suggest`,
       ),
       {
         method: "POST",
@@ -399,7 +368,7 @@ export function PlacesScreen({
     setNote(null);
     try {
       const res = await fetch(
-        httpUrl(robotIp, PLACES_PORT, "/places/pending/import"),
+        api("/places/pending/import"),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -457,7 +426,7 @@ export function PlacesScreen({
     setNote(null);
     try {
       const res = await fetch(
-        httpUrl(robotIp, PLACES_PORT, "/places/pending/import"),
+        api("/places/pending/import"),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -506,7 +475,7 @@ export function PlacesScreen({
     setNote(null);
     try {
       const res = await fetch(
-        httpUrl(robotIp, PLACES_PORT, `/places/${encodeURIComponent(place.id)}`),
+        api(`/places/${encodeURIComponent(place.id)}`),
         { method: "DELETE" },
       );
       if (!res.ok) throw new Error(await readError(res));
@@ -544,10 +513,7 @@ export function PlacesScreen({
       await Promise.all(
         selectedPendingPlaces.map(async (place) => {
           const res = await fetch(
-            httpUrl(
-              robotIp,
-              PLACES_PORT,
-              `/places/${encodeURIComponent(place.id)}`,
+            api(`/places/${encodeURIComponent(place.id)}`,
             ),
             { method: "DELETE" },
           );
@@ -570,8 +536,8 @@ export function PlacesScreen({
 
   return (
     <div className="flex flex-col flex-1 gap-4">
-      <div className="flex items-baseline justify-between gap-3 mt-2">
-        <h2 className="text-2xl font-bold">
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 className="text-base font-semibold">
           Places
           {pending.length > 0 ? (
             <span className="ml-2 text-sm font-normal text-text-dim">
@@ -616,7 +582,7 @@ export function PlacesScreen({
             </div>
           )}
           {where?.score !== undefined ? (
-            <div className="text-text-dim text-[13px] font-mono">
+            <div className="text-text-dim text-body-sm font-mono">
               score {where.score.toFixed(3)} · margin{" "}
               {(where.margin ?? 0).toFixed(3)} · min{" "}
               {(where.min_score ?? 0).toFixed(2)}
@@ -662,7 +628,7 @@ export function PlacesScreen({
                 return (
                   <div
                     key={p.id}
-                    className={`flex gap-3 rounded-[var(--radius-card)] border px-3 py-2.5 ${
+                    className={`flex gap-3 rounded-card border px-3 py-2.5 ${
                       checked
                         ? "border-accent bg-bg-elev-2"
                         : "border-border bg-bg-elev"
@@ -676,7 +642,7 @@ export function PlacesScreen({
                     />
                     {kf ? (
                       <img
-                        src={keyframeUrl(robotIp, p.id, kf.path)}
+                        src={keyframeUrl(api, p.id, kf.path)}
                         alt=""
                         className="w-16 h-12 object-cover rounded-md border border-border shrink-0"
                       />
@@ -716,7 +682,7 @@ export function PlacesScreen({
                         </div>
                       ) : null}
                       <input
-                        className="bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-2 text-text text-sm outline-none focus:border-accent"
+                        className={INPUT_CLASS}
                         value={pendingNames[p.id] ?? p.suggested_name ?? ""}
                         onChange={(e) =>
                           setPendingNames((previous) => ({
@@ -796,7 +762,7 @@ export function PlacesScreen({
           </div>
           <Field label="Room name" hint="Aim the camera at the room, then name it.">
             <input
-              className="bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-2.5 text-text outline-none focus:border-accent"
+              className={INPUT_CLASS}
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               placeholder="kitchen"
@@ -837,7 +803,7 @@ export function PlacesScreen({
             <button
               key={p.id}
               onClick={() => setSelected(active ? null : p.id)}
-              className={`flex items-center gap-3 text-left rounded-[var(--radius-card)] border px-3 py-2.5 transition-colors ${
+              className={`flex items-center gap-3 text-left rounded-card border px-3 py-2.5 transition-colors ${
                 active
                   ? "border-accent bg-bg-elev-2"
                   : "border-border bg-bg-elev hover:bg-bg-elev-2"
@@ -845,7 +811,7 @@ export function PlacesScreen({
             >
               {kf ? (
                 <img
-                  src={keyframeUrl(robotIp, p.id, kf.path)}
+                  src={keyframeUrl(api, p.id, kf.path)}
                   alt=""
                   className="w-16 h-12 object-cover rounded-md border border-border shrink-0"
                 />
@@ -889,11 +855,11 @@ export function PlacesScreen({
                 {detail.keyframes.map((kf) => (
                   <div key={kf.path} className="flex flex-col gap-1">
                     <img
-                      src={keyframeUrl(robotIp, detail.id, kf.path)}
+                      src={keyframeUrl(api, detail.id, kf.path)}
                       alt={kf.role}
                       className="w-40 h-28 object-cover rounded-md border border-border"
                     />
-                    <span className="text-text-dim text-[11px]">{kf.role}</span>
+                    <span className="text-text-dim text-caption">{kf.role}</span>
                   </div>
                 ))}
               </div>
@@ -942,7 +908,7 @@ export function PlacesScreen({
 
             <div className="flex gap-2">
               <input
-                className="flex-1 bg-bg-elev-2 border border-border rounded-[var(--radius-card)] px-3 py-2.5 text-text outline-none focus:border-accent"
+                className={`${INPUT_CLASS} flex-1`}
                 value={factText}
                 onChange={(e) => setFactText(e.target.value)}
                 placeholder="add a fact (e.g. has a red mug)"
@@ -962,12 +928,6 @@ export function PlacesScreen({
           </div>
         </Card>
       ) : null}
-
-      <div className="mt-auto pt-4">
-        <Button variant="ghost" onClick={onBack}>
-          Back
-        </Button>
-      </div>
     </div>
   );
 }

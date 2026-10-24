@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
 
-import type { BebopTransport, DeviceInfo, RobotConfig } from "../ble";
-import { Banner, Button, Field, Spinner } from "../components/ui";
+import type { BebopTransport, DeviceInfo, RobotConfig } from "../setup";
+import { Banner, Button, Field, INPUT_CLASS, PageState } from "../components/ui";
 
+/// Setup › Identity: name the robot. Only `robot_name` is persisted by the
+/// agent; the other RobotConfig fields are sent back unchanged.
 export function ConfigScreen({
   transport,
   onDone,
+  submitLabel = "Save and continue",
 }: {
   transport: BebopTransport;
-  onDone: () => void;
+  onDone: (config: RobotConfig) => void;
+  submitLabel?: string;
 }) {
   const [info, setInfo] = useState<DeviceInfo | null>(null);
   const [config, setConfig] = useState<RobotConfig | null>(null);
@@ -36,7 +40,7 @@ export function ConfigScreen({
     setSaving(true);
     try {
       await transport.setRobotConfig(config);
-      onDone();
+      onDone(config);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -45,15 +49,14 @@ export function ConfigScreen({
   }
 
   if (!config || !info) {
-    return (
-      <div className="flex flex-col flex-1 justify-center items-center">
-        <Spinner large />
-      </div>
+    return error ? (
+      <PageState kind="error" title="Couldn't read the robot's identity">
+        {error}
+      </PageState>
+    ) : (
+      <PageState kind="loading" />
     );
   }
-
-  const inputClass =
-    "bg-bg-elev border border-border rounded-[var(--radius-card)] px-3.5 py-3 text-text outline-none focus:border-accent transition-colors duration-120";
 
   return (
     <div className="flex flex-col flex-1 gap-4">
@@ -67,7 +70,7 @@ export function ConfigScreen({
 
       <Field label="Robot name">
         <input
-          className={inputClass}
+          className={INPUT_CLASS}
           value={config.robotName}
           onChange={(e) =>
             setConfig({ ...config, robotName: e.currentTarget.value })
@@ -77,30 +80,6 @@ export function ConfigScreen({
         />
       </Field>
 
-      <Field
-        label="Owner ID"
-        hint="Used to associate this robot with your account."
-      >
-        <input
-          className={inputClass}
-          value={config.ownerId}
-          onChange={(e) =>
-            setConfig({ ...config, ownerId: e.currentTarget.value })
-          }
-          placeholder="user@example.com"
-        />
-      </Field>
-
-      <Field label="Timezone">
-        <input
-          className={inputClass}
-          value={config.timezone}
-          onChange={(e) =>
-            setConfig({ ...config, timezone: e.currentTarget.value })
-          }
-          placeholder="America/Los_Angeles"
-        />
-      </Field>
 
       <div className="mt-auto pt-4 flex flex-col gap-3">
         <Button
@@ -108,7 +87,7 @@ export function ConfigScreen({
           loading={saving}
           disabled={config.robotName.trim().length === 0}
         >
-          Save and continue
+          {submitLabel}
         </Button>
       </div>
     </div>

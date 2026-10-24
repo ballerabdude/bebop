@@ -1,0 +1,387 @@
+// Robot shell: status bar, navigation and the global E-STOP around every
+// operator page (`#/r/:host/*`).
+//
+//   phones   (<768)      bottom tab bar (safe-area aware), E-STOP floating
+//                        bottom-right above it
+//   tablets  (768-1279)  compact icon rail on the left, E-STOP top-right
+//   desktop  (>=1280)    labeled side rail, E-STOP top-right
+//
+// The Drive page hides most chrome: the rail collapses to icons, the phone
+// tab bar is replaced by a menu button, and only the status bar and E-STOP
+// remain.
+
+import { Suspense, useEffect, useState } from "react";
+import type { ReactNode } from "react";
+import { Link, NavLink, Outlet, useLocation, useParams } from "react-router";
+
+import { cn, PageState, StatusDot, StatusPill } from "../components/ui";
+import type { Tone } from "../components/ui";
+import {
+  RobotProvider,
+  useConnection,
+  useEStop,
+  usePlacesReachable,
+  useRobot,
+  useTelemetry,
+} from "../robot/session";
+import type { RuntimeSnapshot } from "../runtime/types";
+import { EStopButton } from "./EStopButton";
+import {
+  AutonomyIcon,
+  DiagnosticsIcon,
+  DriveIcon,
+  MemoryIcon,
+  MenuIcon,
+  RobotsIcon,
+  SettingsIcon,
+} from "./icons";
+import { robotPath } from "./paths";
+import type { RobotSection } from "./paths";
+import { rememberRobot, useRememberedRobots } from "./robots";
+
+interface NavItem {
+  label: string;
+  section: RobotSection;
+  /// Prefix that marks the item active (defaults to the exact section).
+  match: (path: string) => boolean;
+  icon: () => ReactNode;
+}
+
+const NAV: NavItem[] = [
+  { label: "Drive", section: "drive", match: (p) => p.endsWith("/drive"), icon: DriveIcon },
+  {
+    label: "Autonomy",
+    section: "autonomy",
+    match: (p) => p.endsWith("/autonomy"),
+    icon: AutonomyIcon,
+  },
+  {
+    label: "Memory",
+    section: "autonomy/memory",
+    match: (p) => p.includes("/autonomy/memory"),
+    icon: MemoryIcon,
+  },
+  {
+    label: "Diagnostics",
+    section: "diagnostics/motors",
+    match: (p) => p.includes("/diagnostics"),
+    icon: DiagnosticsIcon,
+  },
+  {
+    label: "Settings",
+    section: "settings",
+    match: (p) => p.endsWith("/settings"),
+    icon: SettingsIcon,
+  },
+];
+
+// ------------------------------------------------------------- status bar
+
+interface StatusSlice {
+  mode: RuntimeSnapshot["mode"] | null;
+  visionPresent: boolean;
+  visionRunning: boolean;
+  voicePresent: boolean;
+  voiceRunning: boolean;
+  socKnown: boolean;
+  soc: number;
+  volts: number;
+  powerPresent: boolean;
+  powerReceived: boolean;
+  drivePresent: boolean;
+  driver: "you" | "other" | "none";
+  driverName: string;
+}
+
+function selectStatus(s: RuntimeSnapshot | null): StatusSlice {
+  const p = s?.power;
+  const d = s?.drive;
+  return {
+    mode: s?.mode ?? null,
+    visionPresent: !!s?.vision.present,
+    visionRunning: !!s?.vision.running,
+    voicePresent: !!s?.voice.present,
+    voiceRunning: !!s?.voice.running,
+    powerPresent: !!p?.present,
+    powerReceived: !!p?.statusReceived,
+    socKnown: !!p?.present && !!p.statusReceived && p.stateOfChargePct >= 0,
+    soc: Math.round(p?.stateOfChargePct ?? -1),
+    volts: Math.round((p?.batteryVoltageV ?? 0) * 10) / 10,
+    drivePresent: !!d?.present,
+    driver: d?.youAreActiveOperator ? "you" : d?.hasActiveOperator ? "other" : "none",
+    driverName: d?.activeOperatorName ?? "",
+  };
+}
+
+const MODE_LABEL: Record<string, string> = {
+  UNSPECIFIED: "Unknown",
+  IDLE: "Idle",
+  DIAL_IN: "Armed mode",
+  RUN_POLICY: "Policy",
+};
+
+function StatusBar({ onMenu, showMenu }: { onMenu: () => void; showMenu: boolean }) {
+  const { host } = useRobot();
+  const link = useConnection();
+  const s = useTelemetry(selectStatus, 5);
+  const robots = useRememberedRobots();
+  const name = robots.find((r) => r.host === host)?.name;
+  // Keep the pills clear of the fixed E-STOP (wider while Reset shows).
+  const estop = useEStop();
+  const latched = estop.latched;
+  const estopErr = !!estop.error;
+  const placesUp = usePlacesReachable();
+
+  const runtimeTone: Tone =
+    link.state === "connected" ? "ok" : link.state === "degraded" ? "warn" : link.state === "connecting" ? "warn" : "err";
+  const svc = (present: boolean, running: boolean): Tone =>
+    link.state !== "connected" && link.state !== "degraded"
+      ? "dim"
+      : !present
+        ? "dim"
+        : running
+          ? "ok"
+          : "dim";
+  const batteryTone: Tone = !s.socKnown ? "dim" : s.soc < 25 ? "err" : s.soc < 60 ? "warn" : "ok";
+
+  return (
+    <header className="sticky top-0 z-30 border-b border-border bg-bg/90 pt-safe backdrop-blur-md">
+      <div
+        className={cn(
+          "flex min-h-14 items-center gap-2 px-3 py-1.5 sm:px-4 md:min-h-16",
+          estopErr ? (latched ? "md:pr-[440px]" : "md:pr-[340px]") : latched ? "md:pr-[250px]" : "md:pr-[130px]",
+        )}
+      >
+        {showMenu ? (
+          <button
+            type="button"
+            onClick={onMenu}
+            aria-label="Open navigation"
+            className="inline-flex h-touch w-touch shrink-0 items-center justify-center rounded-card text-text-dim hover:bg-bg-elev-2 hover:text-text md:hidden"
+          >
+            <MenuIcon />
+          </button>
+        ) : null}
+        <Link
+          to="/"
+          className="flex min-h-touch min-w-0 shrink items-center gap-1 rounded-card pr-2 text-left hover:bg-bg-elev-2"
+          title="Switch robot"
+        >
+          <span className="hidden text-text-dim md:inline-flex">
+            <RobotsIcon />
+          </span>
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-semibold leading-tight">
+              {name || host}
+            </span>
+            {name ? (
+              <span className="block truncate font-mono text-micro leading-tight text-text-dim">
+                {host}
+              </span>
+            ) : null}
+          </span>
+        </Link>
+
+        <div
+          className="flex shrink-0 items-center gap-2 rounded-full border border-border px-2.5 py-1"
+          aria-label="Service links"
+        >
+          <StatusDot
+            tone={runtimeTone}
+            pulse={link.state === "connecting"}
+            label={`Runtime ${link.state}`}
+          />
+          <StatusDot tone={svc(s.visionPresent, s.visionRunning)} label={`Video ${s.visionRunning ? "running" : "stopped"}`} />
+          <StatusDot tone={svc(s.voicePresent, s.voiceRunning)} label={`Voice ${s.voiceRunning ? "running" : "stopped"}`} />
+          <StatusDot
+            tone={placesUp === null ? "dim" : placesUp ? "ok" : "err"}
+            label={`Places ${placesUp === null ? "unknown" : placesUp ? "reachable" : "unreachable"}`}
+          />
+        </div>
+
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+          {link.state === "degraded" ? (
+            <StatusPill tone="warn" dot pulse>
+              link degraded
+            </StatusPill>
+          ) : link.state !== "connected" ? (
+            <StatusPill tone="warn" dot pulse>
+              {link.state === "connecting" ? "connecting" : "offline"}
+            </StatusPill>
+          ) : null}
+          {s.powerPresent ? (
+            <StatusPill tone={batteryTone} title="Battery">
+              {s.socKnown ? `${s.soc}%` : s.powerReceived ? `${s.volts.toFixed(1)} V` : "batt —"}
+            </StatusPill>
+          ) : null}
+          {s.mode ? (
+            <StatusPill tone={s.mode === "IDLE" ? "dim" : "info"} className="hidden sm:inline-flex" title="Firmware mode">
+              {MODE_LABEL[s.mode] ?? s.mode}
+            </StatusPill>
+          ) : null}
+          {s.drivePresent && s.driver !== "none" ? (
+            <StatusPill tone={s.driver === "you" ? "ok" : "warn"} title="Who holds the drive seat">
+              {s.driver === "you" ? "you drive" : s.driverName ? `${s.driverName} driving` : "other driving"}
+            </StatusPill>
+          ) : null}
+        </div>
+      </div>
+    </header>
+  );
+}
+
+// ------------------------------------------------------------- navigation
+
+function SideRail({ host, compact }: { host: string; compact: boolean }) {
+  const { pathname } = useLocation();
+  return (
+    <nav
+      aria-label="Robot sections"
+      className={cn(
+        "hidden shrink-0 flex-col gap-1 border-r border-border bg-bg-elev/40 px-2 pt-[max(0.75rem,env(safe-area-inset-top))] pb-3 md:flex",
+        compact ? "w-[72px]" : "w-[72px] xl:w-56",
+      )}
+    >
+      {NAV.map((item) => {
+        const active = item.match(pathname);
+        return (
+          <NavLink
+            key={item.label}
+            to={robotPath(host, item.section)}
+            aria-current={active ? "page" : undefined}
+            title={item.label}
+            className={cn(
+              "flex h-12 items-center gap-3 rounded-card px-3 text-sm font-semibold transition-colors",
+              compact ? "justify-center" : "justify-center xl:justify-start",
+              active ? "bg-accent/15 text-accent" : "text-text-dim hover:bg-bg-elev-2 hover:text-text",
+            )}
+          >
+            <item.icon />
+            <span className={cn(compact ? "sr-only" : "sr-only xl:not-sr-only")}>{item.label}</span>
+          </NavLink>
+        );
+      })}
+    </nav>
+  );
+}
+
+function BottomTabs({ host }: { host: string }) {
+  const { pathname } = useLocation();
+  return (
+    <nav
+      aria-label="Robot sections"
+      className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-bg/95 pb-safe backdrop-blur-md md:hidden"
+    >
+      <div className="grid grid-cols-5">
+        {NAV.map((item) => {
+          const active = item.match(pathname);
+          return (
+            <NavLink
+              key={item.label}
+              to={robotPath(host, item.section)}
+              aria-current={active ? "page" : undefined}
+              className={cn(
+                "flex h-16 flex-col items-center justify-center gap-0.5 text-micro font-semibold",
+                active ? "text-accent" : "text-text-dim",
+              )}
+            >
+              <item.icon />
+              {item.label}
+            </NavLink>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
+function NavSheet({ host, open, onClose }: { host: string; open: boolean; onClose: () => void }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[55] bg-black/55 md:hidden" onClick={onClose}>
+      <div
+        className="absolute inset-x-0 bottom-0 rounded-t-card border-t border-border bg-bg-elev pb-safe"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="grid grid-cols-3 gap-1 p-3">
+          {NAV.map((item) => (
+            <NavLink
+              key={item.label}
+              to={robotPath(host, item.section)}
+              onClick={onClose}
+              className="flex h-20 flex-col items-center justify-center gap-1 rounded-card text-label font-semibold text-text-dim hover:bg-bg-elev-2 hover:text-text"
+            >
+              <item.icon />
+              {item.label}
+            </NavLink>
+          ))}
+          <Link
+            to="/"
+            onClick={onClose}
+            className="flex h-20 flex-col items-center justify-center gap-1 rounded-card text-label font-semibold text-text-dim hover:bg-bg-elev-2 hover:text-text"
+          >
+            <RobotsIcon />
+            Robots
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------- shell
+
+function Shell() {
+  const { host } = useRobot();
+  const { pathname } = useLocation();
+  const immersive = pathname.endsWith("/drive");
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  useEffect(() => {
+    rememberRobot(host);
+  }, [host]);
+
+  return (
+    <div className="flex h-dvh w-full overflow-hidden">
+      <SideRail host={host} compact={immersive} />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <StatusBar showMenu={immersive} onMenu={() => setMenuOpen(true)} />
+        <main
+          id="main"
+          className={cn(
+            "flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto",
+            // Room for the phone tab bar + floating E-STOP.
+            immersive
+              ? "pb-[calc(88px+env(safe-area-inset-bottom))] md:pb-0"
+              : "pb-[calc(152px+env(safe-area-inset-bottom))] md:pb-6",
+          )}
+        >
+          <Suspense fallback={<PageState kind="loading" />}>
+            <Outlet />
+          </Suspense>
+        </main>
+      </div>
+      {immersive ? null : <BottomTabs host={host} />}
+      <NavSheet host={host} open={menuOpen} onClose={() => setMenuOpen(false)} />
+      <EStopButton
+        className={cn(
+          "fixed right-3 z-40 sm:right-4 md:top-[calc(4px+env(safe-area-inset-top))] md:bottom-auto",
+          immersive
+            ? "bottom-[calc(16px+env(safe-area-inset-bottom))]"
+            : "bottom-[calc(76px+env(safe-area-inset-bottom))]",
+        )}
+      />
+    </div>
+  );
+}
+
+/// Route element for `/r/:host/*`.
+export default function RobotLayout() {
+  // React Router hands params back already decoded.
+  const { host = "" } = useParams();
+  return (
+    <RobotProvider key={host} host={host}>
+      <Shell />
+    </RobotProvider>
+  );
+}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { httpUrl } from "../runtime/urls";
+import { useRobot } from "../robot/session";
 import { Banner, Button, Card } from "./ui";
 
 /// A model backend as reported by `bebop-models` (:9094).
@@ -21,7 +21,6 @@ interface SupervisorHealth {
   mem?: Record<string, number>;
 }
 
-const SUPERVISOR_PORT = 9094;
 const POLL_MS = 3000;
 
 /// GPU-budget + model-lifecycle view backed by the `bebop-models` supervisor
@@ -32,7 +31,8 @@ const POLL_MS = 3000;
 ///
 /// Renders nothing if the supervisor isn't reachable, so it stays out of the
 /// way on robots that don't run it.
-export function ModelSupervisorCard({ robotIp }: { robotIp: string }) {
+export function ModelSupervisorCard() {
+  const { endpoints } = useRobot();
   const [backends, setBackends] = useState<BackendView[]>([]);
   const [health, setHealth] = useState<SupervisorHealth | null>(null);
   const [reachable, setReachable] = useState(false);
@@ -40,13 +40,12 @@ export function ModelSupervisorCard({ robotIp }: { robotIp: string }) {
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    if (!robotIp) return;
     try {
       const [modelsRes, healthRes] = await Promise.all([
-        fetch(httpUrl(robotIp, SUPERVISOR_PORT, "/models"), {
+        fetch(endpoints.models("/models"), {
           signal: AbortSignal.timeout(2500),
         }),
-        fetch(httpUrl(robotIp, SUPERVISOR_PORT, "/healthz"), {
+        fetch(endpoints.models("/healthz"), {
           signal: AbortSignal.timeout(2500),
         }),
       ]);
@@ -60,7 +59,7 @@ export function ModelSupervisorCard({ robotIp }: { robotIp: string }) {
       setReachable(false);
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [robotIp]);
+  }, [endpoints]);
 
   useEffect(() => {
     void refresh();
@@ -76,7 +75,7 @@ export function ModelSupervisorCard({ robotIp }: { robotIp: string }) {
         // `load` can block a while (an Edge-LLM backend's first start builds
         // its TensorRT engines), so don't apply a request timeout.
         const res = await fetch(
-          httpUrl(robotIp, SUPERVISOR_PORT, `/models/${id}/${op}`),
+          endpoints.models(`/models/${id}/${op}`),
           { method: "POST" },
         );
         const body = (await res.json()) as { error?: string };
@@ -88,7 +87,7 @@ export function ModelSupervisorCard({ robotIp }: { robotIp: string }) {
         void refresh();
       }
     },
-    [robotIp, refresh],
+    [endpoints, refresh],
   );
 
   if (!reachable) return null;

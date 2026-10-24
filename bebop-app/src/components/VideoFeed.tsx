@@ -1,8 +1,11 @@
 // Live operator video tile, WebRTC-only.
 //
 // Every stream (color and depth) is served by the bebop-vision process as
-// a WHEP endpoint on `:9092/whep`. We create a recvonly peer connection,
-// POST the offer, apply the answer, and play the incoming track. Media
+// a WHEP endpoint (`endpoints(host).whep(stream)`, :9092). We create a
+// recvonly peer connection, POST the offer, apply the answer, and play the
+// incoming track. When the server returns a `Location` for the session, the
+// tile DELETEs it on teardown so the encoder is released right away instead
+// of after the server's idle timeout. Media
 // rides SRTP/UDP, so latency is ~150 ms and packet loss doesn't
 // head-of-line-block the way the old TCP MJPEG / fragmented-MP4 paths
 // did. There is no MSE/progressive/MJPEG fallback any more — if the
@@ -17,15 +20,13 @@ import { Button, Spinner } from "./ui";
 export type VideoStreamState = "loading" | "live" | "error";
 
 interface VideoFeedProps {
-  /// Runtime base URL (`http://<ip>:<port>`); used only when `videoUrl`
-  /// is omitted, defaulting to `<baseUrl>/whep`.
-  baseUrl: string;
-  /// WebRTC (WHEP) endpoint base, e.g. `http://<ip>:9092/whep`. The
-  /// stream selector and cache-buster are appended as query params.
-  videoUrl?: string;
-  /// Stream selector understood by the server: color_near | color_far |
-  /// depth_near | depth_far.
-  stream?: string;
+  /// WHEP offer URL for one stream (`endpoints(host).whep(stream)`); a
+  /// cache-buster is appended per attempt.
+  whepUrl: string;
+  /// Resolve the session `Location` header to an absolute URL for the
+  /// teardown DELETE (`endpoints(host).whepResource`). Without it, or
+  /// when the server sends no Location, teardown just closes the peer.
+  whepResource?: (location: string) => string;
   /// Bump to tear the peer connection down and reconnect.
   reconnectKey: number;
   /// Self-healing reconnects. When negotiation fails or the connection
@@ -79,9 +80,8 @@ function waitForIceGathering(
 }
 
 export function VideoFeed({
-  baseUrl,
-  videoUrl,
-  stream,
+  whepUrl: offerUrl,
+  whepResource,
   reconnectKey,
   autoReconnect = true,
   reconnectBaseDelayMs = 1000,
@@ -109,11 +109,10 @@ export function VideoFeed({
   // sampling `currentTime` works everywhere.
   const lastTimeRef = useRef(0);
 
-  const whepBase = videoUrl ?? `${baseUrl}/whep`;
   const streamKey = `${reconnectKey}.${autoRetry}`;
-  const whepUrl =
-    `${whepBase}?stream=${encodeURIComponent(stream ?? "color_near")}` +
-    `&r=${streamKey}`;
+  const whepUrl = `${offerUrl}${offerUrl.includes("?") ? "&" : "?"}r=${streamKey}`;
+  const resourceRef = useRef(whepResource);
+  resourceRef.current = whepResource;
 
   const report = (s: VideoStreamState) => {
     setState(s);
@@ -184,6 +183,8 @@ export function VideoFeed({
 
     const pc = new RTCPeerConnection({ iceServers: [] });
     let disposed = false;
+    // WHEP session resource (from the POST's Location), DELETEd on teardown.
+    let sessionUrl: string | null = null;
     const fail = () => {
       if (disposed) return;
       report("error");
@@ -212,9 +213,30 @@ export function VideoFeed({
           headers: { "Content-Type": "application/sdp" },
           body: pc.localDescription?.sdp ?? offer.sdp ?? "",
         });
+        if (res.status === 503) {
+          // Viewer limit (JSON body, Retry-After) or encoder unavailable.
+          let detail = "";
+          try {
+            const j = (await res.json()) as { error?: string; message?: string };
+            detail = j.error ?? j.message ?? "";
+          } catch {
+            /* not JSON */
+          }
+          throw new Error(
+            detail === "viewer limit"
+              ? "Stream busy: too many viewers, retry in a few seconds"
+              : `Stream unavailable${detail ? `: ${detail}` : ""}`,
+          );
+        }
         if (!res.ok) throw new Error(`WHEP HTTP ${res.status}`);
+        const location = res.headers.get("Location");
+        const resolve = resourceRef.current;
+        if (location && resolve) sessionUrl = resolve(location);
         const answer = await res.text();
-        if (disposed) return;
+        if (disposed) {
+          if (sessionUrl) void fetch(sessionUrl, { method: "DELETE" }).catch(() => {});
+          return;
+        }
         await pc.setRemoteDescription({ type: "answer", sdp: answer });
       } catch {
         fail();
@@ -223,6 +245,11 @@ export function VideoFeed({
 
     return () => {
       disposed = true;
+      if (sessionUrl) {
+        // keepalive lets the DELETE survive a page unload.
+        void fetch(sessionUrl, { method: "DELETE", keepalive: true }).catch(() => {});
+        sessionUrl = null;
+      }
       pc.ontrack = null;
       pc.onconnectionstatechange = null;
       try {
@@ -304,11 +331,7 @@ export function VideoFeed({
                 Stream lost — reconnecting
                 {secondsLeft !== null ? ` in ${secondsLeft}s` : ""}…
               </span>
-              <Button
-                variant="ghost"
-                className="text-xs h-8"
-                onClick={retryNow}
-              >
+              <Button variant="ghost" size="sm" onClick={retryNow}>
                 Retry now
               </Button>
             </>

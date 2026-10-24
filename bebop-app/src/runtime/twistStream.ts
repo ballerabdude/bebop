@@ -20,7 +20,20 @@
 //    newest twist goes out on the next tick once the socket drains;
 //  * stops (0, 0) go out immediately: no throttle, no buffer check;
 //  * firmware rejections of non-zero twists (another operator holds the
-//    drive seat) reach `onError`, at most once per `errorIntervalMs`.
+//    drive seat) reach `onError`, at most once per `errorIntervalMs`;
+//  * a stop is only written when this stream owes one: it wrote a non-zero
+//    twist since its last stop, or `holdsSeat()` says this client holds the
+//    drive seat. A spectator's (0, 0) would otherwise halt whoever is
+//    driving. A seat-held stop is written once: repeated neutral reports
+//    (a joystick resting in its dead zone, keyups typed into a text field)
+//    don't re-send (0, 0) until a non-zero twist has gone out again.
+//    `forceStop()` always writes (E-STOP-adjacent use);
+//  * after the link drops (a write finds the socket closed, or `linkLost()`)
+//    or after `requireNeutral()` (window blur, tab hidden, the firmware's
+//    operator watchdog fired), a held input does NOT resume: non-zero
+//    twists are ignored until the input returns to neutral, i.e. a
+//    `set(0, 0)` or `stop()` arrives. Only a fresh operator action moves
+//    the robot again.
 //
 // The module is pure: no React, DOM or transport imports. The socket write,
 // buffered-byte probe, clock and timers are injected, so the unit tests
@@ -70,6 +83,13 @@ export interface TwistStreamDeps {
   clearTimer(handle: unknown): void;
   /// Rate-limited sink for rejections of non-zero twists.
   onError?(message: string): void;
+  /// True while this client holds the firmware's drive seat. A stop is then
+  /// written even if this stream hasn't driven since its last stop (once:
+  /// not again until a non-zero twist has been written).
+  /// Optional: without it only this stream's own driving owes a stop.
+  holdsSeat?(): boolean;
+  /// Called whenever the re-engage latch (`needsNeutral()`) flips.
+  onNeutralRequiredChange?(required: boolean): void;
 }
 
 export interface TwistStreamOptions {
@@ -83,9 +103,26 @@ export interface TwistStream {
   /// Request a body twist (vx m/s, wz rad/s, +wz = left turn). A non-zero
   /// twist opens or continues a drive cycle. (0, 0) is a stop.
   set(vx: number, wz: number): void;
-  /// Close the drive cycle and write (0, 0) right away. Still writes after
-  /// `dispose()`: a late stop from an unmounting input must reach the robot.
+  /// Close the drive cycle and write (0, 0) right away if this stream owes
+  /// a stop (it drove since its last stop, or holds the seat). Also clears
+  /// the re-engage latch: a stop is the input returning to neutral. Still
+  /// writes after `dispose()`: a late stop from an unmounting input must
+  /// reach the robot.
   stop(): void;
+  /// Always writes (0, 0), owed or not. Unlike `stop()` it is a halt, not
+  /// a release: if a drive cycle was open (or the latch was set) the held
+  /// input must return to neutral before driving again.
+  forceStop(): void;
+  /// Stop (if owed) and, when an input is currently held, ignore non-zero
+  /// twists until the input returns to neutral. For window blur, tab
+  /// hidden, page hide and the firmware's operator-stale signal.
+  requireNeutral(): void;
+  /// The link dropped: nothing more can be written on this connection and
+  /// the firmware has released the seat, so no stop is owed. A held input
+  /// must return to neutral before it drives again.
+  linkLost(): void;
+  /// True while a held input must return to neutral before driving.
+  needsNeutral(): boolean;
   /// True while a drive cycle is open.
   isDriving(): boolean;
   /// Cancel the keepalive and ignore later non-zero twists. Writes nothing.
@@ -111,6 +148,31 @@ export function createTwistStream(
   let timer: { handle: unknown; at: number } | null = null;
   let lastErrorAt = -Infinity;
   let disposed = false;
+  /// A non-zero twist reached the socket since the last stop.
+  let owesStop = false;
+  /// Re-engage latch: non-zero twists are ignored until neutral.
+  let latched = false;
+  /// The last frame written was a stop and no non-zero twist went out
+  /// since: a seat-held stop needn't be written again.
+  let stopWritten = false;
+
+  function setLatched(next: boolean): void {
+    if (latched === next) return;
+    latched = next;
+    try {
+      deps.onNeutralRequiredChange?.(next);
+    } catch {
+      /* a listener error must not break the stream */
+    }
+  }
+
+  function seatHeld(): boolean {
+    try {
+      return deps.holdsSeat?.() ?? false;
+    } catch {
+      return false;
+    }
+  }
 
   function reportError(message: string): void {
     if (disposed) return;
@@ -121,11 +183,17 @@ export function createTwistStream(
   }
 
   // A throwing transport must not take the keepalive down with it.
-  function write(vx: number, wz: number, onReject?: (message: string) => void): boolean {
+  // "closed" = the socket isn't open (send returned false); "threw" = a
+  // transient failure worth retrying on the next tick.
+  function write(
+    vx: number,
+    wz: number,
+    onReject?: (message: string) => void,
+  ): "ok" | "closed" | "threw" {
     try {
-      return deps.send(vx, wz, onReject);
+      return deps.send(vx, wz, onReject) ? "ok" : "closed";
     } catch {
-      return false;
+      return "threw";
     }
   }
 
@@ -164,21 +232,61 @@ export function createTwistStream(
       wakeAt(now + minIntervalMs, now);
       return;
     }
-    if (write(target.vx, target.wz, reportError)) {
+    const result = write(target.vx, target.wz, reportError);
+    if (result === "closed") {
+      // The link is down. Don't keep retrying the held twist: when the
+      // socket comes back it would drive with no new operator action.
+      linkLost();
+      return;
+    }
+    if (result === "ok") {
       written = target;
       writtenAt = now;
+      owesStop = true;
+      stopWritten = false;
     }
-    // After a write this is the next keepalive. After a failed write
-    // (socket closed) it is the retry, so a twist still held when the
-    // link comes back resumes.
+    // After a write this is the next keepalive. After a send that threw
+    // it is the retry.
     wakeAt(now + keepaliveMs, now);
   }
 
-  function stop(): void {
+  function writeStop(): void {
+    if (write(0, 0) === "ok") {
+      writtenAt = deps.now();
+      stopWritten = true;
+    }
+  }
+
+  // End the drive cycle; write (0, 0) only if this stream owes it.
+  function endCycle(): void {
+    const owed = owesStop || (!stopWritten && seatHeld());
     target = null;
     written = null;
+    owesStop = false;
     cancelTimer();
-    if (write(0, 0)) writtenAt = deps.now();
+    if (owed) writeStop();
+  }
+
+  function stop(): void {
+    endCycle();
+    setLatched(false);
+  }
+
+  function requireNeutral(): void {
+    const held = target !== null || latched;
+    endCycle();
+    setLatched(held && !disposed);
+  }
+
+  function linkLost(): void {
+    const held = target !== null || latched;
+    target = null;
+    written = null;
+    owesStop = false;
+    // A new connection may be a new seat: its first seat-held stop counts.
+    stopWritten = false;
+    cancelTimer();
+    if (held && !disposed) setLatched(true);
   }
 
   function set(vx: number, wz: number): void {
@@ -190,7 +298,7 @@ export function createTwistStream(
       stop();
       return;
     }
-    if (disposed) return;
+    if (disposed || latched) return;
     target = { vx: x, wz: z };
     pump();
   }
@@ -198,6 +306,20 @@ export function createTwistStream(
   return {
     set,
     stop,
+    forceStop() {
+      const held = target !== null || latched;
+      target = null;
+      written = null;
+      owesStop = false;
+      cancelTimer();
+      writeStop();
+      // A held input stays held after an emergency stop: it must be
+      // released before the robot moves again.
+      setLatched(held && !disposed);
+    },
+    requireNeutral,
+    linkLost,
+    needsNeutral: () => latched,
     isDriving: () => target !== null,
     dispose() {
       disposed = true;

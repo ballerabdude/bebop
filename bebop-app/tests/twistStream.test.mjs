@@ -295,21 +295,206 @@ test("rejections of driving twists reach onError at most once per interval", () 
   assert.ok(env.frames.length >= 10);
 });
 
-test("a closed socket keeps the cycle open and the held twist resumes on reconnect", () => {
+test("a closed socket ends the cycle and a held twist does NOT resume on reconnect", () => {
+  // Regression for the review's P1: the old stream kept retrying the held
+  // twist, so the robot drove again on reconnect with no operator action.
   const { env, stream, at, values } = rig();
-  env.open = false;
   stream.set(0.3, 0.2);
-  at(1000);
-  assert.equal(env.frames.length, 0);
-  assert.equal(stream.isDriving(), true);
-  env.open = true;
-  at(1000 + TWIST_KEEPALIVE_MS);
   assert.equal(env.frames.length, 1);
-  assert.deepEqual(values()[0], [0.3, 0.2]);
-  // A stop while closed must not throw.
   env.open = false;
-  stream.stop();
+  at(TWIST_KEEPALIVE_MS); // the keepalive finds the socket closed
   assert.equal(stream.isDriving(), false);
+  assert.equal(stream.needsNeutral(), true);
+  assert.equal(env.timers.size, 0, "no retry loop while closed");
+  env.open = true;
+  at(2000);
+  assert.equal(env.frames.length, 1, "nothing resumed on reconnect");
+  // The input is still held and keeps reporting: ignored.
+  stream.set(0.3, 0.2);
+  stream.set(0.4, 0.2);
+  at(2500);
+  assert.equal(env.frames.length, 1);
+  // Release to neutral: no stop is owed (the firmware dropped the old
+  // connection), so nothing is written, but the latch clears.
+  stream.set(0, 0);
+  assert.equal(stream.needsNeutral(), false);
+  assert.equal(env.frames.length, 1);
+  // A fresh press drives.
+  stream.set(0.3, 0.2);
+  assert.deepEqual(values().at(-1), [0.3, 0.2]);
+  assert.equal(env.frames.length, 2);
+});
+
+test("a press while the link is down needs a release once it is back", () => {
+  const { env, stream, at } = rig();
+  env.open = false;
+  stream.set(0.3, 0);
+  assert.equal(stream.needsNeutral(), true);
+  env.open = true;
+  at(500);
+  stream.set(0.3, 0);
+  assert.equal(env.frames.length, 0);
+  stream.stop();
+  assert.equal(env.frames.length, 0, "no stop owed");
+  stream.set(0.3, 0);
+  assert.equal(env.frames.length, 1);
+});
+
+test("linkLost() latches a held twist without writing", () => {
+  const { env, stream, at } = rig();
+  stream.set(0.3, 0);
+  stream.linkLost();
+  assert.equal(stream.isDriving(), false);
+  assert.equal(stream.needsNeutral(), true);
+  assert.equal(env.frames.length, 1, "no stop written into a dead link");
+  at(1000);
+  assert.equal(env.frames.length, 1);
+  // linkLost with nothing held doesn't latch: the next press just drives.
+  stream.stop();
+  stream.linkLost();
+  assert.equal(stream.needsNeutral(), false);
+  stream.set(0.2, 0);
+  assert.equal(env.frames.length, 2);
+});
+
+test("requireNeutral (blur / hidden / operator stale) stops a driving stream and latches", () => {
+  const { env, stream, at, values } = rig();
+  stream.set(0.3, 0.1);
+  at(150);
+  stream.requireNeutral();
+  assert.deepEqual(values().at(-1), [0, 0], "the stop goes out at once");
+  assert.equal(stream.needsNeutral(), true);
+  const n = env.frames.length;
+  // The held key / stick keeps reporting: nothing moves.
+  stream.set(0.3, 0.1);
+  at(1000);
+  assert.equal(env.frames.length, n);
+  stream.stop(); // released: latch clears, no second stop (not owed)
+  assert.equal(env.frames.length, n);
+  assert.equal(stream.needsNeutral(), false);
+  stream.set(0.3, 0.1);
+  assert.equal(env.frames.length, n + 1);
+});
+
+test("requireNeutral with nothing held neither writes nor latches", () => {
+  const { env, stream } = rig();
+  stream.requireNeutral();
+  assert.equal(env.frames.length, 0, "a spectator's blur sends nothing");
+  assert.equal(stream.needsNeutral(), false);
+  stream.set(0.3, 0);
+  assert.equal(env.frames.length, 1, "the first press after refocus drives");
+});
+
+test("onNeutralRequiredChange reports latch flips once each", () => {
+  const flips = [];
+  const env = { t: 0 };
+  const stream = createTwistStream({
+    send: () => true,
+    bufferedAmount: () => 0,
+    now: () => env.t,
+    setTimer: () => 1,
+    clearTimer() {},
+    onNeutralRequiredChange: (v) => flips.push(v),
+  });
+  stream.set(0.3, 0);
+  stream.requireNeutral();
+  stream.requireNeutral();
+  stream.set(0.3, 0);
+  stream.set(0, 0);
+  stream.set(0, 0);
+  assert.deepEqual(flips, [true, false]);
+});
+
+test("a spectator's stops never reach the wire; forceStop always does", () => {
+  // Passive viewer: never drove, so its release / unmount / blur stops
+  // would halt whoever holds the seat.
+  const { env, stream } = rig();
+  stream.stop();
+  stream.set(0, 0);
+  stream.requireNeutral();
+  assert.equal(env.frames.length, 0);
+  stream.forceStop();
+  assert.equal(env.frames.length, 1);
+  assert.deepEqual([env.frames[0].vx, env.frames[0].wz], [0, 0]);
+  stream.forceStop();
+  assert.equal(env.frames.length, 2, "forceStop writes every time");
+});
+
+test("only one stop is owed per drive cycle", () => {
+  const { env, stream } = rig();
+  stream.set(0.3, 0);
+  stream.stop();
+  stream.stop();
+  stream.set(0, 0);
+  assert.equal(env.frames.length, 2);
+});
+
+test("a twist that never reached the socket owes no stop", () => {
+  const { env, stream, at } = rig();
+  stream.set(0.3, 0);
+  stream.stop();
+  at(10);
+  stream.set(0.4, 0); // inside the throttle window: not written yet
+  stream.stop();
+  assert.equal(env.frames.length, 2, "no stop for a twist nobody saw");
+  at(500);
+  assert.equal(env.frames.length, 2);
+});
+
+test("holdsSeat makes a stop go out, once per drive", () => {
+  let seat = true;
+  const frames = [];
+  let clock = 0;
+  const stream = createTwistStream({
+    send: (vx, wz) => (frames.push([vx, wz]), true),
+    bufferedAmount: () => 0,
+    now: () => (clock += 100),
+    setTimer: () => 1,
+    clearTimer() {},
+    holdsSeat: () => seat,
+  });
+  stream.stop();
+  assert.deepEqual(frames, [[0, 0]]);
+  // Repeated neutral reports (joystick resting in its dead zone) don't
+  // re-send while nothing non-zero went out in between.
+  stream.stop();
+  stream.set(0, 0);
+  assert.equal(frames.length, 1);
+  stream.set(0.3, 0);
+  stream.stop();
+  stream.stop();
+  assert.equal(frames.length, 3);
+  // A new connection may be a new seat: its first stop counts again.
+  stream.linkLost();
+  stream.stop();
+  assert.equal(frames.length, 4);
+  seat = false;
+  stream.linkLost();
+  stream.stop();
+  assert.equal(frames.length, 4);
+  // forceStop is never deduplicated.
+  stream.forceStop();
+  stream.forceStop();
+  assert.equal(frames.length, 6);
+});
+
+test("forceStop mid-drive latches: the held input must be released", () => {
+  const { env, stream } = rig();
+  stream.set(0.3, 0);
+  stream.forceStop();
+  assert.equal(stream.needsNeutral(), true);
+  const n = env.frames.length;
+  stream.set(0.31, 0);
+  assert.equal(env.frames.length, n);
+  stream.set(0, 0);
+  assert.equal(stream.needsNeutral(), false);
+  env.t += 100;
+  stream.set(0.3, 0);
+  assert.equal(env.frames.length, n + 1, "no stop owed on release; the new twist goes out");
+  // Idle forceStop doesn't latch.
+  stream.stop();
+  stream.forceStop();
+  assert.equal(stream.needsNeutral(), false);
 });
 
 test("a throwing send doesn't kill the keepalive", () => {
@@ -349,23 +534,30 @@ test("non-finite components never reach the wire", () => {
   assert.equal(stream.isDriving(), false);
 });
 
-test("stop/go chatter still spaces non-zero frames by the throttle interval", () => {
+test("stop/go chatter spaces non-zero frames and writes only owed stops", () => {
   const { env, stream, at } = rig();
   for (let t = 0; t <= 100; t += 5) {
     at(t);
     if ((t / 5) % 2 === 0) stream.set(0.3, 0);
     else stream.stop();
   }
+  at(150);
+  stream.stop();
   at(300);
-  const stops = env.frames.filter((f) => f.vx === 0 && f.wz === 0);
-  assert.equal(stops.length, 10, "every stop is written");
   let prev = -Infinity;
+  let prevWasStop = true;
   for (const f of env.frames) {
-    if (f.vx !== 0) {
+    const isStop = f.vx === 0 && f.wz === 0;
+    if (!isStop) {
       assert.ok(f.t - prev >= TWIST_MIN_INTERVAL_MS, `non-zero frame at ${f.t}`);
+    } else {
+      assert.ok(!prevWasStop, `stop at ${f.t} not preceded by driving`);
     }
+    prevWasStop = isStop;
     prev = f.t;
   }
+  assert.ok(prevWasStop, "the last frame is a stop");
+  assert.ok(env.frames.some((f) => f.vx !== 0));
 });
 
 test("options override the defaults", () => {

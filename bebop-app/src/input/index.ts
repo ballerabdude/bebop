@@ -24,3 +24,24 @@ export {
   useGamepad,
   useGamepadCallback,
 } from "./useGamepad";
+export {
+  DEADMAN_THRESHOLD,
+  DRIVE_PRIORITY,
+  createDriveArbiter,
+  gamepadTwist,
+  ignoreDriveKeydown,
+  isDriveKey,
+  isEditableTarget,
+  keyboardTwist,
+  mergeDriveSources,
+} from "./driveArbiter";
+export type {
+  DriveArbiter,
+  DriveArbiterState,
+  DriveSource,
+  DriveTwist,
+  GamepadDriveLayout,
+} from "./driveArbiter";
+export { getGamepadLayout, setGamepadLayout, useGamepadLayout } from "./gamepadLayout";
+export { useDriveInput } from "./useDriveInput";
+export type { DriveChannel, DriveInput, DriveInputOptions } from "./useDriveInput";

@@ -16,11 +16,11 @@ export interface WifiJoinResult {
 
 /// Transport used by the setup wizard to talk to a robot's provisioning
 /// server. The only implementation is `SetupTransport`, which speaks
-/// protobuf over a binary WebSocket to `bebop-agent` on port 9091 — over
+/// protobuf over a binary WebSocket to `bebop-agent` (:9091) — over
 /// the LAN once the robot is on Wi-Fi, or directly over its setup hotspot
 /// during first-time provisioning.
 export interface BebopTransport {
-  /// Open the underlying WebSocket. Resolves once the handshake completes.
+  /// Open the underlying WebSocket (requests also open it lazily).
   connect(): Promise<void>;
   disconnect(): void;
   isConnected(): boolean;

@@ -78,6 +78,9 @@ export interface DriveView {
   /// are per-connection, so "you" is well-defined).
   hasActiveOperator: boolean;
   youAreActiveOperator: boolean;
+  /// Name the seat holder announced via `ClientHello` ("" when none,
+  /// or when the holder never sent one / on older firmware).
+  activeOperatorName: string;
   odomX: number; // m
   odomY: number; // m
   odomTheta: number; // rad

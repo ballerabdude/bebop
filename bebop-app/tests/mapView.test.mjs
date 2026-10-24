@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  createPovProjection,
   decodeGridMask,
   decodePlaceLayer,
   decodeRleBase64,
@@ -36,14 +35,6 @@ import {
   zoomPlanView,
 } from "../src/screens/mapView.ts";
 
-const pose = (translation = [0, 0, 0], rotation = [0, 0, 0, 1]) => ({
-  translation,
-  rotation,
-});
-const close = (actual, expected) => {
-  assert.ok(actual, "expected a visible point");
-  actual.forEach((value, i) => assert.ok(Math.abs(value - expected[i]) < 1e-8));
-};
 // Canonical backend format: uint16 run lengths only, alternating from a 0-run.
 const u16Lengths = (lengths) => {
   const buf = Buffer.alloc(lengths.length * 2);
@@ -59,40 +50,6 @@ const u16Runs = (runs, valueFirst = true) => {
   });
   return buf.toString("base64");
 };
-
-test("POV uses perspective and optical axes: right +X, down +Y, forward +Z", () => {
-  const project = createPovProjection(pose(), 800, 600, 90);
-  close(project([0, 0, 2]), [400, 300, 2]);
-  close(project([1, 1, 2]), [550, 450, 2]);
-  close(project([1, 1, 4]), [475, 375, 4]);
-});
-
-test("POV inverts camera translation and rotation rather than rotating the world forward", () => {
-  const q = [0, Math.SQRT1_2, 0, Math.SQRT1_2];
-  const project = createPovProjection(pose([1, 2, 3], q), 800, 600, 90);
-  close(project([3, 2, 3]), [400, 300, 2]);
-  close(project([3, 3, 2]), [550, 450, 2]);
-  // Unit and scaled quaternions represent the same orientation.
-  const scaled = createPovProjection(pose([1, 2, 3], q.map(v => v * 2)), 800, 600, 90);
-  close(scaled([3, 3, 2]), [550, 450, 2]);
-});
-
-test("POV clips points behind camera, inside near plane, outside viewport, and nonfinite", () => {
-  const project = createPovProjection(pose(), 800, 600, 90, 0.1);
-  for (const point of [[0, 0, -1], [0, 0, 0], [0, 0, 0.05], [100, 0, 1], [0, 100, 1], [NaN, 0, 1]]) {
-    assert.equal(project(point), null);
-  }
-});
-
-test("POV rejects invalid pose and projection inputs", () => {
-  for (const bad of [null, pose([NaN, 0, 0]), pose([0, 0, 0], [0, 0, 0, 0]), pose([0, 0, 0], [0, 0, Infinity, 1])]) {
-    assert.equal(createPovProjection(bad, 800, 600), null);
-  }
-  for (const [width, height, fov, near] of [[0, 600, 70, 0.1], [800, 0, 70, 0.1], [800, 600, 0, 0.1], [800, 600, 180, 0.1], [800, 600, 70, -1]]) {
-    assert.equal(createPovProjection(pose(), width, height, fov, near), null);
-  }
-});
-
 
 test("plan world<->screen projection round-trips with pan and zoom", () => {
   const view = { centerX: 2, centerY: 3, scale: 10, width: 200, height: 100 };

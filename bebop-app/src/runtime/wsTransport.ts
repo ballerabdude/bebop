@@ -18,9 +18,10 @@
 //    reply is routed back, to a per-frame callback held in a bounded
 //    registry.
 //
-// The runtime API is intentionally separate from the BLE control surface
-// in `src/ble/`; the BLE transport is for one-shot setup over Bluetooth,
-// while this one is the high-bandwidth IP path used after Wi-Fi config.
+// The runtime API is separate from the provisioning surface in
+// `src/setup/` (bebop-agent on :9091); this one is the firmware's control
+// and telemetry path. One instance per robot is owned by `RobotProvider`
+// (`src/robot/session.tsx`).
 
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
@@ -42,16 +43,15 @@ import {
   SetHfTokenSchema,
   SetModelPurposeSchema,
   SetPolicyDryRunSchema,
-  SetNavigationGoalSchema,
   SetVelocityCommandSchema,
   SetVisionEnabledSchema,
   SetVoiceEnabledSchema,
-  Vec2Schema,
   SetWheelEnabledSchema,
   SetAllWheelsEnabledSchema,
   ResetOdometrySchema,
   CalibrateWheelSchema,
   SubscribeTelemetrySchema,
+  ClientHelloSchema,
   UnsubscribeTelemetrySchema,
   type ClientRuntimeMessage,
   type Snapshot,
@@ -86,30 +86,17 @@ import type {
   VoiceView,
   WheelView,
 } from "./types";
+import { reconnectDelayMs } from "./backoff";
+import { PORTS } from "../robot/endpoints";
 import { wsUrl } from "./urls";
 
-const DEFAULT_PORT = 9090;
+const DEFAULT_PORT = PORTS.runtime;
 const ACK_TIMEOUT_MS = 5_000;
-/// How long to wait between auto-reconnect attempts after an unintended
-/// socket close (server reboot, Wi-Fi flap, etc.). Matches the
-/// firmware's ~5 s telemetry-pump period so the operator sees recovery
-/// within a couple of frames; short enough that a brief outage is
-/// barely noticeable but long enough to avoid pegging the CPU /
-/// network if the robot is genuinely down.
-const RECONNECT_DELAY_MS = 5_000;
 
 type PendingResolver = (msg: ServerRuntimeMessage) => void;
 type TelemetryListener = (snapshot: RuntimeSnapshot) => void;
 type EStopListener = (reason: string) => void;
 type ModeListener = (mode: RuntimeMode) => void;
-/// Active navd navigation goal. `null` = goal cleared / none.
-export type NavGoalUpdate =
-  | { kind: "heading"; headingRad: number }
-  | { kind: "point"; x: number; y: number };
-export type NavGoalListener = (goal: NavGoalUpdate | null) => void;
-/// Nav-mask pushes are high-rate (~10 Hz × 14 KB) and are consumed by
-/// the video overlay's draw loop directly — they deliberately do NOT
-/// flow through the `RuntimeSnapshot` state machine like telemetry.
 
 /// Lifecycle of the underlying WebSocket exposed to consumers.
 ///
@@ -138,7 +125,6 @@ export class RuntimeTransport {
   private telemetryListeners = new Set<TelemetryListener>();
   private estopListeners = new Set<EStopListener>();
   private modeListeners = new Set<ModeListener>();
-  private navGoalListeners = new Set<NavGoalListener>();
   private connectionStateListeners = new Set<ConnectionStateListener>();
 
   /// Last (host, port) the caller asked us to open. Stashed so the
@@ -154,14 +140,36 @@ export class RuntimeTransport {
   /// Cleared on `disconnect()` and whenever the reconnect actually
   /// fires (so a fresh failure can schedule a new one).
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /// Consecutive failed (re)connect attempts; drives the backoff.
+  private reconnectAttempt = 0;
   /// Last subscribed telemetry rate, so we can transparently resume
   /// the subscription after an auto-reconnect. `null` means the
   /// caller has not subscribed (or has explicitly unsubscribed) and
   /// we should NOT re-issue `SubscribeTelemetry` on reconnect.
   private subscribedRateHz: number | null = null;
-  /// Last subscribed nav-mask rate, so an auto-reconnect transparently
-  /// resumes the overlay stream (same pattern as telemetry).
   private connectionState: RuntimeConnectionState = "disconnected";
+  /// Display name announced via `ClientHello` on every (re)connect, so
+  /// other operators see who holds the drive seat. Defaults to a stable
+  /// per-browser name (see `defaultClientName`).
+  private clientName: string = defaultClientName();
+
+  /// Change the announced name; re-announces at once when connected.
+  setClientName(name: string): void {
+    this.clientName = name;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.sendHello();
+  }
+
+  /// Fire-and-forget `ClientHello`. Firmware older than the hello
+  /// answers "empty or unsupported client message"; that is harmless.
+  private sendHello(): void {
+    if (!this.clientName) return;
+    void this.request({
+      case: "clientHello",
+      value: create(ClientHelloSchema, { name: this.clientName }),
+    }).catch(() => {
+      /* old firmware, or the socket dropped; the next open re-sends */
+    });
+  }
 
   /** Open the socket and resolve once we get the `open` event.
    *
@@ -175,7 +183,8 @@ export class RuntimeTransport {
    *  closing is not allowed".
    *
    *  Once `connect()` succeeds, the transport latches `wantConnected =
-   *  true` and will auto-reconnect every `RECONNECT_DELAY_MS` after
+   *  true` and will auto-reconnect (250 ms backoff doubling to 5 s, see
+   *  `backoff.ts`) after
    *  any subsequent close (server reboot, brief Wi-Fi outage, etc.)
    *  until `disconnect()` is called. Telemetry subscriptions are
    *  re-established automatically on each reconnect so the operator
@@ -246,7 +255,9 @@ export class RuntimeTransport {
           reject(new Error("disconnected during connect"));
           return;
         }
+        this.reconnectAttempt = 0;
         this.setConnectionState("connected");
+        this.sendHello();
         // Resume telemetry subscription if the caller had one before
         // the drop. Fire-and-forget — a failure here just means the
         // next close will trigger another reconnect, and the operator
@@ -294,6 +305,8 @@ export class RuntimeTransport {
     }
     if (this.reconnectTimer !== null) return;
     this.setConnectionState("connecting");
+    const delay = reconnectDelayMs(this.reconnectAttempt);
+    this.reconnectAttempt += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (!this.wantConnected) return;
@@ -301,7 +314,38 @@ export class RuntimeTransport {
         // openSocket() will already have triggered `onclose` which
         // schedules the next attempt; nothing more to do here.
       });
-    }, RECONNECT_DELAY_MS);
+    }, delay);
+  }
+
+  /// Drop the current socket and dial again right away, keeping the
+  /// telemetry subscription. Used by the session's liveness check when the
+  /// socket looks open but telemetry stopped arriving (a half-dead TCP link
+  /// after a Wi-Fi roam never fires `onclose` on its own).
+  forceReconnect(): void {
+    if (!this.wantConnected) return;
+    const ws = this.ws;
+    this.ws = null;
+    this.failAllPending("WS reset (no telemetry)");
+    if (ws) {
+      ws.onopen = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onmessage = null;
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempt = 0;
+    this.setConnectionState("connecting");
+    void this.openSocket().catch(() => {
+      /* onclose schedules the next attempt */
+    });
   }
 
   disconnect(): void {
@@ -312,6 +356,7 @@ export class RuntimeTransport {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.reconnectAttempt = 0;
     this.subscribedRateHz = null;
     this.endpoint = null;
     const ws = this.ws;
@@ -393,12 +438,6 @@ export class RuntimeTransport {
     this.modeListeners.add(cb);
     return () => this.modeListeners.delete(cb);
   }
-  /// Active navigation goal (navd). Pushed on change and once after
-  /// connect; `null` = no active goal.
-  onNavGoal(cb: NavGoalListener): () => void {
-    this.navGoalListeners.add(cb);
-    return () => this.navGoalListeners.delete(cb);
-  }
 
   // -------------------------------------------------------------- requests
   async getSnapshot(): Promise<RuntimeSnapshot> {
@@ -433,10 +472,6 @@ export class RuntimeTransport {
       value: create(UnsubscribeTelemetrySchema, {}),
     });
   }
-
-  /// Subscribe to the pushed nav-mask frames (the video overlay feed).
-  /// Rate hint is an upper bound — the firmware only pushes new masks,
-  /// so a rate above the model's own inference rate just idles.
 
   async setMotorEnabled(jointName: string, enabled: boolean): Promise<void> {
     await this.requestAck({
@@ -609,29 +644,6 @@ export class RuntimeTransport {
     });
   }
 
-  /// Operator navigation goal for the navd goal-drive pipeline (plan §8).
-  /// `heading` = body-frame offset (rad, + left), `pointOdom` = odom-frame
-  /// destination (m); both optional, neither = clear the active goal.
-  async setNavigationGoal(goal?: {
-    headingRad?: number;
-    pointOdom?: { x: number; y: number };
-  }): Promise<void> {
-    await this.requestAck({
-      case: "setNavigationGoal",
-      value: create(SetNavigationGoalSchema, {
-        goal: goal?.headingRad !== undefined
-          ? { case: "headingRad", value: goal.headingRad }
-          : goal?.pointOdom !== undefined
-            ? {
-                case: "pointOdom",
-                value: create(Vec2Schema, goal.pointOdom),
-              }
-            : undefined,
-        clear: !goal,
-      }),
-    });
-  }
-
   /// Run the ODrive FULL_CALIBRATION_SEQUENCE on one wheel (~20-30 s spin).
   /// The axis must be disarmed first. Recovers a lost encoder calibration —
   /// the CAN result is NOT saved to the S1's NVM, so it must be re-run
@@ -642,17 +654,6 @@ export class RuntimeTransport {
       value: create(CalibrateWheelSchema, { wheelName }),
     });
   }
-
-  // -------------------------------------------------------------- camera
-
-  /// Command the camera gimbal to an absolute pan/tilt pose in degrees
-  /// (pan + = right, tilt + = up; 0/0 = power-on center). The firmware
-  /// clamps to the camera's UVC limits (OBSBOT Tiny 2: pan ±130°, tilt
-  /// ±90°) and is deliberately NOT mode-gated — PTZ look-around is safe
-  /// in any mode (dataset recording included). The settled pose arrives
-  /// via telemetry (`camera` field of the snapshot views); a 30° move
-  /// takes ~0.5-0.7 s, so relative jogging should read the latest pose
-  /// from a snapshot rather than tracking locally.
 
   // -------------------------------------------------------------- misc
 
@@ -821,21 +822,6 @@ export class RuntimeTransport {
       case "modeChanged":
         for (const cb of this.modeListeners) cb(modeFromProto(msg.payload.value.mode));
         break;
-      case "navGoal": {
-        const g = msg.payload.value;
-        const goal: NavGoalUpdate | null =
-          g.goal.case === "headingRad"
-            ? { kind: "heading", headingRad: g.goal.value }
-            : g.goal.case === "pointOdom"
-              ? {
-                  kind: "point",
-                  x: g.goal.value.x,
-                  y: g.goal.value.y,
-                }
-              : null;
-        for (const cb of this.navGoalListeners) cb(g.active ? goal : null);
-        break;
-      }
       case "snapshot":
       case "ack":
       case "error":
@@ -896,6 +882,7 @@ function driveFromProto(d: ProtoDriveState | undefined): DriveView {
     operatorStale: d.operatorStale,
     hasActiveOperator: d.hasActiveOperator,
     youAreActiveOperator: d.youAreActiveOperator,
+    activeOperatorName: d.activeOperatorName ?? "",
     odomX: d.odomX,
     odomY: d.odomY,
     odomTheta: d.odomTheta,
@@ -909,6 +896,7 @@ const EMPTY_DRIVE_VIEW: DriveView = {
   operatorStale: false,
   hasActiveOperator: false,
   youAreActiveOperator: false,
+  activeOperatorName: "",
   odomX: 0,
   odomY: 0,
   odomTheta: 0,
@@ -1192,4 +1180,31 @@ function asErrorMessage(msg: ServerRuntimeMessage, fallback: string): string {
     return msg.payload.value.message || fallback;
   }
   return fallback;
+}
+
+/// A stable, human-readable name for this browser ("phone-3f2a",
+/// "tablet-91c0", "desktop-07be"), remembered in localStorage. Storage
+/// failures (private mode) just give a fresh suffix per load.
+export function defaultClientName(): string {
+  const KEY = "bebop.clientName";
+  try {
+    const saved = globalThis.localStorage?.getItem(KEY);
+    if (saved) return saved;
+  } catch {
+    /* ignore */
+  }
+  const ua = globalThis.navigator?.userAgent ?? "";
+  const kind = /iPad|Tablet/i.test(ua) || (/Android/i.test(ua) && !/Mobile/i.test(ua))
+    ? "tablet"
+    : /Mobi|iPhone|Android/i.test(ua)
+      ? "phone"
+      : "desktop";
+  const suffix = Math.floor(Math.random() * 0x10000).toString(16).padStart(4, "0");
+  const name = `${kind}-${suffix}`;
+  try {
+    globalThis.localStorage?.setItem(KEY, name);
+  } catch {
+    /* ignore */
+  }
+  return name;
 }
