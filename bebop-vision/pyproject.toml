@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bebop-vision"
 version = "0.1.0"
-description = "Video perception pipeline for the bebop robot: navigable-path prediction + teacher tooling"
+description = "Perception stack for the bebop robot: MCAP recorder, WebRTC operator video, place memory, voice gateway and offline SAM 3.1 labeling tools"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
@@ -28,13 +28,6 @@ dependencies = [
 jetson = [
     "pyorbbecsdk2==2.1.2",
 ]
-# Student-model runtime (§7.3): ONNX inference for --navd-model. CPU build
-# on workstation/CI; on the Jetson use the GPU build instead
-# (requirements.txt) — the two distributions share the
-# site-packages/onnxruntime dir, so never install both into one venv.
-runtime = [
-    "onnxruntime>=1.20",
-]
 teacher = [
     "einops",
     "onnx",
@@ -43,27 +36,22 @@ teacher = [
     "tensorrt>=11.0",
     "sam3 @ git+https://github.com/facebookresearch/sam3.git",
 ]
-# Workstation-side training/extraction only: the Jetson never trains, so
-# TensorBoard and PyAV (H.265 MCAP decode) stay out of the main dependency
-# set.  ONNX/TensorRT are installed separately for the M4 export bench
-# because onnxruntime and onnxruntime-gpu share one import name.
-train = [
-    "tensorboard>=2.12",
+# Workstation-side offline tools: PyAV decodes the recorder's H.265 color
+# (tools/mcap_extract.py). On the robot `tensorrt-edgellm[server]` pins av
+# already (requirements.txt), so it stays out of the main dependency set.
+tools = [
     "av>=12",
 ]
-# ML review dashboard: FastAPI backend (tools/dashboard_api.py) + the React
-# app under dashboard/ (built bundle served as static files). Inference
-# prefers the CUDA EP: on a workstation with an NVIDIA GPU install
-# onnxruntime-gpu==1.22.* (the CUDA 12 build — matches the torch-shipped
-# nvidia-* libs; 1.29 requires CUDA 13 system libs) instead of the CPU
-# `runtime` extra — tools/dashboard_api.py pre-loads the bundled
-# CUDA/cuDNN libs and falls back to CPU automatically. Never install
-# onnxruntime and onnxruntime-gpu into one venv (same import name).
-#   pip install -e ".[dashboard]" + onnxruntime(-gpu)
-dashboard = [
+# HTTP services: the voice gateway (bebop_vision/voice_server.py) and the
+# bebop-models supervisor (bebop_vision/models_supervisor.py) run on FastAPI
+# + uvicorn and call their model servers over httpx. On the robot
+# `tensorrt-edgellm[server]` (requirements.txt) pulls these in; a
+# workstation venv needs this extra, or the voice and supervisor tests skip.
+server = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "pydantic>=2.7",
+    "httpx>=0.27",
 ]
 
 [tool.setuptools.packages.find]

@@ -67,17 +67,13 @@ pull-data:
 ledger:
     cd bebop-vision && .venv/bin/python tools/session_ledger.py datasets/sessions
 
-# Review dashboard: replay ticks, paint hand corrections (port 8099).
-review:
-    cd bebop-vision && .venv/bin/python tools/dashboard_api.py --data datasets/navd-v0 --port 8099
-
 # --- Mobile app ------------------------------------------------------------
 
 # Run the companion app in Tauri dev mode (desktop).
 app-dev:
     cd bebop-app && npm run tauri dev
 
-# Run the React UI in a browser (Web Bluetooth transport).
+# Run the React UI in a browser (Vite dev server).
 app-web:
     cd bebop-app && npm run dev
 
@@ -218,9 +214,10 @@ lab-train-kill TARGET="latest":
     done
     echo "done"
 
-# Export a trained RSL-RL checkpoint to ONNX (the artefact deployed on the
-# robot). Runs export_bebop_model.py inside the lab container; the ONNX is
-# written next to the checkpoint by default.
+# Export a trained RSL-RL checkpoint to ONNX (the robot no longer runs it:
+# the firmware's policy runner was removed on 2026-10-24). Runs
+# export_bebop_model.py inside the lab container; the ONNX is written next
+# to the checkpoint by default.
 #
 # CHECKPOINT may be:
 #   - omitted            -> latest run's latest model_*.pt

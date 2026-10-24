@@ -1,7 +1,7 @@
-# orbbec_rig.yaml — measured once per robot; source of truth for extrinsics
-# (docs/navd.md Section 6.2). Convention: pitch_deg negative = camera center
-# points below the horizon. Body frame: x forward, y left, z up; camera
-# optical frame: x right, y down, z forward.
+# orbbec_rig.yaml — measured once per robot; source of truth for extrinsics.
+# Convention: pitch_deg negative = camera center points below the horizon.
+# Body frame: x forward, y left, z up; camera optical frame: x right, y down,
+# z forward.
 #
 # depth_profile is the *preferred* profile; the camera service negotiates
 # down to what the device advertises.
@@ -22,11 +22,11 @@ robots:
         # 30 fps, matched across the hardware-synced primary+secondary pair
         # (see header note).
         depth_profile: [848, 480, 30]
-        # Depth preset (set at open; resets to "Default" on power cycle).
-        # Supersedes the old depth_work_mode (presets bundle their own work
-        # mode). Built-in "High Accuracy" replaces "High Density" (user
-        # choice 2026-09-07); the G33X custom preset bin is Gemini 330-only
-        # (firmware rejects with ERR_MISMATCH on the 335Lg).
+        # Depth preset (set at open; resets to "Default" on power cycle;
+        # presets bundle their own work mode). Built-in "High Accuracy"
+        # replaces "High Density" (user choice 2026-09-07); the G33X custom
+        # preset bin is Gemini 330-only (firmware rejects with ERR_MISMATCH
+        # on the 335Lg).
         depth_preset: High Accuracy
         # Camera's hardware JPEG encoder: color arrives pre-encoded and the
         # recorder stores it verbatim (saves ~65 ms/tick of CPU encode vs
@@ -65,9 +65,10 @@ robots:
         # top corners and both sides.
         # The rigid mount keeps these pixels fixed.
         # Keep the chassis polygon for consumers that need to exclude self
-        # pixels (fuse_navd_labels), but do not zero the published depth:
-        # the master BEV's body-frame robot.self_mask removes chassis points,
-        # and the color/depth views stay complete for comparison.
+        # pixels (the labeler, bev_student_labels), but do not zero the
+        # published depth: the labeler's body-frame robot.self_mask also
+        # removes chassis points, and the color/depth views stay complete
+        # for comparison.
         zero_self_pixels: false
         self_mask_pixels:
           - [[352, 238], [329, 479], [273, 479], [657, 479], [566, 479], [524, 240], [352, 238]]
@@ -85,19 +86,10 @@ robots:
         depth_filters: [temporal, hole]
         imu: true
         imu_hz: 200
-    bev:
-      range_m: 3.0        # forward horizon
-      width_m: 3.0        # lateral span (-1.5..+1.5)
-      cell_m: 0.05        # 60x60 cells
-      near_authority_m: 1.5
-      # Body-frame dead disc: chassis-silhouette stereo artifacts sit just
-      # outside the self-view mask; nothing inside this radius is
-      # actionable (planner rays start at 0.35 m).
-      min_range_m: 0.55
-    # Learned master-BEV student (docs/bev-student.md).  SAM 3.1 is the
-    # offline semantic teacher; these knobs shape its depth-fused labels.
-    # The grid is 120x60, row 0 far, col 0 right.  The live BEV is model-only;
-    # `geometry` is used by the offline label/training tools.
+    # Offline SAM 3.1 x depth labeler (bebop_vision/bev_student_labels.py,
+    # tools/bev_student_labels.py): SAM 3.1 is the semantic teacher and
+    # these knobs shape its depth-fused labels.  The grid is 120x60, row 0
+    # far, col 0 right.
     bev_student:
       grid:
         range_m: 6.0
@@ -158,19 +150,15 @@ robots:
         # body-frame raster next to this file, built from the robot's own
         # recordings -- cells that hold above-floor depth in nearly every
         # frame are the body, never-observed cells beside it are the floor
-        # the body hides (wheels, underbody).  Read by the labeler AND the
-        # live runtime; when present it replaces the rectangle below, which
-        # stays as the fallback.  Rebuild after any chassis/camera change.
+        # the body hides (wheels, underbody).  Read by the labeler; when
+        # present it replaces the rectangle below, which stays as the
+        # fallback.  Rebuild after any chassis/camera change.
         # 2026-10-19 (633 frames): body seen x -0.11..+0.30, y -0.21..+0.10;
         # footprint x -0.13..+0.32, y -0.34..+0.19 m (0.45 x 0.53 m).
         mask_file: ego_mask.npz
-        # Live guard matching label.hazard_ego_margin_m: a predicted drop in
-        # this ring around the chassis becomes the model's best other class.
-        hazard_pad_m: 0.15
-        # Fallback rectangle in the body frame (x forward from the
-        # camera mast, y left).  Read by the offline labeler (ego layer) AND
-        # by the live runtime, which ORs this static rectangle onto the
-        # model's predicted ego every frame -- keep them the same numbers.
+        # Fallback rectangle in the body frame (x forward from the camera
+        # mast, y left).  Read by the offline labeler (ego layer) and by
+        # tools/bev_ego_from_data.py.
         # Measured 2026-10-19 from the near camera's depth across all six
         # drives: the frame top (0.58 m up) spans x -0.10..+0.29,
         # y -0.20..+0.09, i.e. the body is 0.40 m long x 0.29 m wide, centred
@@ -184,7 +172,6 @@ robots:
         x_range_m: [-0.10, 0.29]
         y_range_m: [-0.27, 0.17]
     robot:
-      radius_m: 0.20      # inflation radius for planning
       # Self-view mask: the mast cameras see the robot's own chassis at
       # fixed body-frame positions; those returns are dropped before
       # classification. Measured 2026-09-05 from the mounted rig (mast

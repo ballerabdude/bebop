@@ -2,10 +2,8 @@
 negotiation, intrinsics round-trip, self-view mask shapes)."""
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 from bebop_vision.orbbec import (_negotiate_depth_profile, _dump_intrinsics,
@@ -22,14 +20,12 @@ def test_default_rig_config():
     assert cams["CPBLC53000ED"]["role"] == "far"
     assert cams["CPBLC53000PE"]["pitch_deg"] < cams["CPBLC53000ED"]["pitch_deg"] < 0
     # The near camera keeps the chassis polygon for label consumers but no
-    # longer zeroes the published depth; the master BEV body self-mask does
-    # the chassis removal.
+    # longer zeroes the published depth; the labeler's body-frame self-mask
+    # does the chassis removal.
     assert cams["CPBLC53000PE"]["zero_self_pixels"] is False
     assert cams["CPBLC53000PE"]["self_mask_pixels"]
-    bev = cfg["robots"]["default"]["bev"]
-    assert (bev["range_m"], bev["width_m"], bev["cell_m"]) == (3.0, 3.0, 0.05)
-    # The learned BEV grid is non-square: the far camera sees further
-    # ahead than the robot is wide.  Geometry values are label-side.
+    # The label grid is non-square: the far camera sees further ahead than
+    # the robot is wide.  Geometry values are label-side.
     bs = cfg["robots"]["default"]["bev_student"]
     assert (bs["grid"]["range_m"], bs["grid"]["width_m"],
             bs["grid"]["cell_m"]) == (6.0, 3.0, 0.05)
