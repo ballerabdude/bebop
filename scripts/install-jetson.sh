@@ -16,6 +16,11 @@
 #   sudo ./install-jetson.sh --release firmware/v0.2.0   # pin bebop-linux to a tagged release
 #   sudo ./install-jetson.sh --run-id 1234    # pin both daemons to a CI run (pre-release path)
 #   sudo ./install-jetson.sh --branch dev     # latest green agent build on a branch
+#   sudo ./install-jetson.sh --repo owner/name --workflow ci
+#                                             # pull from another GitHub
+#                                             # repo / CI workflow (defaults:
+#                                             # ballerabdude/bebop, ci; env
+#                                             # BEBOP_REPO / BEBOP_WORKFLOW)
 #   sudo ./install-jetson.sh --local          # install from the local repo
 #                                             # checkout (no GitHub, no `gh`):
 #                                             # uses pre-built binaries from
@@ -91,11 +96,19 @@
 #   sudo ./install-jetson.sh --quantize-voice --num-samples 128
 #                                             # fewer calibration samples
 #                                             # (faster; 512 default, ~128 floor)
+#   sudo ./install-jetson.sh --setup-models   # also install + enable
+#                                             # bebop-models.service (the
+#                                             # GPU/model supervisor, :9094)
 #   sudo ./install-jetson.sh --enable-autostart
 #                                             # opt bebop-vision and
 #                                             # bebop-voice into boot; both
 #                                             # ship un-enabled so the
-#                                             # operator owns the GPU
+#                                             # operator owns the GPU. On
+#                                             # its own it does only that
+#                                             # (no download or install);
+#                                             # next to other flags it runs
+#                                             # after them, e.g. after the
+#                                             # install
 #
 # Requires:
 #   * `gh` CLI authenticated (`gh auth login`) — needed to list/download
@@ -126,12 +139,12 @@
 # resolution. It is declared in bebop-vision/pyproject.toml under the
 # `jetson` extra; see bebop-vision/requirements.txt for the full story.
 # The wheel bundles the OrbbecSDK v2 shared libs — nothing compiles on
-# the Jetson — and its manylinux aarch64 wheels cover both JetPack 6.x
-# (python3.10) and 7.x (python3.12). When a bebop-vision/.venv exists
-# this setup probes it for the bindings and prints the exact fix when
-# they're missing. Like every other process on the robot: only one
-# process can hold the camera at a time — stop bebop-vision or
-# OrbbecViewer before opening it from the other.
+# the Jetson — and its manylinux aarch64 wheels cover JetPack 7.x's
+# python3.12. When a bebop-vision/.venv exists this setup probes it for
+# the bindings and prints the exact fix when they're missing. Like every
+# other process on the robot: only one process can hold the camera at a
+# time — stop bebop-vision or OrbbecViewer before opening it from the
+# other.
 
 set -euo pipefail
 
@@ -173,8 +186,9 @@ SETUP_MODELS=0
 # --enable-autostart: opt bebop-vision + bebop-voice into boot. Both units
 # ship un-enabled so the operator owns the GPU (voice's first start builds
 # TensorRT engines); this flips that for a robot that should come up on its
-# own. Opt-in.
+# own. Opt-in. (ENABLE_AUTOSTART_ONLY is derived after parsing.)
 ENABLE_AUTOSTART=0
+ENABLE_AUTOSTART_ONLY=0
 # Calibration samples for --quantize-voice (default 512, as upstream). The
 # docs floor is ~128; lower is faster, higher is better quality.
 VOICE_QUANT_SAMPLES="${VOICE_QUANT_SAMPLES:-512}"
@@ -216,6 +230,9 @@ usage() {
     ' "$0"
 }
 
+# Counted before the parser shifts the arguments away (see
+# ENABLE_AUTOSTART_ONLY below).
+ARG_COUNT=$#
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)        usage; exit 0 ;;
@@ -248,6 +265,13 @@ while [[ $# -gt 0 ]]; do
         *)                echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
+
+# --enable-autostart with no other argument short-circuits like the *-only
+# flags (no gh, no artifacts); next to anything else it runs after the rest
+# of the run, e.g. after an install.
+if [[ "${ENABLE_AUTOSTART}" -eq 1 && "${ARG_COUNT}" -eq 1 ]]; then
+    ENABLE_AUTOSTART_ONLY=1
+fi
 
 if [[ "${INSTALL_AGENT}" -eq 0 && "${INSTALL_LINUX}" -eq 0 ]]; then
     echo "--agent-only and --linux-only are mutually exclusive" >&2
@@ -301,10 +325,11 @@ fi
 # CAN setup helper
 # ---------------------------------------------------------------------------
 #
-# The Bebop V2 wiring uses a 5-port candleLight-style USB-CAN hub
-# (Geschwister Schneider, USB id 1d50:606f, gs_usb driver). bebop_v2.yaml
-# wants the buses at can0 / can1 / can4. The Orin Nano's *native* CAN0
-# (mttcan, exposed on the 40-pin header) takes the can0 slot by default,
+# The robot's CAN buses come from a 5-port candleLight-style USB-CAN hub
+# (Geschwister Schneider, USB id 1d50:606f, gs_usb driver), and the robot
+# YAML names them by interface (bebop_wheeled.yaml: the PowerBoard on can0,
+# the ODrive wheels on can4). A Jetson's *native* CAN controller (mttcan,
+# e.g. the Orin Nano's 40-pin-header CAN0) takes the can0 slot by default,
 # so the USB hub gets bumped to can1..can5 and nothing matches.
 #
 # This function:
@@ -318,12 +343,12 @@ fi
 # fail if anything has the device open. The function tries it best-effort
 # and prints a clear "REBOOT REQUIRED" line when it can't.
 setup_can() {
-    echo "==> configuring CAN (gs_usb hub on Jetson Orin Nano)"
+    echo "==> configuring CAN (gs_usb USB-CAN hub)"
 
     # 1) Blacklist mttcan so the native CAN0 doesn't grab the can0 slot.
     install -d -m 0755 /etc/modprobe.d
     cat > /etc/modprobe.d/bebop-blacklist-mttcan.conf <<'EOF'
-# Bebop: don't auto-load the Jetson Orin Nano native CAN driver. The
+# Bebop: don't auto-load the Jetson's native CAN driver (mttcan). The
 # robot uses an external USB-CAN hub (gs_usb / candleLight) and we want
 # can0..canN to come from that hub, not from the SoC's mttcan
 # controller. Remove this file (and reboot) to re-enable native CAN.
@@ -342,8 +367,8 @@ EOF
     if modinfo gs_usb >/dev/null 2>&1; then
         modprobe gs_usb 2>/dev/null || true
     elif [[ "${BUILD_GS_USB}" -eq 1 ]]; then
-        # JetPack's stock kernel ships without CONFIG_CAN_GS_USB. Build
-        # the module out-of-tree against the running kernel's headers.
+        # This kernel was built without CONFIG_CAN_GS_USB. Build the
+        # module out-of-tree against the running kernel's headers.
         echo "    gs_usb missing; building out-of-tree (--build-gs-usb)"
         if [[ -x "${SCRIPT_DIR}/build-gs-usb.sh" ]]; then
             "${SCRIPT_DIR}/build-gs-usb.sh"
@@ -353,9 +378,9 @@ EOF
         fi
     else
         cat >&2 <<EOF
-    WARN: gs_usb not found in /lib/modules/$(uname -r). NVIDIA's stock
-          JetPack 6 kernel ships without CONFIG_CAN_GS_USB, so the
-          USB-CAN hub has no driver. Build the module out-of-tree:
+    WARN: gs_usb not found in /lib/modules/$(uname -r): this kernel was
+          built without CONFIG_CAN_GS_USB, so the USB-CAN hub has no
+          driver. Build the module out-of-tree:
 
               sudo ${SCRIPT_DIR}/build-gs-usb.sh
 
@@ -537,14 +562,13 @@ EOF
 #   1. udev rules. JetPack ships USB device nodes root-only. The vendored
 #      scripts/orbbec-99-obsensor-libusb.rules (Orbbec's official rules,
 #      covering the whole 2bc5 product range) makes the camera 0666.
-#   2. Python bindings — but NOT from this script. `pyorbbecsdk2` is
-#      declared in bebop-vision/pyproject.toml, so the bebop-vision venv
-#      owns it like every other Python dep. This function only probes
-#      for the bindings and prints the exact bootstrap commands when
-#      they're missing. (The wheel itself is self-contained: it bundles
-#      the OrbbecSDK v2 shared libraries, and its manylinux_2_27 aarch64
-#      wheels span cp38–cp313, i.e. both JetPack 6.x (Ubuntu 22.04,
-#      python3.10) and 7.x (24.04, python3.12) system Pythons.)
+#   2. Python bindings — but NOT from this function. `pyorbbecsdk2` is
+#      installed into the bebop-vision venv by `--setup-voice`, on its own
+#      with `--no-deps` (see the Orbbec note at the top). This function
+#      only probes for the bindings and prints the fix when they're
+#      missing. (The wheel itself is self-contained: it bundles the
+#      OrbbecSDK v2 shared libraries, and its manylinux_2_27 aarch64
+#      wheels span cp38–cp313, JetPack 7.x's python3.12 included.)
 #
 # No reboot is required: `udevadm trigger` applies the rules to the
 # already-enumerated device. A camera currently held open by another
@@ -568,7 +592,7 @@ setup_orbbec() {
     udevadm settle 2>/dev/null || true
 
     # 2) Verify the Python side. The bindings live in the bebop-vision
-    #    venv (declared in its pyproject.toml); probe it when present,
+    #    venv (installed by --setup-voice); probe it when present,
     #    falling back to the system python. Missing bindings are a WARN
     #    with the exact fix — the OS-level setup is complete either way.
     local checkout_root="${LOCAL_REPO_ROOT}"
@@ -610,14 +634,13 @@ PYEOF
     then
         cat >&2 <<EOF
     WARN: pyorbbecsdk2 is not importable via ${probe_python:-<no python found>}.
-          The bindings are a bebop-vision dependency — bootstrap its venv:
+          The bindings live in the bebop-vision venv; --setup-voice
+          bootstraps it and installs them (on their own, --no-deps):
 
-              cd ${checkout_root}/bebop-vision
-              python3 -m venv .venv          # python3-venv pkg on fresh JetPack
-              .venv/bin/pip install -e .     # pulls pyorbbecsdk2 via pyproject
+              sudo $0 --setup-voice-only
 
           The udev rules installed above are already in effect; once the
-          venv exists there is no need to re-run this script.
+          venv has the bindings there is no need to re-run --setup-orbbec.
 EOF
     fi
 
@@ -652,13 +675,14 @@ EOF
 # ---------------------------------------------------------------------------
 #
 # bebop-vision runs EVERYTHING from one venv (bebop-vision/.venv): the
-# recorder/perception/places stack AND the voice stack (Qwen3-Omni served by
-# TensorRT Edge-LLM). It is created with --system-site-packages so JetPack's
-# TensorRT bindings are visible, while numpy/scipy/pandas are pinned inside
-# the venv so their numpy-2 builds shadow the system numpy-1 copies.
+# recorder/perception/places stack AND the voice stack (TensorRT Edge-LLM
+# serving the default ASR → brain → TTS cascade, or Qwen3-Omni). It is
+# created with --system-site-packages so JetPack's TensorRT bindings are
+# visible, while numpy/scipy/pandas are pinned inside the venv so their
+# numpy-2 builds shadow the system numpy-1 copies.
 #
-#   * the checkpoint is downloaded through the app's Models page like every
-#     other model (catalog entry `qwen3-omni-30b`, snapshot download);
+#   * the checkpoints are downloaded through the app's Models page like
+#     every other model (catalog snapshot downloads);
 #   * the systemd unit is installed by the normal install path.
 # The published aarch64 wheel covers Jetson Thor (JetPack 7.x, CUDA 13,
 # SM110, platform TensorRT 10) — nothing compiles on the robot.
@@ -772,10 +796,10 @@ EOF
 # `weights/qwen3-omni-30b-nvfp4/`, which `bebop-voice.service` then prefers
 # automatically (see `bebop_vision.voice_server.resolve_model_dir`).
 #
-# Requires `--setup-voice` first (the `tools` extra: PyTorch + ModelOpt +
-# datasets) and the FP16 checkpoint downloaded via the app's Models page.
-# Runs as the invoking user so the output stays user-owned; the calibration
-# datasets land in that user's HF cache.
+# Requires `--setup-voice` first (tensorrt-edgellm's `tools` extra: PyTorch +
+# ModelOpt + datasets) and the FP16 checkpoint downloaded via the app's
+# Models page. Runs as the invoking user so the output stays user-owned; the
+# calibration datasets land in that user's HF cache.
 quantize_voice() {
     echo "==> quantizing the voice model to NVFP4 (Qwen3-Omni)"
     local checkout_root="${LOCAL_REPO_ROOT}"
@@ -827,7 +851,7 @@ quantize_voice() {
 }
 
 # ---------------------------------------------------------------------------
-# Sanity checks
+# Model supervisor + autostart helpers
 # ---------------------------------------------------------------------------
 
 # --setup-models: install + enable the model supervisor unit.
@@ -867,15 +891,21 @@ enable_autostart() {
     return "${rc}"
 }
 
+# ---------------------------------------------------------------------------
+# Sanity checks
+# ---------------------------------------------------------------------------
+
 if [[ "${EUID}" -ne 0 ]]; then
     echo "install-jetson.sh must be run as root (sudo)" >&2
     exit 1
 fi
 
-# --setup-can-only / --setup-imu-only / --setup-orbbec-only / --enable-autostart
-# short-circuit before we touch gh / artifacts so an operator can run them from
-# a freshly-cloned checkout without needing a CI build artifact to be available.
-if [[ "${SETUP_CAN_ONLY}" -eq 1 || "${SETUP_IMU_ONLY}" -eq 1 || "${SETUP_ORBBEC_ONLY}" -eq 1 || "${SETUP_VOICE_ONLY}" -eq 1 || "${QUANTIZE_VOICE_ONLY}" -eq 1 || "${ENABLE_AUTOSTART}" -eq 1 ]]; then
+# The *-only flags (and --enable-autostart on its own) short-circuit before we
+# touch gh / artifacts so an operator can run them from a freshly-cloned
+# checkout without needing a CI build artifact to be available.
+# --enable-autostart next to one of them runs here too; next to anything else
+# it runs after the install, with the other opt-in steps further down.
+if [[ "${SETUP_CAN_ONLY}" -eq 1 || "${SETUP_IMU_ONLY}" -eq 1 || "${SETUP_ORBBEC_ONLY}" -eq 1 || "${SETUP_VOICE_ONLY}" -eq 1 || "${QUANTIZE_VOICE_ONLY}" -eq 1 || "${ENABLE_AUTOSTART_ONLY}" -eq 1 ]]; then
     [[ "${SETUP_CAN_ONLY}" -eq 1 ]] && setup_can
     [[ "${SETUP_IMU_ONLY}" -eq 1 ]] && setup_imu
     [[ "${SETUP_ORBBEC_ONLY}" -eq 1 ]] && setup_orbbec
@@ -1465,11 +1495,12 @@ if [[ "${ENABLE_AUTOSTART}" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# GPU clocks. The Orin's nvhost_podgov idles the GPU at ~306 MHz; navd's
-# ~5 Hz CUDA inferences each paid the clock ramp (107-118 ms unpinned vs
-# 74 ms flat, bench 2026-09-07). A boot-time oneshot pins the devfreq
-# governor to performance for every GPU consumer. Installed
-# unconditionally: idempotent, tiny, and not tied to any --setup flag.
+# GPU clocks. A boot-time oneshot pins the GPU devfreq governor to
+# performance for every GPU consumer (measured on the Orin, whose
+# nvhost_podgov idled the GPU at ~306 MHz: the since-removed navd model's
+# ~5 Hz CUDA inferences each paid the clock ramp, 107-118 ms unpinned vs
+# 74 ms flat, bench 2026-09-07). Installed unconditionally: idempotent,
+# tiny, and not tied to any --setup flag.
 # ---------------------------------------------------------------------------
 
 echo "==> installing bebop-gpu-clocks.service (GPU devfreq -> performance)"
