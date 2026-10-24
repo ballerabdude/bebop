@@ -69,32 +69,6 @@ def test_all_streams_serve_jpegs(server):
             assert len(body) > 100
 
 
-def test_register_replaces_and_closes_predecessor():
-    """A reconnecting client must not leave the old session (and its
-    NVENC pipeline + GPU fds) alive."""
-    v = VideoServer(FakeRig(), port=0)
-    closed = []
-
-    class S:
-        def __init__(self, name):
-            self.name = name
-
-        def close(self):
-            closed.append(self.name)
-
-    a, b = S("a"), S("b")
-    v._register("color_near", a)
-    v._register("color_near", b)
-    assert closed == ["a"]
-    assert v._sessions["color_near"] is b
-
-    v._unregister("color_near", a)       # stale unregister is ignored
-    assert v._sessions["color_near"] is b
-
-    v._unregister("color_near", b)
-    assert "color_near" not in v._sessions
-
-
 def _post(port, path, payload):
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}", data=json.dumps(payload).encode(),

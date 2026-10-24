@@ -841,42 +841,59 @@ def test_single_registration_constructor_is_backward_compatible(store):
     assert svc.status()["registrations"] == 1
 
 
-def test_voice_busy_probe_uses_a_signal_and_fails_open():
+def test_voice_busy_probe_uses_turn_signal_and_fails_closed():
+    import socket
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    state = {"body": {"phase": "ready"}}
+    state = {"body": {"phase": "ready"}, "delay": 0.0}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_GET(self):
+            import time as _t
+            _t.sleep(state["delay"])
             data = json.dumps(state["body"]).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except OSError:
+                pass  # the probe gave up (the timeout case)
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{httpd.server_address[1]}/healthz"
     try:
         probe = VoiceBusyProbe(url, timeout=0.5)
-        assert probe() is False          # no signal -> fail open
-        state["body"] = {"turn_active": True}
+        assert probe() is True           # up, but no signal -> fail closed
+        state["body"] = {"turn_active": True, "turns_active": 1}
         assert probe() is True
+        state["body"] = {"turn_active": False, "turns_active": 0}
+        assert probe() is False
         state["body"] = {"in_flight": 0}
         assert probe() is False
         state["body"] = {"busy": "false"}  # strings are not a busy signal
         assert probe() is False
+        state["body"] = ["not", "an", "object"]
+        assert probe() is True
+        state["body"], state["delay"] = {"turn_active": False}, 0.5
+        assert VoiceBusyProbe(url, timeout=0.1)() is True  # hung -> busy
+        state["delay"] = 0.0
     finally:
         httpd.shutdown()
         httpd.server_close()
 
-    # A dead service must fail open, not raise or block the tick.
-    dead = VoiceBusyProbe(url, timeout=0.1)
+    # A stopped service (nothing listening) has no turn to collide with.
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    free = sock.getsockname()[1]
+    sock.close()
+    dead = VoiceBusyProbe(f"http://127.0.0.1:{free}/healthz", timeout=0.2)
     assert dead() is False
 
 

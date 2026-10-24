@@ -1,38 +1,42 @@
-"""On-device speech-to-speech gateway (Qwen3-Omni via TensorRT Edge-LLM).
+"""On-device agent gateway: voice and text turns (TensorRT Edge-LLM).
 
 `bebop-voice.service` runs this as root from `bebop-vision/.venv-voice`. It
 owns two things:
 
-1. **The model server.** It supervises `tensorrt-edgellm-serve`, which serves
-   the catalog's `voice` checkpoint (Qwen3-Omni-30B-A3B) as an
-   OpenAI-compatible HTTP API on 127.0.0.1:8000. The first start builds the
-   checkpoint's TensorRT engines into `--cache-dir`; that can take many
-   minutes.
-2. **The app gateway.** It exposes a turn-based WebSocket on :9093 that the
-   Tauri app's Voice page talks to. The app streams 16 kHz mono PCM16 for one
-   utterance, then receives streamed text and 24 kHz mono PCM16 speech back.
+1. **The model servers.** The default `cascade` backend supervises three
+   `tensorrt-edgellm-serve` stages (ASR, a VLM brain with tools, TTS); the
+   `omni` backend (chat only, no tools) serves the catalog's `voice`
+   checkpoint (Qwen3-Omni-30B-A3B). The first start builds TensorRT engines
+   into `--cache-dir`; that can take many minutes.
+2. **The app gateway.** A turn-based WebSocket on :9093 for the app's agent
+   console: spoken turns (16 kHz PCM16 in) and typed turns, answered with
+   streamed text, tool events and optional 24 kHz PCM16 speech.
 
 The runtime WebSocket on :9090 carries only control (`SetVoiceEnabled`) and
 status (`VoiceState`); audio never flows through the firmware. See
 `docs/voice.md`.
 
-Wire protocol (:9093), one utterance per connection turn:
+Wire protocol (:9093, `/voice?session=<id>`): voice and typed turns share
+one socket. Each turn runs as its own task, so `cancel` lands mid-turn:
 
     app -> {"type":"utterance_start","sample_rate":16000,"format":"pcm16"}
     app -> <binary PCM16 frames>
-    app -> {"type":"utterance_end"}
-    svc -> {"type":"text","delta":"..."}          (zero or more)
-    svc -> {"type":"audio_start","sample_rate":24000,"format":"pcm16"}
-    svc -> <binary PCM16 frames>
-    svc -> {"type":"audio_end"}
-    svc -> {"type":"done"}
-    svc -> {"type":"error","message":"..."}       (on failure)
+    app -> {"type":"utterance_end"}                 (starts a voice turn)
+    app -> {"type":"user_text","text":"...","speak":false}   (a typed turn)
+    app -> {"type":"cancel"}  /  {"type":"reset"}
+    svc -> turn_start, transcript, assistant_delta, tool_call, tool_result,
+           motion_progress, audio_start, <binary PCM16 24 kHz>, audio_end,
+           turn_end{status: done|cancelled|error}, turn_rejected
+    svc -> legacy: text{delta}, tool{name}, done, error{message}
+
+The full contract is in docs/voice.md ("Agent protocol").
 
 `GET /healthz` is the status surface the app polls:
 
     {"ok": bool, "phase": "starting|building|ready|error|stub",
-     "detail": "<last meaningful log line>", "model": "qwen3-omni-30b",
-     "model_downloaded": bool, "updated_ms": 123, "log_tail": [...]}
+     "detail": "<last meaningful log line>", "model": "...",
+     "backend": "cascade|omni", "tools_supported": bool,
+     "turn_active": bool, "turns_active": int, ...}
 
 The gateway serves `/healthz` immediately, even while the model server is
 still building or has failed, so the operator sees progress instead of a
@@ -47,6 +51,7 @@ import argparse
 import asyncio
 import atexit
 import base64
+import contextvars
 import io
 import json
 import math
@@ -167,6 +172,9 @@ CONFIG_PATH = Path("/var/lib/bebop-voice/config.json")
 # registered by `bebop-models` as `omni-edgellm`. Rewritten on load.
 _BACKEND_ID_MIGRATIONS = {"omni-vllm": "omni-edgellm"}
 MAX_SESSIONS = 32
+# Bumped when a saved field changes meaning (see `VoiceConfig.load`).
+# 2: cascade became the default backend.
+CONFIG_VERSION = 2
 
 
 def _clamp_turns(n: Any) -> int:
@@ -190,7 +198,10 @@ class VoiceConfig:
     # separate from `tools_enabled`: that switch is the app's "live
     # context" toggle, and arming wheels should not ride on it.
     motion_enabled: bool = False
-    backend: str = "omni"  # "omni" (end-to-end) | "cascade" (ASR->brain->TTS)
+    # "cascade" (ASR -> brain -> TTS; the only engine with tools) is the
+    # default. "omni" (end-to-end Qwen3-Omni) stays selectable as a chat-only
+    # engine: it has no tools, so no place memory and no motion.
+    backend: str = "cascade"
     # When set, the omni backend uses this already-running OpenAI-compatible
     # server instead of supervising an Edge-LLM child. A debug escape hatch.
     omni_url: str = ""
@@ -224,6 +235,16 @@ class VoiceConfig:
             cfg.motion_enabled = raw["motion_enabled"]
         if raw.get("backend") in ("omni", "cascade"):
             cfg.backend = raw["backend"]
+        # Files written before CONFIG_VERSION 2 persisted the old default
+        # ("omni") on every save, so a saved "omni" there is not a choice.
+        # Cascade became the default (omni has no tools and underperformed);
+        # migrate once. A v2 file keeps whatever the operator picked.
+        version = raw.get("config_version", 1)
+        legacy = not isinstance(version, int) or version < CONFIG_VERSION
+        if legacy and cfg.backend == "omni":
+            _log("config: pre-v2 file; switching the default backend "
+                 "omni -> cascade (omni stays selectable)")
+            cfg.backend = "cascade"
         if isinstance(raw.get("omni_url"), str):
             cfg.omni_url = raw["omni_url"].strip()
         if isinstance(raw.get("omni_supervisor_url"), str):
@@ -256,6 +277,7 @@ class VoiceConfig:
 
     def snapshot(self) -> dict[str, Any]:
         return {
+            "config_version": CONFIG_VERSION,
             "voice": self.voice,
             "system_prompt": self.system_prompt,
             "history_turns": self.history_turns,
@@ -298,6 +320,266 @@ class SessionStore:
     def clear(self, key: str) -> None:
         with self._lock:
             self._map.pop(key, None)
+
+
+# --- agent turns -------------------------------------------------------------
+#
+# A turn (one voice utterance or one typed message, and everything the brain
+# does about it) runs as its own asyncio.Task, so the WebSocket keeps reading
+# while it runs: `cancel` arrives mid-turn, and a disconnect cancels it. See
+# docs/voice.md "Agent protocol" for the event contract.
+
+# The turn the current task is serving; tools (motion progress, cancel
+# checks) read it without threading it through `_run_tool`'s signature.
+_CURRENT_TURN: contextvars.ContextVar["AgentTurn | None"] = contextvars.ContextVar(
+    "bebop_voice_turn", default=None)
+# Per tool call: {"ok": bool, "call_id": str}. A tool marks a refusal with
+# `_tool_failed()` so the app can render it as one without parsing text.
+_TOOL_STATUS: contextvars.ContextVar["dict[str, Any] | None"] = contextvars.ContextVar(
+    "bebop_voice_tool_status", default=None)
+
+
+def _tool_failed() -> None:
+    status = _TOOL_STATUS.get()
+    if status is not None:
+        status["ok"] = False
+
+
+class TurnEmitter:
+    """Serialised, disconnect-tolerant sender for one WebSocket.
+
+    The turn task and the receive loop both send; a lock keeps frames whole.
+    After the peer goes away every send is a silent no-op, so a turn that is
+    winding down (stopping the wheels) never dies on a dead socket.
+    """
+
+    def __init__(self, ws: Any) -> None:
+        self.ws = ws
+        self.closed = False
+        self._lock = asyncio.Lock()
+
+    async def json(self, obj: dict[str, Any]) -> None:
+        await self._send(text=json.dumps(obj))
+
+    async def audio(self, data: bytes) -> None:
+        await self._send(data=data)
+
+    async def _send(self, *, text: str | None = None, data: bytes | None = None) -> None:
+        if self.closed or self.ws is None:
+            return
+        async with self._lock:
+            try:
+                if text is not None:
+                    await self.ws.send_text(text)
+                else:
+                    await self.ws.send_bytes(data)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - peer gone; stop sending
+                self.closed = True
+
+
+_TURN_SEQ = {"n": 0}
+
+
+def _new_turn_id() -> str:
+    _TURN_SEQ["n"] += 1
+    return f"t{int(time.time() * 1000):x}-{_TURN_SEQ['n']}"
+
+
+@dataclass(eq=False)  # identity semantics: turns live in sets
+class AgentTurn:
+    """One turn: its id, where it came from, and how to talk to the client."""
+
+    turn_id: str
+    source: str  # "voice" | "text"
+    out: TurnEmitter
+    speak: bool = True
+    session_key: str = ""
+    owner: Any = None  # the WebSocket that started it (disconnect cancels)
+    cancel: asyncio.Event = field(default_factory=asyncio.Event)
+    task: "asyncio.Task[None] | None" = None
+    audio_open: bool = False
+
+    async def emit(self, kind: str, **fields: Any) -> None:
+        await self.out.json({"type": kind, "turn_id": self.turn_id, **fields})
+
+    async def delta(self, text: str) -> None:
+        await self.emit("assistant_delta", text=text)
+        await self.out.json({"type": "text", "delta": text})  # legacy
+
+    async def audio_start(self) -> None:
+        if self.speak and not self.audio_open:
+            self.audio_open = True
+            await self.emit("audio_start", sample_rate=OUTPUT_RATE, format="pcm16")
+
+    async def audio_end(self) -> None:
+        if self.audio_open:
+            self.audio_open = False
+            await self.emit("audio_end")
+
+    async def audio(self, data: bytes) -> None:
+        if self.speak:
+            await self.out.audio(data)
+
+    def request_cancel(self) -> None:
+        self.cancel.set()
+        if self.task is not None and not self.task.done():
+            self.task.cancel()
+
+    @property
+    def running(self) -> bool:
+        return self.task is not None and not self.task.done()
+
+
+def _adhoc_turn(ws: Any, text: str | None, turn: AgentTurn | None) -> AgentTurn:
+    """The turn to report on: the session's, or a throwaway one (tests)."""
+    if turn is not None:
+        return turn
+    return AgentTurn(turn_id=_new_turn_id(),
+                     source="text" if text is not None else "voice",
+                     out=TurnEmitter(ws))
+
+
+def _parse_speak(value: Any) -> bool:
+    """`speak` flag: a JSON bool; strings "false"/"0"/"no"/"off" read as false."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return True
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() not in ("false", "0", "no", "off", "")
+
+
+class TurnRegistry:
+    """Server-wide view of running turns (`/healthz` `turn_active`).
+
+    At most one turn per session runs at a time. A new turn while one is
+    running is rejected (`turn_rejected`); the client sends `cancel` first.
+    A cancelled turn that is still winding down (stopping the wheels) does not
+    block the next one: the new turn waits for it before starting.
+    """
+
+    def __init__(self) -> None:
+        self.by_session: dict[str, AgentTurn] = {}
+        self.running: set[AgentTurn] = set()
+
+    @property
+    def count(self) -> int:
+        return len(self.running)
+
+    def busy(self, session_key: str) -> AgentTurn | None:
+        turn = self.by_session.get(session_key)
+        if turn is not None and turn.running and not turn.cancel.is_set():
+            return turn
+        return None
+
+
+
+async def run_agent_turn(
+    turn: AgentTurn,
+    registry: TurnRegistry | None,
+    body: Any,
+    *,
+    previous: AgentTurn | None = None,
+) -> None:
+    """Run one turn's body with the lifecycle events around it.
+
+    Emits `turn_start`, then whatever the body emits, then the legacy
+    `done` (or `error`) and `turn_end{status}`. Cancellation (the `cancel`
+    message or a disconnect) ends the turn as `cancelled`; the body's own
+    `finally` blocks (stop + disarm, history commit) run first.
+    """
+    if registry is not None:
+        registry.running.add(turn)
+    token = _CURRENT_TURN.set(turn)
+    status, error = "done", None
+    try:
+        if previous is not None and previous.task is not None:
+            # A cancelled predecessor may still be stopping the wheels.
+            await asyncio.wait({previous.task}, timeout=10.0)
+        await turn.emit("turn_start", source=turn.source, speak=turn.speak)
+        await body()
+    except asyncio.CancelledError:
+        status = "cancelled"
+    except Exception as exc:  # noqa: BLE001 - reported to the client
+        status, error = "error", str(exc) or type(exc).__name__
+        _log(f"turn {turn.turn_id} failed: {error}")
+    finally:
+        _CURRENT_TURN.reset(token)
+        if registry is not None:
+            registry.running.discard(turn)
+    if turn.cancel.is_set() and status == "done":
+        status = "cancelled"
+    try:
+        await turn.audio_end()
+        if status == "error":
+            await turn.out.json({"type": "error", "message": error})  # legacy
+        else:
+            await turn.out.json({"type": "done"})  # legacy
+        end: dict[str, Any] = {"status": status}
+        if error:
+            end["error"] = error
+        await turn.emit("turn_end", **end)
+    finally:
+        # Drop the finished turn so the registry does not pin closed sockets
+        # (every anonymous connection has its own session key).
+        if registry is not None and registry.by_session.get(turn.session_key) is turn:
+            registry.by_session.pop(turn.session_key, None)
+
+
+def _turn_starts(history: list[dict[str, Any]]) -> list[int]:
+    """Indices where a turn begins in a flat message history.
+
+    A turn starts at a user message; histories that keep no user messages
+    (omni without audio history) start a turn at each assistant reply that
+    does not follow a tool result or a tool-calling assistant message.
+    """
+    starts: list[int] = []
+    for i, msg in enumerate(history):
+        role = msg.get("role")
+        if role == "user":
+            starts.append(i)
+        elif role == "assistant":
+            prev = history[i - 1] if i else None
+            if prev is None or (prev.get("role") == "assistant"
+                                and not prev.get("tool_calls")):
+                starts.append(i)
+    return starts
+
+
+def _trim_history(history: list[dict[str, Any]], turns: int) -> None:
+    """Keep the last `turns` whole turns (user, tool calls/results, reply)."""
+    if turns <= 0:
+        history.clear()
+        return
+    starts = _turn_starts(history)
+    if len(starts) > turns:
+        del history[:starts[-turns]]
+
+
+def _close_tool_calls(msgs: list[dict[str, Any]]) -> None:
+    """Give every advertised tool call a result (a cancel can cut one off).
+
+    Chat templates reject an assistant `tool_calls` message whose calls have
+    no matching `tool` messages, so a cut-off call gets a placeholder.
+    """
+    answered = {m.get("tool_call_id") for m in msgs if m.get("role") == "tool"}
+    for msg in list(msgs):
+        for call in msg.get("tool_calls") or []:
+            if call["id"] not in answered:
+                msgs.append({"role": "tool", "tool_call_id": call["id"],
+                             "content": "Cancelled by the operator before it ran."})
+                answered.add(call["id"])
+
+
+def _tool_args(arguments: str) -> dict[str, Any]:
+    try:
+        args = json.loads(arguments) if arguments.strip() else {}
+    except ValueError:
+        return {}
+    return args if isinstance(args, dict) else {}
 
 
 # Cache of the model's speaker ids (GET /v1/voices), so `/config` and the WS
@@ -1066,7 +1348,9 @@ async def _run_tool(name: str, arguments: str) -> str:
                 facts = "; ".join(f["text"] for f in place.get("facts", []))
                 return f"{place['name']} — {facts or 'no facts recorded'}."
     except Exception as exc:  # noqa: BLE001 - report, never break the turn
+        _tool_failed()
         return f"The places service is unavailable ({exc})."
+    _tool_failed()
     return f"Unknown tool {name!r}."
 
 
@@ -1213,107 +1497,201 @@ async def _robot_status_text() -> str:
     return text or "Robot status is unavailable."
 
 
+def _seat_taken(st: Any) -> bool:
+    """Another firmware client holds the drive seat (DriveState arbitration)."""
+    return bool(getattr(st, "has_active_operator", False)) and not bool(
+        getattr(st, "you_are_active_operator", False))
+
+
 async def _move_relative(args: dict[str, Any]) -> str:
     """Drive a bounded odom-relative move: forward/back then turn, or a turn.
 
-    Arms the chassis for the duration and always stops + disarms afterwards.
+    Refuses while a person holds the drive seat. Arms the chassis for the
+    duration only when it was not already armed, and on every exit path
+    stops; it then undoes only what it changed itself (disarm if it armed,
+    restore the mode if it switched it) — wheels a person armed stay armed.
     """
     forward_m = float(args.get("forward_m") or 0.0)
     turn_deg = float(args.get("turn_deg") or 0.0)
     if abs(forward_m) < 0.01 and abs(turn_deg) < 0.5:
+        _tool_failed()
         return "No movement was requested."
     forward_m = max(-MOTION_MAX_FORWARD_M, min(MOTION_MAX_FORWARD_M, forward_m))
     turn_deg = max(-MOTION_MAX_TURN_DEG, min(MOTION_MAX_TURN_DEG, turn_deg))
 
     from .robot import RobotClient
 
-    robot = RobotClient(url=ROBOT_WS_URL, name="bebop-voice-move").start()
+    # Announced as "voice" (ClientHello), so the app shows who is driving.
+    robot = RobotClient(url=ROBOT_WS_URL, name="bebop-voice-move",
+                        hello_name="voice").start()
     before_mode = None
     changed_mode = False
-    armed = False
+    armed_by_us = False
     try:
-        if not robot.await_connection(5.0):
+        # Blocking wait: keep it off the event loop so `cancel` still lands.
+        if not await asyncio.to_thread(robot.await_connection, 5.0):
+            _tool_failed()
             return "I cannot reach the robot's runtime, so I did not move."
         st = robot.state
         before_mode = st.mode
         if st.estop_latched:
+            _tool_failed()
             return (f"Not moving: the E-STOP is latched "
                     f"({st.estop_reason or 'no reason given'}).")
+        if _seat_taken(st):
+            _tool_failed()
+            who = getattr(st, "active_operator_name", "") or "another operator"
+            return (f"Not moving: {who} is driving the robot right now. They "
+                    "have to let go of the controls first.")
 
-        # Arming requires DIAL_IN (or RUN_POLICY); DIAL_IN is the bring-up /
-        # teleop mode with the slew limit and watchdog enforced.
-        if before_mode != pb.MODE_DIAL_IN:
-            robot.set_mode(pb.MODE_DIAL_IN)
-            changed_mode = True
-        deadline = time.monotonic() + MOTION_ARM_WAIT_S
-        while time.monotonic() < deadline and st.mode != pb.MODE_DIAL_IN:
-            await asyncio.sleep(0.05)
-        if st.mode != pb.MODE_DIAL_IN:
-            return "Could not switch to dial-in mode, so I did not move."
+        already_armed = bool(st.wheel_armed) and all(st.wheel_armed.values())
+        if already_armed:
+            # A person armed the wheels: drive as-is and leave them armed.
+            if st.mode != pb.MODE_DIAL_IN:
+                _tool_failed()
+                return ("Not moving: the wheels are armed in "
+                        f"{_MODE_NAMES.get(st.mode, st.mode)} mode, not dial-in.")
+        else:
+            # Arming requires DIAL_IN (or RUN_POLICY); DIAL_IN is the bring-up
+            # / teleop mode with the slew limit and watchdog enforced.
+            if before_mode != pb.MODE_DIAL_IN:
+                robot.set_mode(pb.MODE_DIAL_IN)
+                changed_mode = True
+            deadline = time.monotonic() + MOTION_ARM_WAIT_S
+            while time.monotonic() < deadline and st.mode != pb.MODE_DIAL_IN:
+                await asyncio.sleep(0.05)
+            if st.mode != pb.MODE_DIAL_IN:
+                _tool_failed()
+                return "Could not switch to dial-in mode, so I did not move."
 
-        robot.arm_wheels(True)
-        deadline = time.monotonic() + MOTION_ARM_WAIT_S
-        while time.monotonic() < deadline:
-            if st.wheel_armed and all(st.wheel_armed.values()):
-                armed = True
-                break
-            if st.estop_latched:
-                return "Not moving: the E-STOP latched while arming."
-            await asyncio.sleep(0.05)
-        if not armed:
-            return "The wheels did not arm, so I did not move."
+            robot.arm_wheels(True)
+            armed_by_us = True  # from here on, the cleanup disarms
+            deadline = time.monotonic() + MOTION_ARM_WAIT_S
+            armed = False
+            while time.monotonic() < deadline:
+                if st.wheel_armed and all(st.wheel_armed.values()):
+                    armed = True
+                    break
+                if st.estop_latched:
+                    _tool_failed()
+                    return "Not moving: the E-STOP latched while arming."
+                await asyncio.sleep(0.05)
+            if not armed:
+                _tool_failed()
+                return "The wheels did not arm, so I did not move."
 
-        start = tuple(st.odom)
-        moved = await _run_move(robot, forward_m, turn_deg)
-        if moved is None:
-            return "I stopped: the E-STOP latched, or the link dropped."
-        dist, turned, secs = moved
+        dist, turned, secs, stopped = await _run_move(robot, forward_m, turn_deg)
         # Report honestly from telemetry, not from what was asked for.
         direction = "forward" if forward_m > 0 else "back"
         if abs(forward_m) >= 0.01:
             body = f"{dist:.2f} m {direction}"
         else:
-            body = f"{abs(turned):.0f} deg {'left' if turn_deg > 0 else 'right'}"
-        return (f"Moved {body} in {secs:.1f}s "
-                f"(now at x={st.odom[0]:.2f} m, y={st.odom[1]:.2f} m, "
-                f"heading {math.degrees(st.odom[2]):.0f} deg).")
+            body = f"{abs(math.degrees(turned)):.0f} deg {'left' if turn_deg > 0 else 'right'}"
+        where = (f"now at x={st.odom[0]:.2f} m, y={st.odom[1]:.2f} m, "
+                 f"heading {math.degrees(st.odom[2]):.0f} deg")
+        if stopped is not None:
+            _tool_failed()
+            return f"I stopped early ({stopped}) after {body} ({where})."
+        return f"Moved {body} in {secs:.1f}s ({where})."
     finally:
+        # Synchronous submits, in order, on the client's FIFO outbox: stop,
+        # then undo only what this call changed.
         try:
             robot.send_twist(0.0, 0.0)
-            await asyncio.sleep(0.1)
-            if armed:
-                robot.arm_wheels(False)
-            if changed_mode and before_mode is not None:
-                robot.set_mode(before_mode)
-            await asyncio.sleep(0.1)
+            # If another client now holds the drive seat it owns the armed
+            # state: do not pull the wheels or the mode out from under it.
+            if not _seat_taken(robot.state):
+                if armed_by_us:
+                    robot.arm_wheels(False)
+                if changed_mode and before_mode is not None:
+                    robot.set_mode(before_mode)
+            else:
+                _log("move_relative: another operator holds the seat; "
+                     "leaving wheels/mode as they are")
+            await _flush_window(0.2)
         finally:
             robot.stop()
 
 
+async def _flush_window(seconds: float) -> None:
+    """Give the robot client's sender time to flush the cleanup commands.
+
+    Runs in `finally` blocks of a turn that may be cancelled a second time
+    (cancel, then a disconnect); a cancelled sleep must not skip the flush
+    or `robot.stop()` would drop the disarm, so it falls back to blocking.
+    """
+    t0 = time.monotonic()
+    try:
+        await asyncio.sleep(seconds)
+    except asyncio.CancelledError:
+        time.sleep(max(0.0, seconds - (time.monotonic() - t0)))
+        raise
+
+
+MOTION_PROGRESS_S = 0.2  # motion_progress event period
+
+
 async def _run_move(
     robot: Any, forward_m: float, turn_deg: float
-) -> tuple[float, float, float] | None:
-    """Closed loop on wheel odometry. Returns (distance, turned_rad, seconds).
+) -> tuple[float, float, float, str | None]:
+    """Closed loop on wheel odometry.
 
-    None when it had to abort (E-STOP or lost link).
+    Returns (distance_m, turned_rad, seconds, stopped) where `stopped` is None
+    when the move completed, else why it stopped early: "E-STOP latched",
+    "link to the runtime lost", "another operator took the controls" or
+    "cancelled by the operator". The turn's cancel flag is checked every
+    control tick (50 ms); task cancellation also lands at each sleep. Either
+    way the `finally` zeroes the twist.
     """
     st = robot.state
     t0 = time.monotonic()
     start = tuple(st.odom)
+    turn = _CURRENT_TURN.get()
+    tool = _TOOL_STATUS.get() or {}
+    total_m, total_deg = abs(forward_m), abs(turn_deg)
+    last_progress = [0.0]
 
-    async def settle(axis: str, target: float) -> bool:
+    async def progress(force: bool = False) -> None:
+        if turn is None:
+            return
+        now = time.monotonic()
+        if not force and now - last_progress[0] < MOTION_PROGRESS_S:
+            return
+        last_progress[0] = now
+        x, y, th = st.odom
+        await turn.emit(
+            "motion_progress", call_id=tool.get("call_id", ""),
+            done_m=round(math.hypot(x - start[0], y - start[1]), 3),
+            total_m=total_m,
+            done_deg=round(abs(math.degrees(_wrap_pi(th - start[2]))), 1),
+            total_deg=total_deg,
+        )
+
+    def stop_reason() -> str | None:
+        if turn is not None and turn.cancel.is_set():
+            return "cancelled by the operator"
+        if st.estop_latched:
+            return "E-STOP latched"
+        if not st.connected:
+            return "link to the runtime lost"
+        if _seat_taken(st):
+            return "another operator took the controls"
+        return None
+
+    async def settle(axis: str, target: float) -> str | None:
         """Drive one axis to `target` from where this phase starts."""
         ref_x, ref_y, ref_th = st.odom
         budget = (abs(target) / max(MOTION_LINEAR_MS, 1e-6)) + 8.0
         end = time.monotonic() + budget
         while time.monotonic() < end:
-            if st.estop_latched or not st.connected:
-                return False
+            reason = stop_reason()
+            if reason is not None:
+                return reason
             x, y, th = st.odom
             if axis == "turn":
                 err = _wrap_pi(ref_th + target - th)
                 if abs(err) <= MOTION_TOL_RAD:
-                    return True
+                    return None
                 robot.send_twist(0.0, max(-MOTION_ANGULAR_RAD_S,
                                           min(MOTION_ANGULAR_RAD_S, 1.5 * err)))
             else:
@@ -1322,28 +1700,29 @@ async def _run_move(
                             (y - ref_y) * math.sin(ref_th)
                 err = target - travelled
                 if abs(err) <= MOTION_TOL_M:
-                    return True
+                    return None
                 # A small heading hold keeps it straight.
                 hold = _wrap_pi(ref_th - th)
                 robot.send_twist(
                     max(-MOTION_LINEAR_MS, min(MOTION_LINEAR_MS, 1.2 * err)),
                     max(-0.4, min(0.4, 1.5 * hold)),
                 )
+            await progress()
             await asyncio.sleep(0.05)
-        return True  # out of time: report what actually happened
+        return None  # out of time: report what actually happened
 
+    stopped: str | None = None
     try:
         if abs(turn_deg) >= 0.5:
-            if not await settle("turn", math.radians(turn_deg)):
-                return None
-        if abs(forward_m) >= 0.01:
-            if not await settle("forward", forward_m):
-                return None
+            stopped = await settle("turn", math.radians(turn_deg))
+        if stopped is None and abs(forward_m) >= 0.01:
+            stopped = await settle("forward", forward_m)
     finally:
         robot.send_twist(0.0, 0.0)
+    await progress(force=True)
     x, y, th = st.odom
     dist = math.hypot(x - start[0], y - start[1])
-    return dist, _wrap_pi(th - start[2]), time.monotonic() - t0
+    return dist, _wrap_pi(th - start[2]), time.monotonic() - t0, stopped
 
 
 async def _cascade_speak(
@@ -1400,41 +1779,60 @@ async def _run_turn_cascade(
     history: list[dict[str, Any]],
     pcm: bytes,
     sample_rate: int,
-    pipeline: CascadePipeline,
+    pipeline: CascadePipeline | None,
     *,
     stub: bool,
     config: "VoiceConfig",
     voice_override: str | None = None,
+    text: str | None = None,
+    turn: AgentTurn | None = None,
 ) -> None:
+    """One cascade turn: (ASR) -> brain with tools -> (TTS), streamed.
+
+    `text` set means a typed turn: no ASR, the text goes straight to the
+    brain. `turn.speak=False` skips TTS (no audio frames at all). Lifecycle
+    events (`turn_start`/`turn_end`) belong to `run_agent_turn`; this emits
+    the turn's content. History gets the user's words, every tool call and
+    result, and the reply, committed even when the turn is cancelled.
+    """
+    turn = _adhoc_turn(ws, text, turn)
     if stub:
-        await ws.send_text(
-            json.dumps({"type": "audio_start", "sample_rate": OUTPUT_RATE, "format": "pcm16"})
-        )
-        async for ev in stream_stub([], config.voice):
-            if ev["type"] == "text":
-                await ws.send_text(json.dumps({"type": "text", "delta": ev["delta"]}))
-            elif ev["type"] == "audio":
-                await ws.send_bytes(ev["data"])
-        await ws.send_text(json.dumps({"type": "audio_end"}))
-        await ws.send_text(json.dumps({"type": "done"}))
+        said = text if text is not None else "(stub: audio received)"
+        await turn.emit("transcript", text=said, final=True, source=turn.source)
+        await turn.audio_start()
+        reply = ""
+        try:
+            async for ev in stream_stub([], config.voice):
+                if ev["type"] == "text":
+                    reply += ev["delta"]
+                    await turn.delta(ev["delta"])
+                elif ev["type"] == "audio":
+                    await turn.audio(ev["data"])
+            await turn.audio_end()
+        finally:
+            history.append({"role": "user", "content": said})
+            if reply.strip():
+                history.append({"role": "assistant", "content": reply.strip()})
+            _trim_history(history, config.history_turns)
         return
+    if pipeline is None:
+        raise RuntimeError("cascade backend is not running")
 
-    wav_bytes = pcm16_to_wav(pcm, sample_rate)
-
-    # 1) ASR — audio to transcript.
-    transcript = await _cascade_transcribe(pipeline.asr, wav_bytes)
-    await ws.send_text(
-        json.dumps({"type": "transcript", "text": transcript, "final": True})
-    )
+    # 1) ASR — audio to transcript (skipped for a typed turn).
+    if text is None:
+        wav_bytes = pcm16_to_wav(pcm, sample_rate)
+        transcript = await _cascade_transcribe(pipeline.asr, wav_bytes)
+    else:
+        transcript = text
+    await turn.emit("transcript", text=transcript, final=True, source=turn.source)
+    user_text = transcript or "(no speech detected)"
 
     # 2) Brain — text + current camera views -> reply text.
     state = ""
     views: list[tuple[str, bytes]] = []
     if config.tools_enabled:
         state, views = await live_context()
-    content: list[dict[str, Any]] = [
-        {"type": "text", "text": transcript or "(no speech detected)"}
-    ]
+    content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
     for stream, jpeg in views:
         label = "near" if "near" in stream else "far"
         b64 = base64.b64encode(jpeg).decode("ascii")
@@ -1451,6 +1849,8 @@ async def _run_turn_cascade(
             "message includes current views. Use them to answer questions about "
             "what is around you."
         )
+    if text is not None and not turn.speak:
+        system += "\n\nThe user typed this message and reads your reply as text."
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system},
         *history,
@@ -1460,10 +1860,15 @@ async def _run_turn_cascade(
     # sentence at a time, so the first audio does not wait for the whole reply.
     # Measured on the Thor: first audio 5.8-6.7 s waiting for the full text vs
     # ~2 s pipelined. TTS runs ~2x faster than playback, so it stays ahead.
-    voice = resolve_cascade_voice(pipeline.tts, voice_override or config.voice)
-    await ws.send_text(
-        json.dumps({"type": "audio_start", "sample_rate": OUTPUT_RATE, "format": "pcm16"})
-    )
+    voice = (resolve_cascade_voice(pipeline.tts, voice_override or config.voice)
+             if turn.speak else "")
+    await turn.audio_start()
+
+    async def say(sentence: str) -> None:
+        if turn.speak and sentence:
+            async for chunk in _cascade_speak(pipeline.tts, sentence, voice):
+                await turn.audio(chunk)
+
     # Read-only place-memory tools ride the same switch as live context, so the
     # brain can answer "where are we?" / "what do you know about the office?".
     tools: list[dict[str, Any]] = []
@@ -1471,93 +1876,101 @@ async def _run_turn_cascade(
         tools += PLACES_TOOLS + [ROBOT_STATUS_TOOL] + DRIVE_NOTE_TOOLS
     if config.motion_enabled:
         tools += [MOVE_TOOL]
-    tools = tools or None
-    spoken = ""
+    # What this turn adds to the history (images are never kept).
+    turn_msgs: list[dict[str, Any]] = [{"role": "user", "content": user_text}]
     pending = ""
+    round_text = ""
+    finished = False
     convo = list(messages)
-    for _round in range(3):  # at most: tool call(s), then the spoken answer
-        calls: dict[int, dict[str, str]] = {}
-        round_text = ""
-        async for ev in _cascade_chat_stream(pipeline.brain, convo, tools):
-            if ev["type"] == "tool_call":
-                slot = calls.setdefault(
-                    ev["index"], {"id": "", "name": "", "arguments": ""}
-                )
-                if ev["id"]:
-                    slot["id"] = ev["id"]
-                if ev["name"]:
-                    slot["name"] = ev["name"]
-                slot["arguments"] += ev["arguments"]
-                continue
-            delta = ev["delta"]
-            round_text += delta
-            spoken += delta
-            pending += delta
-            await ws.send_text(json.dumps({"type": "text", "delta": delta}))
-            ready, pending = _sentence_chunks(pending)
-            for sentence in ready:
-                async for chunk in _cascade_speak(pipeline.tts, sentence, voice):
-                    await ws.send_bytes(chunk)
-        if not calls:
-            break
-        # Anything said before the tool call ("let me check…") is its own
-        # utterance; flush it so it does not merge with the final answer.
-        if pending.strip():
-            async for chunk in _cascade_speak(pipeline.tts, pending.strip(), voice):
-                await ws.send_bytes(chunk)
+    try:
+        for rnd in range(3):  # at most: tool call(s), then the spoken answer
+            calls: dict[int, dict[str, str]] = {}
+            round_text = ""
+            async for ev in _cascade_chat_stream(pipeline.brain, convo, tools or None):
+                if ev["type"] == "tool_call":
+                    slot = calls.setdefault(
+                        ev["index"], {"id": "", "name": "", "arguments": ""}
+                    )
+                    if ev["id"]:
+                        slot["id"] = ev["id"]
+                    if ev["name"]:
+                        slot["name"] = ev["name"]
+                    slot["arguments"] += ev["arguments"]
+                    continue
+                delta = ev["delta"]
+                round_text += delta
+                pending += delta
+                await turn.delta(delta)
+                ready, pending = _sentence_chunks(pending)
+                for sentence in ready:
+                    await say(sentence)
+            if not calls:
+                break
+            # Anything said before the tool call ("let me check…") is its own
+            # utterance; flush it so it does not merge with the final answer.
+            await say(pending.strip())
             pending = ""
-        ordered = [calls[i] for i in sorted(calls)]
-        convo.append({
-            "role": "assistant",
-            "content": round_text or None,
-            "tool_calls": [
-                {
-                    "id": c["id"] or f"call_{i}",
-                    "type": "function",
-                    "function": {"name": c["name"], "arguments": c["arguments"]},
-                }
-                for i, c in enumerate(ordered)
-            ],
-        })
-        for i, c in enumerate(ordered):
-            await ws.send_text(json.dumps({"type": "tool", "name": c["name"]}))
-            result = await _run_tool(c["name"], c["arguments"])
-            convo.append({
-                "role": "tool",
-                "tool_call_id": c["id"] or f"call_{i}",
-                "content": result,
-            })
-    tail = pending.strip()
-    if tail:
-        async for chunk in _cascade_speak(pipeline.tts, tail, voice):
-            await ws.send_bytes(chunk)
-    await ws.send_text(json.dumps({"type": "audio_end"}))
-    await ws.send_text(json.dumps({"type": "done"}))
-    reply = spoken
-
-    if reply:
-        history.append({"role": "assistant", "content": reply})
-    if config.keep_audio_history:
-        history.append(
-            {
-                "role": "user",
-                "content": [
+            ordered = [calls[i] for i in sorted(calls)]
+            for i, c in enumerate(ordered):
+                c["id"] = c["id"] or f"{turn.turn_id}-{rnd}-{i}"
+            call_msg = {
+                "role": "assistant",
+                "content": round_text or None,
+                "tool_calls": [
                     {
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": base64.b64encode(wav_bytes).decode("ascii"),
-                            "format": "wav",
-                        },
+                        "id": c["id"],
+                        "type": "function",
+                        "function": {"name": c["name"], "arguments": c["arguments"]},
                     }
+                    for c in ordered
                 ],
             }
-        )
-    per_turn = 2 if config.keep_audio_history else 1
-    keep = max(0, config.history_turns) * per_turn
-    if keep == 0:
-        history.clear()
-    elif len(history) > keep:
-        del history[:-keep]
+            convo.append(call_msg)
+            turn_msgs.append(call_msg)
+            round_text = ""
+            for c in ordered:
+                result_msg = await _execute_tool_call(turn, c)
+                convo.append(result_msg)
+                turn_msgs.append(result_msg)
+        await say(pending.strip())
+        pending = ""
+        await turn.audio_end()
+        finished = True
+    finally:
+        # Commit whatever happened, even on cancel: the model should know it
+        # already moved, or was cut off, next turn.
+        _close_tool_calls(turn_msgs)
+        reply = round_text.strip()
+        if reply or not finished:
+            if not finished:
+                reply = (reply + " (interrupted)").strip()
+            turn_msgs.append({"role": "assistant", "content": reply})
+        history.extend(turn_msgs)
+        _trim_history(history, config.history_turns)
+
+
+async def _execute_tool_call(turn: AgentTurn, call: dict[str, str]) -> dict[str, Any]:
+    """Run one tool call with `tool_call`/`tool_result` events around it."""
+    args = _tool_args(call["arguments"])
+    await turn.emit("tool_call", call_id=call["id"], name=call["name"], args=args)
+    await turn.out.json({"type": "tool", "name": call["name"]})  # legacy
+    status: dict[str, Any] = {"ok": True, "call_id": call["id"]}
+    token = _TOOL_STATUS.set(status)
+    t0 = time.monotonic()
+    try:
+        result = await _run_tool(call["name"], call["arguments"])
+    except asyncio.CancelledError:
+        await turn.emit("tool_result", call_id=call["id"], ok=False,
+                        text="cancelled", ms=int((time.monotonic() - t0) * 1000))
+        raise
+    except Exception as exc:  # noqa: BLE001 - the model hears the failure
+        status["ok"] = False
+        result = f"The {call['name']} tool failed ({exc})."
+    finally:
+        _TOOL_STATUS.reset(token)
+    await turn.emit("tool_result", call_id=call["id"], ok=bool(status["ok"]),
+                    text=result, ms=int((time.monotonic() - t0) * 1000))
+    return {"role": "tool", "tool_call_id": call["id"], "content": result}
 
 
 # --- status ---------------------------------------------------------------
@@ -2188,12 +2601,19 @@ def build_app(
         if pipeline is not None:
             await asyncio.to_thread(pipeline.stop)
 
-    def current_status() -> VoiceStatus:
-        """Status of the backend selected right now."""
-        active_cascade = (config.backend == "cascade" and pipeline is not None) or (
+    registry = TurnRegistry()
+    app.state.turns = registry
+    app.state.sessions = sessions
+
+    def use_cascade() -> bool:
+        """Turns go to the cascade (the engine with tools)."""
+        return (config.backend == "cascade" and pipeline is not None) or (
             server is None and pipeline is not None
         )
-        if active_cascade:
+
+    def current_status() -> VoiceStatus:
+        """Status of the backend selected right now."""
+        if use_cascade():
             return pipeline_status or status
         return status
 
@@ -2211,6 +2631,7 @@ def build_app(
         snap["voices"] = voices_list()
         # Both are selectable; the service loads only the chosen one.
         snap["backends"] = ["omni", "cascade"]
+        snap["tools_supported"] = use_cascade()
         return snap
 
     @app.get("/healthz")
@@ -2218,6 +2639,14 @@ def build_app(
         snap = current_status().snapshot()
         snap["backend"] = config.backend
         snap["available"] = {"omni": server is not None, "cascade": pipeline is not None}
+        # Only the cascade brain has tools (place memory, robot status,
+        # motion); omni is chat-only.
+        snap["tools_supported"] = use_cascade()
+        snap["tools_enabled"] = config.tools_enabled
+        snap["motion_enabled"] = config.motion_enabled
+        # In-flight turns (the place router's VoiceBusyProbe reads these).
+        snap["turns_active"] = registry.count
+        snap["turn_active"] = registry.count > 0
         return JSONResponse(snap)
 
     @app.get("/voices")
@@ -2291,83 +2720,124 @@ def build_app(
         session_key = params.get("session") or f"anon-{id(ws)}"
         history = sessions.get(session_key)
         requested_voice = params.get("voice")
+        out = TurnEmitter(ws)
+        # The utterance being recorded: None, or its control frame + chunks.
+        utterance: dict[str, Any] | None = None
+
+        async def start_turn(ctl: dict[str, Any], *, source: str,
+                             text: str | None, pcm: bytes,
+                             sample_rate: int) -> None:
+            busy = registry.busy(session_key)
+            if busy is not None:
+                # No legacy `error` alongside: an old client would flip to
+                # its error state mid-turn; it gets the running turn's `done`.
+                await out.json({"type": "turn_rejected", "reason": "busy",
+                                "active_turn_id": busy.turn_id, "source": source})
+                return
+            client_id = ctl.get("turn_id")
+            turn = AgentTurn(
+                turn_id=(client_id if isinstance(client_id, str) and 0 < len(client_id) <= 64
+                         else _new_turn_id()),
+                source=source,
+                out=out,
+                speak=_parse_speak(ctl.get("speak", True)),
+                session_key=session_key,
+                owner=ws,
+            )
+            previous = registry.by_session.get(session_key)
+            registry.by_session[session_key] = turn
+            if use_cascade():
+                async def body() -> None:
+                    await _run_turn_cascade(
+                        None, history, pcm, sample_rate, pipeline, stub=stub,
+                        config=config, voice_override=requested_voice,
+                        text=text, turn=turn)
+            elif server is not None or stub:
+                async def body() -> None:
+                    await _run_turn(
+                        None, history, pcm, sample_rate, server, stub=stub,
+                        config=config, voice_override=requested_voice,
+                        text=text, turn=turn)
+            else:
+                async def body() -> None:
+                    raise RuntimeError("no voice backend available")
+            turn.task = asyncio.create_task(
+                run_agent_turn(turn, registry, body,
+                               previous=previous if previous is not None
+                               and previous.running else None),
+                name=f"voice-turn-{turn.turn_id}",
+            )
+
         try:
             while True:
                 msg = await ws.receive()
                 if msg.get("type") == "websocket.disconnect":
                     break
-                if "text" in msg and msg["text"] is not None:
+                if msg.get("bytes") is not None:
+                    if utterance is not None:
+                        utterance["chunks"].append(msg["bytes"])
+                    continue
+                if msg.get("text") is None:
+                    continue
+                try:
                     ctl = json.loads(msg["text"])
-                    kind = ctl.get("type")
-                    if kind == "reset":
-                        history.clear()
-                        await ws.send_text(json.dumps({"type": "reset"}))
+                except ValueError:
+                    await out.json({"type": "error", "message": "bad JSON frame"})
+                    continue
+                if not isinstance(ctl, dict):
+                    continue
+                kind = ctl.get("type")
+                if kind == "cancel":
+                    turn = registry.by_session.get(session_key)
+                    if turn is not None and turn.running:
+                        turn.request_cancel()
+                elif kind == "reset":
+                    turn = registry.by_session.get(session_key)
+                    if turn is not None and turn.running:
+                        # A turn commits its history when it ends; let it
+                        # end first so the reset sticks.
+                        turn.request_cancel()
+                        await asyncio.wait({turn.task}, timeout=10.0)
+                    history.clear()
+                    await out.json({"type": "reset"})
+                elif kind == "utterance_start":
+                    utterance = {"ctl": ctl, "chunks": []}
+                elif kind == "utterance_end":
+                    if utterance is None:
                         continue
-                    if kind != "utterance_start":
-                        continue
-                    sample_rate = int(ctl.get("sample_rate", INPUT_RATE))
-                    pcm = await _collect_pcm(ws)
+                    pcm = b"".join(utterance["chunks"])
+                    start_ctl = utterance["ctl"]
+                    utterance = None
                     if not pcm:
-                        await ws.send_text(json.dumps({"type": "done"}))
+                        await out.json({"type": "done"})
                         continue
-                    use_cascade = (
-                        config.backend == "cascade" and pipeline is not None
-                    ) or (server is None and pipeline is not None)
-                    if use_cascade:
-                        await _run_turn_cascade(
-                            ws,
-                            history,
-                            pcm,
-                            sample_rate,
-                            pipeline,
-                            stub=stub,
-                            config=config,
-                            voice_override=requested_voice,
-                        )
-                    elif server is not None or stub:
-                        await _run_turn(
-                            ws,
-                            history,
-                            pcm,
-                            sample_rate,
-                            server,
-                            stub=stub,
-                            config=config,
-                            voice_override=requested_voice,
-                        )
-                    else:
-                        raise RuntimeError("no voice backend available")
+                    await start_turn(
+                        start_ctl, source="voice", text=None, pcm=pcm,
+                        sample_rate=int(start_ctl.get("sample_rate", INPUT_RATE)))
+                elif kind == "user_text":
+                    text = str(ctl.get("text") or "").strip()
+                    if not text:
+                        await out.json({"type": "error", "message": "empty user_text"})
+                        continue
+                    await start_turn(ctl, source="text", text=text, pcm=b"",
+                                     sample_rate=INPUT_RATE)
         except WebSocketDisconnect:
             pass
         except Exception as exc:  # noqa: BLE001 - report and close cleanly
-            try:
-                await ws.send_text(
-                    json.dumps({"type": "error", "message": str(exc)})
-                )
-            except Exception:  # noqa: BLE001
-                pass
+            await out.json({"type": "error", "message": str(exc)})
         finally:
+            out.closed = True
+            # A disconnect cancels the turns this socket started (the motion
+            # tool's own `finally` still stops and disarms).
+            for turn in list(registry.running):
+                if turn.owner is ws:
+                    turn.request_cancel()
             try:
                 await ws.close()
             except Exception:  # noqa: BLE001
                 pass
 
     return app
-
-
-async def _collect_pcm(ws: Any) -> bytes:
-    """Accumulate binary PCM frames until `utterance_end`."""
-    chunks: list[bytes] = []
-    while True:
-        msg = await ws.receive()
-        if msg.get("type") == "websocket.disconnect":
-            return b"".join(chunks)
-        if "bytes" in msg and msg["bytes"] is not None:
-            chunks.append(msg["bytes"])
-        elif "text" in msg and msg["text"] is not None:
-            ctl = json.loads(msg["text"])
-            if ctl.get("type") == "utterance_end":
-                return b"".join(chunks)
 
 
 async def _run_turn(
@@ -2380,7 +2850,13 @@ async def _run_turn(
     stub: bool,
     config: VoiceConfig,
     voice_override: str | None = None,
+    text: str | None = None,
+    turn: AgentTurn | None = None,
 ) -> None:
+    """One omni turn: a single model call, no tools (omni rejects tools with
+    audio output). `text` set means a typed turn; `turn.speak=False` asks
+    for a text-only reply."""
+    turn = _adhoc_turn(ws, text, turn)
     voice = config.voice
     if voice_override:
         available = known_voices(server)
@@ -2394,7 +2870,10 @@ async def _run_turn(
     if config.tools_enabled and not stub:
         state, views = await live_context()
 
-    wav_b64 = base64.b64encode(pcm16_to_wav(pcm, sample_rate)).decode("ascii")
+    if text is not None:
+        await turn.emit("transcript", text=text, final=True, source=turn.source)
+    wav_b64 = ("" if text is not None else
+               base64.b64encode(pcm16_to_wav(pcm, sample_rate)).decode("ascii"))
     content: list[dict[str, Any]] = []
     if views:
         content.append({"type": "text", "text": "Your current camera views:"})
@@ -2408,9 +2887,12 @@ async def _run_turn(
                     "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
                 }
             )
-    content.append(
-        {"type": "input_audio", "input_audio": {"data": wav_b64, "format": "wav"}}
-    )
+    if text is not None:
+        content.append({"type": "text", "text": text})
+    else:
+        content.append(
+            {"type": "input_audio", "input_audio": {"data": wav_b64, "format": "wav"}}
+        )
     user_msg = {"role": "user", "content": content}
 
     # The system prompt comes from the live config (persona edits apply on the
@@ -2430,44 +2912,43 @@ async def _run_turn(
         user_msg,
     ]
 
-    await ws.send_text(
-        json.dumps({"type": "audio_start", "sample_rate": OUTPUT_RATE, "format": "pcm16"})
-    )
+    await turn.audio_start()
     final_text = ""
-    async for ev in _stream(server, messages, voice, None, stub, audio=True):
-        if ev["type"] == "text":
-            final_text += ev["delta"]
-            await ws.send_text(json.dumps({"type": "text", "delta": ev["delta"]}))
-        elif ev["type"] == "audio":
-            await ws.send_bytes(ev["data"])
-
-    await ws.send_text(json.dumps({"type": "audio_end"}))
-    await ws.send_text(json.dumps({"type": "done"}))
-
-    # Bound the rolling history. The assistant's text is always kept; the
-    # user's (large) audio is kept only when the operator opts in, so the model
-    # can re-hear prior turns at the cost of re-prefilling them. Camera frames
-    # are never kept — only the current turn's views are attached.
-    if final_text.strip():
-        history.append({"role": "assistant", "content": final_text.strip()})
-    if config.keep_audio_history:
-        history.append(
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_audio",
-                        "input_audio": {"data": wav_b64, "format": "wav"},
-                    }
-                ],
-            }
-        )
-    per_turn = 2 if config.keep_audio_history else 1
-    keep = max(0, config.history_turns) * per_turn
-    if keep == 0:
-        history.clear()
-    elif len(history) > keep:
-        del history[:-keep]
+    finished = False
+    try:
+        async for ev in _stream(server, messages, voice, None, stub, audio=turn.speak):
+            if ev["type"] == "text":
+                final_text += ev["delta"]
+                await turn.delta(ev["delta"])
+            elif ev["type"] == "audio":
+                await turn.audio(ev["data"])
+        await turn.audio_end()
+        finished = True
+    finally:
+        # Bound the rolling history. The user's words (typed turns) and the
+        # assistant's text are always kept; the user's (large) audio only when
+        # the operator opts in, so the model can re-hear prior turns at the
+        # cost of re-prefilling them. Camera frames are never kept.
+        if text is not None:
+            history.append({"role": "user", "content": text})
+        elif config.keep_audio_history:
+            history.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": wav_b64, "format": "wav"},
+                        }
+                    ],
+                }
+            )
+        reply = final_text.strip()
+        if not finished:
+            reply = (reply + " (interrupted)").strip()
+        if reply:
+            history.append({"role": "assistant", "content": reply})
+        _trim_history(history, config.history_turns)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2509,8 +2990,9 @@ def main(argv: list[str] | None = None) -> int:
         "--backend",
         choices=["omni", "cascade"],
         default="",
-        help="voice backend: 'omni' (end-to-end Qwen3-Omni) or 'cascade' "
-        "(ASR -> VLM brain -> TTS). Defaults to the saved config.",
+        help="voice backend: 'cascade' (ASR -> VLM brain -> TTS, with tools; "
+        "the default) or 'omni' (end-to-end Qwen3-Omni, chat only, no tools). "
+        "Overrides the saved config.",
     )
     parser.add_argument(
         "--omni-url",

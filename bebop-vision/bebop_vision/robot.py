@@ -29,6 +29,11 @@ class RobotState:
         self.estop_reason = ""
         self.cmd = (0.0, 0.0)
         self.odom = (0.0, 0.0, 0.0)
+        # Drive-seat arbitration (DriveState): someone holds the seat, and
+        # whether it is this connection.
+        self.has_active_operator = False
+        self.you_are_active_operator = False
+        self.active_operator_name = ""
         self.wheel_armed = {}
         self.wheel_vel = {}
         self.wheel_feedback_stale = {}
@@ -42,11 +47,15 @@ class RobotState:
 class RobotClient:
     """Async WS client on a background thread; thread-safe command methods."""
 
-    def __init__(self, url=DEFAULT_URL, telemetry_hz=30, reconnect_s=1.0, name="bebop-vision"):
+    def __init__(self, url=DEFAULT_URL, telemetry_hz=30, reconnect_s=1.0, name="bebop-vision",
+                 hello_name=None):
         self.url = url
         self.telemetry_hz = telemetry_hz
         self.reconnect_s = reconnect_s
         self.name = name
+        # When set, announced via ClientHello on every (re)connect, so other
+        # clients see who holds the drive seat (`DriveState.active_operator_name`).
+        self.hello_name = hello_name
         self.state = RobotState()
         # Every ServerRuntimeMessage as received, (monotonic, wall_ns, bytes):
         # the recorder drains this into `/runtime` (telemetry frames) and
@@ -91,6 +100,10 @@ class RobotClient:
                     print(f"[robot] connected to {self.url}")
                     outbox = asyncio.Queue(maxsize=64)
                     self._outbox = outbox
+                    if self.hello_name:
+                        hello = pb.ClientRuntimeMessage()
+                        hello.client_hello.name = str(self.hello_name)
+                        outbox.put_nowait(hello.SerializeToString())
                     outbox.put_nowait(self._subscribe_msg().SerializeToString())
                     sender = asyncio.create_task(self._sender(ws, outbox))
                     try:
@@ -149,6 +162,9 @@ class RobotClient:
         if t.drive.present:
             st.cmd = (t.drive.cmd_linear_x, t.drive.cmd_angular_z)
             st.odom = (t.drive.odom_x, t.drive.odom_y, t.drive.odom_theta)
+            st.has_active_operator = t.drive.has_active_operator
+            st.you_are_active_operator = t.drive.you_are_active_operator
+            st.active_operator_name = t.drive.active_operator_name
         st.wheel_armed = {w.name: w.armed for w in t.wheels}
         st.wheel_vel = {w.name: w.velocity_rad_s for w in t.wheels}
         st.wheel_feedback_stale = {w.name: w.feedback_stale for w in t.wheels}

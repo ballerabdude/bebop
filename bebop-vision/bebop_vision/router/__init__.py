@@ -22,7 +22,7 @@ Second skill: **map capture** — "should I persist this local structure map?"
     router = RouterService(
         place_skill, place_exec, capture=capture,
         skills=[(capture_skill, capture_exec)],            # extra registrations
-        voice_busy=VoiceBusyProbe(),                       # :9093, fail-open
+        voice_busy=VoiceBusyProbe(),                       # :9093 turn_active
     )
     router.start()
 

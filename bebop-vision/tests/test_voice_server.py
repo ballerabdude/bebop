@@ -391,8 +391,10 @@ def test_run_turn_cascade(monkeypatch):
     # pipelined: one TTS call per finished sentence, not one for the whole reply
     assert spoken == ["Hi there!", "Bye now."]
     assert audio_bytes == 8  # 2 sentences x 2 chunks x 2 bytes
-    assert history and history[0]["role"] == "assistant"
-    assert history[0]["content"] == "Hi there! Bye now."
+    # history keeps the user's words and the reply (no images)
+    assert [m["role"] for m in history] == ["user", "assistant"]
+    assert history[0]["content"] == "hello robot"
+    assert history[1]["content"] == "Hi there! Bye now."
     # the transcript is what the brain sees as the user turn
     assert seen["messages"][-1]["content"][0]["text"] == "hello robot"
 

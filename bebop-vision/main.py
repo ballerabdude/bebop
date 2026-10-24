@@ -149,7 +149,12 @@ def run_record_navd(args):
         raise SystemExit("cameras did not produce fresh frames within 10 s")
     vserver = None
     if not args.no_video_server:
-        vserver = VideoServer(rig, port=args.video_port, notes=notes)
+        vserver = VideoServer(
+            rig, port=args.video_port, notes=notes,
+            bitrates={"color": args.video_color_kbps * 1000,
+                      "depth": args.video_depth_kbps * 1000},
+            max_viewers=args.video_max_viewers,
+            idr_interval_s=args.video_idr_s)
         vserver.start()
 
     # Semantic place memory (bebop_vision/places): teaches named rooms from
@@ -450,11 +455,22 @@ def main():
     parser.add_argument("--rig", metavar="YAML",
                         help="rig config path (default: config/orbbec_rig.yaml)")
     parser.add_argument("--no-video-server", action="store_true",
-                        help="do not serve the operator MJPEG stream on "
-                             "--video-port")
+                        help="do not serve the operator WebRTC (WHEP) "
+                             "video on --video-port")
     parser.add_argument("--video-port", type=int, default=9092,
                         help="port for the operator video stream "
                              "(default: 9092)")
+    parser.add_argument("--video-color-kbps", type=int, default=3500,
+                        help="WHEP color stream CBR bitrate (default: 3500)")
+    parser.add_argument("--video-depth-kbps", type=int, default=1000,
+                        help="WHEP depth stream CBR bitrate (default: 1000)")
+    parser.add_argument("--video-max-viewers", type=int, default=4,
+                        help="simultaneous WHEP viewers per stream; they "
+                             "share one encoder (default: 4)")
+    parser.add_argument("--video-idr-s", type=float, default=1.0,
+                        help="periodic IDR interval of the WHEP encoders, "
+                             "seconds (joins and PLIs force one sooner; "
+                             "default: 1.0)")
     parser.add_argument("--roles", default="",
                         help="comma-separated camera roles to open "
                              "(default: all configured, e.g. 'near' while "

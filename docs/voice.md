@@ -1,14 +1,18 @@
-# Voice: on-robot speech-to-speech (Qwen3-Omni)
+# Voice + agent: on-robot voice and text turns
 
-Status: **in progress** (branch `feat/voice-omni`). Provisioning foundation
-landed; firmware control path, voice service, and app page are next.
+`bebop-voice` (:9093) is the robot's **agent server**: the operator talks *or
+types* to the robot, and it answers with streamed text, optional speech, and
+tool calls (place memory, robot status, drive notes, bounded motion). Fully
+local: every model runs on the robot.
 
-## Goal (v1)
+**Engines.** `cascade` (ASR → VLM brain → TTS) is the **default** and the only
+engine with tools. `omni` (end-to-end Qwen3-Omni) stays selectable as a
+chat-only engine — it has no tools (the omni server rejects tools combined
+with audio output) and underperformed the cascade in use. `/healthz` and
+`/config` report `tools_supported` so the app can say so.
 
-A new app page where the operator talks to the robot and it talks back.
-**No actions, no tool calls** — pure speech-to-speech. Fully local: the model
-runs on the robot, audio never leaves the device (except between the phone and
-the robot on the LAN).
+The protocol the app speaks is in [Agent protocol](#agent-protocol-voice-ws-9093).
+The sections after it are the original omni bring-up notes, kept as history.
 
 ## Why Qwen3-Omni + TensorRT Edge-LLM
 
@@ -123,22 +127,95 @@ message VoiceState {
 }
 ```
 
-### Audio (voice WS `:9093`)
+### Agent protocol (voice WS `:9093`)
 
-Turn-based v1 (push-to-talk or client VAD), JSON control frames + binary audio:
+One WebSocket, `ws://<robot>:9093/voice?session=<id>[&voice=<speaker>]`, carries
+voice and typed turns. JSON text frames are control/events; binary frames are
+PCM16 audio (16 kHz-ish mono up, 24 kHz mono down). `session` keys the
+conversation history (kept across reconnects, LRU of 32 sessions); without it
+each connection gets a fresh history.
 
-- app → robot: `{"type":"utterance_start","sample_rate":16000,"format":"pcm16"}`
-  then binary PCM16 frames, then `{"type":"utterance_end"}`.
-- robot → app: `{"type":"text","delta":"..."}` (transcript/response), then
-  `{"type":"audio_start","sample_rate":24000,"format":"pcm16"}`, binary PCM16
-  frames, `{"type":"audio_end"}`, `{"type":"done"}`.
-- `{"type":"error","message":"..."}` on failure.
-- `GET /healthz` for readiness.
+**Turn model.** Each turn runs as its own server task, so the socket keeps
+reading while the brain thinks, speaks or drives. **At most one turn per
+session runs at a time; a new turn while one runs is rejected**
+(`turn_rejected`) — send `cancel` first. (Rejecting rather than
+auto-cancelling keeps a stray second message from silently aborting a motion.)
+A turn that was cancelled but is still winding down (stopping the wheels) does
+not block: the next turn waits for it, then starts. Events for a turn go to
+the socket that started it.
 
-Full-duplex (barge-in) is a later step (needs a full-duplex model such as
-NemotronLabs VoiceChat-11B, or careful VAD + cancellation).
+App → robot:
 
-### Live context (single pass, no tools)
+| Message | Meaning |
+|---|---|
+| `{"type":"utterance_start","sample_rate":48000,"format":"pcm16","speak"?:bool,"turn_id"?:str}` | start recording a voice turn; binary PCM16 frames follow |
+| `{"type":"utterance_end"}` | end of the utterance → starts the voice turn (empty audio → just `done`) |
+| `{"type":"user_text","text":"...","speak"?:bool,"turn_id"?:str}` | a typed turn: the text goes straight to the brain (no ASR) |
+| `{"type":"cancel"}` | cancel the session's running turn (no-op when idle) |
+| `{"type":"reset"}` | cancel any running turn, then clear the session history (→ `{"type":"reset"}`) |
+
+`speak` is a JSON bool and defaults to `true` (the strings `"false"`, `"0"`,
+`"no"`, `"off"` are also read as false); `false` skips TTS for that turn (no `audio_*`
+events, no binary frames). `turn_id` (≤64 chars) lets the client pick the id;
+otherwise the server assigns one.
+
+Robot → app (every event carries `turn_id`):
+
+| Event | Fields |
+|---|---|
+| `turn_start` | `source: "voice"\|"text"`, `speak` |
+| `transcript` | `text` (the ASR result, or the typed text), `final: true`, `source` |
+| `assistant_delta` | `text` — streamed reply text (concatenate) |
+| `tool_call` | `call_id`, `name`, `args` (parsed JSON object) |
+| `tool_result` | `call_id`, `ok`, `text` (what the model was told), `ms` |
+| `motion_progress` | `call_id`, `done_m`, `total_m`, `done_deg`, `total_deg` (~5 Hz during `move_relative`, plus a final one) |
+| `audio_start` / `audio_end` | `sample_rate: 24000`, `format: "pcm16"`; binary PCM16 frames in between |
+| `turn_end` | `status: "done"\|"cancelled"\|"error"`, `error?` — always the last event of a turn |
+| `turn_rejected` | `reason: "busy"`, `active_turn_id`, `source` (no turn was started; no `turn_end` follows; no legacy `error` is sent with it) |
+
+Ordering within a turn: `turn_start` → `transcript` → `audio_start`? →
+(`assistant_delta` | `tool_call` → `motion_progress`* → `tool_result`)* →
+`audio_end`? → `turn_end`. `ok: false` marks a refusal or failure (a tool that
+declined to move, an unreachable service); the text says why. A cancelled
+tool reports `tool_result{ok:false,text:"cancelled"}`.
+
+**Legacy messages** (for the pre-agent app, kept while cheap): `text{delta}`
+mirrors each `assistant_delta`; `tool{name}` mirrors `tool_call`; `done`
+precedes every `turn_end` that is `done`/`cancelled`, and `error{message}`
+precedes an `error` one (and answers bad frames; `turn_rejected` has no legacy mirror). New
+clients should key off the typed events and ignore these.
+
+**Cancel.** `cancel`, `reset` and a socket disconnect cancel the running turn:
+brain streaming and TTS stop immediately; `move_relative` checks the turn's
+cancel flag every 50 ms control tick (and task cancellation lands at each
+tick's sleep). Its `finally` blocks always send a zero twist, then undo what
+it changed (disarm / restore the mode) before the turn ends `cancelled`.
+There is no confirmation gate for motion (operator decision): motion is gated
+by `motion_enabled` and the drive-seat rule below.
+
+**History** keeps whole turns — the user's words (transcript or typed text),
+each tool-calling assistant message with its tool results, and the reply —
+bounded by `history_turns` *turns* (not messages). Camera frames are never
+kept. A cancelled turn is still committed (cut-off tool calls get a
+"cancelled" result, the reply ends "(interrupted)") so the model knows what
+already happened. For omni, a spoken user turn is kept only with
+`keep_audio_history`; `keep_audio_history` does not apply to the cascade (it
+keeps the transcript).
+
+**Busy signal.** `GET /healthz` adds `turn_active` (bool) and `turns_active`
+(int, server-wide), plus `tools_supported`, `tools_enabled` and
+`motion_enabled`. The place router's `VoiceBusyProbe`
+(`bebop_vision/router/voice_busy.py`) skips its background tick while a turn
+runs. It treats a stopped voice service (connection refused) as idle, and
+fails **closed** (busy) when the service is up but times out, errors, or
+reports no turn signal.
+
+**Permissions.** `tools_enabled` gates live context (camera frames + robot
+status) *and* the non-motion tools; `motion_enabled` adds `move_relative`.
+Both are in `GET /config` (with `tools_supported`) and settable with
+`POST /config`.
+
+### Live context (omni: single pass, no tools)
 
 Earlier revisions used a `describe_scene` tool. That forced a two-phase turn
 because `/v1/chat/completions` **rejects `tools` combined with audio output**
@@ -170,7 +247,10 @@ Toggle with the Voice page's "Live context" switch (`VoiceConfig.tools_enabled`,
 
 ## Cascade backend (multi-hop: ASR → brain → TTS)
 
-Selected by `VoiceConfig.backend` (`omni` default, or `cascade`; `--backend`).
+Selected by `VoiceConfig.backend` (`cascade`, the default, or `omni`;
+`--backend`). Config files written before `config_version: 2` saved the old
+`omni` default on every write, so a pre-v2 file's `omni` is migrated to
+`cascade` on load; a v2 file keeps whatever the operator chose.
 The cascade uses the **best model per stage**, each its own Edge-LLM OpenAI
 server (all served checkpoint-direct, engines cached):
 
@@ -181,9 +261,9 @@ server (all served checkpoint-direct, engines cached):
 | TTS | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | `POST /v1/audio/speech` → 24 kHz PCM |
 
 Ports 8011/8012/8013. `CascadePipeline` supervises them (sequential engine
-builds to bound GPU memory); `_run_turn_cascade` does: transcribe → attach
-robot status + both camera frames → chat → synthesize, streaming a
-`{"type":"transcript","text":…}` event to the app for the ASR result.
+builds to bound GPU memory); `_run_turn_cascade` does: transcribe (voice
+turns only) → attach robot status + both camera frames → chat (with tools) →
+synthesize per sentence (unless `speak: false`), streaming the events above.
 
 Because the brain is a text/VLM model, **native tool calling works** here (the
 omni server rejects tools combined with audio output).
@@ -340,9 +420,26 @@ the localisation note in `bebop_vision/places/__init__.py`). It:
 - is gated by its own `motion_enabled` switch, **not** the app's casual
   "live context" toggle;
 - clamps a single call to ≤2 m and ≤180°;
-- arms the chassis for the duration only — mode → `DIAL_IN` (arming requires
-  it), enable the wheels, move, then **stop, disarm and restore the mode on
-  every exit path**;
+- **refuses while another client holds the drive seat**
+  (`DriveState.has_active_operator && !you_are_active_operator`);
+- **is not preempted by the joystick.** The firmware keeps the seat with the
+  client that is sending input and rejects everyone else (stops included)
+  until the holder has been idle for `server.operator_grace_ms` (2 s).
+  `move_relative` sends a twist every 50 ms, so while it drives, another
+  operator's joystick is refused ("\"voice\" is driving"). **A voice move
+  is stopped only by `cancel` (or `reset` / closing the socket) or the
+  E-STOP.** The app should show a prominent Cancel button whenever it is
+  receiving `motion_progress`. (Letting a human preempt the `voice` client
+  would be a firmware arbitration change.) If the seat does change hands
+  mid-move (e.g. after a gap longer than the grace), voice stops and leaves
+  the wheels and mode to the new holder instead of disarming them;
+- if the wheels are **already armed** (a person armed them, in `DIAL_IN`), it
+  drives as-is and **leaves them armed and the mode untouched**; otherwise it
+  arms for the duration only — mode → `DIAL_IN` (arming requires it), enable
+  the wheels, move — and on **every exit path** stops, then undoes only what
+  it changed (disarm if it armed, restore the mode if it switched it);
+- stops within one 50 ms tick on `cancel` / disconnect, E-STOP, link loss or
+  a seat change, and reports how far it actually got (`ok: false`);
 - closes the loop on wheel odometry and reports the distance telemetry
   actually showed, not the distance requested;
 - relies on the firmware as the backstop: the operator-link watchdog zeroes a
