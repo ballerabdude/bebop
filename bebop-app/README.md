@@ -85,7 +85,7 @@ robot's own Bluetooth stack is not involved.
 | Flow              | Drives                                                                 | Where it lives                                   |
 |-------------------|------------------------------------------------------------------------|--------------------------------------------------|
 | App-side dial-in  | Per-joint target position via `setMotorTarget` (legged)                | `src/input/`, `src/components/GamepadDriver.tsx` |
-| App-side drive    | Body twist (vx, wz) via `setVelocityCommand` (wheeled)                 | `src/input/`, `src/components/GamepadDrive.tsx`  |
+| App-side drive    | Body twist (vx, wz) via `sendVelocityCommand` (wheeled)                | `src/input/`, `src/components/GamepadDrive.tsx`  |
 
 ### Layout auto-detection
 
@@ -131,6 +131,13 @@ The firmware holds the last commanded twist until told otherwise, so the
 bridge owns stopping: deadman release, E-STOP latch, pad disconnect, leaving
 the screen, hiding the tab, or any interruption of the gamepad poll loop
 (250 ms watchdog) all enqueue a zero twist exactly once per drive cycle.
+
+Every drive input (gamepad, on-screen joystick, WASD / arrows) goes through
+one twist stream, `src/runtime/twistStream.ts`. The robot zeroes any twist
+not refreshed within its `operator_timeout_ms` (500 ms), so the stream never
+waits for an Ack. It re-sends the held twist every 100 ms, sends changes at
+most every ~33 ms, skips frames while the WebSocket is backed up instead of
+queueing stale ones, and sends stops immediately.
 
 ### Control profiles
 

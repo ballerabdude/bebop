@@ -20,6 +20,7 @@ import type {
 } from "../runtime";
 import type { RuntimeTransport } from "../runtime";
 import { httpUrl } from "../runtime/urls";
+import { useTwistStream } from "../runtime/useTwistStream";
 
 interface MotorBenchProps {
   /** IP address of the robot, as reported by `WifiStatus.ip_address` over BLE. */
@@ -50,14 +51,6 @@ const MODE_LABEL: Record<RuntimeMode, string> = {
   DIAL_IN: "Dial-in",
   RUN_POLICY: "Policy",
 };
-
-/// How often the drive keepalive re-sends the current twist while a
-/// drive cycle is open. Must stay comfortably below the firmware's
-/// `operator_timeout_ms` (default 500 ms — see
-/// `firmware/bebop-linux/src/config.rs`) so a healthy session never
-/// trips the robot-side link-loss watchdog; 10 Hz leaves ~4 missed
-/// packets of slack.
-const TWIST_KEEPALIVE_MS = 100;
 
 /** Live motor bench: enable/disable per joint, see live state, E-STOP. */
 export function MotorBenchScreen({
@@ -290,71 +283,19 @@ export function MotorBenchScreen({
     [refreshAfter],
   );
 
-  // Throttled twist sender. The joystick can emit dozens of moves per
-  // second; keep a single in-flight request and always send the latest
-  // (vx, wz) so the firmware sees a continuous stream without queueing
-  // one request per pointerm move. On release we send (0, 0) to stop.
-  const twistInFlightRef = useRef(false);
-  const twistPendingRef = useRef<{ vx: number; wz: number } | null>(null);
-
-  // Drive-cycle bookkeeping for the keepalive below: `drivingRef` is
-  // true while a gesture holds a non-zero twist, `lastTwistRef` holds
-  // the latest one. Closed by every stop path.
-  const drivingRef = useRef(false);
-  const lastTwistRef = useRef<{ vx: number; wz: number } | null>(null);
-
-  const sendTwist = useCallback(async (vx: number, wz: number, silent = false) => {
-    const t = transportRef.current;
-    if (!t) return;
-    const payload = { vx, wz };
-    lastTwistRef.current = payload;
-    if (vx !== 0 || wz !== 0) drivingRef.current = true;
-    if (twistInFlightRef.current) {
-      twistPendingRef.current = payload;
-      return;
-    }
-    twistInFlightRef.current = true;
-    try {
-      await t.setVelocityCommand(vx, wz);
-    } catch (e) {
-      if (!silent) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    } finally {
-      twistInFlightRef.current = false;
-      const next = twistPendingRef.current;
-      twistPendingRef.current = null;
-      if (next) {
-        void Promise.resolve().then(() => sendTwist(next.vx, next.wz, silent));
-      }
-    }
-  }, []);
-
-  // One-shot "stop": enqueue a (0,0) twist that supersedes anything
-  // mid-flight, so releasing the joystick always halts the robot.
-  const stopDrive = useCallback(() => {
-    drivingRef.current = false;
-    lastTwistRef.current = null;
-    twistPendingRef.current = { vx: 0, wz: 0 };
-    void sendTwist(0, 0);
-  }, [sendTwist]);
-
-  // Operator-link keepalive: the firmware zeroes any twist that isn't
-  // refreshed within its `operator_timeout_ms` (500 ms default). Every
-  // drive input here emits only on *change*, so a steady stick would
-  // look like a dead operator to that watchdog; re-send the current
-  // twist at ~10 Hz while a drive cycle is open. Repeats are silent —
-  // a flaky link already surfaces through the connection banner and
-  // the robot halting is the designed behavior.
-  useEffect(() => {
-    if (connState !== "connected") return;
-    const iv = window.setInterval(() => {
-      if (!drivingRef.current) return;
-      const last = lastTwistRef.current;
-      if (last) void sendTwist(last.vx, last.wz, true);
-    }, TWIST_KEEPALIVE_MS);
-    return () => window.clearInterval(iv);
-  }, [connState, sendTwist]);
+  // Drive twists: the joystick, WASD / arrows and the gamepad bridge all
+  // go through one twist stream (`src/runtime/twistStream.ts`). It never
+  // waits for the firmware's Ack, re-sends the held twist every 100 ms
+  // for the robot's operator watchdog, throttles changes to ~30 Hz,
+  // skips frames while the socket is backed up, and sends stops
+  // (joystick release included) immediately. Rejections reach the
+  // error banner, rate-limited. Unmounting mid-drive halts the chassis
+  // (handled by the hook).
+  const { sendTwist, stopDrive } = useTwistStream(
+    robotIp,
+    runtimePort,
+    setError,
+  );
 
   // "Run policy" composite action: switch to RUN_POLICY mode first, then
   // arm every joint. Order matters — the firmware's `arm()` only accepts
@@ -901,8 +842,8 @@ export function MotorBenchScreen({
           />
 
           {/* Bluetooth-gamepad drive bridge. Streams twists through the
-              same `sendTwist` coalescer as the joystick above, so the
-              throttling / in-flight logic stays in one place. Renders
+              same `sendTwist` twist stream as the joystick above, so the
+              throttling / keepalive logic stays in one place. Renders
               nothing when no pad is connected to the phone / laptop. */}
           <GamepadDrive
             wheels={wheels}

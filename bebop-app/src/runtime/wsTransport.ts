@@ -11,6 +11,12 @@
 //  - **Push streams**: telemetry (frequent), mode changes, E-STOP latches.
 //    Listeners registered via `onTelemetry()` / `onModeChanged()` etc.
 //    receive every matching frame.
+//  - **Fire-and-forget drive twists**: `sendVelocityCommand` writes the
+//    frame and returns without waiting for the Ack. Acks queue behind
+//    telemetry on the downlink, and the drive keepalive
+//    (`twistStream.ts`) must never stall behind a slow one. Only an Error
+//    reply is routed back, to a per-frame callback held in a bounded
+//    registry.
 //
 // The runtime API is intentionally separate from the BLE control surface
 // in `src/ble/`; the BLE transport is for one-shot setup over Bluetooth,
@@ -64,6 +70,7 @@ import {
   type ModelCatalogEntry as ProtoModelCatalogEntry,
   type PurposeSelection as ProtoPurposeSelection,
 } from "../proto/bebop_runtime_pb";
+import { createReplyRegistry, TWIST_REPLY_CAPACITY } from "./twistStream";
 import type {
   BusView,
   DriveView,
@@ -121,6 +128,13 @@ export class RuntimeTransport {
   private ws: WebSocket | null = null;
   private nextRequestId = 1;
   private pending = new Map<number, PendingResolver>();
+  /// Error callbacks for fire-and-forget twist frames, keyed by request id.
+  /// Nothing awaits those frames, so the registry is bounded (oldest
+  /// evicted) and cleared on every close: a reply that never arrives can't
+  /// leak a waiter.
+  private twistReplies = createReplyRegistry<(message: string) => void>(
+    TWIST_REPLY_CAPACITY,
+  );
   private telemetryListeners = new Set<TelemetryListener>();
   private estopListeners = new Set<EStopListener>();
   private modeListeners = new Set<ModeListener>();
@@ -346,6 +360,8 @@ export class RuntimeTransport {
   }
 
   private failAllPending(message: string): void {
+    // Twist frames have no awaiters to fail; just forget their callbacks.
+    this.twistReplies.clear();
     if (this.pending.size === 0) return;
     for (const [id, fn] of this.pending) {
       fn({
@@ -536,14 +552,44 @@ export class RuntimeTransport {
   /// `linearX` (m/s forward) and `angularZ` (rad/s yaw, + left). The
   /// firmware clamps + slew-limits and converts to per-wheel velocity;
   /// send (0, 0) to stop. No-op on the humanoid (no `drive:` block).
-  async setVelocityCommand(linearX: number, angularZ: number): Promise<void> {
-    await this.requestAck({
-      case: "setVelocityCommand",
-      value: create(SetVelocityCommandSchema, {
-        linearX,
-        angularZ,
+  ///
+  /// Fire-and-forget, for the drive stream (`twistStream.ts`). It never
+  /// waits for the Ack: it returns true once the frame is handed to the
+  /// socket and false when the socket isn't open. When the firmware rejects
+  /// the frame with an Error (e.g. another operator holds the drive seat),
+  /// `onError` gets the message. Acks are dropped.
+  sendVelocityCommand(
+    linearX: number,
+    angularZ: number,
+    onError?: (message: string) => void,
+  ): boolean {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    const requestId = this.nextRequestId++;
+    const bytes = toBinary(
+      ClientRuntimeMessageSchema,
+      create(ClientRuntimeMessageSchema, {
+        requestId,
+        payload: {
+          case: "setVelocityCommand",
+          value: create(SetVelocityCommandSchema, { linearX, angularZ }),
+        },
       }),
-    });
+    );
+    try {
+      ws.send(bytes);
+    } catch {
+      return false;
+    }
+    if (onError) this.twistReplies.add(requestId, onError);
+    return true;
+  }
+
+  /// Bytes queued on the socket that haven't been handed to the network
+  /// yet (`WebSocket.bufferedAmount`); 0 without a socket. The drive stream
+  /// skips non-zero twists while this is high instead of queueing them.
+  bufferedAmount(): number {
+    return this.ws?.bufferedAmount ?? 0;
   }
 
   /// Arm/disarm a single ODrive wheel. `wheelName` matches a `wheels:[]`
@@ -734,6 +780,25 @@ export class RuntimeTransport {
       return;
     }
     const id = msg.requestId;
+
+    // Replies to fire-and-forget twist frames: only a rejection matters.
+    if (id !== 0) {
+      const onTwistError = this.twistReplies.take(id);
+      if (onTwistError) {
+        const reply = msg.payload;
+        if (
+          reply.case === "error" ||
+          (reply.case === "ack" && !reply.value.ok)
+        ) {
+          try {
+            onTwistError(reply.value.message || "drive command rejected");
+          } catch {
+            /* a UI callback bug must not break the receive path */
+          }
+        }
+        return;
+      }
+    }
 
     // Solicited responses.
     if (id !== 0 && this.pending.has(id)) {

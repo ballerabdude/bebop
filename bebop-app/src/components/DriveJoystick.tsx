@@ -4,9 +4,9 @@
 // robot. WASD / arrow keys do the same for keyboard operators, and
 // releasing all drive keys also stops.
 //
-// Safety contract with the parent (which owns the coalesced twist
-// sender): every way a gesture can end without further pointer/key
-// events still enqueues a stop —
+// Safety contract with the parent (which owns the twist stream,
+// `src/runtime/twistStream.ts`): every way a gesture can end without
+// further pointer/key events still sends a stop —
 //   * pointer released / cancelled            → onStop
 //   * last drive key released                  → onStop
 //   * keyboard drive active at unmount        → onStop (effect cleanup)
@@ -77,13 +77,18 @@ export function DriveJoystick({
   );
 
   // A pointer drag that ends in unmount (screen switched mid-gesture)
-  // never sees pointerup — halt from the unmount cleanup instead.
-  useEffect(
-    () => () => {
+  // never sees pointerup — halt from the unmount cleanup instead. Focus
+  // leaving the window mid-drag can swallow pointerup too: release then.
+  useEffect(() => {
+    const onBlur = () => {
+      if (draggingRef.current) release();
+    };
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("blur", onBlur);
       if (draggingRef.current) onStopRef.current();
-    },
-    [],
-  );
+    };
+  }, [release]);
 
   // Keyboard drive: WASD + arrow keys. Held keys compose a twist;
   // releasing the last drive key stops. Bound only while enabled so a
@@ -134,17 +139,30 @@ export function DriveJoystick({
         onTwistRef.current(vx, wz);
       }
     };
+    // Focus leaving the window (Alt+Tab, a click into another app, an OS
+    // dialog) delivers the held keys' keyup to whatever has focus now, so
+    // they would stay held here and the twist stream would keep re-sending
+    // the twist. Losing focus or going hidden releases every drive key.
+    const releaseAll = () => {
+      if (keys.size === 0) return;
+      keys.clear();
+      onStopRef.current();
+    };
+    const onVisibility = () => {
+      if (document.hidden) releaseAll();
+    };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", releaseAll);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", releaseAll);
+      document.removeEventListener("visibilitychange", onVisibility);
       // Keys held at teardown (component unmount or `disabled` flipping
       // on mid-drive) will never see their keyup — stop from here.
-      if (keys.size > 0) {
-        keys.clear();
-        onStopRef.current();
-      }
+      releaseAll();
     };
   }, [disabled]);
 

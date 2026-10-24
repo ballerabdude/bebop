@@ -37,8 +37,9 @@
 // otherwise, so *this screen* owns stopping): every gesture end —
 // joystick release, last drive key, deadman release, E-STOP latch, pad
 // disconnect, fullscreen toggle, tab hidden, or leaving the screen —
-// funnels a zero twist through the coalesced sender exactly once per
-// cycle. See `DriveJoystick` / `GamepadDrive` for their own edge cases.
+// sends a zero twist through the shared twist stream
+// (`src/runtime/twistStream.ts`) right away. See `DriveJoystick` /
+// `GamepadDrive` for their own edge cases.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -59,6 +60,7 @@ import { useGamepad } from "../input";
 import { getOrCreateRuntimeTransport } from "../runtime";
 import type { RuntimeTransport } from "../runtime";
 import { httpUrl } from "../runtime/urls";
+import { useTwistStream } from "../runtime/useTwistStream";
 import type {
   RuntimeConnectionState,
   RuntimeMode,
@@ -82,14 +84,6 @@ const MODE_LABEL: Record<RuntimeMode, string> = {
   DIAL_IN: "Dial-in",
   RUN_POLICY: "Policy",
 };
-
-/// How often the drive keepalive re-sends the current twist while a
-/// drive cycle is open. Must stay comfortably below the firmware's
-/// `operator_timeout_ms` (default 500 ms — see
-/// `firmware/bebop-linux/src/config.rs`) so a healthy session never
-/// trips the robot-side link-loss watchdog; 10 Hz leaves ~4 missed
-/// packets of slack.
-const TWIST_KEEPALIVE_MS = 100;
 
 /// localStorage key for the video-playback toggle. Persisted so an
 /// operator teleoping without video (e.g. bebop-vision recording only,
@@ -275,88 +269,25 @@ export function TeleopScreen({
     [],
   );
 
-  // Throttled twist sender (single in-flight + latest pending) — the
-  // joystick / keyboard / gamepad paths all funnel through this, so
-  // the firmware sees a continuous stream without queueing one WS
-  // request per pointer move. Stop sends are silent: halting into a
-  // not-drivable state (E-STOP just latched, mode switched) would
-  // otherwise surface a confusing rejection banner on top of the
-  // banner that explains why.
-  const twistInFlightRef = useRef(false);
-  const twistPendingRef = useRef<{ vx: number; wz: number } | null>(null);
-  const sentAnythingRef = useRef(false);
-
-  // Drive-cycle bookkeeping for the keepalive below: `drivingRef` is
-  // true while a gesture holds a non-zero twist, `lastTwistRef` holds
-  // the latest one. Closed by every stop path (release, deadman drop,
-  // visibility change, gesture teardown).
-  const drivingRef = useRef(false);
-  const lastTwistRef = useRef<{ vx: number; wz: number } | null>(null);
-
-  const sendTwist = useCallback(
-    async (vx: number, wz: number, silent = false) => {
-      const t = transportRef.current;
-      if (!t) return;
-      sentAnythingRef.current = true;
-      const payload = { vx, wz };
-      lastTwistRef.current = payload;
-      if (vx !== 0 || wz !== 0) drivingRef.current = true;
-      if (twistInFlightRef.current) {
-        twistPendingRef.current = payload;
-        return;
-      }
-      twistInFlightRef.current = true;
-      try {
-        await t.setVelocityCommand(vx, wz);
-      } catch (e) {
-        if (!silent) {
-          setError(e instanceof Error ? e.message : String(e));
-        }
-      } finally {
-        twistInFlightRef.current = false;
-        const next = twistPendingRef.current;
-        twistPendingRef.current = null;
-        if (next) {
-          void Promise.resolve().then(() => sendTwist(next.vx, next.wz, silent));
-        }
-      }
-    },
-    [],
+  // Drive twists: the joystick, keyboard and gamepad paths all go
+  // through one twist stream (`src/runtime/twistStream.ts`). It never
+  // waits for the firmware's Ack, re-sends the held twist every 100 ms
+  // for the robot's operator watchdog, throttles changes to ~30 Hz,
+  // skips frames while the socket is backed up, and sends stops
+  // immediately. Rejections (another operator holds the drive seat)
+  // reach the banner, rate-limited. Stops are silent, so halting into a
+  // not-drivable state (E-STOP just latched, mode switched) never stacks
+  // a rejection banner on top of the one that explains why. Unmounting
+  // mid-drive halts the chassis (handled by the hook).
+  const { sendTwist, stopDrive } = useTwistStream(
+    robotIp,
+    runtimePort,
+    setError,
   );
 
-  // One-shot "stop": enqueue a (0,0) twist that supersedes anything
-  // mid-flight, so every gesture end halts the robot.
-  const stopDrive = useCallback(() => {
-    drivingRef.current = false;
-    lastTwistRef.current = null;
-    twistPendingRef.current = { vx: 0, wz: 0 };
-    void sendTwist(0, 0, true);
-  }, [sendTwist]);
-
-  // Operator-link keepalive: the firmware zeroes any twist that isn't
-  // refreshed within its `operator_timeout_ms` (500 ms default) — the
-  // robot-side backstop for a dropped link. Every drive input here
-  // emits only on *change*, so a steady stick would look exactly like a
-  // dead operator to that watchdog. While a drive cycle is open,
-  // re-send the current twist at ~10 Hz; the coalescer above keeps this
-  // to one in-flight request + one pending. Repeats are silent (a
-  // flaky link already shows in the connection pill, and the robot
-  // halting is precisely the designed behavior we don't need to nag
-  // about).
-  useEffect(() => {
-    if (connState !== "connected") return;
-    const iv = window.setInterval(() => {
-      if (!drivingRef.current) return;
-      const last = lastTwistRef.current;
-      if (last) void sendTwist(last.vx, last.wz, true);
-    }, TWIST_KEEPALIVE_MS);
-    return () => window.clearInterval(iv);
-  }, [connState, sendTwist]);
-
-  // Leaving the screen (or the whole tab) mid-drive must halt the
-  // chassis — the firmware would otherwise hold the last twist. The
-  // per-gesture stops above cover normal releases; this is the
-  // belt-and-braces for "the component went away".
+  // Hiding the tab mid-drive must halt the chassis too: the firmware
+  // would otherwise hold the last twist, and hidden tabs throttle the
+  // keepalive timers.
   useEffect(() => {
     const onVisibility = () => {
       if (document.hidden) stopDrive();
@@ -365,19 +296,6 @@ export function TeleopScreen({
     return () =>
       document.removeEventListener("visibilitychange", onVisibility);
   }, [stopDrive]);
-  useEffect(
-    () => () => {
-      if (!sentAnythingRef.current) return;
-      // Re-fetch from the endpoint cache (the lifecycle cleanup above
-      // nulled transportRef); if the socket's already gone the catch
-      // swallows it.
-      const t = getOrCreateRuntimeTransport(robotIp, runtimePort);
-      void t.setVelocityCommand(0, 0).catch(() => {
-        /* socket may already be closed */
-      });
-    },
-    [robotIp, runtimePort],
-  );
 
   const eStop = useCallback(
     () => refreshAfter("estop", () => transportRef.current!.emergencyStop("operator")),
@@ -554,7 +472,7 @@ export function TeleopScreen({
   // descriptions; exactly one mount site renders each.
   const drivePad = (
     <DriveJoystick
-      onTwist={(vx, wz) => void sendTwist(vx, wz)}
+      onTwist={sendTwist}
       onStop={stopDrive}
       disabled={!canDrive}
     />
@@ -1084,7 +1002,7 @@ export function TeleopScreen({
             wheels={wheels}
             mode={mode}
             estopLatched={estopLatched}
-            onTwist={(vx, wz) => void sendTwist(vx, wz)}
+            onTwist={sendTwist}
             onStop={stopDrive}
             onEStop={eStop}
             onResetEStop={resetEStop}

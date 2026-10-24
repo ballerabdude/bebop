@@ -55,9 +55,9 @@ const DEADMAN_THRESHOLD = 0.4;
 const WATCHDOG_MS = 250;
 
 /// Minimum twist change worth a WS write. Filters stick sensor noise
-/// around centre while the deadman is held; the parent's in-flight
-/// coalescing bounds the remaining send rate to one outstanding
-/// request + one pending.
+/// around centre while the deadman is held; the parent's twist stream
+/// (`src/runtime/twistStream.ts`) caps the rest at ~30 Hz and owns the
+/// keepalive that refreshes a steady stick.
 const TWIST_EPS = 1e-3;
 
 /// UI-only state (deadman pill, twist readout) refreshes at ~10 Hz
@@ -69,10 +69,10 @@ interface GamepadDriveProps {
   mode: RuntimeMode;
   estopLatched: boolean;
   /// Stream a body twist (vx m/s, wz rad/s, +wz = left turn). Throttling
-  /// + in-flight coalescing is the parent's responsibility — same
-  /// pattern as the on-screen joystick.
+  /// and the keepalive belong to the parent's twist stream, same as the
+  /// on-screen joystick.
   onTwist: (vx: number, wz: number) => void;
-  /// One-shot stop; supersedes anything in flight.
+  /// One-shot stop; goes out immediately and ends the keepalive.
   onStop: () => void;
   onEStop: () => void;
   onResetEStop: () => void;
