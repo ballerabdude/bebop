@@ -130,7 +130,8 @@ def run_record_navd(args):
     _acquire_recorder_lock()
     if args.stall_watch:
         from bebop_vision.stall_watch import StallWatch
-        StallWatch(args.stall_watch, threshold_ms=args.stall_ms).start()
+        StallWatch(args.stall_watch, threshold_ms=args.stall_ms,
+                   gc_ms=args.stall_gc_ms).start()
         print(f"[stall-watch] logging stalls >= {args.stall_ms:.0f} ms to {args.stall_watch}")
     # Operator notes (intent / events / places) shared by the video server's
     # routes, the scout and every recorder segment.
@@ -187,7 +188,15 @@ def run_record_navd(args):
             scout=scout,
             importer=importer,
         )
-        threading.Thread(target=penc.warmup, name="places-warmup",
+        def _warm_places():
+            penc.warmup()
+            if not args.no_gc_freeze:
+                # The ViT-L model is ~280 k tracked objects; freeze them so a
+                # full GC stops scanning them (bebop_vision/gc_tuning.py).
+                from bebop_vision.gc_tuning import freeze_heap
+                freeze_heap("places encoder warmup")
+
+        threading.Thread(target=_warm_places, name="places-warmup",
                          daemon=True).start()
         places.start()
 
@@ -290,6 +299,12 @@ def run_record_navd(args):
     from bebop_vision.orbbec import load_rig_config
     safety = load_rig_config()["robots"]["default"].get("safety", {})
     max_frame_age_s = float(safety.get("max_frame_age_s", 0.3))
+
+    if not args.no_gc_freeze:
+        # Startup objects live as long as the process: keep full garbage
+        # collections from walking them (150-180 ms recorder stalls before).
+        from bebop_vision.gc_tuning import freeze_heap
+        freeze_heap("startup")
 
     budget = args.disk_budget_gb * 1e9
     rate = args.record_rate if args.record_rate is not None else 30.0
@@ -516,6 +531,12 @@ def main():
                              "pauses to FILE (bebop_vision/stall_watch.py)")
     parser.add_argument("--stall-ms", type=float, default=150.0,
                         help="stall threshold for --stall-watch (default 150)")
+    parser.add_argument("--stall-gc-ms", type=float, default=50.0,
+                        help="--stall-watch logs garbage collections at least "
+                             "this long (default 50)")
+    parser.add_argument("--no-gc-freeze", action="store_true",
+                        help="do not freeze the startup heap (gc.freeze); only "
+                             "for comparing GC pauses, see gc_tuning.py")
     args = parser.parse_args()
 
     if args.place_router and args.no_places:
