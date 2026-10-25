@@ -40,11 +40,20 @@ message ImuGyro {
 // Operator-declared mission for the current segment ("living room ->
 // kitchen"). Sticky: the recorder writes it at segment start and whenever
 // it changes, so every file carries the intent it was driven under.
+// A run is one attempt at a task: `run_id` ("r" + local YYYYMMDD_HHMMSS +
+// "_" + 4 hex) groups the segments of that attempt, so two runs with the
+// same text stay apart. `task` is one of the fixed vocabulary in
+// bebop_vision/session_notes.py (TASKS), `target` its argument. Files
+// written before these fields existed decode them as "" / 0.
 message Intent {
   string text = 1;
   string from_place = 2;
   string to_place = 3;
   int64 stamp_ns = 4;
+  string task = 5;
+  string target = 6;
+  string run_id = 7;
+  int64 run_started_ns = 8;
 }
 
 // Operator marker during a drive: a planted obstacle, a recovery start, a

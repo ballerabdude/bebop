@@ -294,7 +294,7 @@ result, and the answer streams (and is spoken per sentence) as usual.
 | `where_am_i`, `list_places`, `place_facts` | read place memory over HTTP `:9095` ([`places.md`](places.md)) | `tools_enabled` |
 | `remember_place`, `add_place_fact`, `rename_place`, `forget_place` | write it (`remember_place` is `POST /places`, the current view of every camera) | `tools_enabled` |
 | `robot_status` | the cached status line: mode, E-STOP, armed wheels, odometry, battery | `tools_enabled` |
-| `note_drive_intent` `{text, from_place?, to_place?}` | the drive intent, `POST :9092/intent` (an empty text clears it) | `tools_enabled` |
+| `note_drive_intent` `{text, from_place?, to_place?, task?, target?, mode?}` | the drive intent and its run (`data-collection.md` › Runs), `POST :9092/intent`; `mode: continue` sends only the spoken fields; all fields empty clears it | `tools_enabled` |
 | `mark_drive_event` `{kind: obstacle\|recovery\|exclude\|note, note?}` | a marker, `POST :9092/event`; 409 (no segment recording) is reported as not marked | `tools_enabled` |
 | `move_relative` `{forward_m?, turn_deg?}` | bounded odom-relative motion | `motion_enabled` |
 

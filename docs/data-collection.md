@@ -100,9 +100,11 @@ drive that rolls over several files keeps it. It can be set at any time,
 armed or not.
 
 - In the app's Drive page: the REC chip shows whether a segment is
-  recording; the intent chip opens presets (keep, left, right, stop, turn
-  around), free text and Clear; the markers are Obstacle, Recovery, Exclude
-  and Note (hotkeys 1–4).
+  recording; the intent chip opens the run panel (below: task, target, free
+  text, from / to, Continue / Update, Repeat, New, the recent runs and the
+  ending buttons; the old presets keep, left, right, stop, turn around fill
+  the `maneuver` task); the markers are Obstacle, Recovery, Exclude and Note
+  (hotkeys 1–4).
 - By voice, on the cascade engine with "Live context and tools" on (Settings ›
   Voice & agent; on by default): "I'm driving from the living room to the
   kitchen", "mark that sock as an obstacle", "mark a recovery start",
@@ -118,9 +120,83 @@ armed or not.
   ```
 
   `GET /notes` answers
-  `{recording, intent, events_pending, places_pending, events_dropped, places_dropped}`.
+  `{recording, intent, recent, events_pending, places_pending, events_dropped, places_dropped}`.
   A POST needs a JSON object body (`400` otherwise; an empty body never
   clears the intent).
+
+### Runs
+
+A **run** is one attempt at one task, from setting it to its ending: "go to
+the master bedroom", driven once. Every intent belongs to a run with an id
+(`r20261025_104233_9f3a`), written into every segment file with the task,
+target and start time (`bebop.navd.Intent` fields `task`, `target`,
+`run_id`, `run_started_ns`, since 2026-10-25). Segments of one run share its
+id, so an E-STOP, a disarm or a vision restart in the middle does not split
+it; two passes of the same route have different ids even with identical
+text. The lab groups and splits by run (`python -m bebop_vision.lab runs`,
+`dataset.make_run_splits`).
+
+| Task | Target | For |
+|---|---|---|
+| `hold` | none | staying put |
+| `go_to_place` | a place name | a room-to-room route |
+| `go_through_door` | `left`, `right` or `ahead` | a doorway |
+| `follow_step` | the step text | one step of a route ("out the office door to the right") |
+| `look_for` | an object | searching for something |
+| `explore` | optional text | wandering, collecting data |
+| `return` | optional text | going back |
+| `maneuver` | `keep`, `left`, `right`, `stop` or `turn-around` | the path model's intent presets |
+
+- **Starting and stopping.** Disarming all wheels is the normal stop: the
+  Drive page's **Stop driving** (the mirror of Start driving) disarms every
+  wheel and then, with a run open, asks how it went: **Arrived**, **Found**,
+  **Gave up** or **Keep it open**, with an optional note. E-STOP is for
+  emergencies; disabling one wheel on the dashboard is a diagnostic, not a
+  stop. Whenever you start driving (Start driving, the drawer's or the
+  Motors tab's Arm all, a pad arm, arming the last wheel) with a run still
+  open, the app always asks first: the run, how it last stopped, a note
+  field ("carried it back to the office"), and **Continue** (keeps the run,
+  writes a `resume` event with the note) or **Close it** (ends it as
+  `unfinished`). It never guesses what a break was.
+- **Outcomes.** `arrived`, `found` and `gave_up` end a run as done;
+  `unfinished` ends one that was closed without that (declined on resume,
+  cleared, or replaced by a new run; older robots closed these with an empty
+  outcome, which reads as `unfinished`; the term is one constant,
+  `session_notes.UNFINISHED`). `interrupted` marks a pause and keeps the run.
+  Panel buttons: **Update** sends edited fields into the open run, **Repeat**
+  starts a new run with the same task (with no run open it repeats the most
+  recent one), **New** a different one, **Close (unfinished)** ends it.
+- **Why each recording ended.** When a drive file closes, the recorder
+  writes a `stop` event with the cause, read from the firmware's state at
+  that moment: `disarmed`, `wheel_disarmed` (some wheels), `idle` (left
+  DialIn), `estop_operator` or `estop_auto` (with the firmware's reason,
+  e.g. lost wheel feedback), `link_lost`, `rolled` or `recorder_stop`. The
+  open run keeps the list, and the resume prompt shows the last one.
+- **Where it is kept.** The open run and the last 8 runs are saved in
+  `/var/lib/bebop-vision/intent.json` (`main.py --intent-state`; `''` turns it
+  off), so a vision restart keeps the run with the same id. Every closed run
+  (outcome, end note, stops, resumes) is also appended to `runs.jsonl` beside
+  it, served as `GET :9092/runs`. An outcome picked after Stop driving is in
+  no drive file (disarming closed it), so `python -m bebop_vision.lab pull`
+  mirrors this log to `datasets/sessions/runs.jsonl` and `lab runs` reads it
+  (`outcome_source` says whether an outcome came from an event, the log, or
+  nowhere).
+
+```sh
+curl -X POST http://bebop.local:9092/intent \
+     -d '{"task": "go_to_place", "target": "master bedroom", "from": "office", "to": "master bedroom", "mode": "new"}'
+curl -X POST http://bebop.local:9092/intent -d '{"end": "arrived"}'
+curl -X POST http://bebop.local:9092/intent -d '{"repeat": "r20261025_104233_9f3a"}'
+curl -X POST http://bebop.local:9092/intent -d '{"resume": true, "note": "carried back to the office"}'
+curl -X POST http://bebop.local:9092/intent -d '{"end": "unfinished", "note": "battery low"}'
+curl http://bebop.local:9092/runs
+```
+
+`mode` is `new` (default), `repeat` or `continue` (only the keys sent
+change; `409` when no run is open). A task outside the table, or a target
+outside a task's choices, is a `400`. `GET /notes` also returns `recent`
+(newest first: run id, task, target, text, from, to, started, ended,
+outcome, interruptions).
 
 Event kinds are short tokens (`[a-z][a-z0-9_-]{0,31}`); the app and the voice
 tool offer `obstacle` (a planted doll, sock, cable), `recovery` (an off-lane

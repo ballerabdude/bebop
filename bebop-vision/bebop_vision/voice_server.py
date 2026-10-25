@@ -75,6 +75,7 @@ from fastapi.responses import JSONResponse
 from . import models
 from .edge_serve import resolve_edgellm_bin
 from .proto.bebop.runtime.v1 import bebop_runtime_pb2 as pb
+from .session_notes import TASKS
 
 # --- defaults -------------------------------------------------------------
 
@@ -1183,13 +1184,31 @@ async def _drive_note(name: str, args: dict[str, Any]) -> str:
 
     if name == "note_drive_intent":
         path = "/intent"
-        text = str(args.get("text") or "").strip()
-        # An empty text is an explicit clear, whatever places came with it,
-        # so the spoken reply and the recorded /intent agree.
-        payload = ({"text": text,
-                    "from": str(args.get("from_place") or ""),
-                    "to": str(args.get("to_place") or "")}
-                   if text else {"clear": True})
+        given = {key: str(args.get(arg) or "").strip()
+                 for key, arg in (("text", "text"), ("from", "from_place"),
+                                  ("to", "to_place"), ("task", "task"),
+                                  ("target", "target"))}
+        mode = str(args.get("mode") or "").strip().lower()
+        if mode == "continue":
+            # A continue edits the open run: send only what the model gave,
+            # so unspoken fields (the places, say) keep their values.
+            payload = {k: v for k, v in given.items() if v}
+            payload["mode"] = "continue"
+        elif not any(given.values()):
+            # Nothing at all: an explicit clear, so the spoken reply and the
+            # recorded /intent agree.
+            payload = {"clear": True}
+        else:
+            # A new run: text and places always go (as before), task, target
+            # and mode only when given, so an old-style call posts exactly
+            # what it always did.
+            payload = {"text": given["text"], "from": given["from"],
+                       "to": given["to"]}
+            for key in ("task", "target"):
+                if given[key]:
+                    payload[key] = given[key]
+            if mode:
+                payload["mode"] = mode
     else:
         path = "/event"
         payload = {"kind": str(args.get("kind") or "note"),
@@ -1200,15 +1219,35 @@ async def _drive_note(name: str, args: dict[str, Any]) -> str:
     except Exception as exc:  # noqa: BLE001 - report, never break the turn
         return f"The recorder is unavailable ({exc})."
     if r.status_code == 409:
+        if path == "/intent":
+            return "No run is open to continue; say it again as a new run."
         return "Not recording right now, so nothing was marked."
     if r.status_code != 200:
-        return f"The recorder refused the note (HTTP {r.status_code})."
+        detail = ""
+        if r.status_code == 400:
+            try:
+                detail = f": {r.json().get('error')}"
+            except Exception:  # noqa: BLE001 - the status alone is enough
+                detail = ""
+        return f"The recorder refused the note (HTTP {r.status_code}){detail}."
     if path == "/intent":
         if payload.get("clear"):
             return "Cleared the drive intent."
-        route = (f" ({payload['from']} -> {payload['to']})"
-                 if payload["from"] or payload["to"] else "")
-        return f"Noted: this drive is {payload['text']!r}{route}."
+        # Describe the intent the recorder now holds (after a continue that
+        # is the merged run), falling back to what was sent.
+        try:
+            shown = r.json().get("intent")
+        except Exception:  # noqa: BLE001 - the payload is enough
+            shown = None
+        if not isinstance(shown, dict):
+            shown = payload
+        route = (f" ({shown.get('from', '')} -> {shown.get('to', '')})"
+                 if shown.get("from") or shown.get("to") else "")
+        task = ""
+        if shown.get("task"):
+            task = f" [{shown['task']}"
+            task += f": {shown['target']}]" if shown.get("target") else "]"
+        return f"Noted: this drive is {shown.get('text', '')!r}{route}{task}."
     note = f": {payload['note']}" if payload["note"] else ""
     return f"Marked {payload['kind']}{note}."
 
@@ -1361,7 +1400,10 @@ DRIVE_NOTE_TOOLS: list[dict[str, Any]] = [
                 "Record what the current drive is for, so the recording "
                 "carries it: e.g. 'from the living room to the kitchen'. Use "
                 "when the operator says where they are driving to or what "
-                "this run is about. An empty text clears the intent."
+                "this run is about. A call with no text, places, task or "
+                "target clears the intent. Each call starts a new run unless "
+                "mode is 'continue' (the operator is correcting the current "
+                "run; give only the fields that change)."
             ),
             "parameters": {
                 "type": "object",
@@ -1370,6 +1412,19 @@ DRIVE_NOTE_TOOLS: list[dict[str, Any]] = [
                              "description": "the mission in the operator's words"},
                     "from_place": {"type": "string"},
                     "to_place": {"type": "string"},
+                    "task": {"type": "string", "enum": list(TASKS),
+                             "description": "optional: the kind of run"},
+                    "target": {"type": "string",
+                               "description": (
+                                   "optional, for the task: a place name "
+                                   "(go_to_place), left|right|ahead "
+                                   "(go_through_door), the step text "
+                                   "(follow_step), the object (look_for), "
+                                   "keep|left|right|stop|turn-around "
+                                   "(maneuver)")},
+                    "mode": {"type": "string",
+                             "enum": ["new", "repeat", "continue"],
+                             "description": "optional, default new"},
                 },
                 "required": ["text"],
             },

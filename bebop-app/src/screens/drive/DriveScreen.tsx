@@ -15,6 +15,13 @@
 // Driving: `useDrive` (twist stream + input arbiter: joystick, WASD /
 // arrows, gamepad behind the RT deadman). Every lifecycle stop lives there.
 // Drive notes: `useDriveNotes` -> videoserver /notes, /intent, /event.
+//
+// Runs: starting to drive (Start driving here or in the drawer, Arm all
+// from fully disarmed, the pad's L3) first asks /notes whether a run is
+// still open and, if so, always asks the operator to continue or close it
+// (`RunPrompts.tsx`); nothing infers what the break was. "Stop driving"
+// disarms every wheel (the normal stop; E-STOP is for emergencies) and then
+// offers the run's ending.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
@@ -30,6 +37,8 @@ import {
   useGamepad,
 } from "../../input";
 import type { DriveSource } from "../../input";
+import { openRun } from "../../robot/driveNotes";
+import type { RecentRun } from "../../robot/driveNotes";
 import { VIDEO_STREAMS } from "../../robot/endpoints";
 import {
   useEStop,
@@ -53,8 +62,10 @@ import type { DriverStatus, MeasuredTwist } from "./hudModel";
 import { GaugeIcon, GridIcon, PipIcon, SlidersIcon } from "./icons";
 import { LinkChip, LinkDetails, useTelemetryHealth } from "./LinkChip";
 import { PagePanel } from "./PagePanel";
+import { EndRunSheet } from "./RunPrompts";
 import { ToastView, useToast } from "./Toasts";
 import { useDriveNotes } from "./useDriveNotes";
+import { useRunStartGuard } from "./useRunStartGuard";
 import { VideoStage } from "./VideoStage";
 
 const VIDEO_ENABLED_KEY = "bebop.teleop.videoEnabled";
@@ -215,12 +226,53 @@ export function DriveScreen() {
     input.linkOk &&
     driver.kind !== "human" &&
     (!driveMode || armed === 0);
-  const startDriving = useCallback(() => {
+  const driving = wheeled && driveMode && armed > 0;
+  // Read at arm time, not when the run prompt opened: the operator may
+  // answer it seconds later.
+  const live = useRef({ driveMode, armed });
+  live.current = { driveMode, armed };
+  const armDriving = useCallback(() => {
     void run("start-driving", async (t) => {
-      if (!driveMode) await t.setMode("DIAL_IN");
-      if (armed === 0) await t.setAllWheelsEnabled(true);
+      if (!live.current.driveMode) await t.setMode("DIAL_IN");
+      if (live.current.armed === 0) await t.setAllWheelsEnabled(true);
     });
-  }, [run, driveMode, armed]);
+  }, [run]);
+  const armAll = useCallback(() => {
+    void run("all-wheels:true", (t) => t.setAllWheelsEnabled(true));
+  }, [run]);
+
+  // ------------------------------------------------------------ runs
+  const notify = toast.show;
+  const [endFor, setEndFor] = useState<RecentRun | null>(null);
+  const guard = useRunStartGuard(notes, notify);
+  const { requestStart, checking } = guard;
+  const checkNotes = notes.check;
+  const startDriving = useCallback(() => void requestStart(armDriving), [requestStart, armDriving]);
+  const startArmAll = useCallback(() => void requestStart(armAll), [requestStart, armAll]);
+  const startArmWheel = useCallback(
+    (wheel: string) =>
+      void requestStart(() => void run(`wheel:${wheel}`, (t) => t.setWheelEnabled(wheel, true))),
+    [requestStart, run],
+  );
+
+  const lastNotes = useRef(notes.notes);
+  lastNotes.current = notes.notes;
+  /// The normal stop: disarm every wheel first, then (with a run open) the
+  /// end-of-run sheet. The sheet never delays or gates the disarm, and it
+  /// only opens once the disarm went through: after a failed disarm the
+  /// wheels may still be armed, so the error toast is the answer instead.
+  const stopDriving = useCallback(() => {
+    let disarmed = false;
+    const disarm = run("stop-driving", async (t) => {
+      await t.setAllWheelsEnabled(false);
+      disarmed = true;
+    });
+    void Promise.all([disarm, checkNotes()]).then(([, r]) => {
+      if (!disarmed) return;
+      const open = openRun(r.ok ? r.value : lastNotes.current);
+      if (open) setEndFor(open);
+    });
+  }, [run, checkNotes]);
 
   // Measured twist from the odometry pose stream.
   const odomEst = useRef(createOdomVelocity());
@@ -245,7 +297,7 @@ export function DriveScreen() {
   }, [error]);
 
   // ------------------------------------------------------------ status line
-  const status: { tone: Tone; text: string; action?: "start" } | null = !snapshot
+  const baseStatus: { tone: Tone; text: string; action?: "start" | "stop" } | null = !snapshot
     ? { tone: "dim", text: "Waiting for the robot's telemetry…" }
     : !wheeled
       ? { tone: "dim", text: "This robot reports no wheeled drive." }
@@ -266,8 +318,15 @@ export function DriveScreen() {
                     : drive?.operatorStale
                       ? { tone: "warn", text: "Link stale — robot halted" }
                       : null;
+  // While the wheels are armed in drive mode the line carries "Stop
+  // driving" (a spectator of another human uses the drawer's Disarm all).
+  const stoppable = driving && !estopLatched && input.linkOk && driver.kind !== "human";
+  const status = !stoppable
+    ? baseStatus
+    : baseStatus
+      ? { ...baseStatus, action: baseStatus.action ?? ("stop" as const) }
+      : { tone: "ok" as Tone, text: `Driving · ${armed}/${wheels.length} armed`, action: "stop" as const };
 
-  const notify = toast.show;
   useMarkerHotkeys(notes, notify);
 
   // ------------------------------------------------------------ pieces
@@ -367,6 +426,7 @@ export function DriveScreen() {
         status.tone === "err" && "border-danger/60 text-danger-fg",
         status.tone === "warn" && "border-warning/55 text-warning-fg",
         status.tone === "info" && "border-info/50 text-info-fg",
+        status.tone === "ok" && "border-success/50 text-text",
         status.tone === "dim" && "border-border text-text-dim",
       )}
     >
@@ -377,10 +437,22 @@ export function DriveScreen() {
           variant="success"
           size="sm"
           onClick={startDriving}
-          loading={busy === "start-driving"}
-          disabled={!!busy}
+          loading={busy === "start-driving" || checking}
+          disabled={!!busy || checking}
         >
           Start driving
+        </Button>
+      ) : status.action === "stop" ? (
+        // Neutral, not red: this is the normal stop (disarm every wheel);
+        // the red E-STOP stays the emergency control.
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={stopDriving}
+          loading={busy === "stop-driving"}
+          title="Disarm every wheel (the normal stop). E-STOP is for emergencies."
+        >
+          Stop driving
         </Button>
       ) : (
         <span className="w-1.5" />
@@ -547,6 +619,8 @@ export function DriveScreen() {
       onResetEStop={() => void estop.reset()}
       quickStartable={quickStartable}
       onStartDriving={startDriving}
+      onArmAll={startArmAll}
+      onArmWheel={startArmWheel}
       videoEnabled={videoEnabled}
       onVideoEnabled={setVideoEnabled}
       onReconnectVideo={reconnectVideo}
@@ -705,6 +779,10 @@ export function DriveScreen() {
         ) : null}
         {wide ? null : drawer}
       </div>
+      {guard.dialog}
+      {endFor && !guard.prompting ? (
+        <EndRunSheet key={endFor.runId} run={endFor} notes={notes} notify={notify} onClose={() => setEndFor(null)} />
+      ) : null}
       {wide ? drawer : null}
     </div>
   );

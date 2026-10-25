@@ -31,6 +31,21 @@ from bebop_vision.proto.bebop.runtime.v1 import bebop_runtime_pb2 as pb
 from bebop_vision.robot import DEFAULT_URL
 
 
+def _intent_state_path(path):
+    """``path`` with its parent directory created, or None (run without
+    persistence) when it is empty or the directory cannot be made."""
+    if not path:
+        return None
+    path = Path(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"[record-navd] warning: cannot create {path.parent} ({exc}); "
+              f"drive runs will not survive a restart")
+        return None
+    return path
+
+
 def _session_path(out_dir, stamp):
     """navd_session_<stamp>.mcap, suffixed _1, _2, ... when that name exists.
 
@@ -103,6 +118,76 @@ def _drive_active(robot):
             and all(st.wheel_armed.values()))
 
 
+def _stop_cause(robot, rolled):
+    """Why the --auto loop closes its segment, as ``(cause, detail)`` with a
+    cause from ``session_notes.STOP_CAUSES``.
+
+    Read from ``robot.state`` at the moment the loop decides to close, in
+    this order: link lost, E-STOP (``estop_operator`` when the firmware's
+    reason starts with "operator", the app's E-STOP button; ``estop_auto``
+    otherwise, with the reason as detail), mode left DialIn (``idle``),
+    wheels (``disarmed`` for all, the normal stop; ``wheel_disarmed`` with
+    the disarmed names for some), then a size/time roll.  ``(None, "")``
+    when the drive state is fine and nothing rolled.
+    """
+    st = robot.state
+    if not st.connected:
+        return "link_lost", ""
+    if st.estop_latched:
+        reason = str(st.estop_reason or "").strip()
+        cause = ("estop_operator" if reason.lower().startswith("operator")
+                 else "estop_auto")
+        return cause, reason
+    if st.mode != pb.MODE_DIAL_IN:
+        return "idle", ""
+    wheels = dict(st.wheel_armed)
+    off = sorted(name for name, armed in wheels.items() if not armed)
+    if off and len(off) == len(wheels):
+        return "disarmed", ""
+    if off:
+        return "wheel_disarmed", ", ".join(off)
+    if rolled:
+        return "rolled", ""
+    return None, ""
+
+
+def _settled_stop_cause(robot, rolled, settle_s=0.15, max_s=0.6, poll_s=0.03,
+                        clock=None, sleep=None):
+    """``_stop_cause`` once the firmware state has stopped moving.
+
+    The firmware passes through intermediate states on a normal stop:
+    ``disarm_all_wheels`` disarms one wheel at a time (a frame between them
+    reads left off, right on, i.e. ``wheel_disarmed``), and ``set_mode(Idle)``
+    disarms every wheel before it stores the new mode (a frame in that gap
+    reads ``disarmed``, not ``idle``).  So the cause is re-read every
+    ``poll_s`` until it has been the same for ``settle_s``, or ``max_s``
+    has passed (then the latest reading wins).  The recorder keeps writing
+    meanwhile; the delay only moves the ``stop`` event a little later in
+    the closing file.  ``(None, "")`` means the state recovered.
+    """
+    import time
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    cur = _stop_cause(robot, rolled)
+    t0 = since = clock()
+    while True:
+        now = clock()
+        if now - since >= settle_s or now - t0 >= max_s:
+            return cur
+        sleep(poll_s)
+        nxt = _stop_cause(robot, rolled)
+        if nxt != cur:
+            cur, since = nxt, clock()
+
+
+def _note_stop(notes, cause, detail=""):
+    """``notes.note_stop`` that never takes the recorder loop down."""
+    try:
+        notes.note_stop(cause, detail)
+    except Exception as exc:
+        print(f"\n[record-navd] could not note the stop ({cause}): {exc}")
+
+
 def run_record_navd(args):
     """Recorder v2: teleop session(s) -> MCAP file(s).
 
@@ -127,8 +212,9 @@ def run_record_navd(args):
                    gc_ms=args.stall_gc_ms).start()
         print(f"[stall-watch] logging stalls >= {args.stall_ms:.0f} ms to {args.stall_watch}")
     # Operator notes (intent / events / places) shared by the video server's
-    # routes, the scout and every recorder segment.
-    notes = SessionNotes()
+    # routes, the scout and every recorder segment.  The open run and the
+    # recent runs persist in --intent-state so a restart keeps the run id.
+    notes = SessionNotes(state_path=_intent_state_path(args.intent_state))
     robot = RobotClient(args.robot_url).start()
     if not robot.await_connection(5.0):
         _release_recorder_lock()
@@ -254,6 +340,7 @@ def run_record_navd(args):
         except KeyboardInterrupt:
             pass
         finally:
+            _note_stop(notes, "recorder_stop")
             close_segment(rec, path)
             if places is not None:
                 places.stop()
@@ -290,6 +377,14 @@ def run_record_navd(args):
                     _time.sleep(2.0)
                     active = False
             elif seg is not None and (not active or rolled):
+                # Say why before closing, so the stop event lands in the
+                # closing file; read once the firmware state has settled.
+                # None: the drive state recovered while settling (a
+                # transient, no stop happened), so the segment stays open.
+                cause, detail = _settled_stop_cause(robot, rolled)
+                if cause is None:
+                    continue
+                _note_stop(notes, cause, detail)
                 try:
                     close_segment(seg, seg_path)
                 except OSError as exc:
@@ -314,6 +409,7 @@ def run_record_navd(args):
         pass
     finally:
         if seg is not None:
+            _note_stop(notes, "recorder_stop")
             try:
                 close_segment(seg, seg_path)
             except OSError as exc:
@@ -351,6 +447,11 @@ def main():
                              "many minutes (0 = off)")
     parser.add_argument("--disk-budget-gb", type=float, default=20.0,
                         help="record-navd --auto: prune oldest sessions below this total")
+    parser.add_argument("--intent-state", metavar="PATH",
+                        default="/var/lib/bebop-vision/intent.json",
+                        help="JSON file that keeps the open drive run and the "
+                             "recent runs across restarts ('' = memory only; "
+                             "default: /var/lib/bebop-vision/intent.json)")
     parser.add_argument("--rig", metavar="YAML",
                         help="rig config path (default: config/orbbec_rig.yaml)")
     parser.add_argument("--no-video-server", action="store_true",

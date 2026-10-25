@@ -25,6 +25,7 @@ import {
 } from "../../components/ui";
 import { CONTROL_PROFILES, setActiveControlProfile, useControlProfile } from "../../input";
 import type { ControlProfileId } from "../../input";
+import { armStartsDrive } from "../../robot/driveNotes";
 import type { RuntimeMode, RuntimeSnapshot, RuntimeTransport, WheelView } from "../../runtime";
 import { signed } from "./hudModel";
 import { CloseIcon } from "./icons";
@@ -56,6 +57,8 @@ export function ControlsDrawer({
   onResetEStop,
   quickStartable,
   onStartDriving,
+  onArmAll,
+  onArmWheel,
   videoEnabled,
   onVideoEnabled,
   onReconnectVideo,
@@ -74,6 +77,10 @@ export function ControlsDrawer({
   onResetEStop: () => void;
   quickStartable: boolean;
   onStartDriving: () => void;
+  /// An arm that leaves every wheel armed starts a drive: the page routes
+  /// it through its open-run prompt. Without these the arms go directly.
+  onArmAll?: () => void;
+  onArmWheel?: (wheel: string) => void;
   videoEnabled: boolean;
   onVideoEnabled: (on: boolean) => void;
   /// Tear down and renegotiate every video tile.
@@ -101,8 +108,15 @@ export function ControlsDrawer({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, docked, onClose]);
 
-  const setAll = (enabled: boolean) =>
+  const setAll = (enabled: boolean) => {
+    // Arm all (button or the pad's L3) starts a drive unless every wheel
+    // is armed already.
+    if (enabled && onArmAll && armStartsDrive(wheels, null)) {
+      onArmAll();
+      return;
+    }
     void run(`all-wheels:${enabled}`, (t) => t.setAllWheelsEnabled(enabled));
+  };
 
   const body = (
     <>
@@ -164,9 +178,14 @@ export function ControlsDrawer({
                   wheel={w}
                   busy={busy === `wheel:${w.name}`}
                   disabled={!w.armed && (estopLatched || !driveMode || spectator)}
-                  onToggle={(enabled) =>
-                    void run(`wheel:${w.name}`, (t) => t.setWheelEnabled(w.name, enabled))
-                  }
+                  onToggle={(enabled) => {
+                    // Arming the last disarmed wheel starts a drive too.
+                    if (enabled && onArmWheel && armStartsDrive(wheels, w.name)) {
+                      onArmWheel(w.name);
+                      return;
+                    }
+                    void run(`wheel:${w.name}`, (t) => t.setWheelEnabled(w.name, enabled));
+                  }}
                 />
               ))}
             </div>

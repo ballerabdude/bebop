@@ -816,6 +816,53 @@ def test_drive_note_tools_report_not_recording_and_clear(monkeypatch):
     out = asyncio.run(vs._run_tool("mark_drive_event", json.dumps({"kind": "exclude"})))
     assert out == "Not recording right now, so nothing was marked."
     out = asyncio.run(vs._run_tool("note_drive_intent",
-                                   json.dumps({"text": "  ", "from_place": "office"})))
+                                   json.dumps({"text": "  ", "from_place": " "})))
     assert out == "Cleared the drive intent."
     assert fake.bodies[-1] == {"clear": True}
+    # a place alone is a run, as SessionNotes reads it, not a clear
+    asyncio.run(vs._run_tool("note_drive_intent",
+                             json.dumps({"text": "", "from_place": "office"})))
+    assert fake.bodies[-1] == {"text": "", "from": "office", "to": ""}
+
+
+def test_drive_note_intent_passes_task_target_and_mode(monkeypatch):
+    import asyncio
+    from bebop_vision import voice_server as vs
+
+    fake = _FakePlaces(monkeypatch, {("POST", "/intent"): _Resp(200, {"ok": True})})
+    out = asyncio.run(vs._run_tool("note_drive_intent", json.dumps(
+        {"text": "through the left door", "task": "go_through_door",
+         "target": "left", "mode": "continue"})))
+    # a continue sends only what the model gave, so the places stay
+    assert fake.bodies[-1] == {"text": "through the left door",
+                               "task": "go_through_door", "target": "left",
+                               "mode": "continue"}
+    assert "[go_through_door: left]" in out
+    # the reply shows the merged intent the recorder answered with
+    merged = {"text": "via the hall", "from": "office", "to": "kitchen",
+              "task": "go_to_place", "target": "kitchen"}
+    fake = _FakePlaces(monkeypatch, {("POST", "/intent"): _Resp(
+        200, {"ok": True, "intent": merged})})
+    out = asyncio.run(vs._run_tool("note_drive_intent", json.dumps(
+        {"text": "via the hall", "from_place": "", "mode": "continue"})))
+    assert fake.bodies[-1] == {"text": "via the hall", "mode": "continue"}
+    assert out == ("Noted: this drive is 'via the hall' (office -> kitchen)"
+                   " [go_to_place: kitchen].")
+    # a task without text is a run, not a clear; a task-only continue too
+    out = asyncio.run(vs._run_tool("note_drive_intent", json.dumps(
+        {"text": "", "task": "explore"})))
+    assert fake.bodies[-1] == {"text": "", "from": "", "to": "", "task": "explore"}
+    out = asyncio.run(vs._run_tool("note_drive_intent", json.dumps(
+        {"text": "", "task": "look_for", "target": "keys", "mode": "continue"})))
+    assert fake.bodies[-1] == {"task": "look_for", "target": "keys", "mode": "continue"}
+    schema = vs.DRIVE_NOTE_TOOLS[0]["function"]["parameters"]["properties"]
+    assert "maneuver" in schema["task"]["enum"] and schema["mode"]["enum"][-1] == "continue"
+
+    fake = _FakePlaces(monkeypatch, {("POST", "/intent"): _Resp(409, {"error": "no run"})})
+    out = asyncio.run(vs._run_tool("note_drive_intent", json.dumps(
+        {"text": "x", "mode": "continue"})))
+    assert out.startswith("No run is open")
+    fake = _FakePlaces(monkeypatch, {("POST", "/intent"): _Resp(400, {"error": "bad task"})})
+    out = asyncio.run(vs._run_tool("note_drive_intent", json.dumps(
+        {"text": "x", "task": "dance"})))
+    assert out == "The recorder refused the note (HTTP 400): bad task."

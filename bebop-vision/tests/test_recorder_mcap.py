@@ -522,3 +522,63 @@ def test_cleared_intent_is_not_replayed_at_segment_start(tmp_path):
         texts = [navd_proto.Intent.FromString(m.data).text
                  for s, c, m in make_reader(f).iter_messages() if c.topic == "/intent"]
     assert texts == ["to the office", ""]
+
+
+def test_intent_carries_the_run(tmp_path):
+    """The run fields reach /intent; a restored intent (fresh version) is
+    written into the next segment with its old run id."""
+    from mcap.reader import make_reader
+    from bebop_vision import navd_proto
+    from bebop_vision.session_notes import SessionNotes
+    state = tmp_path / "intent.json"
+    notes = SessionNotes(state_path=state)
+    it = notes.set_intent("through the door", task="go_through_door", target="left")
+    restored = SessionNotes(state_path=state)          # a vision restart
+    for name, n in (("a.mcap", notes), ("b.mcap", restored)):
+        rec = NavdRecorder(FakeRig(), FakeRobot(), tmp_path / name, rate_hz=20.0,
+                           color_codec=None, notes=n)
+        rec.start(); time.sleep(0.15)
+        rec.stop()
+        with open(tmp_path / name, "rb") as f:
+            got = [navd_proto.Intent.FromString(m.data)
+                   for s, c, m in make_reader(f).iter_messages() if c.topic == "/intent"]
+        assert len(got) == 1, name
+        assert (got[0].task, got[0].target, got[0].run_id, got[0].run_started_ns) == (
+            "go_through_door", "left", it.run_id, it.run_started_ns)
+
+
+def test_stop_and_held_resume_land_in_the_right_segments(tmp_path):
+    """A stop noted before close lands in the closing file; a resume made
+    between segments is the first event of the next one (not dropped as
+    pre-segment)."""
+    from mcap.reader import make_reader
+    from bebop_vision import navd_proto
+    from bebop_vision.session_notes import SessionNotes
+    notes = SessionNotes()
+    notes.set_intent("to the kitchen", task="go_to_place", target="Kitchen")
+
+    def events(path):
+        with open(path, "rb") as f:
+            return [navd_proto.Event.FromString(m.data)
+                    for s, c, m in make_reader(f).iter_messages() if c.topic == "/event"]
+
+    rec = NavdRecorder(FakeRig(), FakeRobot(), tmp_path / "a.mcap", rate_hz=20.0,
+                       color_codec=None, notes=notes)
+    rec.start(); time.sleep(0.15)
+    notes.note_stop("estop_auto", "CAN bus can4: bus off")
+    rec.stop()
+    assert [(e.kind, e.note) for e in events(tmp_path / "a.mcap")] == [
+        ("stop", "estop_auto: CAN bus can4: bus off")]
+
+    notes.resume_run("bus back up")              # between segments: held
+    time.sleep(0.01)
+    rec = NavdRecorder(FakeRig(), FakeRobot(), tmp_path / "b.mcap", rate_hz=20.0,
+                       color_codec=None, notes=notes)
+    rec.start(); time.sleep(0.1)
+    notes.add_event("obstacle", "sock")
+    time.sleep(0.1)
+    notes.note_stop("disarmed")
+    rec.stop()
+    got = [(e.kind, e.note) for e in events(tmp_path / "b.mcap")]
+    assert got == [("resume", "bus back up"), ("obstacle", "sock"), ("stop", "disarmed")]
+    assert rec.notes_stale == 0

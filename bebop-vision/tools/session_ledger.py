@@ -173,9 +173,14 @@ def analyse_session(path, decoder=None):
         elif topic == "/odom":
             odom.append((float(field_value(m, "x", 0.0)), float(field_value(m, "y", 0.0))))
         elif topic == "/intent":
+            # task / target / run_id are absent from files written before
+            # drive runs (2026-10-25); they read as "".
             intents.append({"text": field_value(m, "text", ""),
                             "from_place": field_value(m, "from_place", ""),
                             "to_place": field_value(m, "to_place", ""),
+                            "task": field_value(m, "task", ""),
+                            "target": field_value(m, "target", ""),
+                            "run_id": field_value(m, "run_id", ""),
                             "stamp_ns": int(field_value(m, "stamp_ns", msg.log_time))})
         elif topic == "/event":
             events.append({"kind": field_value(m, "kind", ""),
@@ -206,7 +211,10 @@ def analyse_session(path, decoder=None):
         # non-empty one, so clearing it before disarming keeps the mission.
         "intents": intents,
         "intent": next((i for i in reversed(intents)
-                        if i["text"] or i["from_place"] or i["to_place"]), None),
+                        if i["text"] or i["from_place"] or i["to_place"]
+                        or i["task"] or i["target"]), None),
+        # The drive runs this segment belongs to, first seen first.
+        "run_ids": list(dict.fromkeys(i["run_id"] for i in intents if i["run_id"])),
         "events": events, "places": places,
     })
     row.update(cmd_stats([c[0] for c in cmd], [c[1] for c in cmd], [c[2] for c in cmd]))
@@ -318,7 +326,7 @@ def format_row(r):
     h = r.get("health") or {}
     batt = (f"{h['battery_v_min']:.1f}-{h['battery_v_max']:.1f}"
             if "battery_v_min" in h else "-")
-    intent = (r["intent"] or {}).get("text") or "-"
+    intent = (r["intent"] or {}).get("text") or (r["intent"] or {}).get("task") or "-"
     places = ",".join(p["name"] for p in r["places"]) or "-"
     return (f"{r['name'][:34]:34} {r['duration_s']:6.1f} {r['ticks']:5d} {r['tick_hz']:4.1f}"
             f"  {r['frame_gaps']:3d} ({r['frame_gap_max_s']:4.2f})   {r['gyro_hz']:6.1f}"

@@ -21,12 +21,34 @@ Routes:
   GET    /snapshot?stream=... single JPEG of the latest frame (the voice
                               agent's live context, tools, tests)
   GET    /healthz             liveness
-  POST   /intent {text, from, to}   operator intent (sticky; any time);
-                                    {"clear": true} clears it
+  POST   /intent {text, from, to, task, target, mode}
+                                    operator intent (sticky; any time).
+                                    mode "new" (default) / "repeat" start a
+                                    run, "continue" edits the open one (only
+                                    the keys sent; 409 with no open run);
+                                    {"clear": true} clears it (the run ends
+                                    as unfinished); {"repeat": run_id}
+                                    re-runs a recent run; {"end": outcome,
+                                    "note"} ends the run (arrived, found,
+                                    gave_up, unfinished) or marks it
+                                    interrupted, and works when nothing
+                                    records (an ending note is kept on the
+                                    run row as end_note); {"resume": true, "note"} logs
+                                    that the operator continues the open
+                                    run (a "resume" event now, or first in
+                                    the next segment; 409 with no open run).
+                                    400 on a bad task, target, outcome or
+                                    mode.
   POST   /event  {kind, note}       marker in the current drive (obstacle,
                                     recovery, exclude, note); 409 when no
                                     segment is recording
-  GET    /notes                     current intent + queue counts
+  GET    /notes                     current intent, recent runs + queue counts
+  GET    /runs[?since=NS]           every closed run (runs.jsonl beside the
+                                    intent state), oldest first: the lab's
+                                    record of outcomes picked after a stop
+                                    (the intent and each run row carry
+                                    stops / resumes counts and last_stop
+                                    {t_ns, cause, detail} or null)
   The note routes write into the active MCAP segment through
   bebop_vision.session_notes (see the recorder's /intent, /event, /place).
 
@@ -84,7 +106,7 @@ from urllib.parse import parse_qs, urlparse
 import cv2
 import numpy as np
 
-from .session_notes import NotRecording
+from .session_notes import NoRun, NotRecording
 from .whep_registry import (DEFAULT_MAX_VIEWERS, DEFAULT_RELEASE_GRACE_S,
                             ViewerLimit, WhepRegistry)
 
@@ -373,23 +395,59 @@ class VideoServer:
                 try:
                     payload = self._read_json()
                     if route == "/intent":
-                        if payload.get("clear"):
-                            intent = notes.clear_intent()
-                        else:
-                            intent = notes.set_intent(
-                                payload.get("text", ""),
-                                payload.get("from", payload.get("from_place", "")),
-                                payload.get("to", payload.get("to_place", "")))
-                        self._send_json(200, {"ok": True,
-                                              "intent": intent.to_dict()})
+                        self._intent(notes, payload)
                     else:
                         ev = notes.add_event(payload.get("kind", "note"),
                                              payload.get("note", ""))
                         self._send_json(200, {"ok": True, "event": ev})
                 except NotRecording as exc:
                     self._send_json(409, {"error": str(exc), "recording": False})
+                except NoRun as exc:
+                    self._send_json(409, {"error": str(exc), "intent": None})
                 except (ValueError, TypeError, RecursionError) as exc:
                     self._send_json(400, {"error": str(exc)})
+
+            def _intent(self, notes, payload):
+                """POST /intent: clear, repeat, end, resume or set (see the
+                module docstring).  ``intent`` is the current intent as
+                /notes shows it: an empty one (run_id "") after a clear or an
+                ending outcome, null only before any intent was ever set."""
+                def current():
+                    return notes.intent_dict()
+
+                if payload.get("clear"):
+                    notes.clear_intent()
+                    self._send_json(200, {"ok": True, "intent": current()})
+                    return
+                if payload.get("repeat"):
+                    notes.repeat_run(payload["repeat"])
+                    self._send_json(200, {"ok": True, "intent": current()})
+                    return
+                if payload.get("end"):
+                    out = notes.end_run(payload["end"], payload.get("note", ""))
+                    self._send_json(200, {"ok": True, **out, "intent": current()})
+                    return
+                if payload.get("resume"):
+                    out = notes.resume_run(payload.get("note", ""))
+                    self._send_json(200, {"ok": True, **out, "intent": current()})
+                    return
+                mode = payload.get("mode") or "new"
+                keys = (("text", "text"), ("from", "from_place"), ("to", "to_place"),
+                        ("task", "task"), ("target", "target"))
+                if str(mode).strip().lower() == "continue":
+                    # Only the keys sent change the open run.
+                    args = {}
+                    for key, arg in keys:
+                        if key in payload:
+                            args[arg] = payload[key]
+                        elif arg in payload:            # from_place / to_place
+                            args[arg] = payload[arg]
+                    args.setdefault("text", None)
+                else:
+                    args = {arg: payload.get(key, payload.get(arg, ""))
+                            for key, arg in keys}
+                notes.set_intent(mode=mode, **args)
+                self._send_json(200, {"ok": True, "intent": current()})
 
             def do_GET(self):
                 # Don't hold keep-alive connections open: each WHEP POST
@@ -422,6 +480,16 @@ class VideoServer:
                         self._send_json(503, {"error": "no session notes"})
                     else:
                         self._send_json(200, server.notes.snapshot())
+                elif route == "/runs":
+                    if server.notes is None:
+                        self._send_json(503, {"error": "no session notes"})
+                    else:
+                        try:
+                            q = parse_qs(urlparse(self.path).query)
+                            since = int(q.get("since", ["0"])[0] or 0)
+                        except (ValueError, TypeError):
+                            since = 0
+                        self._send_json(200, {"runs": server.notes.run_log(since)})
                 elif route == "/healthz":
                     self.send_response(200)
                     self.send_header("Content-Length", "2")

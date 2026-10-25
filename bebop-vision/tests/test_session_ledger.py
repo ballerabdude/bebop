@@ -405,3 +405,37 @@ def test_iter_messages_fallback_does_not_repeat(mirror, monkeypatch):
            for _, c, m in mcap_tools.iter_messages(mirror["session"], ["/cmd_vel", "/odom"])]
     assert len(got) == len(set(got)) == len(full)
     assert sorted(got) == sorted(full)
+
+
+def test_intent_run_fields_are_read_when_present(tmp_path):
+    """The recorder's Intent schema (with task / target / run_id) passes the
+    run through; the older hand-made schema above reads them as ""."""
+    path = tmp_path / "navd_session_20261025_104233.mcap"
+    f, w = _writer(path)
+    ch = w.register_channel("/intent", "protobuf",
+                            w.register_schema(*navd_proto.schema(navd_proto.Intent)))
+    for i, (text, run) in enumerate((("door", "r20261025_104233_9f3a"),
+                                     ("door", "r20261025_104233_9f3a"),
+                                     ("door", "r20261025_104301_00be"), ("", ""))):
+        log = T0 + i * 1_000_000_000
+        w.add_message(ch, log, navd_proto.Intent(
+            text=text, task="go_through_door" if text else "",
+            target="left" if text else "", run_id=run, stamp_ns=log).SerializeToString(), log)
+    w.finish(); f.close()
+    row = session_ledger.analyse_session(path)
+    assert row["intent"]["run_id"] == "r20261025_104301_00be"
+    assert (row["intent"]["task"], row["intent"]["target"]) == ("go_through_door", "left")
+    assert row["run_ids"] == ["r20261025_104233_9f3a", "r20261025_104301_00be"]
+
+
+def test_old_intent_schema_reads_empty_run_fields(tmp_path):
+    path = tmp_path / "navd_session_20261023_150000.mcap"
+    f, w = _writer(path)
+    ch = w.register_channel("/intent", "protobuf",
+                            w.register_schema("bebop.navd.Intent", "protobuf", NOTES_FDS))
+    w.add_message(ch, T0, NOTES["bebop.navd.Intent"](text="old", stamp_ns=T0)
+                  .SerializeToString(), T0)
+    w.finish(); f.close()
+    row = session_ledger.analyse_session(path)
+    assert (row["intent"]["task"], row["intent"]["run_id"]) == ("", "")
+    assert row["run_ids"] == []

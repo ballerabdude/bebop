@@ -19,9 +19,13 @@ import {
   Switch,
 } from "../../components/ui";
 import type { DriveChannel } from "../../input";
+import { armStartsDrive } from "../../robot/driveNotes";
 import { useDrive } from "../../robot/useDrive";
-import { useEStop, useRuntimeAction, useTelemetry } from "../../robot/session";
+import { useEStop, useRobot, useRuntimeAction, useTelemetry } from "../../robot/session";
 import type { DriveView, RuntimeMode, RuntimeSnapshot, WheelView } from "../../runtime";
+import { ToastView, useToast } from "../drive/Toasts";
+import { useDriveNotes } from "../drive/useDriveNotes";
+import { useRunStartGuard } from "../drive/useRunStartGuard";
 
 const select = (s: RuntimeSnapshot | null) => s;
 
@@ -47,10 +51,29 @@ export function MotorsTab() {
   const canDrive = wheeled && !estopLatched && driveMode && armed > 0 && !otherDriving;
   const input = useDrive({ canDrive, onError: setError });
 
+  // Arms that leave every wheel armed start a recorded drive, so they ask
+  // the Drive page's open-run question first. /notes is fetched only then
+  // (no polling here).
+  const { host } = useRobot();
+  const notes = useDriveNotes(host, false);
+  const toast = useToast();
+  const guard = useRunStartGuard(notes, toast.show);
+  const { requestStart } = guard;
   const setAllWheels = useCallback(
-    (enabled: boolean) =>
-      void run(`all-wheels:${enabled}`, (t) => t.setAllWheelsEnabled(enabled)),
-    [run],
+    (enabled: boolean) => {
+      const go = () => void run(`all-wheels:${enabled}`, (t) => t.setAllWheelsEnabled(enabled));
+      if (enabled && armStartsDrive(wheels, null)) void requestStart(go);
+      else go();
+    },
+    [run, wheels, requestStart],
+  );
+  const toggleWheel = useCallback(
+    (wheel: string, enabled: boolean) => {
+      const go = () => void run(`wheel:${wheel}`, (t) => t.setWheelEnabled(wheel, enabled));
+      if (enabled && armStartsDrive(wheels, wheel)) void requestStart(go);
+      else go();
+    },
+    [run, wheels, requestStart],
   );
 
   if (!snapshot) return <PageState kind="loading">Waiting for telemetry…</PageState>;
@@ -118,7 +141,7 @@ export function MotorsTab() {
             busy={busy}
             canDrive={canDrive}
             touch={input.touch}
-            onToggleWheel={(w, en) => void run(`wheel:${w}`, (t) => t.setWheelEnabled(w, en))}
+            onToggleWheel={toggleWheel}
             onSetAllWheels={setAllWheels}
             onCalibrateWheel={(w) => void run(`calib:${w}`, (t) => t.calibrateWheel(w))}
             onResetOdom={() => void run("odom-reset", (t) => t.resetOdometry())}
@@ -145,6 +168,12 @@ export function MotorsTab() {
           />
         </Card>
       )}
+      {guard.dialog}
+      <ToastView
+        toast={toast.toast}
+        onDismiss={toast.dismiss}
+        className="fixed inset-x-0 bottom-[calc(6rem+env(safe-area-inset-bottom))] z-[39] px-4"
+      />
     </div>
   );
 }

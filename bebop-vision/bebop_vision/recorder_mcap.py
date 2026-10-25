@@ -535,7 +535,9 @@ class NavdRecorder:
             if not (first and intent.empty):
                 put("intent", lambda: navd_proto.Intent(
                     text=intent.text, from_place=intent.from_place,
-                    to_place=intent.to_place, stamp_ns=int(intent.stamp_ns)), log_ns)
+                    to_place=intent.to_place, stamp_ns=int(intent.stamp_ns),
+                    task=intent.task, target=intent.target, run_id=intent.run_id,
+                    run_started_ns=int(intent.run_started_ns)), log_ns)
         for ev in notes.drain_events():
             # Safety net: the notes object refuses events while no segment is
             # open, so nothing older than this segment should be queued.

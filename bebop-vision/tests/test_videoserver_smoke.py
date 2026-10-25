@@ -134,3 +134,131 @@ def test_notes_routes_reject_missing_and_chunked_bodies():
         assert notes.intent().text == "keep me"     # nothing was cleared
     finally:
         v.stop()
+
+
+def test_runs_route_serves_the_run_log(tmp_path):
+    from bebop_vision.session_notes import SessionNotes
+    notes = SessionNotes(state_path=tmp_path / "intent.json")
+    v = VideoServer(FakeRig(), port=0, notes=notes)
+    v.start()
+    try:
+        port = v._httpd.server_address[1]
+        with _get(port, "/runs") as r:
+            assert json.loads(r.read()) == {"runs": []}
+        notes.set_intent("office to bedroom", task="go_to_place", target="master bedroom")
+        notes.end_run("arrived", note="by the dresser")
+        with _get(port, "/runs") as r:
+            runs = json.loads(r.read())["runs"]
+        assert len(runs) == 1 and runs[0]["outcome"] == "arrived"
+        assert runs[0]["end_note"] == "by the dresser"
+        with _get(port, f"/runs?since={runs[0]['ended_ns']}") as r:
+            assert json.loads(r.read())["runs"] == []
+        with _get(port, "/runs?since=junk") as r:          # bad since: everything
+            assert len(json.loads(r.read())["runs"]) == 1
+    finally:
+        v.stop()
+
+
+def test_intent_run_routes():
+    from bebop_vision.session_notes import SessionNotes
+    notes = SessionNotes()
+    v = VideoServer(FakeRig(), port=0, notes=notes)
+    v.start()
+    try:
+        port = v._httpd.server_address[1]
+
+        def post(payload):
+            with _post(port, "/intent", payload) as r:
+                return json.loads(r.read())
+
+        def refused(payload):
+            with pytest.raises(urllib.error.HTTPError) as ei:
+                _post(port, "/intent", payload)
+            return ei.value.code
+
+        assert refused({"text": "x", "mode": "continue"}) == 409   # no run yet
+        for bad in ({"text": "x", "task": "dance"}, {"text": "x", "mode": "again"},
+                    {"end": "teleported"}, {"repeat": "r_unknown"}):
+            assert refused(bad) == 400, bad
+        a = post({"text": "to the kitchen", "from": "office", "to": "kitchen",
+                  "task": "go_to_place", "target": "Kitchen"})["intent"]
+        assert a["run_id"].startswith("r") and a["task"] == "go_to_place"
+        # continue changes only the keys sent
+        b = post({"to": "pantry", "mode": "continue"})["intent"]
+        assert (b["run_id"], b["text"], b["to"]) == (a["run_id"], "to the kitchen", "pantry")
+        # ending works with nothing recording
+        out = post({"end": "interrupted", "note": "estop"})
+        assert out["event_recorded"] is False and out["run"]["interruptions"] == 1
+        assert out["intent"]["run_id"] == a["run_id"]
+        notes.begin_segment("seg")
+        out = post({"end": "arrived"})
+        assert out["ok"] and out["event_recorded"] is True
+        assert out["run"]["outcome"] == "arrived" and out["intent"]["run_id"] == ""
+        c = post({"repeat": a["run_id"]})["intent"]
+        assert c["run_id"] != a["run_id"] and c["to"] == "pantry"
+        with _get(port, "/notes") as r:
+            snap = json.loads(r.read())
+        assert [x["run_id"] for x in snap["recent"]] == [c["run_id"], a["run_id"]]
+        assert snap["intent"]["run_id"] == c["run_id"] and snap["events_pending"] == 1
+        assert post({"clear": True})["intent"]["run_id"] == ""
+        # POST /event keeps its 409 once the segment closes
+        notes.end_segment("seg")
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _post(port, "/event", {"kind": "note"})
+        assert ei.value.code == 409
+    finally:
+        v.stop()
+
+
+def test_intent_resume_unfinished_and_stops_routes():
+    from bebop_vision.session_notes import SessionNotes
+    notes = SessionNotes()
+    v = VideoServer(FakeRig(), port=0, notes=notes)
+    v.start()
+    try:
+        port = v._httpd.server_address[1]
+
+        def post(payload):
+            with _post(port, "/intent", payload) as r:
+                return json.loads(r.read())
+
+        def notes_snap():
+            with _get(port, "/notes") as r:
+                return json.loads(r.read())
+
+        with pytest.raises(urllib.error.HTTPError) as ei:      # no run open
+            _post(port, "/intent", {"resume": True, "note": "x"})
+        assert ei.value.code == 409
+        a = post({"text": "to the kitchen", "task": "go_to_place",
+                  "target": "Kitchen"})["intent"]
+        assert (a["stops"], a["resumes"], a["last_stop"]) == (0, 0, None)
+        notes.begin_segment("seg")
+        notes.note_stop("estop_operator", "operator: app button")
+        notes.end_segment("seg")
+        snap = notes_snap()
+        assert snap["intent"]["stops"] == 1
+        assert snap["intent"]["last_stop"]["cause"] == "estop_operator"
+        assert snap["intent"]["last_stop"]["detail"] == "operator: app button"
+        assert snap["recent"][0]["run_id"] == a["run_id"]
+        assert snap["recent"][0]["last_stop"]["cause"] == "estop_operator"
+        # resume while idle: held for the next segment
+        out = post({"resume": True, "note": "all clear"})
+        assert out["ok"] and out["run"]["resumes"] == 1 and out["held"] is True
+        assert out["intent"]["run_id"] == a["run_id"] and out["intent"]["resumes"] == 1
+        assert notes_snap()["events_held"] == 1
+        # the operator declines: the run closes as unfinished with the note
+        out = post({"end": "unfinished", "note": "ran out of time"})
+        assert out["run"]["outcome"] == "unfinished" and out["intent"]["run_id"] == ""
+        assert out["run"]["end_note"] == "ran out of time"
+        snap = notes_snap()
+        assert snap["recent"][0]["outcome"] == "unfinished"
+        assert snap["recent"][0]["end_note"] == "ran out of time"
+        assert snap["recent"][0]["stops"] == 1 and snap["recent"][0]["resumes"] == 1
+        assert snap["events_held"] == 0
+        # a clear closes as unfinished too
+        b = post({"text": "loop", "task": "explore"})["intent"]
+        post({"clear": True})
+        row = notes_snap()["recent"][0]
+        assert (row["run_id"], row["outcome"]) == (b["run_id"], "unfinished")
+    finally:
+        v.stop()
