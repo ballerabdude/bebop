@@ -8,3 +8,5 @@ runs/
 *.egg-info/
 __pycache__/
 Log/
+# marimo session caches (notebook run state)
+notebooks/__marimo__/

@@ -175,9 +175,11 @@
 ## Testing on the Jetson
 
 - Python tests: `cd ~/bebop/bebop-vision && .venv/bin/python -m pytest
-  tests/ -q` (no hardware needed; 267 passed + 1 skipped on the workstation
-  on 2026-10-24, the skip being `test_mcap_h265_hardware`, which needs
-  NVENC, so the robot count can differ slightly). Run after every deploy. A
+  tests/ -q` (no hardware needed; 309 passed + 1 skipped on the workstation
+  on 2026-10-25, the skip being `test_mcap_h265_hardware`, which needs
+  NVENC, so the robot count can differ slightly; plus the 315 `tests/lab`
+  tests of the model-development lab, `docs/lab.md`, which need the `lab`
+  extra: av, polars, timm, rerun-sdk). Run after every deploy. A
   workstation venv needs the `server` extra (fastapi, uvicorn, pydantic,
   httpx), or the voice and supervisor tests skip.
 - Rust tests are CI-side (fmt + clippy `-D warnings` + `cargo test`: the
@@ -185,7 +187,7 @@
   `firmware/bebop-linux`, 116 lib tests, as of 2026-10-24); on-Jetson builds
   are for deploy only, never for testing.
 - App tests run on the workstation, not in CI: `cd bebop-app && npm test`
-  (125 node tests, 2026-10-24).
+  (145 node tests, 2026-10-25).
 - Camera exclusivity: ONE process per camera. The recorder
   (`main.py --record-navd`, run by `bebop-vision.service`; single-instance
   lock `/tmp/navd_recorder.lock`) holds the rig, so stop it before a camera

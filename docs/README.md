@@ -10,6 +10,7 @@ its code (listed below).
 | [`setup-protocol.md`](setup-protocol.md) | `bebop-agent`'s setup WebSocket (`:9091`), Wi-Fi provisioning, the two network modes and the mode button. |
 | [`dev-https.md`](dev-https.md) | A secure context for the app's microphone during development: localhost, Chrome's insecure-origin flag, the `Caddyfile.dev` TLS proxy. |
 | [`data-collection.md`](data-collection.md) | Recording navd drive sessions, pulling and extracting them (`just pull-data`), the session ledger. |
+| [`lab.md`](lab.md) | bebop lab (`bebop_vision/lab`): model development on recorded drives. Sessions as aligned numpy, modality selection, labels from the recording, the architecture registry, training modes, runs and scores, Rerun views, ONNX and on-Thor latency. |
 | [`depth-tuning.md`](depth-tuning.md) | Gemini 335Lg depth presets and host-side filters, measured 2026-10-22. |
 | [`path-model.md`](path-model.md) | Proposal (2026-10-22/23): a learned path model and guarded follower to replace the stripped navigation stack. The model, the follower and the safety envelope are not implemented. |
 | [`places.md`](places.md) | Place memory (`:9095`): the 1 Hz DINOv3 scout, the pending queue and operator import, `/whereami`, the place graph. |
