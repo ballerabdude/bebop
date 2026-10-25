@@ -490,8 +490,15 @@ class SessionNotes:
         if self._runs_log_path is None:
             return
         try:
-            with open(self._runs_log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(run) + "\n")
+            with open(self._runs_log_path, "a+b") as f:
+                # A power cut mid-append leaves a last line without "\n";
+                # appending onto it would make this row unreadable too.
+                f.seek(0, os.SEEK_END)
+                if f.tell() > 0:
+                    f.seek(-1, os.SEEK_END)
+                    if f.read(1) != b"\n":
+                        f.write(b"\n")
+                f.write((json.dumps(run) + "\n").encode("utf-8"))
                 f.flush()
                 os.fsync(f.fileno())
         except OSError as exc:

@@ -461,3 +461,15 @@ def test_closed_runs_are_appended_to_the_run_log(tmp_path):
     mem.set_intent("x", task="explore")
     mem.end_run("arrived")
     assert mem.run_log() == []
+
+
+def test_run_log_recovers_after_a_torn_last_line(tmp_path):
+    path = tmp_path / "intent.json"
+    notes = SessionNotes(clock_ns=_clock(), state_path=path)
+    notes.set_intent("a", task="explore")
+    notes.end_run("arrived")
+    with open(tmp_path / "runs.jsonl", "a") as f:
+        f.write('{"run_id": "rtorn", "ended')        # power cut mid-append
+    notes.set_intent("b", task="explore")
+    notes.end_run("found")
+    assert [r["outcome"] for r in notes.run_log()] == ["arrived", "found"]
